@@ -73,6 +73,7 @@ scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
         if char == '\n' {
 	        try arraylist.append(tokens, Token{ kind = .newline, start = cursor })
 	        cursor += 1
+			continue
         } else if _is_whitespace(char) {
             cursor += 1
             continue
@@ -81,6 +82,8 @@ scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
         # comments
         if char == '#' {
             while cursor < input.len and input[cursor] != '\n' : cursor += 1 {}
+            cursor += 1
+            continue
         }
 
         # identifiers and keywords
