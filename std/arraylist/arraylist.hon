@@ -1,0 +1,67 @@
+mem :: import "@std/mem"
+
+ArrayList func($T type) type {
+	return struct {
+		items []mut T
+		capacity usize
+		allocator mem.Allocator
+	}
+}
+
+init func($T type, allocator mem.Allocator) ArrayList(T) {
+	return ArrayList(T) {
+		items = mem.empty(T),
+		capacity = 0,
+		allocator = allocator,
+	}
+}
+
+deinit func($T type, list @mut ArrayList(T)) void {
+	allocation []mut T :: list.items.ptr[..list.capacity]
+	mem.free(list.allocator, allocation)
+	list.items = mem.empty(T)
+	list.capacity = 0
+}
+
+reserve func($T type, list @mut ArrayList(T), minimum_capacity usize) void ! mem.AllocError {
+	if minimum_capacity <= list.capacity {
+		return _
+	}
+
+	new_capacity usize = 8
+	if list.capacity >= 8 {
+		half usize :: div_trunc(list.capacity, 2)
+		if list.capacity > max_value(usize) - half {
+			new_capacity = minimum_capacity
+		} else {
+			new_capacity = list.capacity + half
+		}
+	}
+	if new_capacity < minimum_capacity {
+		new_capacity = minimum_capacity
+	}
+
+	length usize :: list.items.len
+	allocation []mut T :: list.items.ptr[..list.capacity]
+	grown []mut T :: mem.realloc(list.allocator, allocation, new_capacity) catch |_| {
+		return .out_of_memory
+	}
+	list.items = grown.ptr[..length]
+	list.capacity = new_capacity
+	return _
+}
+
+append func($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
+	length usize :: list.items.len
+	if length == max_value(usize) {
+		return .out_of_memory
+	}
+	try reserve(list, length + 1)
+	list.items = list.items.ptr[..length + 1]
+	list.items[length] = value
+	return _
+}
+
+clear func($T type, list @mut ArrayList(T)) void {
+	list.items = list.items.ptr[..0]
+}

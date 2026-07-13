@@ -1,0 +1,166 @@
+import "@ffi/c"
+import "@std"
+import "@std/mem"
+import "@std/arraylist"
+
+TokenKind :: enum {
+    ident
+    int
+    float
+    string
+
+    equal
+    double_colon
+
+    left_paren
+    right_paren
+    left_curly
+    right_curly
+
+    newline
+
+    invalid
+    eof
+}
+
+Token :: struct {
+    kind TokenKind
+    start int
+}
+
+_token_kind_str func(kind TokenKind) *c_char {
+    return match kind {
+        .ident: "ident"
+        .int: "int"
+        .float: "float"
+        .string: "string"
+        .equal: "equal"
+        .double_colon: "double_colon"
+        .left_paren: "left_paren"
+        .right_paren: "right_paren"
+        .left_curly: "left_curly"
+        .right_curly: "right_curly"
+        .newline: "newline"
+        .invalid: "invalid"
+        .eof: "eof"
+    }
+}
+
+_is_whitespace func(char u8) bool {
+    return char == ' ' or char == '\t' or char == '\n' or char == '\r'
+}
+
+_is_alpha func(char u8) bool {
+    return match char {
+        'a'..'z', 'A'..'Z': true
+        else: false
+    }
+}
+
+_is_digit func(char u8) bool {
+    return match char {
+        '0'..'9': true
+        else: false
+    }
+}
+
+scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
+    cursor usize = 0
+    while cursor < input.len {
+        char :: input[cursor]
+
+        # whitespace
+        if char == '\n' {
+	        try arraylist.append(tokens, Token{ kind = .newline, start = cursor })
+	        cursor += 1
+        } else if _is_whitespace(char) {
+            cursor += 1
+            continue
+        }
+
+        # comments
+        if char == '#' {
+            while cursor < input.len and input[cursor] != '\n' : cursor += 1 {}
+        }
+
+        # identifiers and keywords
+        if _is_alpha(char) or char == '_' {
+            start :: cursor
+            cursor += 1
+            while cursor < input.len and (_is_alpha(input[cursor]) or _is_digit(input[cursor]) or input[cursor] == '_') {
+                cursor += 1
+            }
+            try arraylist.append(tokens, Token{ kind = .ident, start = start })
+            continue
+        }
+
+        # integers literals
+        if _is_digit(char) {
+            start :: cursor
+            cursor += 1
+            while cursor < input.len and _is_digit(input[cursor]) {
+                cursor += 1
+            }
+            try arraylist.append(tokens, Token{ kind = .int, start = start })
+            continue
+        }
+
+        # string literals
+        if char == '"' {
+            start :: cursor
+            cursor += 1
+
+            while cursor < input.len and input[cursor] != '"' and input[cursor] != '\n' : cursor += 1 {
+	            # ignore escaped characters
+	            if (input[cursor] == '\\' and cursor + 1 < input.len) cursor += 1
+            }
+
+            if cursor < input.len and input[cursor] == '"' {
+                cursor += 1
+	            try arraylist.append(tokens, Token{ kind = .string, start = start })
+            } else {
+                try arraylist.append(tokens, Token{ kind = .invalid, start = start })
+            }
+
+            continue
+        }
+
+        # mutable assignment
+        if char == '=' {
+            try arraylist.append(tokens, Token{ kind = .equal, start = cursor })
+            cursor += 1
+            continue
+        }
+
+        # immutable assignment
+        cursor += 1
+        if cursor < input.len and char == ':' and input[cursor] == ':' {
+            try arraylist.append(tokens, Token{ kind = .double_colon, start = cursor })
+            cursor += 1
+            continue
+        }
+
+        # invalid character
+        try arraylist.append(tokens, Token{ kind = .invalid, start = cursor })
+    }
+    try arraylist.append(tokens, Token{ kind = .eof, start = cursor })
+}
+
+program ::
+	`# these are immutable
+	`x :: 32
+	`y :: 3.2
+
+main func() void {
+    tokens std.ArrayList(Token) = arraylist.init(mem.c_allocator)
+    defer arraylist.deinit(&tokens)
+
+    scan(&tokens, program) catch |_| {
+        _ = c.printf("failed to scan: out of memory\n")
+        return _
+    }
+
+    for tokens.items |token| {
+        _ = c.printf("%s\n", _token_kind_str(token.kind))
+    }
+}
