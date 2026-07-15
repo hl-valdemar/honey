@@ -1,5 +1,5 @@
-c :: import "@ffi/c"
-meta :: import "@std/meta"
+import "@ffi/c"
+import "@std/meta"
 
 ReadError :: enum {
 	read_failed
@@ -276,7 +276,7 @@ hide write_integer func(writer Writer, $T type, value T, base u64, uppercase boo
 	return
 }
 
-# ponytail: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
+# note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
 hide write_float func(writer Writer, $T type, value T, scientific bool) void ! WriteError {
 	match typeinfo!(T) {
 		.float: {
@@ -353,12 +353,7 @@ hide write_default func(writer Writer, $T type, value T) void ! WriteError {
 	return
 }
 
-print func(
-	writer Writer,
-	$format []u8,
-	$Args type,
-	args Args,
-) void ! WriteError {
+print func(writer Writer, $format []u8, $Args type, args Args) void ! WriteError {
 	inline for parse_format(format.len, format, Args) |token| {
 		if (token.kind == .unused) {
 			break
