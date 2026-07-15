@@ -1,5 +1,5 @@
-import "@ffi/c"
 import "@std"
+import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
 
@@ -28,36 +28,18 @@ Token :: struct {
     start int
 }
 
-_token_kind_str func(kind TokenKind) *c_char {
-    return match kind {
-        .ident: "ident"
-        .int: "int"
-        .float: "float"
-        .string: "string"
-        .equal: "equal"
-        .double_colon: "double_colon"
-        .left_paren: "left_paren"
-        .right_paren: "right_paren"
-        .left_curly: "left_curly"
-        .right_curly: "right_curly"
-        .newline: "newline"
-        .invalid: "invalid"
-        .eof: "eof"
-    }
-}
-
-_is_whitespace func(char u8) bool {
+hide is_whitespace func(char u8) bool {
     return char == ' ' or char == '\t' or char == '\n' or char == '\r'
 }
 
-_is_alpha func(char u8) bool {
+hide is_alpha func(char u8) bool {
     return match char {
         'a'..'z', 'A'..'Z': true
         else: false
     }
 }
 
-_is_digit func(char u8) bool {
+hide is_digit func(char u8) bool {
     return match char {
         '0'..'9': true
         else: false
@@ -74,7 +56,7 @@ scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
 	        try arraylist.append(tokens, Token{ kind = .newline, start = cursor })
 	        cursor += 1
 			continue
-        } else if _is_whitespace(char) {
+        } else if is_whitespace(char) {
             cursor += 1
             continue
         }
@@ -87,10 +69,10 @@ scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
         }
 
         # identifiers and keywords
-        if _is_alpha(char) or char == '_' {
+        if is_alpha(char) or char == '_' {
             start :: cursor
             cursor += 1
-            while cursor < input.len and (_is_alpha(input[cursor]) or _is_digit(input[cursor]) or input[cursor] == '_') {
+            while cursor < input.len and (is_alpha(input[cursor]) or is_digit(input[cursor]) or input[cursor] == '_') {
                 cursor += 1
             }
             try arraylist.append(tokens, Token{ kind = .ident, start = start })
@@ -98,10 +80,10 @@ scan func(tokens @mut std.ArrayList(Token), input []u8) void ! mem.AllocError {
         }
 
         # integers literals
-        if _is_digit(char) {
+        if is_digit(char) {
             start :: cursor
             cursor += 1
-            while cursor < input.len and _is_digit(input[cursor]) {
+            while cursor < input.len and is_digit(input[cursor]) {
                 cursor += 1
             }
             try arraylist.append(tokens, Token{ kind = .int, start = start })
@@ -159,11 +141,11 @@ main func() void {
     defer arraylist.deinit(&tokens)
 
     scan(&tokens, program) catch |_| {
-        _ = c.printf("failed to scan: out of memory\n")
-        return _
+        debug.print("failed to scan: out of memory\n", {})
+        return
     }
 
     for tokens.items |token| {
-        _ = c.printf("%s\n", _token_kind_str(token.kind))
+        debug.print("{}\n", { token.kind })
     }
 }

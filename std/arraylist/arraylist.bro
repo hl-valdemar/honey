@@ -25,13 +25,13 @@ deinit func($T type, list @mut ArrayList(T)) void {
 
 reserve func($T type, list @mut ArrayList(T), minimum_capacity usize) void ! mem.AllocError {
 	if minimum_capacity <= list.capacity {
-		return _
+		return
 	}
 
 	new_capacity usize = 8
 	if list.capacity >= 8 {
-		half usize :: div_trunc(list.capacity, 2)
-		if list.capacity > max_value(usize) - half {
+		half usize :: divtrunc!(list.capacity, 2)
+		if list.capacity > maxval!(usize) - half {
 			new_capacity = minimum_capacity
 		} else {
 			new_capacity = list.capacity + half
@@ -48,18 +48,18 @@ reserve func($T type, list @mut ArrayList(T), minimum_capacity usize) void ! mem
 	}
 	list.items = grown.ptr[..length]
 	list.capacity = new_capacity
-	return _
+	return
 }
 
 append func($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
 	length usize :: list.items.len
-	if length == max_value(usize) {
+	if length == maxval!(usize) {
 		return .out_of_memory
 	}
 	try reserve(list, length + 1)
 	list.items = list.items.ptr[..length + 1]
 	list.items[length] = value
-	return _
+	return
 }
 
 clear func($T type, list @mut ArrayList(T)) void {

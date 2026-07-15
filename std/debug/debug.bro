@@ -1,0 +1,36 @@
+c :: import "@ffi/c"
+io :: import "@std/io"
+
+hide write func(_ ?*mut anyopaque, _ io.WriteStream, bytes []u8) usize ! io.WriteError {
+	request usize = bytes.len
+	maximum usize :: usize(maxval!(c_long))
+	if request > maximum {
+		request = maximum
+	}
+	while true {
+		count c_long :: c.write(2, bytes.ptr, c_ulong(request))
+		if count >= 0 {
+			return usize(count)
+		}
+		if c.__error()^ != 4 {
+			return .write_failed
+		}
+	}
+}
+
+hide read func(_ ?*mut anyopaque, _ io.ReadStream, _ []mut u8) usize ! io.ReadError {
+	return .read_failed
+}
+
+hide vtable io.IoVTable :: io.IoVTable {
+	read = read,
+	write = write,
+}
+
+print func($format []u8, $Args type, args Args) void {
+	writer io.Writer :: io.Writer {
+		impl = io.Io {context = none, vtable = &vtable},
+		stream = .stderr,
+	}
+	io.print(writer, format, Args, args) catch |_| {}
+}
