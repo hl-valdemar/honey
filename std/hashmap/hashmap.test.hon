@@ -1,0 +1,13 @@
+import "@std/mem"
+import "@std/testing"
+
+handles_put_and_get test {
+	map StringHashMap(u32) = init(mem.c_allocator)
+	defer deinit(&map)
+
+	try put(&map, "key", 42)
+	value :: get(&map, "key")
+
+	try testing.expect_type(?u32, value)
+	try testing.expect_equal(42, value?)
+}
