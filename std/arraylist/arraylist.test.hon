@@ -1,0 +1,32 @@
+import "@std/mem"
+import "@std/testing"
+
+handles_append test {
+	list ArrayList(i32) = init(mem.c_allocator)
+	defer deinit(&list)
+
+	try append(&list, 42)
+
+	try testing.expect_equal(1, list.items.len)
+	try testing.expect_equal(42, list.items[0])
+}
+
+handles_clear test {
+	list ArrayList(i32) = init(mem.c_allocator)
+	defer deinit(&list)
+
+	try append(&list, 42)
+	clear(&list)
+
+	try testing.expect_equal(0, list.items.len)
+}
+
+handles_reserve test {
+	list ArrayList(i32) = init(mem.c_allocator)
+	defer deinit(&list)
+
+	try reserve(&list, 10)
+
+	try testing.expect_equal(10, list.capacity)
+	try testing.expect_equal(0, list.items.len)
+}

@@ -23,8 +23,8 @@ deinit func($T type, list @mut ArrayList(T)) void {
 	list.capacity = 0
 }
 
-reserve func($T type, list @mut ArrayList(T), minimum_capacity usize) void ! mem.AllocError {
-	if minimum_capacity <= list.capacity {
+reserve func($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
+	if min_capacity <= list.capacity {
 		return
 	}
 
@@ -32,13 +32,13 @@ reserve func($T type, list @mut ArrayList(T), minimum_capacity usize) void ! mem
 	if list.capacity >= 8 {
 		half usize :: divtrunc!(list.capacity, 2)
 		if list.capacity > maxval!(usize) - half {
-			new_capacity = minimum_capacity
+			new_capacity = min_capacity
 		} else {
 			new_capacity = list.capacity + half
 		}
 	}
-	if new_capacity < minimum_capacity {
-		new_capacity = minimum_capacity
+	if new_capacity < min_capacity {
+		new_capacity = min_capacity
 	}
 
 	length usize :: list.items.len

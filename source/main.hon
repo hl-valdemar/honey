@@ -3,12 +3,19 @@ import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
 
+test import "@std/arraylist"
+
 program ::
 	`# these are immutable
 	`x :: 32
 	`y :: 3.2
+	`
+	`# these are mutable
+	`z u32 = 54
 
 main func() void {
+    debug.print("PROGRAM::[[\n{}\n]]\n\n", {program})
+
     tokens std.ArrayList(Token) = arraylist.init(mem.c_allocator)
     defer arraylist.deinit(&tokens)
 
@@ -17,7 +24,9 @@ main func() void {
         return
     }
 
+    debug.print("TOKENS::[[\n", {})
     for tokens.items |token| {
         debug.print("{}\n", { token.kind })
     }
+    debug.print("]]\n", {})
 }
