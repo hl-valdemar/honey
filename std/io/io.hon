@@ -355,48 +355,20 @@ hide write_default func(writer Writer, $T type, value T) void ! WriteError {
 
 print func(writer Writer, $format []u8, $Args type, args Args) void ! WriteError {
 	inline for parse_format(format.len, format, Args) |token| {
-		if (token.kind == .unused) {
-			break
+		match token.kind {
+			.unused: break
+			.literal: try write_all(writer, format[token.start..token.end])
+			.string: try write_all(writer, field!(args, token.field))
+			.default: try write_default(writer, field!(args, token.field))
+			.decimal: try write_decimal(writer, field!(args, token.field))
+			.binary: try write_integer(writer, field!(args, token.field), 2, false)
+			.octal: try write_integer(writer, field!(args, token.field), 8, false)
+			.hex_lower: try write_integer(writer, field!(args, token.field), 16, false)
+			.hex_upper: try write_integer(writer, field!(args, token.field), 16, true)
+			.character: try write_character(writer, field!(args, token.field))
+			else: try write_float(writer, field!(args, token.field), true)
 		}
-		if (token.kind == .literal) {
-			try write_all(writer, format[token.start..token.end])
-			continue
-		}
-		if (token.kind == .string) {
-			try write_all(writer, field!(args, token.field))
-			continue
-		}
-		if (token.kind == .default) {
-			try write_default(writer, field!(args, token.field))
-			continue
-		}
-		if (token.kind == .decimal) {
-			try write_decimal(writer, field!(args, token.field))
-			continue
-		}
-		if (token.kind == .binary) {
-			try write_integer(writer, field!(args, token.field), 2, false)
-			continue
-		}
-		if (token.kind == .octal) {
-			try write_integer(writer, field!(args, token.field), 8, false)
-			continue
-		}
-		if (token.kind == .hex_lower) {
-			try write_integer(writer, field!(args, token.field), 16, false)
-			continue
-		}
-		if (token.kind == .hex_upper) {
-			try write_integer(writer, field!(args, token.field), 16, true)
-			continue
-		}
-		if (token.kind == .character) {
-			try write_character(writer, field!(args, token.field))
-			continue
-		}
-		try write_float(writer, field!(args, token.field), true)
 	}
-	return
 }
 
 hide system_read func(_ ?*mut anyopaque, stream ReadStream, buffer []mut u8) usize ! ReadError {
