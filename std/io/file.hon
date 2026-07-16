@@ -1,0 +1,144 @@
+import "@ffi/c"
+
+File :: struct {
+	io Io
+	handle Handle
+}
+
+FileMode :: enum {
+	read_only
+	write_only
+	read_write
+}
+
+OpenError :: enum {
+	open_failed
+}
+
+CloseError :: enum {
+	close_failed
+}
+
+open func(io Io, path [;0]u8, mode FileMode) File ! OpenError {
+	handle Handle :: io.vtable.open(io.context, path, mode) catch |err| {
+		return err
+	}
+	return File {io = io, handle = handle}
+}
+
+close func(file File) void ! CloseError {
+	try file.io.vtable.close(file.io.context, file.handle)
+}
+
+reader func(file File) Reader {
+	return Reader {
+		context = file.io.context,
+		handle = file.handle,
+		read = file.io.vtable.read,
+	}
+}
+
+writer func(file File) Writer {
+	return Writer {
+		context = file.io.context,
+		handle = file.handle,
+		write = file.io.vtable.write,
+	}
+}
+
+hide system_read func(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError {
+	request usize = buffer.len
+	maximum usize :: usize(maxval!(c_long))
+	if request > maximum {
+		request = maximum
+	}
+	while true {
+		count c_long :: c.read(handle.file_desc, buffer.ptr, c_ulong(request))
+		if count >= 0 {
+			return usize(count)
+		}
+		errno c_int :: c.__error()?^
+		if errno == c.EINTR {
+			continue
+		}
+		if errno == c.EBADF {
+			return .not_open_for_reading
+		}
+		return .read_failed
+	}
+}
+
+hide system_write func(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError {
+	request usize = bytes.len
+	maximum usize :: usize(maxval!(c_long))
+	if request > maximum {
+		request = maximum
+	}
+	while true {
+		count c_long :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
+		if count >= 0 {
+			return usize(count)
+		}
+		errno c_int :: c.__error()?^
+		if errno == c.EINTR {
+			continue
+		}
+		if errno == c.EBADF {
+			return .not_open_for_writing
+		}
+		return .write_failed
+	}
+}
+
+hide system_open func(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
+	flags c_int = c.O_RDONLY
+	match mode {
+		.read_only: flags = c.O_RDONLY
+		.write_only: flags = c.O_WRONLY
+		.read_write: flags = c.O_RDWR
+	}
+	while true {
+		fd c_int :: c.open(ptrcast!(c_char, path.ptr), flags)
+		if fd >= 0 {
+			return Handle {file_desc = fd}
+		}
+		if c.__error()?^ != c.EINTR {
+			return .open_failed
+		}
+	}
+}
+
+hide system_close func(_ ?@mut anyopaque, handle Handle) void ! CloseError {
+	if c.close(handle.file_desc) != 0 {
+		return .close_failed
+	}
+}
+
+hide system_stdin func(_ ?@mut anyopaque) Handle {
+	return Handle {file_desc = c_int(Stream.stdin)}
+}
+
+hide system_stdout func(_ ?@mut anyopaque) Handle {
+	return Handle {file_desc = c_int(Stream.stdout)}
+}
+
+hide system_stderr func(_ ?@mut anyopaque) Handle {
+	return Handle {file_desc = c_int(Stream.stderr)}
+}
+
+hide system_vtable IoVTable :: IoVTable {
+	read = system_read,
+	write = system_write,
+	open = system_open,
+	close = system_close,
+	stdin = system_stdin,
+	stdout = system_stdout,
+	stderr = system_stderr,
+}
+
+hide system func() Io {
+	return Io {
+		context = none,
+		vtable = &system_vtable,
+	}
+}

@@ -2,69 +2,80 @@ import "@ffi/c"
 import "@std/meta"
 
 ReadError :: enum {
+	not_open_for_reading
 	read_failed
 }
 
 WriteError :: enum {
+	not_open_for_writing
 	write_failed
 	no_progress
 }
 
+Handle :: union {
+	file_desc c_int
+	ptr @mut anyopaque
+}
+
+Stream :: enum(c_int) {
+	stdin = c.STDIN_FILENO
+	stdout = c.STDOUT_FILENO
+	stderr = c.STDERR_FILENO
+}
+
 Io :: struct {
-	context ?*mut anyopaque
+	context ?@mut anyopaque
 	vtable @IoVTable
 }
 
 IoVTable :: struct {
-	read @func(context ?*mut anyopaque, stream ReadStream, buffer []mut u8) usize ! ReadError
-	write @func(context ?*mut anyopaque, stream WriteStream, bytes []u8) usize ! WriteError
-}
-
-ReadStream :: enum(c_int) {
-	stdin = 0
-}
-
-WriteStream :: enum(c_int) {
-	stdout = 1
-	stderr = 2
+	read @func(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
+	write @func(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
+	open @func(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
+	close @func(context ?@mut anyopaque, handle Handle) void ! CloseError
+	stdin @func(context ?@mut anyopaque) Handle
+	stdout @func(context ?@mut anyopaque) Handle
+	stderr @func(context ?@mut anyopaque) Handle
 }
 
 Reader :: struct {
-	impl Io
-	stream ReadStream
+	context ?@mut anyopaque
+	handle Handle
+	read @func(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
 }
 
 Writer :: struct {
-	impl Io
-	stream WriteStream
+	context ?@mut anyopaque
+	handle Handle
+	write @func(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
 }
 
-read func(reader Reader, buffer []mut u8) usize ! ReadError {
+read func(input Reader, buffer []mut u8) usize ! ReadError {
 	if buffer.len == 0 {
 		return 0
 	}
-	count usize :: try reader.impl.vtable.read(reader.impl.context, reader.stream, buffer)
+	count usize :: try input.read(input.context, input.handle, buffer)
 	if count > buffer.len {
 		return .read_failed
 	}
 	return count
 }
 
-write func(writer Writer, bytes []u8) usize ! WriteError {
+write func(output Writer, bytes []u8) usize ! WriteError {
 	if bytes.len == 0 {
 		return 0
 	}
-	count usize :: try writer.impl.vtable.write(writer.impl.context, writer.stream, bytes)
+	count usize :: try output.write(output.context, output.handle, bytes)
 	if count > bytes.len {
 		return .write_failed
 	}
 	return count
 }
 
-write_all func(writer Writer, bytes []u8) void ! WriteError {
+write_all func(output Writer, bytes []u8) void ! WriteError {
 	offset usize = 0
 	while offset < bytes.len {
-		count usize :: write(writer, bytes[offset..]) catch |err| {
+		count usize :: write(output, bytes[offset..]) catch |err| {
 			return err
 		}
 		if count == 0 {
@@ -75,7 +86,49 @@ write_all func(writer Writer, bytes []u8) void ! WriteError {
 	return
 }
 
-hide write_integer_signed func(writer Writer, value i64, base u64, uppercase bool) void ! WriteError {
+stdin func(io Io) Reader {
+	return Reader {
+		context = io.context,
+		handle = io.vtable.stdin(io.context),
+		read = io.vtable.read,
+	}
+}
+
+stdout func(io Io) Writer {
+	return Writer {
+		context = io.context,
+		handle = io.vtable.stdout(io.context),
+		write = io.vtable.write,
+	}
+}
+
+stderr func(io Io) Writer {
+	return Writer {
+		context = io.context,
+		handle = io.vtable.stderr(io.context),
+		write = io.vtable.write,
+	}
+}
+
+print func(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
+	expand for parse_format(format.len, format, Args) |token| {
+		match token.kind {
+			.unused: break
+			.literal: try write_all(output, format[token.start..token.end])
+			.string: try write_all(output, field!(args, token.field))
+			.default: try write_default(output, field!(args, token.field))
+			.decimal: try write_decimal(output, field!(args, token.field))
+			.binary: try write_integer(output, field!(args, token.field), 2, false)
+			.octal: try write_integer(output, field!(args, token.field), 8, false)
+			.hex_lower: try write_integer(output, field!(args, token.field), 16, false)
+			.hex_upper: try write_integer(output, field!(args, token.field), 16, true)
+			.character: try write_character(output, field!(args, token.field))
+			else: try write_float(output, field!(args, token.field), true)
+		}
+	}
+}
+
+hide write_integer_signed func(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
 	buffer [65]mut u8 = undefined
 	end usize = buffer.len
 	current i64 = value
@@ -104,11 +157,11 @@ hide write_integer_signed func(writer Writer, value i64, base u64, uppercase boo
 		end -= 1
 		buffer[end] = '-'
 	}
-	try write_all(writer, buffer[end..])
+	try write_all(output, buffer[end..])
 	return
 }
 
-hide write_integer_unsigned func(writer Writer, value u64, base u64, uppercase bool) void ! WriteError {
+hide write_integer_unsigned func(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
 	buffer [65]mut u8 = undefined
 	end usize = buffer.len
 	current u64 = value
@@ -127,7 +180,7 @@ hide write_integer_unsigned func(writer Writer, value u64, base u64, uppercase b
 			break
 		}
 	}
-	try write_all(writer, buffer[end..])
+	try write_all(output, buffer[end..])
 	return
 }
 
@@ -264,12 +317,12 @@ hide format_field_name func($T type, index usize) []u8 {
 	}
 }
 
-hide write_integer func(writer Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
+hide write_integer func(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
 	match typeinfo!(T) {
 		.integer: if minval!(T) < 0 {
-			try write_integer_signed(writer, i64(value), base, uppercase)
+			try write_integer_signed(output, i64(value), base, uppercase)
 		} else {
-			try write_integer_unsigned(writer, u64(value), base, uppercase)
+			try write_integer_unsigned(output, u64(value), base, uppercase)
 		}
 		else: compile_error!("io.print integer format requires an integer argument")
 	}
@@ -277,7 +330,7 @@ hide write_integer func(writer Writer, $T type, value T, base u64, uppercase boo
 }
 
 # note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
-hide write_float func(writer Writer, $T type, value T, scientific bool) void ! WriteError {
+hide write_float func(output Writer, $T type, value T, scientific bool) void ! WriteError {
 	match typeinfo!(T) {
 		.float: {
 			buffer [64]mut u8 = undefined
@@ -296,53 +349,53 @@ hide write_float func(writer Writer, $T type, value T, scientific bool) void ! W
 			if count < 0 or usize(count) >= buffer.len {
 				return .write_failed
 			}
-			try write_all(writer, buffer[0..usize(count)])
+			try write_all(output, buffer[0..usize(count)])
 		}
 		else: compile_error!("io.print float format requires a float argument")
 	}
 	return
 }
 
-hide write_decimal func(writer Writer, $T type, value T) void ! WriteError {
+hide write_decimal func(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
-		.integer: try write_integer(writer, value, 10, false)
-		.float: try write_float(writer, value, false)
+		.integer: try write_integer(output, value, 10, false)
+		.float: try write_float(output, value, false)
 		else: compile_error!("io.print '{d}' requires an integer or float argument")
 	}
 	return
 }
 
-hide write_character func(writer Writer, $T type, value T) void ! WriteError {
+hide write_character func(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
 		.integer: {
 			if minval!(T) < 0 or maxval!(T) > 255 {
 				compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
 			}
 			buffer [1]u8 = [u8(value)]
-			try write_all(writer, buffer[..])
+			try write_all(output, buffer[..])
 		}
 		else: compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
 	}
 	return
 }
 
-hide write_default func(writer Writer, $T type, value T) void ! WriteError {
+hide write_default func(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
 		.bool: if value {
-			try write_all(writer, "true")
+			try write_all(output, "true")
 		} else {
-			try write_all(writer, "false")
+			try write_all(output, "false")
 		}
-		.integer: try write_integer(writer, value, 10, false)
-		.float: try write_float(writer, value, false)
-		.array: try write_all(writer, value)
-		.pointer: try write_all(writer, value)
-		.slice: try write_all(writer, value)
+		.integer: try write_integer(output, value, 10, false)
+		.float: try write_float(output, value, false)
+		.array: try write_all(output, value)
+		.pointer: try write_all(output, value)
+		.slice: try write_all(output, value)
 		.enum |enum_info|: {
-			inline for enum_info.fields |field| {
+			expand for enum_info.fields |field| {
 				if value == field!(T, field.name) {
-					try write_all(writer, ".")
-					try write_all(writer, field.name)
+					try write_all(output, ".")
+					try write_all(output, field.name)
 					return
 				}
 			}
@@ -351,69 +404,4 @@ hide write_default func(writer Writer, $T type, value T) void ! WriteError {
 		else: compile_error!("io.print '{}' does not support this argument type")
 	}
 	return
-}
-
-print func(writer Writer, $format []u8, $Args type, args Args) void ! WriteError {
-	inline for parse_format(format.len, format, Args) |token| {
-		match token.kind {
-			.unused: break
-			.literal: try write_all(writer, format[token.start..token.end])
-			.string: try write_all(writer, field!(args, token.field))
-			.default: try write_default(writer, field!(args, token.field))
-			.decimal: try write_decimal(writer, field!(args, token.field))
-			.binary: try write_integer(writer, field!(args, token.field), 2, false)
-			.octal: try write_integer(writer, field!(args, token.field), 8, false)
-			.hex_lower: try write_integer(writer, field!(args, token.field), 16, false)
-			.hex_upper: try write_integer(writer, field!(args, token.field), 16, true)
-			.character: try write_character(writer, field!(args, token.field))
-			else: try write_float(writer, field!(args, token.field), true)
-		}
-	}
-}
-
-hide system_read func(_ ?*mut anyopaque, stream ReadStream, buffer []mut u8) usize ! ReadError {
-	request usize = buffer.len
-	maximum usize :: usize(maxval!(c_long))
-	if request > maximum {
-		request = maximum
-	}
-	while true {
-		count c_long :: c.read(c_int(stream), buffer.ptr, c_ulong(request))
-		if count >= 0 {
-			return usize(count)
-		}
-		if c.__error()^ != 4 {
-			return .read_failed
-		}
-	}
-}
-
-hide system_write func(_ ?*mut anyopaque, stream WriteStream, bytes []u8) usize ! WriteError {
-	fd c_int :: c_int(stream)
-	request usize = bytes.len
-	maximum usize :: usize(maxval!(c_long))
-	if request > maximum {
-		request = maximum
-	}
-	while true {
-		count c_long :: c.write(fd, bytes.ptr, c_ulong(request))
-		if count >= 0 {
-			return usize(count)
-		}
-		if c.__error()^ != 4 {
-			return .write_failed
-		}
-	}
-}
-
-hide system_vtable IoVTable :: IoVTable {
-	read = system_read,
-	write = system_write,
-}
-
-hide system func() Io {
-	return Io {
-		context = none,
-		vtable = &system_vtable,
-	}
 }
