@@ -1,0 +1,34 @@
+testing :: import "@std/testing"
+
+TestTokenKind :: enum(u8) {
+	ident = 3
+	int = 8
+	eof = 21
+}
+
+TestNames :: alias EnumFieldStruct(TestTokenKind, ?[]u8, some!(none))
+
+enum_field_struct_defaults test {
+	names TestNames = {
+		ident = "identifier",
+		int = "integer",
+	}
+	if field!(names, "ident") |value| {
+		try testing.expect(value.len == 10)
+	} else {
+		try testing.expect(false)
+	}
+	if field!(names, "int") |value| {
+		try testing.expect(value.len == 7)
+	} else {
+		try testing.expect(false)
+	}
+	if field!(names, "eof") |_| {
+		try testing.expect(false)
+	}
+
+	empty TestNames = {}
+	if field!(empty, "ident") |_| {
+		try testing.expect(false)
+	}
+}

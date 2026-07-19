@@ -1,4 +1,5 @@
 import "@std/debug"
+import "@std/mem"
 
 Error :: enum {
 	expectation_failed
@@ -18,9 +19,31 @@ expect func(condition bool, location SourceLocation) void ! Error {
 }
 
 expect_equal func($T type, expected, actual T, location SourceLocation) void ! Error {
-	if expected != actual {
-		debug.print("{s}:{d}:{d}: expected {}, found {}\n", {location.file, location.line, location.column, expected, actual})
-		return .expectation_failed
+	match typeinfo!(T) {
+		.optional: {
+			if expected |expected_value| {
+				if actual |actual_value| {
+					try expect_equal(expected_value, actual_value, location)
+					return
+				}
+				debug.print("{s}:{d}:{d}: expected an optional value, found none\n", {location.file, location.line, location.column})
+				return .expectation_failed
+			}
+			if actual |_| {
+				debug.print("{s}:{d}:{d}: expected none, found an optional value\n", {location.file, location.line, location.column})
+				return .expectation_failed
+			}
+		}
+		.slice: if !mem.eql(expected, actual) {
+			debug.print("{s}:{d}:{d}: expected and actual slices differ\n", {location.file, location.line, location.column})
+			return .expectation_failed
+		}
+		else: {
+			if expected != actual {
+				debug.print("{s}:{d}:{d}: expected {}, found {}\n", {location.file, location.line, location.column, expected, actual})
+				return .expectation_failed
+			}
+		}
 	}
 }
 

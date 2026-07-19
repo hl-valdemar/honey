@@ -40,7 +40,8 @@ init func(
 	}
 }
 
-# frees the entries in the hash map and invalidates it.
+# free the entries in the hash map.
+# note: this operation invalidates the map.
 deinit func(
 	$K, $V type,
 	$hash_key func(key K) usize,
@@ -80,9 +81,9 @@ put func(
 	key K,
 	value V,
 ) void ! (PutError | mem.AllocError) {
+	# check grow
 	threshold :: map.entries.len - divtrunc!(map.entries.len, 4)
 	if (map.entries.len == 0 or map.count + 1 > threshold) {
-		# grow entries array
 		old_entries :: map.entries
 		new_size :: if (old_entries.len > 0) old_entries.len * 2 else 8
 		new_entries :: try mem.alloc(Entry(K, V), map.allocator, new_size)
@@ -109,6 +110,7 @@ put func(
 		mem.free(map.allocator, old_entries)
 	}
 
+	# put new entry
 	hash :: normalize(hash_key(key))
 	idx usize = hash & (map.entries.len - 1)
 

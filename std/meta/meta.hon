@@ -39,3 +39,20 @@ TypeInfo :: union(enum) {
 	fallible void
 	distinct void
 }
+
+EnumFieldStruct func($E, $Field type, $default ?Field) type {
+	match typeinfo!(E) {
+		.enum |info|: {
+			names [field!(typeinfo!(E), "enum").fields.len]mut []u8 = undefined
+			field_types [field!(typeinfo!(E), "enum").fields.len]mut type = undefined
+			defaults [field!(typeinfo!(E), "enum").fields.len]mut ?Field = undefined
+			expand for info.fields |field, index| {
+				names[index] = field.name
+				field_types[index] = Field
+				defaults[index] = default
+			}
+			return struct_type!(.auto, names, field_types, defaults)
+		}
+		else: compile_error!("EnumFieldStruct key must be an enum")
+	}
+}
