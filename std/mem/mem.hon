@@ -184,10 +184,7 @@ hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size
 			if new_size < copy_size {
 				copy_size = new_size
 			}
-			i usize = 0
-			while i < copy_size : i += 1 {
-				new_bytes[i] = old_memory[i]
-			}
+			memcopy!(new_bytes[..copy_size], old_memory[..copy_size])
 			c.free(old_memory)
 		}
 		return new_memory
