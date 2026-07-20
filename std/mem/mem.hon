@@ -35,7 +35,7 @@ eql func($T type, left, right []T) bool {
 	return true
 }
 
-# allocate memory for a slice of type `T` with `count` elements.
+#! allocate memory for a slice of type `T` with `count` elements.
 alloc func($T type, allocator Allocator, count usize) []mut T ! AllocError {
 	if (count == 0) return empty_slice(T, 0)
 
@@ -54,9 +54,9 @@ alloc func($T type, allocator Allocator, count usize) []mut T ! AllocError {
 	return .out_of_memory
 }
 
-# reallocate memory for a slice of type `T` with `new_count` elements.
-# reallocating with `new_count == 0` will free the memory and return an empty slice.
-# note: memory must be reallocated with the same allocator that was used to allocate it.
+#! reallocate memory for a slice of type `T` with `new_count` elements.
+#! reallocating with `new_count == 0` will free the memory and return an empty slice.
+#! note: memory must be reallocated with the same allocator that was used to allocate it.
 realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mut T ! AllocError {
 	if new_count == memory.len {
 		return memory
@@ -96,8 +96,8 @@ realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 	return .out_of_memory
 }
 
-# free memory allocated for a slice of type `T`.
-# note: memory must be freed with the same allocator that was used to allocate it.
+#! free memory allocated for a slice of type `T`.
+#! note: memory must be freed with the same allocator that was used to allocate it.
 free func($T type, allocator Allocator, memory []T) void {
 	if (memory.len == 0 or sizeof!(T) == 0) return
 	raw_free(allocator, ptrcast!(
@@ -108,13 +108,13 @@ free func($T type, allocator Allocator, memory []T) void {
 	)
 }
 
-# get an empty slice of type `T` with `count` elements.
+#! get an empty slice of type `T` with `count` elements.
 empty_slice func($T type, count usize) []mut T {
 	pointer *mut T :: ptrcast!(T, (&empty_storage).ptr)
 	return pointer[..count]
 }
 
-# get an empty slice of type `T` with 0 elements.
+#! get an empty slice of type `T` with 0 elements.
 empty func($T type) []mut T {
 	return empty_slice(T, 0)
 }
