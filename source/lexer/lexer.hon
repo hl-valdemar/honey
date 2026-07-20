@@ -1,0 +1,213 @@
+import "@std"
+import "@std/mem"
+import "@std/arraylist"
+#import "@std/static_string_map"
+
+#keywords std.StaticStringMap(TokenKind) :: static_string_map.init([
+#	{ "func", .func },
+#	{ "return", .return },
+#	{ "if", .if },
+#	{ "for", .for },
+#	{ "else", .else },
+#])
+
+TokenIndex :: alias usize
+
+ScanDiagnostic :: struct {
+    token TokenIndex
+    message []u8
+}
+
+State :: struct {
+    tokens std.ArrayList(Token)
+    diagnostics std.ArrayList(ScanDiagnostic)
+}
+
+init func(allocator mem.Allocator) State {
+    return State {
+        tokens = arraylist.init(allocator),
+        diagnostics = arraylist.init(allocator),
+    }
+}
+
+deinit func(state @mut State) void {
+    arraylist.deinit(&state.tokens)
+    arraylist.deinit(&state.diagnostics)
+}
+
+scan func(state @mut State, input []u8) void ! mem.AllocError {
+	tokens :: &state.tokens
+	diagnostics :: &state.diagnostics
+
+    cursor usize = 0
+    while cursor < input.len {
+        char :: input[cursor]
+
+        # whitespace
+        if char == '\n' {
+	        try arraylist.append(tokens, Token{ kind = .newline, start = cursor })
+	        cursor += 1
+			continue
+        } else if is_whitespace(char) {
+            cursor += 1
+            continue
+        }
+
+        # comments
+        if char == '#' {
+            while cursor < input.len and input[cursor] != '\n' : cursor += 1 {}
+            cursor += 1
+            continue
+        }
+
+        # identifiers and keywords
+        if is_alpha(char) or char == '_' {
+            start :: cursor
+            cursor += 1
+            while cursor < input.len and (is_alpha(input[cursor]) or is_digit(input[cursor]) or input[cursor] == '_') {
+                cursor += 1
+            }
+            kind :: ident_keyword_map(input[start..cursor])
+            try arraylist.append(tokens, Token{ kind = kind, start = start })
+            continue
+        }
+
+        # numeric literals
+        if is_digit(char) {
+            start :: cursor
+            has_decimal bool = false
+
+            # scan integer part
+            while cursor < input.len and is_digit(input[cursor]) {
+                cursor += 1
+            }
+
+            # check for decimal point
+            if cursor < input.len and input[cursor] == '.' {
+                has_decimal = true
+                cursor += 1
+            }
+
+            # assert that decimals follow the decimal point
+            if has_decimal and cursor < input.len and !is_digit(input[cursor]) {
+                token :: tokens.items.len
+	            try arraylist.append(tokens, Token{ kind = .invalid, start = start })
+	            try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "float must end with a digit" })
+	            continue
+            }
+
+            # scan decimal part
+            while cursor < input.len and is_digit(input[cursor]) : cursor += 1 {}
+
+            if has_decimal {
+                try arraylist.append(tokens, Token{ kind = .float, start = start })
+            } else {
+                try arraylist.append(tokens, Token{ kind = .int, start = start })
+            }
+            continue
+        }
+
+        # string literals
+        if char == '"' {
+            start :: cursor
+            cursor += 1
+
+            while cursor < input.len and input[cursor] != '"' and input[cursor] != '\n' : cursor += 1 {
+	            # ignore escaped characters
+	            if (input[cursor] == '\\' and cursor + 1 < input.len) cursor += 1
+            }
+
+            if cursor < input.len and input[cursor] == '"' {
+                cursor += 1
+	            try arraylist.append(tokens, Token{ kind = .string, start = start })
+            } else {
+                try arraylist.append(tokens, Token{ kind = .invalid, start = start })
+            }
+
+            continue
+        }
+
+        # mutable assignment
+        if char == '=' {
+            try arraylist.append(tokens, Token{ kind = .equal, start = cursor })
+            cursor += 1
+            continue
+        }
+
+        # immutable assignment
+        if cursor + 1 < input.len and char == ':' and input[cursor + 1] == ':' {
+            try arraylist.append(tokens, Token{ kind = .double_colon, start = cursor })
+            cursor += 2
+            continue
+        }
+
+        # parentheses
+        if char == '(' {
+            try arraylist.append(tokens, Token{ kind = .open_paren, start = cursor })
+            cursor += 1
+            continue
+        } else if char == ')' {
+            try arraylist.append(tokens, Token{ kind = .close_paren, start = cursor })
+            cursor += 1
+            continue
+        }
+
+        # curly braces
+        if char == '{' {
+            try arraylist.append(tokens, Token{ kind = .open_curly, start = cursor })
+            cursor += 1
+            continue
+        } else if char == '}' {
+            try arraylist.append(tokens, Token{ kind = .close_curly, start = cursor })
+            cursor += 1
+            continue
+        }
+
+        # invalid character
+        token :: tokens.items.len
+        try arraylist.append(tokens, Token{ kind = .invalid, start = cursor })
+        try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "invalid character" })
+    }
+
+    try arraylist.append(tokens, Token{ kind = .eof, start = cursor })
+}
+
+hide is_whitespace func(char u8) bool {
+    return char == ' ' or char == '\t' or char == '\n' or char == '\r'
+}
+
+hide is_alpha func(char u8) bool {
+    return match char {
+        'a'..='z', 'A'..='Z': true
+        else: false
+    }
+}
+
+hide is_digit func(char u8) bool {
+    return match char {
+        '0'..='9': true
+        else: false
+    }
+}
+
+# fixme: replace with a static string map once implemented
+hide ident_keyword_map func(ident []u8) TokenKind {
+    if mem.eql(u8, ident, "if") return .if
+    if mem.eql(u8, ident, "else") return .else
+    if mem.eql(u8, ident, "for") return .for
+    if mem.eql(u8, ident, "while") return .while
+    if mem.eql(u8, ident, "func") return .func
+    if mem.eql(u8, ident, "return") return .return
+    return .ident
+}
+
+# fixme(brolang): this function fails to infer the enum type from the return values due to the optional
+#hide ident_keyword_map func(ident []u8) ?TokenKind {
+#    if mem.eql(u8, ident, "if") return .if
+#    if mem.eql(u8, ident, "else") return .else
+#    if mem.eql(u8, ident, "for") return .for
+#    if mem.eql(u8, ident, "while") return .while
+#    if mem.eql(u8, ident, "func") return .func
+#    if mem.eql(u8, ident, "return") return .return
+#    return null
+#}

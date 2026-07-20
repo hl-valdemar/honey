@@ -13,7 +13,11 @@ SourceLocation :: struct {
 
 expect func(condition bool, location SourceLocation) void ! Error {
 	if !condition {
-		debug.print("{s}:{d}:{d}: expectation failed\n", {location.file, location.line, location.column})
+		debug.print("{s}:{d}:{d}: expectation failed\n", {
+			location.file,
+			location.line,
+			location.column,
+		})
 		return .expectation_failed
 	}
 }
@@ -26,20 +30,38 @@ expect_equal func($T type, expected, actual T, location SourceLocation) void ! E
 					try expect_equal(expected_value, actual_value, location)
 					return
 				}
-				debug.print("{s}:{d}:{d}: expected an optional value, found null\n", {location.file, location.line, location.column})
+				debug.print("{s}:{d}:{d}: expected an optional value, found null\n", {
+				    location.file,
+				    location.line,
+				    location.column,
+				})
 				return .expectation_failed
 			}
 			if actual |_| {
-				debug.print("{s}:{d}:{d}: expected null, found an optional value\n", {location.file, location.line, location.column})
+				debug.print("{s}:{d}:{d}: expected null, found an optional value\n", {
+				    location.file,
+				    location.line,
+				    location.column,
+				})
 				return .expectation_failed
 			}
 		}
 		.slice: if !mem.eql(expected, actual) {
-			debug.print("{s}:{d}:{d}: expected and actual slices differ\n", {location.file, location.line, location.column})
+			debug.print("{s}:{d}:{d}: expected and actual slices differ\n", {
+				location.file,
+				location.line,
+				location.column,
+			})
 			return .expectation_failed
 		}
 		else: if expected != actual {
-			debug.print("{s}:{d}:{d}: expected {}, found {}\n", {location.file, location.line, location.column, expected, actual})
+			debug.print("{s}:{d}:{d}: expected {}, found {}\n", {
+				location.file,
+				location.line,
+				location.column,
+				expected,
+				actual,
+			})
 			return .expectation_failed
 		}
 	}
