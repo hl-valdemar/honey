@@ -1,0 +1,80 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@std/hashmap"
+import "@std/testing"
+
+StringId :: alias usize
+
+StringPool :: struct {
+	ids hashmap.StringHashMap(StringId) # string → id
+	strings arraylist.ArrayList([]u8)   # id → owned string
+	allocator mem.Allocator
+}
+
+init func(allocator mem.Allocator) StringPool {
+	return StringPool{
+		ids = hashmap.init(allocator),
+		strings = arraylist.init(allocator),
+		allocator = allocator,
+	}
+}
+
+deinit func(pool @mut StringPool) void {
+	hashmap.deinit(&pool.ids)
+	for pool.strings.items |str| {
+		mem.free(pool.allocator, str)
+	}
+	arraylist.deinit(&pool.strings)
+}
+
+intern func(pool @mut StringPool, str []u8) StringId ! mem.AllocError {
+	if hashmap.get(&pool.ids, str) |id| return id
+
+	id :: pool.strings.items.len
+	owned_str []mut u8 :: try mem.alloc(u8, pool.allocator, str.len)
+	errdefer mem.free(pool.allocator, owned_str)
+	memcopy!(owned_str, str)
+
+	try arraylist.append(&pool.strings, owned_str)
+	errdefer _ = arraylist.pop(&pool.strings)
+
+	hashmap.put(&pool.ids, owned_str, id) catch |err| {
+		match err {
+			.key_exists: unreachable
+			else: return err
+		}
+	}
+
+	return id
+}
+
+get_str func(pool @StringPool, id StringId) ?[]u8 {
+	if (id >= pool.strings.items.len) return null
+	return pool.strings.items[id]
+}
+
+get_id func(pool @StringPool, str []u8) ?StringId {
+	return hashmap.get(&pool.ids, str)
+}
+
+handles_intern test {
+	pool StringPool = init(mem.c_allocator)
+	defer deinit(&pool)
+
+	input [5]mut u8 = ['h', 'e', 'l', 'l', 'o']
+	id :: try intern(&pool, input[..])
+	duplicate :: try intern(&pool, "hello")
+	input[0] = 'j'
+
+	same_id :: get_id(&pool, "hello")
+	mutated_id :: get_id(&pool, input[..])
+	hello_str :: get_str(&pool, id)
+	invalid_str :: get_str(&pool, id + 1)
+
+	try testing.expect_equal(0, id)
+	try testing.expect_equal(id, duplicate)
+	try testing.expect_equal(id, same_id?)
+	try testing.expect_equal(null, mutated_id)
+	try testing.expect_equal(null, invalid_str)
+	try testing.expect_equal("hello", hello_str?)
+}
