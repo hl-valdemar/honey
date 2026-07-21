@@ -84,7 +84,7 @@ realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 		return .out_of_memory
 	}
 
-	old_memory ?*mut u8 = none
+	old_memory ?*mut u8 = null
 	old_size usize = 0
 	if memory.len != 0 {
 		old_memory = ptrcast!(u8, memory.ptr)
@@ -147,17 +147,17 @@ hide power_of_two func(value usize) bool {
 
 hide c_alloc func(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
 	if power_of_two(alignment) == false {
-		return none
+		return null
 	}
 
 	if alignment <= malloc_alignment {
 		return ptrcast!(u8, c.malloc(c_ulong(size)))
 	}
 
-	memory [1]mut ?*mut anyopaque = [none]
+	memory [1]mut ?*mut anyopaque = [null]
 	status c_int = c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
 	if status != 0 {
-		return none
+		return null
 	}
 
 	return ptrcast!(u8, memory[0])
@@ -165,12 +165,12 @@ hide c_alloc func(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
 
 hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
 	if power_of_two(alignment) == false {
-		return none
+		return null
 	}
 
 	if new_size == 0 {
 		c.free(memory)
-		return none
+		return null
 	}
 
 	if memory |old_memory| {
@@ -178,7 +178,7 @@ hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size
 			return ptrcast!(u8, c.realloc(old_memory, c_ulong(new_size)))
 		}
 
-		new_memory ?*mut u8 = c_alloc(none, new_size, alignment)
+		new_memory ?*mut u8 = c_alloc(null, new_size, alignment)
 		if new_memory |new_bytes| {
 			copy_size usize = old_size
 			if new_size < copy_size {
@@ -190,7 +190,7 @@ hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size
 		return new_memory
 	}
 
-	return c_alloc(none, new_size, alignment)
+	return c_alloc(null, new_size, alignment)
 }
 
 hide c_free func(_ ?@mut anyopaque, memory ?*mut u8, _ usize, _ usize) void {
@@ -204,6 +204,6 @@ hide c_vtable AllocatorVTable :: AllocatorVTable {
 }
 
 c_allocator Allocator :: Allocator {
-	context = none,
+	context = null,
 	vtable = &c_vtable,
 }
