@@ -1,0 +1,93 @@
+import "@std/mem"
+
+StaticStringMap func($V type) type {
+	return struct {
+		keys [][]u8
+		values []V
+		len_indexes []u32
+		min_len u32
+		max_len u32
+	}
+}
+
+hide Pair func($V type) type {
+	return struct { []u8, V }
+}
+
+init func($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
+	if N > usize(maxval!(u32)) {
+		compile_error!("static string map has too many entries")
+	}
+
+	keys [N]mut []u8 = undefined
+	values [N]mut V = undefined
+
+	# assert no duplicate keys
+	for entries |entry, i| {
+	    if entry.0.len > usize(maxval!(u32)) {
+			compile_error!("static string map key is too long")
+	    }
+
+		for (0..i) |prior| if mem.eql(u8, entry.0, entries[prior].0) {
+			compile_error!("duplicate static string map key")
+		}
+
+		keys[i] = entry.0
+		values[i] = entry.1
+	}
+
+	if N == 0 {
+		len_indexes [0]u32 = undefined
+		return StaticStringMap(V){
+			keys = keys[..],
+			values = values[..],
+			len_indexes = len_indexes[..],
+			min_len = 0,
+			max_len = 0,
+		}
+	}
+
+	# fixme: insertion sort is compile-time O(N^2); replace if large maps affect builds
+	for 1..N |i| {
+		key :: keys[i]
+		value :: values[i]
+		j usize = i
+		while j > 0 and keys[j - 1].len > key.len : j -= 1 {
+			keys[j] = keys[j - 1]
+			values[j] = values[j - 1]
+		}
+		keys[j] = key
+		values[j] = value
+	}
+
+	min_len u32 :: u32(keys[0].len)
+	max_len u32 :: u32(keys[N - 1].len)
+	len_indexes [usize(max_len) + 1]mut u32 = undefined
+	entry_index usize = 0
+	for 0..=(usize(max_len)) |length| {
+		while entry_index < N and keys[entry_index].len < length : entry_index += 1 {}
+		len_indexes[length] = u32(entry_index)
+	}
+
+	return StaticStringMap(V) {
+		keys = keys[..],
+		values = values[..],
+		len_indexes = len_indexes[..],
+		min_len = min_len,
+		max_len = max_len,
+	}
+}
+
+get func($V type, map @StaticStringMap(V), key []u8) ?V {
+	if (map.keys.len == 0 or key.len > maxval!(u32)) return null
+
+	length u32 = u32(key.len)
+	if (length < map.min_len or length > map.max_len) return null
+
+	idx usize = usize(map.len_indexes[usize(length)])
+	while idx < map.keys.len : idx += 1 {
+		candidate :: map.keys[idx]
+		if (candidate.len != key.len) return null
+		if mem.eql(u8, candidate, key) return map.values[idx]
+	}
+}

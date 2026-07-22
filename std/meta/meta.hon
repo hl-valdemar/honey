@@ -1,6 +1,8 @@
-Layout :: enum {
-	auto
-	c
+Layout :: enum { auto, c }
+
+ArrayInfo :: struct {
+	child type
+	len usize
 }
 
 FieldInfo :: struct {
@@ -28,7 +30,7 @@ TypeInfo :: union(enum) {
 	bool void
 	integer void
 	float void
-	array void
+	array ArrayInfo
 	pointer void
 	slice void
 	range void
@@ -44,9 +46,9 @@ TypeInfo :: union(enum) {
 EnumFieldStruct func($E, $Field type, $default ?Field) type {
 	match typeinfo!(E) {
 		.enum |info|: {
-		names [info.fields.len]mut []u8 = undefined
-		field_types [info.fields.len]mut type = undefined
-		defaults [info.fields.len]mut ?Field = undefined
+    		names [info.fields.len]mut []u8 = undefined
+    		field_types [info.fields.len]mut type = undefined
+    		defaults [info.fields.len]mut ?Field = undefined
 			expand for info.fields |field, index| {
 				names[index] = field.name
 				field_types[index] = Field
