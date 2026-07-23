@@ -1,6 +1,6 @@
 import "@std/meta"
 
-EnumMap func($E, $V type) type {
+EnumMap proc($E, $V type) type {
     match typeinfo!(E) {
         .enum |info|: return struct {
 	        present [info.fields.len]mut bool # fixme: replace with bitset
@@ -10,7 +10,7 @@ EnumMap func($E, $V type) type {
     }
 }
 
-init func(
+init proc(
 	$E, $V type,
 	values meta.EnumFieldStruct(E, ?V, some!(null)),
 ) EnumMap(E, V) {
@@ -31,7 +31,7 @@ init func(
 	return map
 }
 
-get func($E, $V type, map @EnumMap(E, V), key E) ?V {
+get proc($E, $V type, map @EnumMap(E, V), key E) ?V {
 	# fixme: linear lookup; implement an enum index/discriminant map for O(1) lookup
 	match typeinfo!(E) {
 		.enum |info|: expand for info.fields |field, i| {

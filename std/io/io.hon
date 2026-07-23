@@ -29,64 +29,55 @@ Io :: struct {
 }
 
 IoVTable :: struct {
-	read @func(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
-	write @func(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
-	open @func(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
-	close @func(context ?@mut anyopaque, handle Handle) void ! CloseError
-	stdin @func(context ?@mut anyopaque) Handle
-	stdout @func(context ?@mut anyopaque) Handle
-	stderr @func(context ?@mut anyopaque) Handle
+	read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
+	write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
+	open @proc(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
+	close @proc(context ?@mut anyopaque, handle Handle) void ! CloseError
+	stdin @proc(context ?@mut anyopaque) Handle
+	stdout @proc(context ?@mut anyopaque) Handle
+	stderr @proc(context ?@mut anyopaque) Handle
 }
 
 Reader :: struct {
 	context ?@mut anyopaque
 	handle Handle
-	read @func(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
+	read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
 }
 
 Writer :: struct {
 	context ?@mut anyopaque
 	handle Handle
-	write @func(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
+	write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
 }
 
-read func(input Reader, buffer []mut u8) usize ! ReadError {
-	if buffer.len == 0 {
-		return 0
-	}
+read proc(input Reader, buffer []mut u8) usize ! ReadError {
+	if (buffer.len == 0) return 0
+
 	count usize :: try input.read(input.context, input.handle, buffer)
-	if count > buffer.len {
-		return .read_failed
-	}
+	if (count > buffer.len) return .read_failed
+
 	return count
 }
 
-write func(output Writer, bytes []u8) usize ! WriteError {
-	if bytes.len == 0 {
-		return 0
-	}
+write proc(output Writer, bytes []u8) usize ! WriteError {
+	if (bytes.len == 0) return 0
+
 	count usize :: try output.write(output.context, output.handle, bytes)
-	if count > bytes.len {
-		return .write_failed
-	}
+	if (count > bytes.len) return .write_failed
+
 	return count
 }
 
-write_all func(output Writer, bytes []u8) void ! WriteError {
+write_all proc(output Writer, bytes []u8) void ! WriteError {
 	offset usize = 0
 	while offset < bytes.len {
-		count usize :: write(output, bytes[offset..]) catch |err| {
-			return err
-		}
-		if count == 0 {
-			return .no_progress
-		}
+		count usize :: try write(output, bytes[offset..])
+		if (count == 0) return .no_progress
 		offset += count
 	}
-	return
 }
 
-stdin func(io Io) Reader {
+stdin proc(io Io) Reader {
 	return Reader {
 		context = io.context,
 		handle = io.vtable.stdin(io.context),
@@ -94,7 +85,7 @@ stdin func(io Io) Reader {
 	}
 }
 
-stdout func(io Io) Writer {
+stdout proc(io Io) Writer {
 	return Writer {
 		context = io.context,
 		handle = io.vtable.stdout(io.context),
@@ -102,7 +93,7 @@ stdout func(io Io) Writer {
 	}
 }
 
-stderr func(io Io) Writer {
+stderr proc(io Io) Writer {
 	return Writer {
 		context = io.context,
 		handle = io.vtable.stderr(io.context),
@@ -110,7 +101,7 @@ stderr func(io Io) Writer {
 	}
 }
 
-print func(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
+print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
 	expand for parse_format(format.len, format, Args) |token| {
 		match token.kind {
 			.unused: break
@@ -128,60 +119,58 @@ print func(output Writer, $format []u8, $Args type, args Args) void ! WriteError
 	}
 }
 
-hide write_integer_signed func(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
+hide write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
 	buffer [65]mut u8 = undefined
 	end usize = buffer.len
 	current i64 = value
+
 	while true {
 		digit_value i64 :: rem!(current, i64(base))
-		digit u8 = 0
-		if digit_value < 0 {
-			digit = u8(-digit_value)
-		} else {
-			digit = u8(digit_value)
-		}
+		digit u8 = if (digit_value < 0)
+			u8(-digit_value)
+		else
+			u8(digit_value)
+
 		end -= 1
-		if digit < 10 {
-			buffer[end] = '0' + digit
-		} else if uppercase {
-			buffer[end] = 'A' + digit - 10
-		} else {
-			buffer[end] = 'a' + digit - 10
-		}
+		buffer[end] = if (digit < 10)
+			'0' + digit
+		else if (uppercase)
+			'A' + digit - 10
+		else
+			'a' + digit - 10
+
 		current = divtrunc!(current, i64(base))
-		if current == 0 {
-			break
-		}
+		if (current == 0) break
 	}
+
 	if value < 0 {
 		end -= 1
 		buffer[end] = '-'
-	}
+    }
 	try write_all(output, buffer[end..])
-	return
 }
 
-hide write_integer_unsigned func(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
+hide write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
 	buffer [65]mut u8 = undefined
 	end usize = buffer.len
 	current u64 = value
+
 	while true {
 		digit u8 :: u8(rem!(current, base))
+
 		end -= 1
-		if digit < 10 {
-			buffer[end] = '0' + digit
-		} else if uppercase {
-			buffer[end] = 'A' + digit - 10
-		} else {
-			buffer[end] = 'a' + digit - 10
-		}
+		buffer[end] = if (digit < 10)
+			'0' + digit
+		else if (uppercase)
+			'A' + digit - 10
+		else
+			'a' + digit - 10
+
 		current = divtrunc!(current, base)
-		if current == 0 {
-			break
-		}
+		if (current == 0) break
 	}
+
 	try write_all(output, buffer[end..])
-	return
 }
 
 hide FormatTokenKind :: enum {
@@ -205,18 +194,17 @@ hide FormatToken :: struct {
 	field []u8
 }
 
-hide parse_format func($N usize, $format []u8, $Args type) [N]mut FormatToken {
+hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
 	tokens [N]mut FormatToken = undefined
 	for (usize(0))..format.len |index| {
-		tokens[index] = FormatToken {kind = .unused, start = 0, end = 0, field = ""}
+		tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
 	}
+
 	field_count usize = 0
 	match typeinfo!(Args) {
-		.record |record|: {
-			if !record.is_tuple {
-				compile_error!("io.print arguments must be a tuple")
-			}
-			field_count = record.fields.len
+		.record |r|: {
+			if (!r.is_tuple) compile_error!("io.print arguments must be a tuple")
+			field_count = r.fields.len
 		}
 		else: compile_error!("io.print arguments must be a tuple")
 	}
@@ -232,68 +220,84 @@ hide parse_format func($N usize, $format []u8, $Args type) [N]mut FormatToken {
 				compile_error!("io.print format has an unmatched '{'")
 			}
 			if cursor > literal_start {
-				tokens[token_count] = FormatToken {kind = .literal, start = literal_start, end = cursor, field = ""}
+				tokens[token_count] = FormatToken{
+					kind = .literal,
+					start = literal_start,
+					end = cursor,
+					field = "",
+				}
 				token_count += 1
 			}
 			next :: format[cursor + 1]
 			if next == '{' {
-				tokens[token_count] = FormatToken {kind = .literal, start = cursor, end = cursor + 1, field = ""}
+				tokens[token_count] = FormatToken{
+					kind = .literal,
+					start = cursor,
+					end = cursor + 1,
+					field = "",
+				}
 				token_count += 1
 				cursor += 2
 				literal_start = cursor
 				continue
 			}
+
 			kind FormatTokenKind = .default
 			width usize = 2
 			if next != '}' {
 				if cursor + 2 >= format.len or format[cursor + 2] != '}' {
 					compile_error!("io.print format expects a one-character specifier")
 				}
+
 				width = 3
-				if next == 's' {
-					kind = .string
-				} else if next == 'd' {
-					kind = .decimal
-				} else if next == 'b' {
-					kind = .binary
-				} else if next == 'o' {
-					kind = .octal
-				} else if next == 'x' {
-					kind = .hex_lower
-				} else if next == 'X' {
-					kind = .hex_upper
-				} else if next == 'c' {
-					kind = .character
-				} else if next == 'e' {
-					kind = .scientific
-				} else {
-					compile_error!("io.print format has an unknown specifier")
-				}
+				if (next == 's') kind = .string
+				else if (next == 'd') kind = .decimal
+				else if (next == 'b') kind = .binary
+				else if (next == 'o') kind = .octal
+				else if (next == 'x') kind = .hex_lower
+				else if (next == 'X') kind = .hex_upper
+				else if (next == 'c') kind = .character
+				else if (next == 'e') kind = .scientific
+				else compile_error!("io.print format has an unknown specifier")
 			}
+
 			if argument_count >= field_count {
 				compile_error!("io.print format argument count does not match the tuple")
 			}
-			tokens[token_count] = FormatToken {
+
+			tokens[token_count] = FormatToken{
 				kind = kind,
 				start = 0,
 				end = 0,
 				field = format_field_name(Args, argument_count),
 			}
+
 			token_count += 1
 			argument_count += 1
 			cursor += width
 			literal_start = cursor
 			continue
 		}
+
 		if byte == '}' {
 			if cursor + 1 >= format.len or format[cursor + 1] != '}' {
 				compile_error!("io.print format has an unmatched '}'")
 			}
 			if cursor > literal_start {
-				tokens[token_count] = FormatToken {kind = .literal, start = literal_start, end = cursor, field = ""}
+				tokens[token_count] = FormatToken{
+					kind = .literal,
+					start = literal_start,
+					end = cursor,
+					field = "",
+				}
 				token_count += 1
 			}
-			tokens[token_count] = FormatToken {kind = .literal, start = cursor, end = cursor + 1, field = ""}
+			tokens[token_count] = FormatToken{
+				kind = .literal,
+				start = cursor,
+				end = cursor + 1,
+				field = "",
+			}
 			token_count += 1
 			cursor += 2
 			literal_start = cursor
@@ -301,23 +305,30 @@ hide parse_format func($N usize, $format []u8, $Args type) [N]mut FormatToken {
 		}
 		cursor += 1
 	}
+
 	if literal_start < format.len {
-		tokens[token_count] = FormatToken {kind = .literal, start = literal_start, end = format.len, field = ""}
+		tokens[token_count] = FormatToken{
+    		kind = .literal,
+     		start = literal_start,
+    		end = format.len,
+			field = "",
+		}
 	}
+
 	if argument_count != field_count {
 		compile_error!("io.print format argument count does not match the tuple")
 	}
 	return tokens
 }
 
-hide format_field_name func($T type, index usize) []u8 {
+hide format_field_name proc($T type, index usize) []u8 {
 	match typeinfo!(T) {
-		.record |record|: return record.fields[index].name
+		.record |r|: return r.fields[index].name
 		else: compile_error!("io.print arguments must be a tuple")
 	}
 }
 
-hide write_integer func(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
+hide write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
 	match typeinfo!(T) {
 		.integer: if minval!(T) < 0 {
 			try write_integer_signed(output, i64(value), base, uppercase)
@@ -326,46 +337,38 @@ hide write_integer func(output Writer, $T type, value T, base u64, uppercase boo
 		}
 		else: compile_error!("io.print integer format requires an integer argument")
 	}
-	return
 }
 
 # note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
-hide write_float func(output Writer, $T type, value T, scientific bool) void ! WriteError {
+hide write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
 	match typeinfo!(T) {
 		.float: {
 			buffer [64]mut u8 = undefined
 			count c_int = 0
 			if sizeof!(T) == 4 {
-				if scientific {
-					count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
-				} else {
-					count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
-				}
+				if (scientific) count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
+				else count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
 			} else if scientific {
 				count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.16e", value)
 			} else {
 				count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.17g", value)
 			}
-			if count < 0 or usize(count) >= buffer.len {
-				return .write_failed
-			}
+			if (count < 0 or usize(count) >= buffer.len) return .write_failed
 			try write_all(output, buffer[0..usize(count)])
 		}
 		else: compile_error!("io.print float format requires a float argument")
 	}
-	return
 }
 
-hide write_decimal func(output Writer, $T type, value T) void ! WriteError {
+hide write_decimal proc(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
 		.integer: try write_integer(output, value, 10, false)
 		.float: try write_float(output, value, false)
 		else: compile_error!("io.print '{d}' requires an integer or float argument")
 	}
-	return
 }
 
-hide write_character func(output Writer, $T type, value T) void ! WriteError {
+hide write_character proc(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
 		.integer: {
 			if minval!(T) < 0 or maxval!(T) > 255 {
@@ -376,10 +379,9 @@ hide write_character func(output Writer, $T type, value T) void ! WriteError {
 		}
 		else: compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
 	}
-	return
 }
 
-hide write_default func(output Writer, $T type, value T) void ! WriteError {
+hide write_default proc(output Writer, $T type, value T) void ! WriteError {
 	match typeinfo!(T) {
 		.bool: if value {
 			try write_all(output, "true")
@@ -403,5 +405,4 @@ hide write_default func(output Writer, $T type, value T) void ! WriteError {
 		}
 		else: compile_error!("io.print '{}' does not support this argument type")
 	}
-	return
 }

@@ -2,7 +2,7 @@ import "@std/mem"
 
 PutError :: enum { key_exists }
 
-Entry func($K, $V type) type {
+Entry proc($K, $V type) type {
 	return struct {
 		# hash = 0 means empty
 		hash usize = 0
@@ -11,10 +11,10 @@ Entry func($K, $V type) type {
 	}
 }
 
-HashMap func(
+HashMap proc(
 	$K, $V type,
-	$hash_key func(key K) usize,
-	$keys_eql func(a, b K) bool,
+	$hash_key proc(key K) usize,
+	$keys_eql proc(a, b K) bool,
 ) type {
 	return struct {
 		entries []mut Entry(K, V)
@@ -23,14 +23,14 @@ HashMap func(
 	}
 }
 
-StringHashMap func($V type) type {
+StringHashMap proc($V type) type {
 	return HashMap([]u8, V, str_hash, str_eql)
 }
 
-init func(
+init proc(
 	$K, $V type,
-	$hash_key func(key K) usize,
-	$keys_eql func(a, b K) bool,
+	$hash_key proc(key K) usize,
+	$keys_eql proc(a, b K) bool,
 	allocator mem.Allocator,
 ) HashMap(K, V, hash_key, keys_eql) {
 	return HashMap(K, V, hash_key, keys_eql){
@@ -42,17 +42,17 @@ init func(
 
 #! free the entries in the hash map.
 #! note: this operation invalidates the map.
-deinit func(
+deinit proc(
 	$K, $V type,
-	$hash_key func(key K) usize,
-	$keys_eql func(a, b K) bool,
+	$hash_key proc(key K) usize,
+	$keys_eql proc(a, b K) bool,
 	map @HashMap(K, V, hash_key, keys_eql),
 ) void { mem.free(map.allocator, map.entries) }
 
-get func(
+get proc(
 	$K, $V type,
-	$hash_key func(key K) usize,
-	$keys_eql func(a, b K) bool,
+	$hash_key proc(key K) usize,
+	$keys_eql proc(a, b K) bool,
 	map @HashMap(K, V, hash_key, keys_eql),
 	key K,
 ) ?V {
@@ -73,10 +73,10 @@ get func(
 	}
 }
 
-put func(
+put proc(
 	$K, $V type,
-	$hash_key func(key K) usize,
-	$keys_eql func(a, b K) bool,
+	$hash_key proc(key K) usize,
+	$keys_eql proc(a, b K) bool,
 	map @mut HashMap(K, V, hash_key, keys_eql),
 	key K,
 	value V,
@@ -89,9 +89,7 @@ put func(
 		new_entries :: try mem.alloc(Entry(K, V), map.allocator, new_size)
 
 		# zero new entries
-		for 0..new_entries.len |i| {
-			new_entries[i].hash = 0
-		}
+		for (0..new_entries.len) |i| new_entries[i].hash = 0
 
 		# move old entries
 		for old_entries |entry| {
@@ -126,7 +124,7 @@ put func(
 			return
 		}
 
-		if (entry.hash == hash and keys_eql(entry.key, key)) {
+		if entry.hash == hash and keys_eql(entry.key, key) {
 			return .key_exists
 		}
 
@@ -134,7 +132,7 @@ put func(
 	}
 }
 
-hide normalize func(hash usize) usize {
+hide normalize proc(hash usize) usize {
 	# mapping both 0 and 1 to 1 is safe because equality resolves
 	# collisions (since hash and key must both be equal).
 	if (hash == 0) return 1
@@ -143,7 +141,7 @@ hide normalize func(hash usize) usize {
 
 #! FNV-1a hash implementation.
 #! note: vulnerable to collision attacks.
-hide str_hash func(key []u8) usize {
+hide str_hash proc(key []u8) usize {
 	hash u32 = 2166136261 # offset basis
 	prime u32 = 16777619
 
@@ -155,6 +153,4 @@ hide str_hash func(key []u8) usize {
 	return usize(hash)
 }
 
-hide str_eql func(a, b []u8) bool {
-	return mem.eql(a, b)
-}
+hide str_eql proc(a, b []u8) bool { return mem.eql(a, b) }

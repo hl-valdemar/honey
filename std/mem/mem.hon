@@ -10,24 +10,24 @@ Allocator :: struct {
 }
 
 AllocatorVTable :: struct {
-	alloc @func(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8
-	realloc @func(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8
-	free @func(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void
+	alloc @proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8
+	realloc @proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8
+	free @proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void
 }
 
-raw_alloc func(allocator Allocator, size usize, alignment usize) ?*mut u8 {
+raw_alloc proc(allocator Allocator, size usize, alignment usize) ?*mut u8 {
 	return allocator.vtable.alloc(allocator.context, size, alignment)
 }
 
-raw_realloc func(allocator Allocator, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+raw_realloc proc(allocator Allocator, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
 	return allocator.vtable.realloc(allocator.context, memory, old_size, new_size, alignment)
 }
 
-raw_free func(allocator Allocator, memory ?*mut u8, size usize, alignment usize) void {
+raw_free proc(allocator Allocator, memory ?*mut u8, size usize, alignment usize) void {
 	allocator.vtable.free(allocator.context, memory, size, alignment)
 }
 
-eql func($T type, left, right []T) bool {
+eql proc($T type, left, right []T) bool {
 	if (left.len != right.len) return false
 	for (0..left.len) |i| if (left[i] != right[i]) {
         return false
@@ -36,7 +36,7 @@ eql func($T type, left, right []T) bool {
 }
 
 #! allocate memory for a slice of type `T` with `count` elements.
-alloc func($T type, allocator Allocator, count usize) []mut T ! AllocError {
+alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
 	if (count == 0) return empty_slice(T, 0)
 
 	element_size usize :: sizeof!(T)
@@ -51,13 +51,14 @@ alloc func($T type, allocator Allocator, count usize) []mut T ! AllocError {
 		pointer *mut T :: ptrcast!(T, bytes)
 		return pointer[..count]
 	}
+
 	return .out_of_memory
 }
 
 #! reallocate memory for a slice of type `T` with `new_count` elements.
 #! reallocating with `new_count == 0` will free the memory and return an empty slice.
 #! note: memory must be reallocated with the same allocator that was used to allocate it.
-realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mut T ! AllocError {
+realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mut T ! AllocError {
 	if new_count == memory.len {
 		return memory
 	}
@@ -68,12 +69,8 @@ realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 	}
 
 	element_size usize :: sizeof!(T)
-	if element_size == 0 {
-		return empty_slice(T, new_count)
-	}
-	if new_count > divtrunc!(maxval!(usize), element_size) {
-		return .out_of_memory
-	}
+	if (element_size == 0) return empty_slice(T, new_count)
+	if (new_count > divtrunc!(maxval!(usize), element_size)) return .out_of_memory
 
 	old_memory ?*mut u8 = null
 	old_size usize = 0
@@ -98,7 +95,7 @@ realloc func($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 
 #! free memory allocated for a slice of type `T`.
 #! note: memory must be freed with the same allocator that was used to allocate it.
-free func($T type, allocator Allocator, memory []T) void {
+free proc($T type, allocator Allocator, memory []T) void {
 	if (memory.len == 0 or sizeof!(T) == 0) return
 	raw_free(allocator, ptrcast!(
 		u8,
@@ -109,21 +106,21 @@ free func($T type, allocator Allocator, memory []T) void {
 }
 
 #! get an empty slice of type `T` with `count` elements.
-empty_slice func($T type, count usize) []mut T {
+empty_slice proc($T type, count usize) []mut T {
 	pointer *mut T :: ptrcast!(T, (&empty_storage).ptr)
 	return pointer[..count]
 }
 
 #! get an empty slice of type `T` with 0 elements.
-empty func($T type) []mut T {
+empty proc($T type) []mut T {
 	return empty_slice(T, 0)
 }
 
 hide empty_storage [1]mut u64 = [0]
 
-hide malloc_alignment usize :: 16 # ponytail: aarch64-macos libc malloc alignment assumption.
+hide malloc_alignment usize :: 16 # note: aarch64-macos libc malloc alignment assumption.
 
-hide power_of_two func(value usize) bool {
+hide power_of_two proc(value usize) bool {
 	if (value == 0) return false
 	current usize = value
 	while current > 1 {
@@ -134,12 +131,9 @@ hide power_of_two func(value usize) bool {
 	return true
 }
 
-hide c_alloc func(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+hide c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
 	if (power_of_two(alignment) == false) return null
-
-	if alignment <= malloc_alignment {
-		return ptrcast!(u8, c.malloc(c_ulong(size)))
-	}
+	if (alignment <= malloc_alignment) return ptrcast!(u8, c.malloc(c_ulong(size)))
 
 	memory [1]mut ?*mut anyopaque = [null]
 	status c_int = c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
@@ -148,7 +142,13 @@ hide c_alloc func(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
 	return ptrcast!(u8, memory[0])
 }
 
-hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+hide c_realloc proc(
+	_ ?@mut anyopaque,
+	memory ?*mut u8,
+	old_size usize,
+	new_size usize,
+	alignment usize,
+) ?*mut u8 {
 	if (power_of_two(alignment) == false) return null
 
 	if new_size == 0 {
@@ -174,7 +174,7 @@ hide c_realloc func(_ ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size
 	return c_alloc(null, new_size, alignment)
 }
 
-hide c_free func(_ ?@mut anyopaque, memory ?*mut u8, _ usize, _ usize) void {
+hide c_free proc(_ ?@mut anyopaque, memory ?*mut u8, _ usize, _ usize) void {
 	c.free(memory)
 }
 

@@ -11,7 +11,7 @@ SourceLocation :: struct {
 	column usize
 }
 
-expect func(condition bool, location SourceLocation) void ! Error {
+expect proc(condition bool, location SourceLocation) void ! Error {
 	if !condition {
 		debug.print("{s}:{d}:{d}: expectation failed\n", {
 			location.file,
@@ -22,7 +22,7 @@ expect func(condition bool, location SourceLocation) void ! Error {
 	}
 }
 
-expect_equal func($T type, expected, actual T, location SourceLocation) void ! Error {
+expect_equal proc($T type, expected, actual T, location SourceLocation) void ! Error {
 	match typeinfo!(T) {
 		.optional: {
 			if expected |expected_value| {
@@ -67,11 +67,11 @@ expect_equal func($T type, expected, actual T, location SourceLocation) void ! E
 	}
 }
 
-expect_type func($Expected, $Actual type, _ Actual, location SourceLocation) void ! Error {
+expect_type proc($Expected, $Actual type, _ Actual, location SourceLocation) void ! Error {
 	try expect($(Expected == Actual), location)
 }
 
-run func(name []u8, callback *func() void ! Error) bool {
+run proc(name []u8, callback *proc() void ! Error) bool {
 	callback() catch |_| {
 		debug.print("{s}...[failed]\n", {name,})
 		return false
@@ -80,6 +80,6 @@ run func(name []u8, callback *func() void ! Error) bool {
 	return true
 }
 
-summary func(passed, failed i32) void {
+summary proc(passed, failed i32) void {
 	debug.print("{d} passed, {d} failed\n", {passed, failed})
 }

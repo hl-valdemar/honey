@@ -4,12 +4,13 @@ import "@std/mem"
 test import "@std/enums"
 test import "@std/arraylist"
 test import "@std/hashmap"
-test import "@std/static_string_map"
+test import "@std/strmap"
 
 import "@source/strpool"
 import "@source/lexer"
 
 test import "@source/strpool"
+test import "@source/lexer"
 
 program ::
 	`# these are immutable
@@ -24,17 +25,14 @@ program ::
 	`else
 	`for
 	`while
-	`func
+	`proc
 	`return
 	`
-	`main func() void {}
+	`main proc() void {}
 
-# cross-cutting concern, hence global singleton
-strings StringPool = undefined
-
-main func() void {
-    strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strings)
+main proc() void {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
 
     debug.print("PROGRAM::[[\n{}\n]]\n\n", {program})
 

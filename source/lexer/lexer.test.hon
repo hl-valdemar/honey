@@ -1,0 +1,22 @@
+import "@source/strpool"
+import "@std/mem"
+import "@std/testing"
+
+handles_keywords_identifiers_and_error_progress test {
+	strpool.strings = strpool.init(mem.c_allocator)
+	defer strpool.deinit(&strpool.strings)
+
+	state State = init(mem.c_allocator)
+	defer deinit(&state)
+	try scan(&state, "if name # comment\n@1.")
+
+	try testing.expect_equal(6, state.tokens.items.len)
+	try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
+	try testing.expect_equal(TokenKind.ident, state.tokens.items[1].kind)
+	try testing.expect_equal(TokenKind.newline, state.tokens.items[2].kind)
+	try testing.expect_equal(TokenKind.invalid, state.tokens.items[3].kind)
+	try testing.expect_equal(TokenKind.invalid, state.tokens.items[4].kind)
+	try testing.expect_equal(TokenKind.eof, state.tokens.items[5].kind)
+	try testing.expect_equal(2, state.diagnostics.items.len)
+	try testing.expect_equal("name", strpool.get_str(&strpool.strings, state.tokens.items[1].str_id)?)
+}

@@ -1,15 +1,18 @@
 import "@std"
 import "@std/mem"
 import "@std/arraylist"
-#import "@std/static_string_map"
+import "@std/strmap"
 
-#keywords std.StaticStringMap(TokenKind) :: static_string_map.init([
-#	{ "func", .func },
-#	{ "return", .return },
-#	{ "if", .if },
-#	{ "for", .for },
-#	{ "else", .else },
-#])
+import "@source/strpool"
+
+keywords std.StaticStringMap(TokenKind) :: strmap.init([
+	{ "proc", .proc },
+	{ "return", .return },
+	{ "if", .if },
+	{ "for", .for },
+	{ "else", .else },
+	{ "while", .while },
+])
 
 TokenIndex :: alias usize
 
@@ -23,19 +26,19 @@ State :: struct {
     diagnostics std.ArrayList(ScanDiagnostic)
 }
 
-init func(allocator mem.Allocator) State {
+init proc(allocator mem.Allocator) State {
     return State {
         tokens = arraylist.init(allocator),
         diagnostics = arraylist.init(allocator),
     }
 }
 
-deinit func(state @mut State) void {
+deinit proc(state @mut State) void {
     arraylist.deinit(&state.tokens)
     arraylist.deinit(&state.diagnostics)
 }
 
-scan func(state @mut State, input []u8) void ! mem.AllocError {
+scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternError) {
 	tokens :: &state.tokens
 	diagnostics :: &state.diagnostics
 
@@ -56,7 +59,6 @@ scan func(state @mut State, input []u8) void ! mem.AllocError {
         # comments
         if char == '#' {
             while cursor < input.len and input[cursor] != '\n' : cursor += 1 {}
-            cursor += 1
             continue
         }
 
@@ -64,11 +66,27 @@ scan func(state @mut State, input []u8) void ! mem.AllocError {
         if is_alpha(char) or char == '_' {
             start :: cursor
             cursor += 1
-            while cursor < input.len and (is_alpha(input[cursor]) or is_digit(input[cursor]) or input[cursor] == '_') {
-                cursor += 1
-            }
-            kind :: ident_keyword_map(input[start..cursor])
-            try arraylist.append(tokens, Token{ kind = kind, start = start })
+
+            # scan whole identifier
+            while (cursor < input.len and (
+                is_alpha(input[cursor]) or
+                is_digit(input[cursor]) or
+                input[cursor] == '_'
+            )) : cursor += 1 {}
+
+            kind :: strmap.get(&keywords, input[start..cursor]) orelse .ident
+
+            # don't intern keywords (already O(1) lookup via token kind)
+            str_id :: if (kind == .ident)
+                try strpool.intern(&strpool.strings, input[start..cursor])
+            else
+                strpool.NoId
+
+            try arraylist.append(tokens, Token{
+                kind = kind,
+                start = start,
+                str_id = str_id
+            })
             continue
         }
 
@@ -89,7 +107,7 @@ scan func(state @mut State, input []u8) void ! mem.AllocError {
             }
 
             # assert that decimals follow the decimal point
-            if has_decimal and cursor < input.len and !is_digit(input[cursor]) {
+            if has_decimal and (cursor >= input.len or !is_digit(input[cursor])) {
                 token :: tokens.items.len
 	            try arraylist.append(tokens, Token{ kind = .invalid, start = start })
 	            try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "float must end with a digit" })
@@ -167,47 +185,26 @@ scan func(state @mut State, input []u8) void ! mem.AllocError {
         token :: tokens.items.len
         try arraylist.append(tokens, Token{ kind = .invalid, start = cursor })
         try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "invalid character" })
+        cursor += 1
     }
 
     try arraylist.append(tokens, Token{ kind = .eof, start = cursor })
 }
 
-hide is_whitespace func(char u8) bool {
+hide is_whitespace proc(char u8) bool {
     return char == ' ' or char == '\t' or char == '\n' or char == '\r'
 }
 
-hide is_alpha func(char u8) bool {
+hide is_alpha proc(char u8) bool {
     return match char {
         'a'..='z', 'A'..='Z': true
         else: false
     }
 }
 
-hide is_digit func(char u8) bool {
+hide is_digit proc(char u8) bool {
     return match char {
         '0'..='9': true
         else: false
     }
 }
-
-# fixme: replace with a static string map once implemented
-hide ident_keyword_map func(ident []u8) TokenKind {
-    if mem.eql(u8, ident, "if") return .if
-    if mem.eql(u8, ident, "else") return .else
-    if mem.eql(u8, ident, "for") return .for
-    if mem.eql(u8, ident, "while") return .while
-    if mem.eql(u8, ident, "func") return .func
-    if mem.eql(u8, ident, "return") return .return
-    return .ident
-}
-
-# fixme(brolang): this function fails to infer the enum type from the return values due to the optional
-#hide ident_keyword_map func(ident []u8) ?TokenKind {
-#    if mem.eql(u8, ident, "if") return .if
-#    if mem.eql(u8, ident, "else") return .else
-#    if mem.eql(u8, ident, "for") return .for
-#    if mem.eql(u8, ident, "while") return .while
-#    if mem.eql(u8, ident, "func") return .func
-#    if mem.eql(u8, ident, "return") return .return
-#    return null
-#}

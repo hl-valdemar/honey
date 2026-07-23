@@ -19,18 +19,16 @@ CloseError :: enum {
 	close_failed
 }
 
-open func(io Io, path [;0]u8, mode FileMode) File ! OpenError {
-	handle Handle :: io.vtable.open(io.context, path, mode) catch |err| {
-		return err
-	}
-	return File {io = io, handle = handle}
+open proc(io Io, path [;0]u8, mode FileMode) File ! OpenError {
+	handle Handle :: try io.vtable.open(io.context, path, mode)
+	return File{ io = io, handle = handle }
 }
 
-close func(file File) void ! CloseError {
+close proc(file File) void ! CloseError {
 	try file.io.vtable.close(file.io.context, file.handle)
 }
 
-reader func(file File) Reader {
+reader proc(file File) Reader {
 	return Reader {
 		context = file.io.context,
 		handle = file.handle,
@@ -38,7 +36,7 @@ reader func(file File) Reader {
 	}
 }
 
-writer func(file File) Writer {
+writer proc(file File) Writer {
 	return Writer {
 		context = file.io.context,
 		handle = file.handle,
@@ -46,51 +44,39 @@ writer func(file File) Writer {
 	}
 }
 
-hide system_read func(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError {
+hide system_read proc(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError {
 	request usize = buffer.len
 	maximum usize :: usize(maxval!(c_long))
-	if request > maximum {
-		request = maximum
-	}
+	if (request > maximum) request = maximum
+
 	while true {
 		count c_long :: c.read(handle.file_desc, buffer.ptr, c_ulong(request))
-		if count >= 0 {
-			return usize(count)
-		}
+		if (count >= 0) return usize(count)
+
 		errno c_int :: c.__error()?^
-		if errno == c.EINTR {
-			continue
-		}
-		if errno == c.EBADF {
-			return .not_open_for_reading
-		}
+		if (errno == c.EINTR) continue
+		if (errno == c.EBADF) return .not_open_for_reading
 		return .read_failed
 	}
 }
 
-hide system_write func(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError {
+hide system_write proc(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError {
 	request usize = bytes.len
 	maximum usize :: usize(maxval!(c_long))
-	if request > maximum {
-		request = maximum
-	}
+	if (request > maximum) request = maximum
+
 	while true {
 		count c_long :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
-		if count >= 0 {
-			return usize(count)
-		}
+		if (count >= 0) return usize(count)
+
 		errno c_int :: c.__error()?^
-		if errno == c.EINTR {
-			continue
-		}
-		if errno == c.EBADF {
-			return .not_open_for_writing
-		}
+		if (errno == c.EINTR) continue
+		if (errno == c.EBADF) return .not_open_for_writing
 		return .write_failed
 	}
 }
 
-hide system_open func(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
+hide system_open proc(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
 	flags c_int = c.O_RDONLY
 	match mode {
 		.read_only: flags = c.O_RDONLY
@@ -99,31 +85,25 @@ hide system_open func(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! Op
 	}
 	while true {
 		fd c_int :: c.open(ptrcast!(c_char, path.ptr), flags)
-		if fd >= 0 {
-			return Handle {file_desc = fd}
-		}
-		if c.__error()?^ != c.EINTR {
-			return .open_failed
-		}
+		if (fd >= 0) return Handle{ file_desc = fd }
+		if (c.__error()?^ != c.EINTR) return .open_failed
 	}
 }
 
-hide system_close func(_ ?@mut anyopaque, handle Handle) void ! CloseError {
-	if c.close(handle.file_desc) != 0 {
-		return .close_failed
-	}
+hide system_close proc(_ ?@mut anyopaque, handle Handle) void ! CloseError {
+	if (c.close(handle.file_desc) != 0) return .close_failed
 }
 
-hide system_stdin func(_ ?@mut anyopaque) Handle {
-	return Handle {file_desc = c_int(Stream.stdin)}
+hide system_stdin proc(_ ?@mut anyopaque) Handle {
+	return Handle{ file_desc = c_int(Stream.stdin) }
 }
 
-hide system_stdout func(_ ?@mut anyopaque) Handle {
-	return Handle {file_desc = c_int(Stream.stdout)}
+hide system_stdout proc(_ ?@mut anyopaque) Handle {
+	return Handle{ file_desc = c_int(Stream.stdout) }
 }
 
-hide system_stderr func(_ ?@mut anyopaque) Handle {
-	return Handle {file_desc = c_int(Stream.stderr)}
+hide system_stderr proc(_ ?@mut anyopaque) Handle {
+	return Handle{ file_desc = c_int(Stream.stderr) }
 }
 
 hide system_vtable IoVTable :: IoVTable {
@@ -136,7 +116,7 @@ hide system_vtable IoVTable :: IoVTable {
 	stderr = system_stderr,
 }
 
-hide system func() Io {
+hide system proc() Io {
 	return Io {
 		context = null,
 		vtable = &system_vtable,

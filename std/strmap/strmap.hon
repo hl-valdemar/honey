@@ -1,6 +1,6 @@
 import "@std/mem"
 
-StaticStringMap func($V type) type {
+StaticStringMap proc($V type) type {
 	return struct {
 		keys [][]u8
 		values []V
@@ -10,11 +10,11 @@ StaticStringMap func($V type) type {
 	}
 }
 
-hide Pair func($V type) type {
+hide Pair proc($V type) type {
 	return struct { []u8, V }
 }
 
-init func($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
+init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 	if N > usize(maxval!(u32)) {
 		compile_error!("static string map has too many entries")
 	}
@@ -64,7 +64,7 @@ init func($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 	max_len u32 :: u32(keys[N - 1].len)
 	len_indexes [usize(max_len) + 1]mut u32 = undefined
 	entry_index usize = 0
-	for 0..=(usize(max_len)) |length| { # fixme: for casts and function calls, we should be able to omit the surrounding parentheses in the range
+	for 0..=usize(max_len) |length| {
 		while entry_index < N and keys[entry_index].len < length : entry_index += 1 {}
 		len_indexes[length] = u32(entry_index)
 	}
@@ -78,7 +78,7 @@ init func($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 	}
 }
 
-get func($V type, map @StaticStringMap(V), key []u8) ?V {
+get proc($V type, map @StaticStringMap(V), key []u8) ?V {
 	if (map.keys.len == 0 or key.len > maxval!(u32)) return null
 
 	length u32 = u32(key.len)
@@ -90,4 +90,5 @@ get func($V type, map @StaticStringMap(V), key []u8) ?V {
 		if (candidate.len != key.len) return null
 		if mem.eql(u8, candidate, key) return map.values[idx]
 	}
+	return null
 }

@@ -1,6 +1,6 @@
 import "@std/mem"
 
-ArrayList func($T type) type {
+ArrayList proc($T type) type {
 	return struct {
 		items []mut T
 		capacity usize
@@ -8,7 +8,7 @@ ArrayList func($T type) type {
 	}
 }
 
-init func($T type, allocator mem.Allocator) ArrayList(T) {
+init proc($T type, allocator mem.Allocator) ArrayList(T) {
 	return ArrayList(T) {
 		items = mem.empty(T),
 		capacity = 0,
@@ -16,14 +16,14 @@ init func($T type, allocator mem.Allocator) ArrayList(T) {
 	}
 }
 
-deinit func($T type, list @mut ArrayList(T)) void {
+deinit proc($T type, list @mut ArrayList(T)) void {
 	allocation []mut T :: list.items.ptr[..list.capacity]
 	mem.free(list.allocator, allocation)
 	list.items = mem.empty(T)
 	list.capacity = 0
 }
 
-reserve func($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
+reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
 	if min_capacity <= list.capacity {
 		return
 	}
@@ -51,7 +51,7 @@ reserve func($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.All
 	return
 }
 
-append func($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
+append proc($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
 	length usize :: list.items.len
 	if length == maxval!(usize) {
 		return .out_of_memory
@@ -62,13 +62,13 @@ append func($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
 	return
 }
 
-pop func($T type, list @mut ArrayList(T)) ?T {
+pop proc($T type, list @mut ArrayList(T)) ?T {
 	if (list.items.len == 0) return null
 	value :: list.items[list.items.len - 1]
 	list.items = list.items.ptr[..list.items.len - 1]
 	return value
 }
 
-clear func($T type, list @mut ArrayList(T)) void {
+clear proc($T type, list @mut ArrayList(T)) void {
 	list.items = list.items.ptr[..0]
 }
