@@ -5,7 +5,7 @@ import "@std/strmap"
 
 import "@source/strpool"
 
-keywords std.StaticStringMap(TokenKind) :: strmap.init([
+keywords std.StringMap(TokenKind) :: strmap.init([
 	{ "proc", .proc },
 	{ "return", .return },
 	{ "if", .if },
@@ -58,6 +58,9 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
 
         # comments
         if char == '#' {
+            # fixme(brolang): while currently requires curly braces but this should be legal
+            #while (cursor < input.len and input[cursor] != '\n') cursor += 1
+
             while cursor < input.len and input[cursor] != '\n' : cursor += 1 {}
             continue
         }
@@ -96,9 +99,7 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
             has_decimal bool = false
 
             # scan integer part
-            while cursor < input.len and is_digit(input[cursor]) {
-                cursor += 1
-            }
+            while cursor < input.len and is_digit(input[cursor]) : cursor += 1 {}
 
             # check for decimal point
             if cursor < input.len and input[cursor] == '.' {
@@ -110,18 +111,21 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
             if has_decimal and (cursor >= input.len or !is_digit(input[cursor])) {
                 token :: tokens.items.len
 	            try arraylist.append(tokens, Token{ kind = .invalid, start = start })
-	            try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "float must end with a digit" })
+	            try arraylist.append(diagnostics, ScanDiagnostic{
+	                token = token,
+	                message = "float must end with a digit",
+	            })
 	            continue
             }
 
             # scan decimal part
             while cursor < input.len and is_digit(input[cursor]) : cursor += 1 {}
 
-            if has_decimal {
+            if (has_decimal)
                 try arraylist.append(tokens, Token{ kind = .float, start = start })
-            } else {
+            else
                 try arraylist.append(tokens, Token{ kind = .int, start = start })
-            }
+
             continue
         }
 
@@ -184,7 +188,10 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
         # invalid character
         token :: tokens.items.len
         try arraylist.append(tokens, Token{ kind = .invalid, start = cursor })
-        try arraylist.append(diagnostics, ScanDiagnostic{ token = token, message = "invalid character" })
+        try arraylist.append(diagnostics, ScanDiagnostic{
+            token = token,
+            message = "invalid character",
+        })
         cursor += 1
     }
 

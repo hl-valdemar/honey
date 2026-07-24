@@ -1,6 +1,6 @@
 import "@std/mem"
 
-StaticStringMap proc($V type) type {
+StringMap proc($V type) type {
 	return struct {
 		keys [][]u8
 		values []V
@@ -14,7 +14,8 @@ hide Pair proc($V type) type {
 	return struct { []u8, V }
 }
 
-init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
+#! initializes a static string map from a list of key-value pairs (constructed at compile-time).
+init proc($V type, $N usize, $entries [N]Pair(V)) StringMap(V) {
 	if N > usize(maxval!(u32)) {
 		compile_error!("static string map has too many entries")
 	}
@@ -38,7 +39,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 
 	if N == 0 {
 		len_indexes [0]u32 = undefined
-		return StaticStringMap(V){
+		return StringMap(V){
 			keys = keys[..],
 			values = values[..],
 			len_indexes = len_indexes[..],
@@ -47,7 +48,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 		}
 	}
 
-	# fixme: insertion sort is compile-time O(N^2); replace if large maps affect builds
+	# fixme: insertion sort is compile-time O(N²); replace if large maps affect builds
 	for 1..N |i| {
 		key :: keys[i]
 		value :: values[i]
@@ -69,7 +70,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 		len_indexes[length] = u32(entry_index)
 	}
 
-	return StaticStringMap(V) {
+	return StringMap(V) {
 		keys = keys[..],
 		values = values[..],
 		len_indexes = len_indexes[..],
@@ -78,7 +79,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 	}
 }
 
-get proc($V type, map @StaticStringMap(V), key []u8) ?V {
+get proc($V type, map @StringMap(V), key []u8) ?V {
 	if (map.keys.len == 0 or key.len > maxval!(u32)) return null
 
 	length u32 = u32(key.len)
@@ -87,7 +88,7 @@ get proc($V type, map @StaticStringMap(V), key []u8) ?V {
 	idx usize = usize(map.len_indexes[usize(length)])
 	while idx < map.keys.len : idx += 1 {
 		candidate :: map.keys[idx]
-		if (candidate.len != key.len) return null
+		if (candidate.len != key.len) return null # key not found
 		if mem.eql(u8, candidate, key) return map.values[idx]
 	}
 	return null
