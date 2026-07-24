@@ -1,85 +1,85 @@
-import "@std/debug"
-import "@std/mem"
+import  "@std/debug"
+import  "@std/mem"
 
-Error :: enum {
-	expectation_failed
+Error  ::  enum  {
+    expectation_failed
 }
 
-SourceLocation :: struct {
-	file []u8
-	line usize
-	column usize
+SourceLocation  ::  struct  {
+    file  []u8
+    line  usize
+    column  usize
 }
 
-expect proc(condition bool, location SourceLocation) void ! Error {
-	if !condition {
-		debug.print("{s}:{d}:{d}: expectation failed\n", {
-			location.file,
-			location.line,
-			location.column,
-		})
-		return .expectation_failed
-	}
+expect  proc(condition  bool,  location  SourceLocation)  void  !  Error  {
+    if  !condition  {
+        debug.print("{s}:{d}:{d}:  expectation  failed\n",  {
+            location.file,
+            location.line,
+            location.column,
+        })
+        return  .expectation_failed
+    }
 }
 
-expect_equal proc($T type, expected, actual T, location SourceLocation) void ! Error {
-	match typeinfo!(T) {
-		.optional: {
-			if expected |expected_value| {
-				if actual |actual_value| {
-					try expect_equal(expected_value, actual_value, location)
-					return
-				}
-				debug.print("{s}:{d}:{d}: expected an optional value, found null\n", {
-				    location.file,
-				    location.line,
-				    location.column,
-				})
-				return .expectation_failed
-			}
-			if actual |_| {
-				debug.print("{s}:{d}:{d}: expected null, found an optional value\n", {
-				    location.file,
-				    location.line,
-				    location.column,
-				})
-				return .expectation_failed
-			}
-		}
-		.slice: if !mem.eql(expected, actual) {
-			debug.print("{s}:{d}:{d}: expected and actual slices differ\n", {
-				location.file,
-				location.line,
-				location.column,
-			})
-			return .expectation_failed
-		}
-		else: if expected != actual {
-			debug.print("{s}:{d}:{d}: expected {}, found {}\n", {
-				location.file,
-				location.line,
-				location.column,
-				expected,
-				actual,
-			})
-			return .expectation_failed
-		}
-	}
+expect_equal  proc($T  type,  expected,  actual  T,  location  SourceLocation)  void  !  Error  {
+    match  typeinfo!(T)  {
+        .optional:  {
+            if  expected  |expected_value|  {
+                if  actual  |actual_value|  {
+                    try  expect_equal(expected_value,  actual_value,  location)
+                    return
+                }
+                debug.print("{s}:{d}:{d}:  expected  an  optional  value,  found  null\n",  {
+                    location.file,
+                    location.line,
+                    location.column,
+                })
+                return  .expectation_failed
+            }
+            if  actual  |_|  {
+                debug.print("{s}:{d}:{d}:  expected  null,  found  an  optional  value\n",  {
+                    location.file,
+                    location.line,
+                    location.column,
+                })
+                return  .expectation_failed
+            }
+        }
+        .slice:  if  !mem.eql(expected,  actual)  {
+            debug.print("{s}:{d}:{d}:  expected  and  actual  slices  differ\n",  {
+                location.file,
+                location.line,
+                location.column,
+            })
+            return  .expectation_failed
+        }
+        else:  if  expected  !=  actual  {
+            debug.print("{s}:{d}:{d}:  expected  {},  found  {}\n",  {
+                location.file,
+                location.line,
+                location.column,
+                expected,
+                actual,
+            })
+            return  .expectation_failed
+        }
+    }
 }
 
-expect_type proc($Expected, $Actual type, _ Actual, location SourceLocation) void ! Error {
-	try expect($(Expected == Actual), location)
+expect_type  proc($Expected,  $Actual  type,  _  Actual,  location  SourceLocation)  void  !  Error  {
+    try  expect($(Expected  ==  Actual),  location)
 }
 
-run proc(name []u8, callback *proc() void ! Error) bool {
-	callback() catch |_| {
-		debug.print("{s}...[failed]\n", {name,})
-		return false
-	}
-	debug.print("{s}...[ok]\n", {name,})
-	return true
+run  proc(name  []u8,  callback  *proc()  void  !  Error)  bool  {
+    callback()  catch  |_|  {
+        debug.print("{s}...[failed]\n",  {name,})
+        return  false
+    }
+    debug.print("{s}...[ok]\n",  {name,})
+    return  true
 }
 
-summary proc(passed, failed i32) void {
-	debug.print("{d} passed, {d} failed\n", {passed, failed})
+summary  proc(passed,  failed  i32)  void  {
+    debug.print("{d}  passed,  {d}  failed\n",  {passed,  failed})
 }

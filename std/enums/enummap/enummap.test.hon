@@ -1,0 +1,25 @@
+import "@std/mem"
+import "@std/testing"
+
+TestEnum :: enum(u8) {
+    ident = 3
+    int = 8
+    eof = 21
+}
+
+handles_sparse_enum_get test {
+    names EnumMap(TestEnum, []u8) = init({
+        ident = "identifier",
+        int = "integer",
+    })
+
+    ident :: get(&names, TestEnum.ident)
+
+    try testing.expect_type(?[]u8, ident)
+    try testing.expect(mem.eql("identifier", ident?))
+
+    eof :: get(&names, TestEnum.eof)
+
+    try testing.expect_type(?[]u8, eof)
+    try testing.expect_equal(null, eof)
+}

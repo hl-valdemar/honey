@@ -1,0 +1,156 @@
+import "@std"
+import "@std/mem"
+import "@std/arraylist"
+import "@std/debug"
+import "@std/enums/enummap"
+
+import "@source/lexer"
+
+NodeId :: distinct u32
+ExtraId :: distinct NodeId
+
+NO_ID :: maxval!(NodeId)
+
+Diagnostic :: struct {
+    code ErrorCode
+    node NodeId
+}
+
+ParseError :: alias ErrorCode | mem.AllocError
+
+ErrorCode :: enum {
+    unexpected_token,
+}
+
+ErrorDetails :: struct {
+    name []u8
+    message []u8
+}
+
+error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
+    unexpected_token = ErrorDetails {
+        name = "P0",
+        message = "unexpected token",
+    },
+})
+
+hide Token :: alias lexer.Token
+hide TokenId :: alias lexer.TokenId
+hide TokenKind :: alias lexer.TokenKind
+
+NodeData :: union {
+    node_id NodeId
+    extra_id ExtraId
+}
+
+Node :: struct {
+    kind NodeKind
+    main_token TokenId
+
+    data0 NodeData = NodeData{ node_id = NO_ID }
+    data1 NodeData = NodeData{ node_id = NO_ID }
+}
+
+NodeKind :: enum {
+    literal_int
+    literal_float
+    literal_string
+    expr_unary
+    expr_binary
+    decl
+    invalid
+}
+
+State :: struct {
+    nodes std.ArrayList(Node)
+
+    #! array of indexes into the nodes array.
+    extra std.ArrayList(NodeId)
+
+    next_token TokenId = TokenId(0)
+}
+
+init proc(allocator mem.Allocator) State {
+    return State{
+        nodes = arraylist.init(allocator),
+        extra = arraylist.init(allocator),
+    }
+}
+
+deinit proc(state @mut State) void {
+    arraylist.deinit(&state.nodes)
+    arraylist.deinit(&state.extra)
+}
+
+parse proc(state @mut State, tokens []Token) void ! ParseError {
+    _ = try parse_decl(state, tokens)
+}
+
+parse_decl proc(state @mut State, tokens []Token) NodeId ! ParseError {
+    # expect identifier
+    try expect(state, tokens, .ident)
+    ident_token :: state.next_token
+    state.next_token += 1
+
+    # expect `::` (immutable assignment)
+    try expect(state, tokens, .double_colon)
+    state.next_token += 1
+
+    # expect expression
+    expr :: try parse_primary(state, tokens)
+
+    # expect statement terminator (newline)
+    try expect_either(state, tokens, &[.newline, .eof])
+    state.next_token += 1
+
+    decl :: try add_node(&state.nodes, Node{
+        kind = .decl,
+        main_token = ident_token,
+        data0 = NodeData{ node_id = expr },
+    })
+
+    return decl
+}
+
+parse_primary proc(state @mut State, tokens []Token) NodeId ! mem.AllocError {
+    start_token :: state.next_token
+    state.next_token += 1
+    return match tokens[start_token].kind {
+        .int: try add_node(&state.nodes, Node{
+            kind = .literal_int,
+            main_token = start_token,
+        })
+        .float: try add_node(&state.nodes, Node{
+            kind = .literal_float,
+            main_token = start_token,
+        })
+        .string: try add_node(&state.nodes, Node{
+            kind = .literal_string,
+            main_token = start_token,
+        })
+        else: try add_node(&state.nodes, Node{
+            kind = .invalid,
+            main_token = start_token,
+        })
+    }
+}
+
+hide expect proc(state @mut State, tokens []Token, token_kind TokenKind) void ! ErrorCode {
+    if (tokens[state.next_token].kind != token_kind) return .unexpected_token
+}
+
+hide expect_either proc(state @mut State, tokens []Token, token_kinds []TokenKind) void ! ErrorCode {
+    for (token_kinds) |kind| if (tokens[state.next_token].kind == kind) return
+    return .unexpected_token
+}
+
+hide add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
+    id :: node_id(nodes.items.len)
+    try arraylist.append(nodes, node)
+    return id
+}
+
+hide node_id proc(idx uint) NodeId {
+    debug.assert(u64(idx) < u64(NO_ID))
+    return NodeId(idx)
+}

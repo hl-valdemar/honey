@@ -1,0 +1,45 @@
+import "@std/meta"
+
+EnumMap proc($E, $V type) type {
+    match typeinfo!(E) {
+        .enum |info|: return struct {
+            present [info.fields.len]mut bool # fixme: replace with bitset
+               values [info.fields.len]mut V
+        }
+        else: compile_error!("EnumMap key must be an enum")
+    }
+}
+
+init proc(
+    $E, $V type,
+    values meta.EnumFieldStruct(E, ?V, some!(null)),
+) EnumMap(E, V) {
+    map EnumMap(E, V) = undefined
+
+    match typeinfo!(E) {
+        .enum |info|: expand for info.fields |field, i| {
+            map.present[i] = false
+
+            if field!(values, field.name) |value| {
+                map.present[i] = true
+                map.values[i] = value
+            }
+        }
+        else: compile_error!("EnumMap key must be an enum")
+    }
+
+    return map
+}
+
+get proc($E, $V type, map @EnumMap(E, V), key E) ?V {
+    # fixme: linear lookup; implement an enum index/discriminant map for O(1) lookup
+    match typeinfo!(E) {
+        .enum |info|: expand for info.fields |field, i| {
+            if key == field!(E, field.name) {
+                if (map.present[i]) return map.values[i]
+                return null
+            }
+        }
+        else: compile_error!("EnumMap key must be an enum")
+    }
+}

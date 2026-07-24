@@ -1,61 +1,61 @@
 Layout :: enum { auto, c }
 
 ArrayInfo :: struct {
-	child type
-	len usize
+    child type
+    len usize
 }
 
 FieldInfo :: struct {
-	name []u8
-	type type
-	index usize
+    name []u8
+    type type
+    index usize
 }
 
 RecordInfo :: struct {
-	name ?[]u8
-	fields []FieldInfo
-	is_tuple bool
-	layout Layout
+    name ?[]u8
+    fields []FieldInfo
+    is_tuple bool
+    layout Layout
 }
 
 EnumInfo :: struct {
-	fields []FieldInfo
+    fields []FieldInfo
 }
 
 TypeInfo :: union(enum) {
-	invalid void
-	void void
-	noreturn void
-	anyopaque void
-	bool void
-	integer void
-	float void
-	array ArrayInfo
-	pointer void
-	slice void
-	range void
-	optional void
-	function void
-	enum EnumInfo
-	record RecordInfo
-	union void
-	fallible void
-	distinct void
+    invalid void
+    void void
+    noreturn void
+    anyopaque void
+    bool void
+    integer void
+    float void
+    array ArrayInfo
+    pointer void
+    slice void
+    range void
+    optional void
+    function void
+    enum EnumInfo
+    record RecordInfo
+    union void
+    fallible void
+    distinct type
 }
 
 EnumFieldStruct proc($E, $Field type, $default ?Field) type {
-	match typeinfo!(E) {
-		.enum |info|: {
-    		names [info.fields.len]mut []u8 = undefined
-    		field_types [info.fields.len]mut type = undefined
-    		defaults [info.fields.len]mut ?Field = undefined
-			expand for info.fields |field, index| {
-				names[index] = field.name
-				field_types[index] = Field
-				defaults[index] = default
-			}
-			return struct_type!(.auto, names, field_types, defaults)
-		}
-		else: compile_error!("EnumFieldStruct key must be an enum")
-	}
+    match typeinfo!(E) {
+        .enum |info|: {
+            names [info.fields.len]mut []u8 = undefined
+            field_types [info.fields.len]mut type = undefined
+            defaults [info.fields.len]mut ?Field = undefined
+            expand for info.fields |field, index| {
+                names[index] = field.name
+                field_types[index] = Field
+                defaults[index] = default
+            }
+            return struct_type!(.auto, names, field_types, defaults)
+        }
+        else: compile_error!("EnumFieldStruct key must be an enum")
+    }
 }

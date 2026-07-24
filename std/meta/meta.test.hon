@@ -1,50 +1,67 @@
 testing :: import "@std/testing"
 
 TestTokenKind :: enum(u8) {
-	ident = 3
-	int = 8
-	eof = 21
+    ident = 3
+    int = 8
+    eof = 21
 }
 
 TestNames :: alias EnumFieldStruct(TestTokenKind, ?[]u8, some!(null))
 TestArrayAlias :: alias [3]u16
+TestInner :: distinct u16
+TestOuter :: distinct TestInner
+TestOuterAlias :: alias TestOuter
+
 
 hide array_info_matches proc($Array, $Child type, $len usize) bool {
-	match typeinfo!(Array) {
-		.array |info|: return info.child == Child and info.len == len
-		else: return false
-	}
+    match typeinfo!(Array) {
+        .array |info|: return info.child == Child and info.len == len
+        else: return false
+    }
 }
+hide distinct_info_matches proc($Distinct, $Backing type) bool {
+    match typeinfo!(Distinct) {
+        .distinct |backing|: return backing == Backing
+        else: return false
+    }
+}
+
 
 array_reflection_exposes_child_and_logical_length test {
-	try testing.expect($(array_info_matches([4]i32, i32, 4)))
-	try testing.expect($(array_info_matches([0]bool, bool, 0)))
-	try testing.expect($(array_info_matches(TestArrayAlias, u16, 3)))
-	try testing.expect($(array_info_matches([2]mut i64, i64, 2)))
-	try testing.expect($(array_info_matches([2;0]u8, u8, 2)))
+    try testing.expect($(array_info_matches([4]i32, i32, 4)))
+    try testing.expect($(array_info_matches([0]bool, bool, 0)))
+    try testing.expect($(array_info_matches(TestArrayAlias, u16, 3)))
+    try testing.expect($(array_info_matches([2]mut i64, i64, 2)))
+    try testing.expect($(array_info_matches([2;0]u8, u8, 2)))
+}
+distinct_reflection_exposes_immediate_backing test {
+    try testing.expect($(distinct_info_matches(TestInner, u16)))
+    try testing.expect($(distinct_info_matches(TestOuter, TestInner)))
+    try testing.expect($(distinct_info_matches(TestOuterAlias, TestInner)))
 }
 
-enum_field_struct_defaults test {
-	names TestNames = {
-		ident = "identifier",
-		int = "integer",
-	}
-	if field!(names, "ident") |value| {
-		try testing.expect(value.len == 10)
-	} else {
-		try testing.expect(false)
-	}
-	if field!(names, "int") |value| {
-		try testing.expect(value.len == 7)
-	} else {
-		try testing.expect(false)
-	}
-	if field!(names, "eof") |_| {
-		try testing.expect(false)
-	}
 
-	empty TestNames = {}
-	if field!(empty, "ident") |_| {
-		try testing.expect(false)
-	}
+enum_field_struct_defaults test {
+    names TestNames = {
+        ident = "identifier",
+        int = "integer",
+    }
+    if field!(names, "ident") |value| {
+        try testing.expect(value.len == 10)
+    } else {
+        try testing.expect(false)
+    }
+    if field!(names, "int") |value| {
+        try testing.expect(value.len == 7)
+    } else {
+        try testing.expect(false)
+    }
+    if field!(names, "eof") |_| {
+        try testing.expect(false)
+    }
+
+    empty TestNames = {}
+    if field!(empty, "ident") |_| {
+        try testing.expect(false)
+    }
 }

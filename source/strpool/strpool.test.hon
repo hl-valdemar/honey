@@ -2,23 +2,23 @@ import "@std/mem"
 import "@std/testing"
 
 handles_intern test {
-	pool StringPool = init(mem.c_allocator)
-	defer deinit(&pool)
+    pool StringPool = init(mem.c_allocator)
+    defer deinit(&pool)
 
-	input [5]mut u8 = ['h', 'e', 'l', 'l', 'o']
-	id :: try intern(&pool, input[..])
-	duplicate :: try intern(&pool, "hello")
-	input[0] = 'j'
+    input [5]mut u8 = ['h', 'e', 'l', 'l', 'o']
+    id :: try intern(&pool, input[..])
+    duplicate :: try intern(&pool, "hello")
+    input[0] = 'j'
 
-	same_id :: get_id(&pool, "hello")
-	mutated_id :: get_id(&pool, input[..])
-	hello_str :: get_str(&pool, id)
-	invalid_str :: get_str(&pool, id + 1)
+    same_id :: get_id(&pool, "hello")
+    mutated_id :: get_id(&pool, input[..])
+    hello_str :: get_str(&pool, id)
+    invalid_str :: get_str(&pool, id + 1)
 
-	try testing.expect_equal(0, id)
-	try testing.expect_equal(id, duplicate)
-	try testing.expect_equal(id, same_id?)
-	try testing.expect_equal(null, mutated_id)
-	try testing.expect_equal(null, invalid_str)
-	try testing.expect_equal("hello", hello_str?)
+    try testing.expect_equal(0, id)
+    try testing.expect_equal(id, duplicate)
+    try testing.expect_equal(id, same_id?)
+    try testing.expect_equal(null, mutated_id)
+    try testing.expect_equal(null, invalid_str)
+    try testing.expect_equal("hello", hello_str?)
 }

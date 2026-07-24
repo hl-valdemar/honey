@@ -1,34 +1,24 @@
 import "@std/debug"
 import "@std/mem"
+import "@std/enums/enummap"
 
-test import "@std/enums"
+test import "@std/enums/enummap"
 test import "@std/arraylist"
 test import "@std/hashmap"
 test import "@std/strmap"
 
 import "@source/strpool"
 import "@source/lexer"
+import "@source/parser"
 
 test import "@source/strpool"
 test import "@source/lexer"
 
 program ::
-	`# these are immutable
-	`x :: 32
-	`y :: 3.2
-	`
-	`# these are mutable
-	`z u32 = 54
-	`
-	`# keywords
-	`if
-	`else
-	`for
-	`while
-	`proc
-	`return
-	`
-	`main proc() void {}
+    `# literals
+    `x :: 123
+
+# todo: consider making current aliased types (IDs) distinct instead
 
 main proc() void {
     strpool.strings = strpool.init(mem.c_allocator)
@@ -47,6 +37,41 @@ main proc() void {
     debug.print("TOKENS::[[\n", {})
     for scan_state.tokens.items |token| {
         debug.print("{}\n", {token.kind})
+    }
+    debug.print("]]\n\n", {})
+
+    debug.print("TOKENS::DIAGNOSTICS::[[\n", {})
+    for scan_state.diagnostics.items |diagnostic| {
+        details :: enummap.get(&lexer.error_msg_map, diagnostic.code)
+        debug.print("{}: {}\n", {details?.name, details?.message})
+    }
+    debug.print("]]\n\n", {})
+
+    parse_state parser.State = parser.init(mem.c_allocator)
+    defer parser.deinit(&parse_state)
+    parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
+        debug.print("failed to parse: {}\n", {err})
+        return
+    }
+
+    debug.print("AST::[[\n", {})
+    for parse_state.nodes.items |node, id| {
+        token :: scan_state.tokens.items[node.main_token]
+
+        end :: if (token.kind == .int or token.kind == .float)
+            lexer.scan_number(token.start, program)
+        else if (token.kind == .string)
+            lexer.scan_string(token.start, program)
+        else
+            token.start
+
+        debug.print("{} (id = {}): {}\n", {
+            node.kind,
+            id,
+            program[token.start..end],
+            #node.data0,
+            #node.data1,
+        })
     }
     debug.print("]]\n", {})
 }

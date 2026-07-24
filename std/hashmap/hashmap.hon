@@ -3,154 +3,154 @@ import "@std/mem"
 PutError :: enum { key_exists }
 
 Entry proc($K, $V type) type {
-	return struct {
-		# hash = 0 means empty
-		hash usize = 0
-		key K
-		value V
-	}
+    return struct {
+        # hash = 0 means empty
+        hash usize = 0
+        key K
+        value V
+    }
 }
 
 HashMap proc(
-	$K, $V type,
-	$hash_key proc(key K) usize,
-	$keys_eql proc(a, b K) bool,
+    $K, $V type,
+    $hash_key proc(key K) usize,
+    $keys_eql proc(a, b K) bool,
 ) type {
-	return struct {
-		entries []mut Entry(K, V)
-		count usize
-		allocator mem.Allocator
-	}
+    return struct {
+        entries []mut Entry(K, V)
+        count usize
+        allocator mem.Allocator
+    }
 }
 
 StringHashMap proc($V type) type {
-	return HashMap([]u8, V, str_hash, str_eql)
+    return HashMap([]u8, V, str_hash, str_eql)
 }
 
 init proc(
-	$K, $V type,
-	$hash_key proc(key K) usize,
-	$keys_eql proc(a, b K) bool,
-	allocator mem.Allocator,
+    $K, $V type,
+    $hash_key proc(key K) usize,
+    $keys_eql proc(a, b K) bool,
+    allocator mem.Allocator,
 ) HashMap(K, V, hash_key, keys_eql) {
-	return HashMap(K, V, hash_key, keys_eql){
-		entries = mem.empty(Entry(K, V)),
-		count = 0,
-		allocator = allocator,
-	}
+    return HashMap(K, V, hash_key, keys_eql){
+        entries = mem.empty(Entry(K, V)),
+        count = 0,
+        allocator = allocator,
+    }
 }
 
 #! free the entries in the hash map.
 #! note: this operation invalidates the map.
 deinit proc(
-	$K, $V type,
-	$hash_key proc(key K) usize,
-	$keys_eql proc(a, b K) bool,
-	map @HashMap(K, V, hash_key, keys_eql),
+    $K, $V type,
+    $hash_key proc(key K) usize,
+    $keys_eql proc(a, b K) bool,
+    map @HashMap(K, V, hash_key, keys_eql),
 ) void { mem.free(map.allocator, map.entries) }
 
 get proc(
-	$K, $V type,
-	$hash_key proc(key K) usize,
-	$keys_eql proc(a, b K) bool,
-	map @HashMap(K, V, hash_key, keys_eql),
-	key K,
+    $K, $V type,
+    $hash_key proc(key K) usize,
+    $keys_eql proc(a, b K) bool,
+    map @HashMap(K, V, hash_key, keys_eql),
+    key K,
 ) ?V {
-	if (map.count == 0) return null
+    if (map.count == 0) return null
 
-	hash :: normalize(hash_key(key))
-	idx usize = hash & (map.entries.len - 1)
+    hash :: normalize(hash_key(key))
+    idx usize = hash & (map.entries.len - 1)
 
-	while true {
-		entry :: map.entries[idx]
-		if (entry.hash == 0) return null
+    while true {
+        entry :: map.entries[idx]
+        if (entry.hash == 0) return null
 
-		if (entry.hash == hash and keys_eql(entry.key, key)) {
-			return entry.value
-		}
+        if (entry.hash == hash and keys_eql(entry.key, key)) {
+            return entry.value
+        }
 
-		idx = (idx + 1) & (map.entries.len - 1)
-	}
+        idx = (idx + 1) & (map.entries.len - 1)
+    }
 }
 
 put proc(
-	$K, $V type,
-	$hash_key proc(key K) usize,
-	$keys_eql proc(a, b K) bool,
-	map @mut HashMap(K, V, hash_key, keys_eql),
-	key K,
-	value V,
+    $K, $V type,
+    $hash_key proc(key K) usize,
+    $keys_eql proc(a, b K) bool,
+    map @mut HashMap(K, V, hash_key, keys_eql),
+    key K,
+    value V,
 ) void ! (PutError | mem.AllocError) {
-	# check grow
-	threshold :: map.entries.len - divtrunc!(map.entries.len, 4)
-	if (map.entries.len == 0 or map.count + 1 > threshold) {
-		old_entries :: map.entries
-		new_size :: if (old_entries.len > 0) old_entries.len * 2 else 8
-		new_entries :: try mem.alloc(Entry(K, V), map.allocator, new_size)
+    # check grow
+    threshold :: map.entries.len - divtrunc!(map.entries.len, 4)
+    if (map.entries.len == 0 or map.count + 1 > threshold) {
+        old_entries :: map.entries
+        new_size :: if (old_entries.len > 0) old_entries.len * 2 else 8
+        new_entries :: try mem.alloc(Entry(K, V), map.allocator, new_size)
 
-		# zero new entries
-		for (0..new_entries.len) |i| new_entries[i].hash = 0
+        # zero new entries
+        for (0..new_entries.len) |i| new_entries[i].hash = 0
 
-		# move old entries
-		for old_entries |entry| {
-			if (entry.hash == 0) continue
+        # move old entries
+        for old_entries |entry| {
+            if (entry.hash == 0) continue
 
-			# find an empty slot
-			idx usize = entry.hash & (new_entries.len - 1)
-			while new_entries[idx].hash != 0 {
-				idx = (idx + 1) & (new_entries.len - 1)
-			}
+            # find an empty slot
+            idx usize = entry.hash & (new_entries.len - 1)
+            while new_entries[idx].hash != 0 {
+                idx = (idx + 1) & (new_entries.len - 1)
+            }
 
-			new_entries[idx] = entry
-		}
+            new_entries[idx] = entry
+        }
 
-		map.entries = new_entries
-		mem.free(map.allocator, old_entries)
-	}
+        map.entries = new_entries
+        mem.free(map.allocator, old_entries)
+    }
 
-	# put new entry
-	hash :: normalize(hash_key(key))
-	idx usize = hash & (map.entries.len - 1)
+    # put new entry
+    hash :: normalize(hash_key(key))
+    idx usize = hash & (map.entries.len - 1)
 
-	while true {
-		entry :: map.entries[idx]
-		if entry.hash == 0 {
-			map.entries[idx] = Entry(K, V){
-				hash = hash,
-				key = key,
-				value = value,
-			}
-			map.count += 1
-			return
-		}
+    while true {
+        entry :: map.entries[idx]
+        if entry.hash == 0 {
+            map.entries[idx] = Entry(K, V){
+                hash = hash,
+                key = key,
+                value = value,
+            }
+            map.count += 1
+            return
+        }
 
-		if entry.hash == hash and keys_eql(entry.key, key) {
-			return .key_exists
-		}
+        if entry.hash == hash and keys_eql(entry.key, key) {
+            return .key_exists
+        }
 
-		idx = (idx + 1) & (map.entries.len - 1)
-	}
+        idx = (idx + 1) & (map.entries.len - 1)
+    }
 }
 
 hide normalize proc(hash usize) usize {
-	# mapping both 0 and 1 to 1 is safe because equality resolves
-	# collisions (since hash and key must both be equal).
-	if (hash == 0) return 1
-	return hash
+    # mapping both 0 and 1 to 1 is safe because equality resolves
+    # collisions (since hash and key must both be equal).
+    if (hash == 0) return 1
+    return hash
 }
 
 #! FNV-1a hash implementation.
 #! note: vulnerable to collision attacks.
 hide str_hash proc(key []u8) usize {
-	hash u32 = 2166136261 # offset basis
-	prime u32 = 16777619
+    hash u32 = 2166136261 # offset basis
+    prime u32 = 16777619
 
-	for key |byte| {
-		product u64 :: u64(hash xor u32(byte)) * prime
-		hash = u32(product & u64(maxval!(u32)))
-	}
+    for key |byte| {
+        product u64 :: u64(hash xor u32(byte)) * prime
+        hash = u32(product & u64(maxval!(u32)))
+    }
 
-	return usize(hash)
+    return usize(hash)
 }
 
 hide str_eql proc(a, b []u8) bool { return mem.eql(a, b) }

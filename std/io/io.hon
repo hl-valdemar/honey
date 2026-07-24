@@ -2,407 +2,447 @@ import "@ffi/c"
 import "@std/meta"
 
 ReadError :: enum {
-	not_open_for_reading
-	read_failed
+    not_open_for_reading
+    read_failed
 }
 
 WriteError :: enum {
-	not_open_for_writing
-	write_failed
-	no_progress
+    not_open_for_writing
+    write_failed
+    no_progress
 }
 
 Handle :: union {
-	file_desc c_int
-	ptr @mut anyopaque
+    file_desc c_int
+    ptr @mut anyopaque
 }
 
 Stream :: enum(c_int) {
-	stdin = c.STDIN_FILENO
-	stdout = c.STDOUT_FILENO
-	stderr = c.STDERR_FILENO
+    stdin = c.STDIN_FILENO
+    stdout = c.STDOUT_FILENO
+    stderr = c.STDERR_FILENO
 }
 
 Io :: struct {
-	context ?@mut anyopaque
-	vtable @IoVTable
+    context ?@mut anyopaque
+    vtable @IoVTable
 }
 
 IoVTable :: struct {
-	read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
-	write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
-	open @proc(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
-	close @proc(context ?@mut anyopaque, handle Handle) void ! CloseError
-	stdin @proc(context ?@mut anyopaque) Handle
-	stdout @proc(context ?@mut anyopaque) Handle
-	stderr @proc(context ?@mut anyopaque) Handle
+    read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
+    write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
+    open @proc(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
+    close @proc(context ?@mut anyopaque, handle Handle) void ! CloseError
+    stdin @proc(context ?@mut anyopaque) Handle
+    stdout @proc(context ?@mut anyopaque) Handle
+    stderr @proc(context ?@mut anyopaque) Handle
 }
 
 Reader :: struct {
-	context ?@mut anyopaque
-	handle Handle
-	read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
+    context ?@mut anyopaque
+    handle Handle
+    read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
 }
 
 Writer :: struct {
-	context ?@mut anyopaque
-	handle Handle
-	write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
+    context ?@mut anyopaque
+    handle Handle
+    write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
 }
 
 read proc(input Reader, buffer []mut u8) usize ! ReadError {
-	if (buffer.len == 0) return 0
+    if (buffer.len == 0) return 0
 
-	count usize :: try input.read(input.context, input.handle, buffer)
-	if (count > buffer.len) return .read_failed
+    count usize :: try input.read(input.context, input.handle, buffer)
+    if (count > buffer.len) return .read_failed
 
-	return count
+    return count
 }
 
 write proc(output Writer, bytes []u8) usize ! WriteError {
-	if (bytes.len == 0) return 0
+    if (bytes.len == 0) return 0
 
-	count usize :: try output.write(output.context, output.handle, bytes)
-	if (count > bytes.len) return .write_failed
+    count usize :: try output.write(output.context, output.handle, bytes)
+    if (count > bytes.len) return .write_failed
 
-	return count
+    return count
 }
 
 write_all proc(output Writer, bytes []u8) void ! WriteError {
-	offset usize = 0
-	while offset < bytes.len {
-		count usize :: try write(output, bytes[offset..])
-		if (count == 0) return .no_progress
-		offset += count
-	}
+    offset usize = 0
+    while offset < bytes.len {
+        count usize :: try write(output, bytes[offset..])
+        if (count == 0) return .no_progress
+        offset += count
+    }
 }
 
 stdin proc(io Io) Reader {
-	return Reader {
-		context = io.context,
-		handle = io.vtable.stdin(io.context),
-		read = io.vtable.read,
-	}
+    return Reader {
+        context = io.context,
+        handle = io.vtable.stdin(io.context),
+        read = io.vtable.read,
+    }
 }
 
 stdout proc(io Io) Writer {
-	return Writer {
-		context = io.context,
-		handle = io.vtable.stdout(io.context),
-		write = io.vtable.write,
-	}
+    return Writer {
+        context = io.context,
+        handle = io.vtable.stdout(io.context),
+        write = io.vtable.write,
+    }
 }
 
 stderr proc(io Io) Writer {
-	return Writer {
-		context = io.context,
-		handle = io.vtable.stderr(io.context),
-		write = io.vtable.write,
-	}
+    return Writer {
+        context = io.context,
+        handle = io.vtable.stderr(io.context),
+        write = io.vtable.write,
+    }
 }
 
 print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
-	expand for parse_format(format.len, format, Args) |token| {
-		match token.kind {
-			.unused: break
-			.literal: try write_all(output, format[token.start..token.end])
-			.string: try write_all(output, field!(args, token.field))
-			.default: try write_default(output, field!(args, token.field))
-			.decimal: try write_decimal(output, field!(args, token.field))
-			.binary: try write_integer(output, field!(args, token.field), 2, false)
-			.octal: try write_integer(output, field!(args, token.field), 8, false)
-			.hex_lower: try write_integer(output, field!(args, token.field), 16, false)
-			.hex_upper: try write_integer(output, field!(args, token.field), 16, true)
-			.character: try write_character(output, field!(args, token.field))
-			else: try write_float(output, field!(args, token.field), true)
-		}
-	}
+    expand for parse_format(format.len, format, Args) |token| {
+        match token.kind {
+            .unused: break
+            .literal: try write_all(output, format[token.start..token.end])
+            .string: try write_all(output, field!(args, token.field))
+            .default: try write_default(output, field!(args, token.field))
+            .decimal: try write_decimal(output, field!(args, token.field))
+            .binary: try write_integer(output, field!(args, token.field), 2, false)
+            .octal: try write_integer(output, field!(args, token.field), 8, false)
+            .hex_lower: try write_integer(output, field!(args, token.field), 16, false)
+            .hex_upper: try write_integer(output, field!(args, token.field), 16, true)
+            .character: try write_character(output, field!(args, token.field))
+            else: try write_float(output, field!(args, token.field), true)
+        }
+    }
 }
 
 hide write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
-	buffer [65]mut u8 = undefined
-	end usize = buffer.len
-	current i64 = value
+    buffer [65]mut u8 = undefined
+    end usize = buffer.len
+    current i64 = value
 
-	while true {
-		digit_value i64 :: rem!(current, i64(base))
-		digit u8 = if (digit_value < 0)
-			u8(-digit_value)
-		else
-			u8(digit_value)
+    while true {
+        digit_value i64 :: rem!(current, i64(base))
+        digit u8 = if (digit_value < 0)
+            u8(-digit_value)
+        else
+            u8(digit_value)
 
-		end -= 1
-		buffer[end] = if (digit < 10)
-			'0' + digit
-		else if (uppercase)
-			'A' + digit - 10
-		else
-			'a' + digit - 10
+        end -= 1
+        buffer[end] = if (digit < 10)
+            '0' + digit
+        else if (uppercase)
+            'A' + digit - 10
+        else
+            'a' + digit - 10
 
-		current = divtrunc!(current, i64(base))
-		if (current == 0) break
-	}
-
-	if value < 0 {
-		end -= 1
-		buffer[end] = '-'
+        current = divtrunc!(current, i64(base))
+        if (current == 0) break
     }
-	try write_all(output, buffer[end..])
+
+    if value < 0 {
+        end -= 1
+        buffer[end] = '-'
+    }
+    try write_all(output, buffer[end..])
 }
 
 hide write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
-	buffer [65]mut u8 = undefined
-	end usize = buffer.len
-	current u64 = value
+    buffer [65]mut u8 = undefined
+    end usize = buffer.len
+    current u64 = value
 
-	while true {
-		digit u8 :: u8(rem!(current, base))
+    while true {
+        digit u8 :: u8(rem!(current, base))
 
-		end -= 1
-		buffer[end] = if (digit < 10)
-			'0' + digit
-		else if (uppercase)
-			'A' + digit - 10
-		else
-			'a' + digit - 10
+        end -= 1
+        buffer[end] = if (digit < 10)
+            '0' + digit
+        else if (uppercase)
+            'A' + digit - 10
+        else
+            'a' + digit - 10
 
-		current = divtrunc!(current, base)
-		if (current == 0) break
-	}
+        current = divtrunc!(current, base)
+        if (current == 0) break
+    }
 
-	try write_all(output, buffer[end..])
+    try write_all(output, buffer[end..])
 }
 
 hide FormatTokenKind :: enum {
-	unused
-	literal
-	default
-	string
-	decimal
-	binary
-	octal
-	hex_lower
-	hex_upper
-	character
-	scientific
+    unused
+    literal
+    default
+    string
+    decimal
+    binary
+    octal
+    hex_lower
+    hex_upper
+    character
+    scientific
 }
 
 hide FormatToken :: struct {
-	kind FormatTokenKind
-	start usize
-	end usize
-	field []u8
+    kind FormatTokenKind
+    start usize
+    end usize
+    field []u8
 }
 
 hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
-	tokens [N]mut FormatToken = undefined
-	for (usize(0))..format.len |index| {
-		tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
-	}
+    tokens [N]mut FormatToken = undefined
+    for (usize(0))..format.len |index| {
+        tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
+    }
 
-	field_count usize = 0
-	match typeinfo!(Args) {
-		.record |r|: {
-			if (!r.is_tuple) compile_error!("io.print arguments must be a tuple")
-			field_count = r.fields.len
-		}
-		else: compile_error!("io.print arguments must be a tuple")
-	}
+    field_count usize = 0
+    match typeinfo!(Args) {
+        .record |r|: {
+            if (!r.is_tuple) compile_error!("io.print arguments must be a tuple")
+            field_count = r.fields.len
+        }
+        else: compile_error!("io.print arguments must be a tuple")
+    }
 
-	token_count usize = 0
-	argument_count usize = 0
-	literal_start usize = 0
-	cursor usize = 0
-	while cursor < format.len {
-		byte :: format[cursor]
-		if byte == '{' {
-			if cursor + 1 >= format.len {
-				compile_error!("io.print format has an unmatched '{'")
-			}
-			if cursor > literal_start {
-				tokens[token_count] = FormatToken{
-					kind = .literal,
-					start = literal_start,
-					end = cursor,
-					field = "",
-				}
-				token_count += 1
-			}
-			next :: format[cursor + 1]
-			if next == '{' {
-				tokens[token_count] = FormatToken{
-					kind = .literal,
-					start = cursor,
-					end = cursor + 1,
-					field = "",
-				}
-				token_count += 1
-				cursor += 2
-				literal_start = cursor
-				continue
-			}
+    token_count usize = 0
+    argument_count usize = 0
+    literal_start usize = 0
+    cursor usize = 0
+    while cursor < format.len {
+        byte :: format[cursor]
+        if byte == '{' {
+            if cursor + 1 >= format.len {
+                compile_error!("io.print format has an unmatched '{'")
+            }
+            if cursor > literal_start {
+                tokens[token_count] = FormatToken{
+                    kind = .literal,
+                    start = literal_start,
+                    end = cursor,
+                    field = "",
+                }
+                token_count += 1
+            }
+            next :: format[cursor + 1]
+            if next == '{' {
+                tokens[token_count] = FormatToken{
+                    kind = .literal,
+                    start = cursor,
+                    end = cursor + 1,
+                    field = "",
+                }
+                token_count += 1
+                cursor += 2
+                literal_start = cursor
+                continue
+            }
 
-			kind FormatTokenKind = .default
-			width usize = 2
-			if next != '}' {
-				if cursor + 2 >= format.len or format[cursor + 2] != '}' {
-					compile_error!("io.print format expects a one-character specifier")
-				}
+            kind FormatTokenKind = .default
+            width usize = 2
+            if next != '}' {
+                if cursor + 2 >= format.len or format[cursor + 2] != '}' {
+                    compile_error!("io.print format expects a one-character specifier")
+                }
 
-				width = 3
-				if (next == 's') kind = .string
-				else if (next == 'd') kind = .decimal
-				else if (next == 'b') kind = .binary
-				else if (next == 'o') kind = .octal
-				else if (next == 'x') kind = .hex_lower
-				else if (next == 'X') kind = .hex_upper
-				else if (next == 'c') kind = .character
-				else if (next == 'e') kind = .scientific
-				else compile_error!("io.print format has an unknown specifier")
-			}
+                width = 3
+                if (next == 's') kind = .string
+                else if (next == 'd') kind = .decimal
+                else if (next == 'b') kind = .binary
+                else if (next == 'o') kind = .octal
+                else if (next == 'x') kind = .hex_lower
+                else if (next == 'X') kind = .hex_upper
+                else if (next == 'c') kind = .character
+                else if (next == 'e') kind = .scientific
+                else compile_error!("io.print format has an unknown specifier")
+            }
 
-			if argument_count >= field_count {
-				compile_error!("io.print format argument count does not match the tuple")
-			}
+            if argument_count >= field_count {
+                compile_error!("io.print format argument count does not match the tuple")
+            }
 
-			tokens[token_count] = FormatToken{
-				kind = kind,
-				start = 0,
-				end = 0,
-				field = format_field_name(Args, argument_count),
-			}
+            tokens[token_count] = FormatToken{
+                kind = kind,
+                start = 0,
+                end = 0,
+                field = format_field_name(Args, argument_count),
+            }
 
-			token_count += 1
-			argument_count += 1
-			cursor += width
-			literal_start = cursor
-			continue
-		}
+            token_count += 1
+            argument_count += 1
+            cursor += width
+            literal_start = cursor
+            continue
+        }
 
-		if byte == '}' {
-			if cursor + 1 >= format.len or format[cursor + 1] != '}' {
-				compile_error!("io.print format has an unmatched '}'")
-			}
-			if cursor > literal_start {
-				tokens[token_count] = FormatToken{
-					kind = .literal,
-					start = literal_start,
-					end = cursor,
-					field = "",
-				}
-				token_count += 1
-			}
-			tokens[token_count] = FormatToken{
-				kind = .literal,
-				start = cursor,
-				end = cursor + 1,
-				field = "",
-			}
-			token_count += 1
-			cursor += 2
-			literal_start = cursor
-			continue
-		}
-		cursor += 1
-	}
+        if byte == '}' {
+            if cursor + 1 >= format.len or format[cursor + 1] != '}' {
+                compile_error!("io.print format has an unmatched '}'")
+            }
+            if cursor > literal_start {
+                tokens[token_count] = FormatToken{
+                    kind = .literal,
+                    start = literal_start,
+                    end = cursor,
+                    field = "",
+                }
+                token_count += 1
+            }
+            tokens[token_count] = FormatToken{
+                kind = .literal,
+                start = cursor,
+                end = cursor + 1,
+                field = "",
+            }
+            token_count += 1
+            cursor += 2
+            literal_start = cursor
+            continue
+        }
+        cursor += 1
+    }
 
-	if literal_start < format.len {
-		tokens[token_count] = FormatToken{
-    		kind = .literal,
-     		start = literal_start,
-    		end = format.len,
-			field = "",
-		}
-	}
+    if literal_start < format.len {
+        tokens[token_count] = FormatToken{
+            kind = .literal,
+             start = literal_start,
+            end = format.len,
+            field = "",
+        }
+    }
 
-	if argument_count != field_count {
-		compile_error!("io.print format argument count does not match the tuple")
-	}
-	return tokens
+    if argument_count != field_count {
+        compile_error!("io.print format argument count does not match the tuple")
+    }
+    return tokens
 }
 
 hide format_field_name proc($T type, index usize) []u8 {
-	match typeinfo!(T) {
-		.record |r|: return r.fields[index].name
-		else: compile_error!("io.print arguments must be a tuple")
-	}
+    match typeinfo!(T) {
+        .record |r|: return r.fields[index].name
+        else: compile_error!("io.print arguments must be a tuple")
+    }
+}
+hide distinct_value proc($Backing, $Distinct type, value Distinct) Backing {
+    return ptrcast!(Backing, &value)^
 }
 
+hide scalar_or_distinct_type proc($T type) bool {
+    match typeinfo!(T) {
+        .bool: return true
+        .integer: return true
+        .float: return true
+        .distinct: return true
+        else: return false
+    }
+}
+
+
+
 hide write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
-	match typeinfo!(T) {
-		.integer: if minval!(T) < 0 {
-			try write_integer_signed(output, i64(value), base, uppercase)
-		} else {
-			try write_integer_unsigned(output, u64(value), base, uppercase)
-		}
-		else: compile_error!("io.print integer format requires an integer argument")
-	}
+    match typeinfo!(T) {
+        .integer: if minval!(T) < 0 {
+            try write_integer_signed(output, i64(value), base, uppercase)
+        } else {
+            try write_integer_unsigned(output, u64(value), base, uppercase)
+        }
+        .distinct |backing|: if scalar_or_distinct_type(backing) {
+            try write_integer(output, distinct_value(backing, T, value), base, uppercase)
+        } else {
+            compile_error!("io.print integer format requires an integer argument")
+        }
+        else: compile_error!("io.print integer format requires an integer argument")
+    }
 }
 
 # note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
 hide write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
-	match typeinfo!(T) {
-		.float: {
-			buffer [64]mut u8 = undefined
-			count c_int = 0
-			if sizeof!(T) == 4 {
-				if (scientific) count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
-				else count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
-			} else if scientific {
-				count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.16e", value)
-			} else {
-				count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.17g", value)
-			}
-			if (count < 0 or usize(count) >= buffer.len) return .write_failed
-			try write_all(output, buffer[0..usize(count)])
-		}
-		else: compile_error!("io.print float format requires a float argument")
-	}
+    match typeinfo!(T) {
+        .float: {
+            buffer [64]mut u8 = undefined
+            count c_int = 0
+            if sizeof!(T) == 4 {
+                if (scientific) count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
+                else count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
+            } else if scientific {
+                count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.16e", value)
+            } else {
+                count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.17g", value)
+            }
+            if (count < 0 or usize(count) >= buffer.len) return .write_failed
+            try write_all(output, buffer[0..usize(count)])
+        }
+        .distinct |backing|: if scalar_or_distinct_type(backing) {
+            try write_float(output, distinct_value(backing, T, value), scientific)
+        } else {
+            compile_error!("io.print float format requires a float argument")
+        }
+        else: compile_error!("io.print float format requires a float argument")
+    }
 }
 
 hide write_decimal proc(output Writer, $T type, value T) void ! WriteError {
-	match typeinfo!(T) {
-		.integer: try write_integer(output, value, 10, false)
-		.float: try write_float(output, value, false)
-		else: compile_error!("io.print '{d}' requires an integer or float argument")
-	}
+    match typeinfo!(T) {
+        .integer: try write_integer(output, value, 10, false)
+        .float: try write_float(output, value, false)
+        .distinct |backing|: if scalar_or_distinct_type(backing) {
+            try write_decimal(output, distinct_value(backing, T, value))
+        } else {
+            compile_error!("io.print '{d}' requires an integer or float argument")
+        }
+        else: compile_error!("io.print '{d}' requires an integer or float argument")
+    }
 }
 
 hide write_character proc(output Writer, $T type, value T) void ! WriteError {
-	match typeinfo!(T) {
-		.integer: {
-			if minval!(T) < 0 or maxval!(T) > 255 {
-				compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
-			}
-			buffer [1]u8 = [u8(value)]
-			try write_all(output, buffer[..])
-		}
-		else: compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
-	}
+    match typeinfo!(T) {
+        .integer: {
+            if minval!(T) < 0 or maxval!(T) > 255 {
+                compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
+            }
+            buffer [1]u8 = [u8(value)]
+            try write_all(output, buffer[..])
+        }
+        .distinct |backing|: if scalar_or_distinct_type(backing) {
+            try write_character(output, distinct_value(backing, T, value))
+        } else {
+            compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
+        }
+        else: compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
+    }
 }
 
 hide write_default proc(output Writer, $T type, value T) void ! WriteError {
-	match typeinfo!(T) {
-		.bool: if value {
-			try write_all(output, "true")
-		} else {
-			try write_all(output, "false")
-		}
-		.integer: try write_integer(output, value, 10, false)
-		.float: try write_float(output, value, false)
-		.array: try write_all(output, value)
-		.pointer: try write_all(output, value)
-		.slice: try write_all(output, value)
-		.enum |enum_info|: {
-			expand for enum_info.fields |field| {
-				if value == field!(T, field.name) {
-					try write_all(output, ".")
-					try write_all(output, field.name)
-					return
-				}
-			}
-			return .write_failed
-		}
-		else: compile_error!("io.print '{}' does not support this argument type")
-	}
+    match typeinfo!(T) {
+        .bool: if value {
+            try write_all(output, "true")
+        } else {
+            try write_all(output, "false")
+        }
+        .integer: try write_integer(output, value, 10, false)
+        .float: try write_float(output, value, false)
+        .array: try write_all(output, value)
+        .pointer: try write_all(output, value)
+        .slice: try write_all(output, value)
+        .enum |enum_info|: {
+            expand for enum_info.fields |field| {
+                if value == field!(T, field.name) {
+                    try write_all(output, ".")
+                    try write_all(output, field.name)
+                    return
+                }
+            }
+            return .write_failed
+        }
+        .distinct |backing|: if scalar_or_distinct_type(backing) {
+            try write_default(output, distinct_value(backing, T, value))
+        } else {
+            compile_error!("io.print '{}' does not support this argument type")
+        }
+        else: compile_error!("io.print '{}' does not support this argument type")
+    }
 }

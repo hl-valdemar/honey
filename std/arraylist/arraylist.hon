@@ -1,74 +1,74 @@
 import "@std/mem"
 
 ArrayList proc($T type) type {
-	return struct {
-		items []mut T
-		capacity usize
-		allocator mem.Allocator
-	}
+    return struct {
+        items []mut T
+        capacity usize
+        allocator mem.Allocator
+    }
 }
 
 init proc($T type, allocator mem.Allocator) ArrayList(T) {
-	return ArrayList(T) {
-		items = mem.empty(T),
-		capacity = 0,
-		allocator = allocator,
-	}
+    return ArrayList(T) {
+        items = mem.empty(T),
+        capacity = 0,
+        allocator = allocator,
+    }
 }
 
 deinit proc($T type, list @mut ArrayList(T)) void {
-	allocation []mut T :: list.items.ptr[..list.capacity]
-	mem.free(list.allocator, allocation)
-	list.items = mem.empty(T)
-	list.capacity = 0
+    allocation []mut T :: list.items.ptr[..list.capacity]
+    mem.free(list.allocator, allocation)
+    list.items = mem.empty(T)
+    list.capacity = 0
 }
 
-reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
-	if min_capacity <= list.capacity {
-		return
-	}
+hide reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
+    if min_capacity <= list.capacity {
+        return
+    }
 
-	new_capacity usize = 8
-	if list.capacity >= 8 {
-		half usize :: divtrunc!(list.capacity, 2)
-		if list.capacity > maxval!(usize) - half {
-			new_capacity = min_capacity
-		} else {
-			new_capacity = list.capacity + half
-		}
-	}
-	if new_capacity < min_capacity {
-		new_capacity = min_capacity
-	}
+    new_capacity usize = 8
+    if list.capacity >= 8 {
+        half usize :: divtrunc!(list.capacity, 2)
+        if list.capacity > maxval!(usize) - half {
+            new_capacity = min_capacity
+        } else {
+            new_capacity = list.capacity + half
+        }
+    }
+    if new_capacity < min_capacity {
+        new_capacity = min_capacity
+    }
 
-	length usize :: list.items.len
-	allocation []mut T :: list.items.ptr[..list.capacity]
-	grown []mut T :: mem.realloc(list.allocator, allocation, new_capacity) catch |_| {
-		return .out_of_memory
-	}
-	list.items = grown.ptr[..length]
-	list.capacity = new_capacity
-	return
+    length usize :: list.items.len
+    allocation []mut T :: list.items.ptr[..list.capacity]
+    grown []mut T :: mem.realloc(list.allocator, allocation, new_capacity) catch |_| {
+        return .out_of_memory
+    }
+    list.items = grown.ptr[..length]
+    list.capacity = new_capacity
+    return
 }
 
 append proc($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
-	length usize :: list.items.len
-	if length == maxval!(usize) {
-		return .out_of_memory
-	}
-	try reserve(list, length + 1)
-	list.items = list.items.ptr[..length + 1]
-	list.items[length] = value
-	return
+    length usize :: list.items.len
+    if length == maxval!(usize) {
+        return .out_of_memory
+    }
+    try reserve(list, length + 1)
+    list.items = list.items.ptr[..length + 1]
+    list.items[length] = value
+    return
 }
 
 pop proc($T type, list @mut ArrayList(T)) ?T {
-	if (list.items.len == 0) return null
-	value :: list.items[list.items.len - 1]
-	list.items = list.items.ptr[..list.items.len - 1]
-	return value
+    if (list.items.len == 0) return null
+    value :: list.items[list.items.len - 1]
+    list.items = list.items.ptr[..list.items.len - 1]
+    return value
 }
 
 clear proc($T type, list @mut ArrayList(T)) void {
-	list.items = list.items.ptr[..0]
+    list.items = list.items.ptr[..0]
 }

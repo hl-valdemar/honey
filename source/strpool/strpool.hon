@@ -8,58 +8,59 @@ strings StringPool = undefined
 InternError :: enum { out_of_space }
 
 StringId :: alias u32
-NoId :: maxval!(StringId)
+
+NO_ID :: maxval!(StringId)
 
 StringPool :: struct {
-	ids hashmap.StringHashMap(StringId) # string → id
-	strings arraylist.ArrayList([]u8)   # id → owned string
-	allocator mem.Allocator
+    ids hashmap.StringHashMap(StringId) # string → id
+    strings arraylist.ArrayList([]u8)   # id → owned string
+    allocator mem.Allocator
 }
 
 init proc(allocator mem.Allocator) StringPool {
-	return StringPool{
-		ids = hashmap.init(allocator),
-		strings = arraylist.init(allocator),
-		allocator = allocator,
-	}
+    return StringPool{
+        ids = hashmap.init(allocator),
+        strings = arraylist.init(allocator),
+        allocator = allocator,
+    }
 }
 
 deinit proc(pool @mut StringPool) void {
-	hashmap.deinit(&pool.ids)
-	for pool.strings.items |str| {
-		mem.free(pool.allocator, str)
-	}
-	arraylist.deinit(&pool.strings)
+    hashmap.deinit(&pool.ids)
+    for pool.strings.items |str| {
+        mem.free(pool.allocator, str)
+    }
+    arraylist.deinit(&pool.strings)
 }
 
 intern proc(pool @mut StringPool, str []u8) StringId ! (mem.AllocError | InternError) {
-	if hashmap.get(&pool.ids, str) |id| return id
+    if hashmap.get(&pool.ids, str) |id| return id
 
-	if (pool.strings.items.len >= usize(NoId)) return .out_of_space
-	id StringId :: StringId(pool.strings.items.len)
+    if (pool.strings.items.len >= usize(NO_ID)) return .out_of_space
+    id StringId :: StringId(pool.strings.items.len)
 
-	owned_str []mut u8 :: try mem.alloc(u8, pool.allocator, str.len)
-	errdefer mem.free(pool.allocator, owned_str)
-	memcopy!(owned_str, str)
+    owned_str []mut u8 :: try mem.alloc(u8, pool.allocator, str.len)
+    errdefer mem.free(pool.allocator, owned_str)
+    memcopy!(owned_str, str)
 
-	try arraylist.append(&pool.strings, owned_str)
-	errdefer _ = arraylist.pop(&pool.strings)
+    try arraylist.append(&pool.strings, owned_str)
+    errdefer _ = arraylist.pop(&pool.strings)
 
-	hashmap.put(&pool.ids, owned_str, id) catch |err| {
-		match err {
-			.key_exists: unreachable
-			else: return err
-		}
-	}
+    hashmap.put(&pool.ids, owned_str, id) catch |err| {
+        match err {
+            .key_exists: unreachable
+            else: return err
+        }
+    }
 
-	return id
+    return id
 }
 
 get_str proc(pool @StringPool, id StringId) ?[]u8 {
-	if (usize(id) >= pool.strings.items.len) return null
-	return pool.strings.items[usize(id)]
+    if (usize(id) >= pool.strings.items.len) return null
+    return pool.strings.items[usize(id)]
 }
 
 get_id proc(pool @StringPool, str []u8) ?StringId {
-	return hashmap.get(&pool.ids, str)
+    return hashmap.get(&pool.ids, str)
 }
