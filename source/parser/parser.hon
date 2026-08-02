@@ -12,6 +12,8 @@ ExtraId :: distinct u32
 NO_ID_NODE :: maxval!(NodeId)
 NO_ID_EXTRA :: maxval!(ExtraId)
 
+# todo: move error stuff into a separate file
+
 Diagnostic :: struct {
     code ErrorCode
     node NodeId
@@ -81,8 +83,8 @@ NodeKind :: enum {
 State :: struct {
     nodes std.ArrayList(Node)
 
-    #! array of indexes into the nodes array.
-    extra std.ArrayList(NodeId)
+    #! array of raw u32's indexing nodes, tokens, etc.
+    extra std.ArrayList(u32)
 
     tokens []Token = &[]
     next_token TokenId = TokenId(0)
@@ -119,19 +121,16 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
         NO_ID_NODE
 
     # expect `::` (immutable assignment)
-    try expect(state, .double_colon)
-    mutability_tok_id :: state.next_token
-    state.next_token += 1
+    mutability_tok_id :: try consume(state, .double_colon)
 
     # expect expression
     expr_id :: try parse_primary(state)
 
     # expect statement terminator (newline)
-    try expect_either(state, &[.newline, .eof])
-    state.next_token += 1
+    _ = try consume_either(state, &[.newline, .eof])
 
-    extra_start :: try add_extra(&state.extra, type_id)
-    _ = try add_extra(&state.extra, expr_id)
+    extra_start :: try add_extra(&state.extra, u32(type_id))
+    _ = try add_extra(&state.extra, u32(expr_id))
 
     decl :: try add_node(&state.nodes, Node{
         kind = .stmt_decl,
@@ -179,6 +178,18 @@ hide expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorC
     return .unexpected_token
 }
 
+hide consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
+    try expect(state, token_kind)
+    state.next_token += 1
+    return state.next_token - 1
+}
+
+hide consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCode {
+    try expect_either(state, token_kinds)
+    state.next_token += 1
+    return state.next_token - 1
+}
+
 hide add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
     id :: node_id(nodes.items.len)
     try arraylist.append(nodes, node)
@@ -190,10 +201,10 @@ hide node_id proc(idx uint) NodeId {
     return NodeId(idx)
 }
 
-hide add_extra proc(extra @mut std.ArrayList(NodeId), id_node NodeId) ExtraId ! mem.AllocError {
-    id_extra :: extra_id(extra.items.len)
-    try arraylist.append(extra, id_node)
-    return id_extra
+hide add_extra proc(extra @mut std.ArrayList(u32), idx u32) ExtraId ! mem.AllocError {
+    id :: extra_id(extra.items.len)
+    try arraylist.append(extra, idx)
+    return id
 }
 
 hide extra_id proc(idx uint) ExtraId {
