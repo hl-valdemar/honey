@@ -17,7 +17,7 @@ init proc(
     map EnumMap(E, V) = undefined
 
     match typeinfo!(E) {
-        .enum |info|: expand for info.fields |field, i| {
+        .enum |info|: inline for info.fields |field, i| {
             map.present[i] = false
 
             if field!(values, field.name) |value| {
@@ -34,7 +34,7 @@ init proc(
 get proc($E, $V type, map @EnumMap(E, V), key E) ?V {
     # fixme: linear lookup; implement an enum index/discriminant map for O(1) lookup
     match typeinfo!(E) {
-        .enum |info|: expand for info.fields |field, i| {
+        .enum |info|: inline for info.fields |field, i| {
             if key == field!(E, field.name) {
                 if (map.present[i]) return map.values[i]
                 return null

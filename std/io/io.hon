@@ -102,7 +102,7 @@ stderr proc(io Io) Writer {
 }
 
 print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
-    expand for parse_format(format.len, format, Args) |token| {
+    inline for parse_format(format.len, format, Args) |token| {
         match token.kind {
             .unused: break
             .literal: try write_all(output, format[token.start..token.end])
@@ -428,7 +428,7 @@ hide write_default proc(output Writer, $T type, value T) void ! WriteError {
         .pointer: try write_all(output, value)
         .slice: try write_all(output, value)
         .enum |enum_info|: {
-            expand for enum_info.fields |field| {
+            inline for enum_info.fields |field| {
                 if value == field!(T, field.name) {
                     try write_all(output, ".")
                     try write_all(output, field.name)
