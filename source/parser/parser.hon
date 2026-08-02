@@ -7,9 +7,10 @@ import "@std/enums/enummap"
 import "@source/lexer"
 
 NodeId :: distinct u32
-ExtraId :: distinct NodeId
+ExtraId :: distinct u32
 
-NO_ID :: maxval!(NodeId)
+NO_ID_NODE :: maxval!(NodeId)
+NO_ID_EXTRA :: maxval!(ExtraId)
 
 Diagnostic :: struct {
     code ErrorCode
@@ -39,6 +40,7 @@ hide TokenId :: alias lexer.TokenId
 hide TokenKind :: alias lexer.TokenKind
 
 NodeData :: union {
+    token_id TokenId
     node_id NodeId
     extra_id ExtraId
 }
@@ -47,17 +49,32 @@ Node :: struct {
     kind NodeKind
     main_token TokenId
 
-    data0 NodeData = NodeData{ node_id = NO_ID }
-    data1 NodeData = NodeData{ node_id = NO_ID }
+    data0 NodeData = NodeData{ node_id = NO_ID_NODE }
+    data1 NodeData = NodeData{ node_id = NO_ID_NODE }
 }
 
 NodeKind :: enum {
+    # LITERALS:
+    # * main_token: token literal
     literal_int
     literal_float
     literal_string
+
+    # IDENTIFIER EXPR:
+    # * main_token: token literal
+    expr_identifier
+
     expr_unary
     expr_binary
-    decl
+
+    # DECL:
+    # * main_token: symbol name (identifier)
+    # * data0: ExtraId
+    #   + extra[data0]: NodeId - type identifier node
+    #   + extra[data0 + 1]: NodeId - initializer expression
+    # * data1: TokenId of either `::` or `=` indicating mutability
+    stmt_decl
+
     invalid
 }
 
@@ -94,21 +111,33 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
     ident_token :: state.next_token
     state.next_token += 1
 
+    # check for type
+    # todo: make a parse_type proc for this
+    type_id :: if (state.tokens[state.next_token].kind == .ident)
+        try parse_primary(state)
+    else
+        NO_ID_NODE
+
     # expect `::` (immutable assignment)
     try expect(state, .double_colon)
+    mutability_tok_id :: state.next_token
     state.next_token += 1
 
     # expect expression
-    expr :: try parse_primary(state)
+    expr_id :: try parse_primary(state)
 
     # expect statement terminator (newline)
     try expect_either(state, &[.newline, .eof])
     state.next_token += 1
 
+    extra_start :: try add_extra(&state.extra, type_id)
+    _ = try add_extra(&state.extra, expr_id)
+
     decl :: try add_node(&state.nodes, Node{
-        kind = .decl,
+        kind = .stmt_decl,
         main_token = ident_token,
-        data0 = NodeData{ node_id = expr },
+        data0 = NodeData{ extra_id = extra_start },
+        data1 = NodeData{ token_id = mutability_tok_id },
     })
 
     return decl
@@ -128,6 +157,10 @@ parse_primary proc(state @mut State) NodeId ! mem.AllocError {
         })
         .string: try add_node(&state.nodes, Node{
             kind = .literal_string,
+            main_token = start_token,
+        })
+        .ident: try add_node(&state.nodes, Node{
+            kind = .expr_identifier,
             main_token = start_token,
         })
         else: try add_node(&state.nodes, Node{
@@ -153,6 +186,17 @@ hide add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.Alloc
 }
 
 hide node_id proc(idx uint) NodeId {
-    debug.assert(u64(idx) < u64(NO_ID))
+    debug.assert(u64(idx) < u64(NO_ID_NODE))
     return NodeId(idx)
+}
+
+hide add_extra proc(extra @mut std.ArrayList(NodeId), id_node NodeId) ExtraId ! mem.AllocError {
+    id_extra :: extra_id(extra.items.len)
+    try arraylist.append(extra, id_node)
+    return id_extra
+}
+
+hide extra_id proc(idx uint) ExtraId {
+    debug.assert(u64(idx) < u64(NO_ID_EXTRA))
+    return ExtraId(idx)
 }
