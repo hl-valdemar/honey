@@ -67,6 +67,7 @@ State :: struct {
     #! array of indexes into the nodes array.
     extra std.ArrayList(NodeId)
 
+    tokens []Token = &[]
     next_token TokenId = TokenId(0)
 }
 
@@ -83,24 +84,25 @@ deinit proc(state @mut State) void {
 }
 
 parse proc(state @mut State, tokens []Token) void ! ParseError {
-    _ = try parse_decl(state, tokens)
+    state.tokens = tokens
+    _ = try parse_decl(state)
 }
 
-parse_decl proc(state @mut State, tokens []Token) NodeId ! ParseError {
+parse_decl proc(state @mut State) NodeId ! ParseError {
     # expect identifier
-    try expect(state, tokens, .ident)
+    try expect(state, .ident)
     ident_token :: state.next_token
     state.next_token += 1
 
     # expect `::` (immutable assignment)
-    try expect(state, tokens, .double_colon)
+    try expect(state, .double_colon)
     state.next_token += 1
 
     # expect expression
-    expr :: try parse_primary(state, tokens)
+    expr :: try parse_primary(state)
 
     # expect statement terminator (newline)
-    try expect_either(state, tokens, &[.newline, .eof])
+    try expect_either(state, &[.newline, .eof])
     state.next_token += 1
 
     decl :: try add_node(&state.nodes, Node{
@@ -112,10 +114,10 @@ parse_decl proc(state @mut State, tokens []Token) NodeId ! ParseError {
     return decl
 }
 
-parse_primary proc(state @mut State, tokens []Token) NodeId ! mem.AllocError {
+parse_primary proc(state @mut State) NodeId ! mem.AllocError {
     start_token :: state.next_token
     state.next_token += 1
-    return match tokens[start_token].kind {
+    return match state.tokens[start_token].kind {
         .int: try add_node(&state.nodes, Node{
             kind = .literal_int,
             main_token = start_token,
@@ -135,12 +137,12 @@ parse_primary proc(state @mut State, tokens []Token) NodeId ! mem.AllocError {
     }
 }
 
-hide expect proc(state @mut State, tokens []Token, token_kind TokenKind) void ! ErrorCode {
-    if (tokens[state.next_token].kind != token_kind) return .unexpected_token
+hide expect proc(state @mut State, token_kind TokenKind) void ! ErrorCode {
+    if (state.tokens[state.next_token].kind != token_kind) return .unexpected_token
 }
 
-hide expect_either proc(state @mut State, tokens []Token, token_kinds []TokenKind) void ! ErrorCode {
-    for (token_kinds) |kind| if (tokens[state.next_token].kind == kind) return
+hide expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorCode {
+    for (token_kinds) |kind| if (state.tokens[state.next_token].kind == kind) return
     return .unexpected_token
 }
 
