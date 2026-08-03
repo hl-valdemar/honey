@@ -5,12 +5,7 @@ import "@std/debug"
 import "@std/enums/enummap"
 
 import "@source/lexer"
-
-NodeId :: distinct u32
-ExtraId :: distinct u32
-
-NO_ID_NODE :: maxval!(NodeId)
-NO_ID_EXTRA :: maxval!(ExtraId)
+import "@source/ast"
 
 # todo: move error stuff into a separate file
 
@@ -40,45 +35,13 @@ error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
 hide Token :: alias lexer.Token
 hide TokenId :: alias lexer.TokenId
 hide TokenKind :: alias lexer.TokenKind
+hide Node :: alias ast.Node
+hide NodeId :: alias ast.NodeId
+hide ExtraId :: alias ast.ExtraId
+hide NodeData :: alias ast.NodeData
 
-NodeData :: union {
-    token_id TokenId
-    node_id NodeId
-    extra_id ExtraId
-}
-
-Node :: struct {
-    kind NodeKind
-    main_token TokenId
-
-    data0 NodeData = NodeData{ node_id = NO_ID_NODE }
-    data1 NodeData = NodeData{ node_id = NO_ID_NODE }
-}
-
-NodeKind :: enum {
-    # LITERALS:
-    # * main_token: token literal
-    literal_int
-    literal_float
-    literal_string
-
-    # IDENTIFIER EXPR:
-    # * main_token: token literal
-    expr_identifier
-
-    expr_unary
-    expr_binary
-
-    # DECL:
-    # * main_token: symbol name (identifier)
-    # * data0: ExtraId
-    #   + extra[data0]: NodeId - type identifier node
-    #   + extra[data0 + 1]: NodeId - initializer expression
-    # * data1: TokenId of either `::` or `=` indicating mutability
-    stmt_decl
-
-    invalid
-}
+hide NO_ID_NODE :: alias ast.NO_ID_NODE
+hide NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
 
 State :: struct {
     nodes std.ArrayList(Node)
