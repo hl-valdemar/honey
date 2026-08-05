@@ -69,7 +69,7 @@ write proc(output Writer, bytes []u8) usize ! WriteError {
 }
 
 write_all proc(output Writer, bytes []u8) void ! WriteError {
-    offset usize = 0
+    offset usize := 0
     while offset < bytes.len {
         count usize :: try write(output, bytes[offset..])
         if (count == 0) return .no_progress
@@ -120,13 +120,13 @@ print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError
 }
 
 hide write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
-    buffer [65]mut u8 = undefined
-    end usize = buffer.len
-    current i64 = value
+    buffer [65]mut u8 := undefined
+    end := buffer.len
+    current := value
 
     while true {
         digit_value i64 :: rem!(current, i64(base))
-        digit u8 = if (digit_value < 0)
+        digit := if (digit_value < 0)
             u8(-digit_value)
         else
             u8(digit_value)
@@ -151,9 +151,9 @@ hide write_integer_signed proc(output Writer, value i64, base u64, uppercase boo
 }
 
 hide write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
-    buffer [65]mut u8 = undefined
-    end usize = buffer.len
-    current u64 = value
+    buffer [65]mut u8 := undefined
+    end := buffer.len
+    current := value
 
     while true {
         digit u8 :: u8(rem!(current, base))
@@ -195,12 +195,12 @@ hide FormatToken :: struct {
 }
 
 hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
-    tokens [N]mut FormatToken = undefined
+    tokens [N]mut FormatToken := undefined
     for (usize(0))..format.len |index| {
         tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
     }
 
-    field_count usize = 0
+    field_count := 0
     match typeinfo!(Args) {
         .record |r|: {
             if (!r.is_tuple) compile_error!("io.print arguments must be a tuple")
@@ -209,10 +209,10 @@ hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
         else: compile_error!("io.print arguments must be a tuple")
     }
 
-    token_count usize = 0
-    argument_count usize = 0
-    literal_start usize = 0
-    cursor usize = 0
+    token_count := 0
+    argument_count := 0
+    literal_start := 0
+    cursor usize := 0
     while cursor < format.len {
         byte :: format[cursor]
         if byte == '{' {
@@ -242,8 +242,8 @@ hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
                 continue
             }
 
-            kind FormatTokenKind = .default
-            width usize = 2
+            kind FormatTokenKind := .default
+            width := 2
             if next != '}' {
                 if cursor + 2 >= format.len or format[cursor + 2] != '}' {
                     compile_error!("io.print format expects a one-character specifier")
@@ -362,8 +362,8 @@ hide write_integer proc(output Writer, $T type, value T, base u64, uppercase boo
 hide write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
     match typeinfo!(T) {
         .float: {
-            buffer [64]mut u8 = undefined
-            count c_int = 0
+            buffer [64]mut u8 := undefined
+            count := 0
             if sizeof!(T) == 4 {
                 if (scientific) count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
                 else count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
@@ -403,7 +403,7 @@ hide write_character proc(output Writer, $T type, value T) void ! WriteError {
             if minval!(T) < 0 or maxval!(T) > 255 {
                 compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
             }
-            buffer [1]u8 = [u8(value)]
+            buffer [1]u8 := [u8(value)]
             try write_all(output, buffer[..])
         }
         .distinct |backing|: if scalar_or_distinct_type(backing) {

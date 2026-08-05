@@ -66,7 +66,7 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
     tokens :: &state.tokens
     diagnostics :: &state.diagnostics
 
-    cursor usize = 0
+    cursor usize := 0
     while cursor < program.len {
         char :: program[cursor]
 
@@ -208,8 +208,8 @@ ScanNumResult :: struct {
 }
 
 scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
-    cursor usize = start
-    has_decimal bool = false
+    cursor := start
+    has_decimal := false
 
     # scan integer part
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
@@ -237,7 +237,7 @@ scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
 ScanStrResult :: struct { end usize }
 
 scan_string proc(start usize, program []u8) ScanStrResult ! ScanError {
-    cursor usize = start + 1 # skip first `"`
+    cursor := start + 1 # skip first `"`
 
     # scan entire string
     while cursor < program.len and program[cursor] != '"' and program[cursor] != '\n' : cursor += 1 {

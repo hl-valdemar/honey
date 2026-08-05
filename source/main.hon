@@ -10,9 +10,11 @@ test import "@std/strmap"
 import "@source/strpool"
 import "@source/lexer"
 import "@source/parser"
+import "@source/ast"
 
 test import "@source/strpool"
 test import "@source/lexer"
+
 
 program ::
     `# literals
@@ -25,7 +27,7 @@ main proc() void {
 
     debug.print("PROGRAM::[[\n{}\n]]\n\n", {program})
 
-    scan_state lexer.State = lexer.init(mem.c_allocator)
+    scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
 
     lexer.scan(&scan_state, program) catch |err| {
@@ -46,7 +48,7 @@ main proc() void {
     }
     debug.print("]]\n\n", {})
 
-    parse_state parser.State = parser.init(mem.c_allocator)
+    parse_state := parser.init(mem.c_allocator)
     defer parser.deinit(&parse_state)
     parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
         debug.print("failed to parse: {}\n", {err})
@@ -85,6 +87,7 @@ main proc() void {
         scan_state.tokens.items,
         program,
     ) catch "<invalid>"
+    
     debug.print("generated literal: {}\n", { literal })
     debug.print("]]\n", {})
 }

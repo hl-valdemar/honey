@@ -17,7 +17,7 @@ init proc($T type, allocator mem.Allocator) ArrayList(T) {
 }
 
 deinit proc($T type, list @mut ArrayList(T)) void {
-    allocation []mut T :: list.items.ptr[..list.capacity]
+    allocation :: list.items.ptr[..list.capacity]
     mem.free(list.allocator, allocation)
     list.items = mem.empty(T)
     list.capacity = 0
@@ -28,9 +28,9 @@ hide reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! me
         return
     }
 
-    new_capacity usize = 8
+    new_capacity := 8
     if list.capacity >= 8 {
-        half usize :: divtrunc!(list.capacity, 2)
+        half :: divtrunc!(list.capacity, 2)
         if list.capacity > maxval!(usize) - half {
             new_capacity = min_capacity
         } else {

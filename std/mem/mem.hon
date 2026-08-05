@@ -46,7 +46,7 @@ alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
         return .out_of_memory
     }
 
-    memory ?*mut u8 = raw_alloc(allocator, count * element_size, alignof!(T))
+    memory := raw_alloc(allocator, count * element_size, alignof!(T))
     if memory |bytes| {
         pointer *mut T :: ptrcast!(T, bytes)
         return pointer[..count]
@@ -72,13 +72,13 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
     if (element_size == 0) return empty_slice(T, new_count)
     if (new_count > divtrunc!(maxval!(usize), element_size)) return .out_of_memory
 
-    old_memory ?*mut u8 = null
-    old_size usize = 0
+    old_memory ?*mut u8 := null
+    old_size := 0
     if memory.len != 0 {
         old_memory = ptrcast!(u8, memory.ptr)
         old_size = memory.len * element_size
     }
-    resized ?*mut u8 = raw_realloc(
+    resized := raw_realloc(
         allocator,
         old_memory,
         old_size,
@@ -116,15 +116,15 @@ empty proc($T type) []mut T {
     return empty_slice(T, 0)
 }
 
-hide empty_storage [1]mut u64 = [0]
+hide empty_storage [1]mut u64 := [0]
 
 hide malloc_alignment usize :: 16 # note: aarch64-macos libc malloc alignment assumption.
 
 hide power_of_two proc(value usize) bool {
     if (value == 0) return false
-    current usize = value
+    current := value
     while current > 1 {
-        half usize = divtrunc!(current, 2)
+        half := divtrunc!(current, 2)
         if (half * 2 != current) return false
         current = half
     }
@@ -135,8 +135,8 @@ hide c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
     if (power_of_two(alignment) == false) return null
     if (alignment <= malloc_alignment) return ptrcast!(u8, c.malloc(c_ulong(size)))
 
-    memory [1]mut ?*mut anyopaque = [null]
-    status c_int = c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
+    memory [1]mut ?*mut anyopaque := [null]
+    status := c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
     if (status != 0) return null
 
     return ptrcast!(u8, memory[0])
@@ -161,9 +161,9 @@ hide c_realloc proc(
             return ptrcast!(u8, c.realloc(old_memory, c_ulong(new_size)))
         }
 
-        new_memory ?*mut u8 = c_alloc(null, new_size, alignment)
+        new_memory := c_alloc(null, new_size, alignment)
         if new_memory |new_bytes| {
-            copy_size usize = old_size
+            copy_size := old_size
             if (new_size < copy_size) copy_size = new_size
             memcopy!(new_bytes[..copy_size], old_memory[..copy_size])
             c.free(old_memory)

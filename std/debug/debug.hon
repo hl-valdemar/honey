@@ -6,7 +6,7 @@ assert proc(ok bool) void {
 }
 
 print proc($format []u8, $Args type, args Args) void {
-    writer io.Writer :: io.Writer{
+    writer :: io.Writer{
         context = null,
         handle = io.Handle{ file_desc = c_int(io.Stream.stderr) },
         write = write,
@@ -15,13 +15,13 @@ print proc($format []u8, $Args type, args Args) void {
 }
 
 hide write proc(_ ?@mut anyopaque, handle io.Handle, bytes []u8) usize ! io.WriteError {
-    request usize = bytes.len
-    maximum usize :: usize(maxval!(c_long))
+    request := bytes.len
+    maximum :: usize(maxval!(c_long))
     if request > maximum {
         request = maximum
     }
     while true {
-        count c_long :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
+        count :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
         if count >= 0 {
             return usize(count)
         }
