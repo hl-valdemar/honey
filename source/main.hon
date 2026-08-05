@@ -16,7 +16,8 @@ test import "@source/lexer"
 
 program ::
     `# literals
-    `x int :: 123
+    `x int :: 123.9
+    `y :: "hello"
 
 main proc() void {
     strpool.strings = strpool.init(mem.c_allocator)
@@ -56,12 +57,17 @@ main proc() void {
     for parse_state.nodes.items |node, id| {
         token :: scan_state.tokens.items[node.main_token]
 
-        end :: if (token.kind == .int or token.kind == .float)
-            lexer.scan_number(token.start, program)
-        else if (token.kind == .string)
-            lexer.scan_string(token.start, program)
-        else
-            token.start
+        end :: if (token.kind == .int or token.kind == .float) lbl: {
+            res :: lexer.scan_number(token.start, program) catch {
+                yield :lbl token.start
+            }
+            yield :lbl res.end
+        } else if (token.kind == .string) lbl: {
+            res :: lexer.scan_string(token.start, program) catch {
+                yield :lbl token.start
+            }
+            yield :lbl res.end
+        } else token.start
 
         debug.print("{} (id = {}): {}\n", {
             node.kind,
@@ -71,5 +77,14 @@ main proc() void {
             #node.data1,
         })
     }
+    debug.print("]]\n\n", {})
+
+    debug.print("AST Render::[[\n", {})
+    literal :: ast.render_literal(
+        &parse_state.nodes.items[1],
+        scan_state.tokens.items,
+        program,
+    ) catch "<invalid>"
+    debug.print("generated literal: {}\n", { literal })
     debug.print("]]\n", {})
 }

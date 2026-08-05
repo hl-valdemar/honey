@@ -48,3 +48,22 @@ NodeKind :: enum {
 
     invalid
 }
+
+# todo: render ast nodes as source code
+
+render proc(node @Node, tokens []Token) void { }
+
+render_literal proc(node @Node, tokens []Token, program []u8) []u8 ! lexer.ScanError {
+    tok :: tokens[node.main_token]
+    match node.kind {
+        .literal_int, .literal_float: {
+            result :: try lexer.scan_number(tok.start, program)
+            return program[tok.start..result.end]
+        }
+        .literal_string: {
+            result :: try lexer.scan_string(tok.start, program)
+            return program[tok.start..result.end]
+        }
+        else: unreachable
+    }
+}

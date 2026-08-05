@@ -8,14 +8,17 @@ handles_keywords_identifiers_and_error_progress test {
 
     state State = init(mem.c_allocator)
     defer deinit(&state)
-    try scan(&state, "if name # comment\n@1.")
+    try scan(&state, "if name # comment\n@1. 2 3.5 \"hi\"")
 
-    try testing.expect_equal(5, state.tokens.items.len)
+    try testing.expect_equal(8, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
     try testing.expect_equal(TokenKind.ident, state.tokens.items[1].kind)
     try testing.expect_equal(TokenKind.invalid, state.tokens.items[2].kind)
     try testing.expect_equal(TokenKind.invalid, state.tokens.items[3].kind)
-    try testing.expect_equal(TokenKind.eof, state.tokens.items[4].kind)
+    try testing.expect_equal(TokenKind.int, state.tokens.items[4].kind)
+    try testing.expect_equal(TokenKind.float, state.tokens.items[5].kind)
+    try testing.expect_equal(TokenKind.string, state.tokens.items[6].kind)
+    try testing.expect_equal(TokenKind.eof, state.tokens.items[7].kind)
     try testing.expect_equal(2, state.diagnostics.items.len)
     try testing.expect_equal("name", strpool.get_str(&strpool.strings, state.tokens.items[1].str_id)?)
 }

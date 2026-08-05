@@ -7,9 +7,10 @@ import "@std/debug"
 
 import "@source/strpool"
 
-ErrorCode :: enum {
+ScanError :: enum {
     invalid_character,
     float_must_end_with_digit,
+    unterminated_string,
 }
 
 ErrorDetails :: struct {
@@ -17,7 +18,7 @@ ErrorDetails :: struct {
     message []u8
 }
 
-error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
+error_msg_map std.EnumMap(ScanError, ErrorDetails) :: enummap.init({
     invalid_character = ErrorDetails {
         name = "L0",
         message = "invalid character",
@@ -40,8 +41,8 @@ keywords std.StringMap(TokenKind) :: strmap.init([
 TokenId :: distinct u32
 
 Diagnostic :: struct {
-    code ErrorCode
     token TokenId
+    code ScanError
 }
 
 State :: struct {
@@ -61,13 +62,13 @@ deinit proc(state @mut State) void {
     arraylist.deinit(&state.diagnostics)
 }
 
-scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternError) {
+scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.InternError) {
     tokens :: &state.tokens
     diagnostics :: &state.diagnostics
 
     cursor usize = 0
-    while cursor < input.len {
-        char :: input[cursor]
+    while cursor < program.len {
+        char :: program[cursor]
 
         # whitespace
         if char == '\n' {
@@ -81,7 +82,7 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
 
         # comments
         if char == '#' {
-            while (cursor < input.len and input[cursor] != '\n') cursor += 1
+            while (cursor < program.len and program[cursor] != '\n') cursor += 1
             cursor += 1 # also skip newline
             continue
         }
@@ -92,17 +93,17 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
             cursor += 1
 
             # scan whole identifier
-            while (cursor < input.len and (
-                is_alpha(input[cursor]) or
-                is_digit(input[cursor]) or
-                input[cursor] == '_'
+            while (cursor < program.len and (
+                is_alpha(program[cursor]) or
+                is_digit(program[cursor]) or
+                program[cursor] == '_'
             )) cursor += 1
 
-            kind :: strmap.get(&keywords, input[start..cursor]) orelse .ident
+            kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
 
             # don't intern keywords (already O(1) lookup via token kind)
             str_id :: if (kind == .ident)
-                try strpool.intern(&strpool.strings, input[start..cursor])
+                try strpool.intern(&strpool.strings, program[start..cursor])
             else
                 strpool.NO_ID
 
@@ -117,51 +118,35 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
         # numeric literals
         if is_digit(char) {
             start :: cursor
-            has_decimal bool = false
-
-            # scan integer part
-            while (cursor < input.len and is_digit(input[cursor])) cursor += 1
-
-            # check for decimal point
-            if cursor < input.len and input[cursor] == '.' {
-                has_decimal = true
-                cursor += 1
-            }
-
-            # assert that decimals follow the decimal point
-            if has_decimal and (cursor >= input.len or !is_digit(input[cursor])) {
+            result :: scan_number(start, program) catch |err| {
                 token :: token_id(tokens.items.len)
-                try arraylist.append(diagnostics, Diagnostic{ token = token, code = .float_must_end_with_digit })
                 try add_token(tokens, Token{ kind = .invalid, start = start })
+                try arraylist.append(diagnostics, Diagnostic{ token = token, code = err })
+                cursor += 1
+                while (cursor < program.len and (is_digit(program[cursor]) or program[cursor] == '.')) cursor += 1
                 continue
             }
 
-            # scan decimal part
-            while (cursor < input.len and is_digit(input[cursor])) cursor += 1
-
-            kind :: if (has_decimal) .float else .int
+            kind :: if (result.has_decimal) .float else .int
             try add_token(tokens, Token{ kind = kind, start = start })
-
+            cursor = result.end
             continue
         }
 
         # string literals
         if char == '"' {
             start :: cursor
-            cursor += 1
-
-            while cursor < input.len and input[cursor] != '"' and input[cursor] != '\n' : cursor += 1 {
-                # ignore escaped characters
-                if (input[cursor] == '\\' and cursor + 1 < input.len) cursor += 1
-            }
-
-            if cursor < input.len and input[cursor] == '"' {
-                cursor += 1
-                try add_token(tokens, Token{ kind = .string, start = start })
-            } else {
+            result :: scan_string(start, program) catch |err| {
+                token :: token_id(tokens.items.len)
                 try add_token(tokens, Token{ kind = .invalid, start = start })
+                try arraylist.append(diagnostics, Diagnostic{ token = token, code = err })
+                cursor += 1
+                while cursor < program.len and program[cursor] != '\n' : cursor += 1 {}
+                continue
             }
 
+            try add_token(tokens, Token{ kind = .string, start = start })
+            cursor = result.end
             continue
         }
 
@@ -174,7 +159,7 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
 
         # immutable assignment or single colon
         if char == ':' {
-            if cursor + 1 < input.len and input[cursor + 1] == ':' {
+            if cursor + 1 < program.len and program[cursor + 1] == ':' {
                 try add_token(tokens, Token{ kind = .double_colon, start = cursor })
                 cursor += 2
                 continue
@@ -217,45 +202,55 @@ scan proc(state @mut State, input []u8) void ! (mem.AllocError | strpool.InternE
     try add_token(tokens, Token{ kind = .eof, start = cursor })
 }
 
-#! returns the cursor position after scanning a number.
-scan_number proc(start usize, input []u8) usize {
-    debug.assert(is_digit(input[start]))
+ScanNumResult :: struct {
+    end usize
+    has_decimal bool
+}
 
-    has_decimal bool = false
+scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
     cursor usize = start
+    has_decimal bool = false
 
     # scan integer part
-    while cursor < input.len and is_digit(input[cursor]) : cursor += 1 {}
+    while (cursor < program.len and is_digit(program[cursor])) cursor += 1
 
-    # check for decimal point
-    if cursor < input.len and input[cursor] == '.' {
+    # check for decimal
+    if cursor < program.len and program[cursor] == '.' {
         has_decimal = true
         cursor += 1
     }
 
-    # assert that decimals follow the decimal point
-    debug.assert(!(has_decimal and (cursor >= input.len or !is_digit(input[cursor]))))
-
-    # scan decimal part
-    while cursor < input.len and is_digit(input[cursor]) : cursor += 1 {}
-
-    return cursor
-}
-
-#! returns the cursor position after scanning a string.
-scan_string proc(start usize, input []u8) usize {
-    debug.assert(input[start] == '"')
-
-    cursor usize = start + 1
-    while cursor < input.len and input[cursor] != '"' and input[cursor] != '\n' : cursor += 1 {
-        # ignore escaped characters
-        if (input[cursor] == '\\' and cursor + 1 < input.len) cursor += 1
+    # assert non-terminating decimal
+    if has_decimal and (cursor >= program.len or !is_digit(program[cursor])) {
+        return .float_must_end_with_digit
     }
 
-    debug.assert(cursor < input.len and input[cursor] == '"')
-    cursor += 1
+    # scan fractional part
+    while (cursor < program.len and is_digit(program[cursor])) cursor += 1
 
-    return cursor
+    return ScanNumResult{
+        end = cursor,
+        has_decimal = has_decimal,
+    }
+}
+
+ScanStrResult :: struct { end usize }
+
+scan_string proc(start usize, program []u8) ScanStrResult ! ScanError {
+    cursor usize = start + 1 # skip first `"`
+
+    # scan entire string
+    while cursor < program.len and program[cursor] != '"' and program[cursor] != '\n' : cursor += 1 {
+        # ignore escaped characters
+        if (program[cursor] == '\\' and cursor + 1 < program.len) cursor += 1
+    }
+
+    # assert string terminal
+    if (cursor >= program.len or program[cursor] != '"') return .unterminated_string
+
+    return ScanStrResult{
+        end = cursor + 1, # skip last `"`
+    }
 }
 
 hide is_whitespace proc(char u8) bool {
