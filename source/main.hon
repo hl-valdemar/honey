@@ -10,10 +10,12 @@ test import "@std/strmap"
 import "@source/strpool"
 import "@source/lexer"
 import "@source/parser"
-import "@source/ast"
+
+ast_renderer :: import "@source/ast/renderer"
 
 test import "@source/strpool"
 test import "@source/lexer"
+test import "@source/parser"
 
 
 program ::
@@ -21,7 +23,7 @@ program ::
     `x int :: 123.9
     `y :: "hello"
 
-main proc() void {
+main proc() void! {
     strpool.strings = strpool.init(mem.c_allocator)
     defer strpool.deinit(&strpool.strings)
 
@@ -29,7 +31,6 @@ main proc() void {
 
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-
     lexer.scan(&scan_state, program) catch |err| {
         debug.print("failed to scan: {}\n", {err})
         return
@@ -50,7 +51,7 @@ main proc() void {
 
     parse_state := parser.init(mem.c_allocator)
     defer parser.deinit(&parse_state)
-    parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
+    root :: parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
         debug.print("failed to parse: {}\n", {err})
         return
     }
@@ -71,23 +72,17 @@ main proc() void {
             yield :lbl res.end
         } else token.start
 
-        debug.print("{} (id = {}): {}\n", {
-            node.kind,
-            id,
-            program[token.start..end],
-            #node.data0,
-            #node.data1,
-        })
+        debug.print("{} (id = {}): {}\n", { node.kind, id, program[token.start..end] })
     }
     debug.print("]]\n\n", {})
 
+    renderer := ast_renderer.init(mem.c_allocator)
+    defer ast_renderer.deinit(&renderer)
+    try ast_renderer.render(&renderer, root, &parse_state, scan_state.tokens.items)
+
     debug.print("AST Render::[[\n", {})
-    literal :: ast.render_literal(
-        &parse_state.nodes.items[1],
-        scan_state.tokens.items,
-        program,
-    ) catch "<invalid>"
-    
-    debug.print("generated literal: {}\n", { literal })
+    for renderer.tokens.items |tok| {
+        debug.print("{}\n", {tok.kind})
+    }
     debug.print("]]\n", {})
 }

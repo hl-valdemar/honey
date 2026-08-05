@@ -1,7 +1,6 @@
 import "@std"
 import "@std/mem"
 import "@std/arraylist"
-import "@std/debug"
 import "@std/enums/enummap"
 
 import "@source/lexer"
@@ -32,16 +31,16 @@ error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
     },
 })
 
-hide Token :: alias lexer.Token
-hide TokenId :: alias lexer.TokenId
-hide TokenKind :: alias lexer.TokenKind
-hide Node :: alias ast.Node
-hide NodeId :: alias ast.NodeId
-hide ExtraId :: alias ast.ExtraId
-hide NodeData :: alias ast.NodeData
+hide(file) Token :: alias lexer.Token
+hide(file) TokenId :: alias lexer.TokenId
+hide(file) TokenKind :: alias lexer.TokenKind
+hide(file) Node :: alias ast.Node
+hide(file) NodeId :: alias ast.NodeId
+hide(file) ExtraId :: alias ast.ExtraId
+hide(file) NodeData :: alias ast.NodeData
 
-hide NO_ID_NODE :: alias ast.NO_ID_NODE
-hide NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
+hide(file) NO_ID_NODE :: alias ast.NO_ID_NODE
+hide(file) NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
 
 State :: struct {
     nodes std.ArrayList(Node)
@@ -65,9 +64,9 @@ deinit proc(state @mut State) void {
     arraylist.deinit(&state.extra)
 }
 
-parse proc(state @mut State, tokens []Token) void ! ParseError {
+parse proc(state @mut State, tokens []Token) NodeId ! ParseError {
     state.tokens = tokens
-    _ = try parse_decl(state)
+    return try parse_decl(state)
 }
 
 parse_decl proc(state @mut State) NodeId ! ParseError {
@@ -87,7 +86,7 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
     mutability_tok_id :: try consume(state, .double_colon)
 
     # expect expression
-    expr_id :: try parse_primary(state)
+    expr_id :: try parse_expr(state)
 
     # expect statement terminator (newline)
     _ = try consume_either(state, &[.newline, .eof])
@@ -103,6 +102,10 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
     })
 
     return decl
+}
+
+parse_expr proc(state @mut State) NodeId ! mem.AllocError {
+    return try parse_primary(state)
 }
 
 parse_primary proc(state @mut State) NodeId ! mem.AllocError {
@@ -154,23 +157,13 @@ hide consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! Er
 }
 
 hide add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
-    id :: node_id(nodes.items.len)
+    id :: ast.node_id(nodes.items.len)
     try arraylist.append(nodes, node)
     return id
 }
 
-hide node_id proc(idx uint) NodeId {
-    debug.assert(u64(idx) < u64(NO_ID_NODE))
-    return NodeId(idx)
-}
-
-hide add_extra proc(extra @mut std.ArrayList(u32), idx u32) ExtraId ! mem.AllocError {
-    id :: extra_id(extra.items.len)
-    try arraylist.append(extra, idx)
+hide add_extra proc(extra @mut std.ArrayList(u32), data u32) ExtraId ! mem.AllocError {
+    id :: ast.extra_id(extra.items.len)
+    try arraylist.append(extra, data)
     return id
-}
-
-hide extra_id proc(idx uint) ExtraId {
-    debug.assert(u64(idx) < u64(NO_ID_EXTRA))
-    return ExtraId(idx)
 }

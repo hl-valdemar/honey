@@ -1,7 +1,15 @@
+#! GRAMMAR:
+#! * type ..... -> identifier
+#! * assignment -> :: | :=
+#! * literal .. -> int | float | string
+#! * expr ..... -> identifier | literal
+#! * decl ..... -> identifier [type] assignment expr
+#! * stmt ..... -> decl
+
+import "@std/debug"
 import "@source/lexer"
 
-hide TokenId :: alias lexer.TokenId
-hide Token :: alias lexer.Token
+hide(file) TokenId :: alias lexer.TokenId
 
 NodeId :: distinct u32
 ExtraId :: distinct u32
@@ -44,27 +52,18 @@ NodeKind :: enum {
     # * data0: ExtraId
     #   + extra[data0]: NodeId - type identifier node
     #   + extra[data0 + 1]: NodeId - initializer expression
-    # * data1: TokenId of either `::` or `=` indicating mutability
+    # * data1: TokenId of either `::` or `:=` indicating mutability
     stmt_decl
 
     invalid
 }
 
-# todo: render ast nodes as source code
+node_id proc(idx uint) NodeId {
+    debug.assert(u64(idx) < u64(NO_ID_NODE))
+    return NodeId(idx)
+}
 
-render proc(node @Node, tokens []Token) void { }
-
-render_literal proc(node @Node, tokens []Token, program []u8) []u8 ! lexer.ScanError {
-    tok :: tokens[node.main_token]
-    match node.kind {
-        .literal_int, .literal_float: {
-            result :: try lexer.scan_number(tok.start, program)
-            return program[tok.start..result.end]
-        }
-        .literal_string: {
-            result :: try lexer.scan_string(tok.start, program)
-            return program[tok.start..result.end]
-        }
-        else: unreachable
-    }
+extra_id proc(idx uint) ExtraId {
+    debug.assert(u64(idx) < u64(NO_ID_EXTRA))
+    return ExtraId(idx)
 }

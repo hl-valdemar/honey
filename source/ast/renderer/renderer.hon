@@ -1,0 +1,119 @@
+import "@std"
+import "@std/mem"
+import "@std/arraylist"
+
+import "@source/lexer"
+import "@source/parser"
+import "@source/ast"
+
+hide(file) TokenId :: alias lexer.TokenId
+hide(file) Token :: alias lexer.Token
+hide(file) Node :: alias ast.Node
+hide(file) NodeId :: alias ast.NodeId
+hide(file) ParseState :: alias parser.State
+
+Renderer :: struct { tokens std.ArrayList(Token) }
+
+init proc(allocator mem.Allocator) Renderer {
+    return Renderer{ tokens = arraylist.init(allocator) }
+}
+
+deinit proc(renderer @mut Renderer) void {
+    arraylist.deinit(&renderer.tokens)
+}
+
+render proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) void ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    match node.kind {
+        .stmt_decl: try render_stmt_decl(renderer, node_id, parse_state, tokens)
+        else: unreachable
+    }
+}
+
+render_stmt_decl proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) void ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    tok_ident :: tokens[usize(node.main_token)]
+    try arraylist.append(&renderer.tokens, tok_ident)
+
+    node_id_type :: ast.node_id(parse_state.extra.items[usize(node.data0.extra_id)])
+    try render_type(renderer, node_id_type, parse_state, tokens)
+
+    tok_assign :: tokens[usize(node.data1.token_id)]
+    try arraylist.append(&renderer.tokens, tok_assign)
+
+    node_id_expr :: ast.node_id(parse_state.extra.items[usize(node.data0.extra_id + 1)])
+    last_expr_token :: try render_expr(renderer, node_id_expr, parse_state, tokens)
+
+    terminator_idx :: usize(last_expr_token) + 1
+    tok_terminator :: if (terminator_idx < tokens.len) tokens[terminator_idx] else return
+    try arraylist.append(&renderer.tokens, tok_terminator)
+
+    eof_idx :: terminator_idx + 1
+    if (tok_terminator.kind == .newline and
+        eof_idx < tokens.len and
+        tokens[eof_idx].kind == .eof
+    ) try arraylist.append(&renderer.tokens, tokens[eof_idx])
+}
+
+render_expr proc(renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) TokenId ! mem.AllocError {
+    # todo: support unary and binary expressions
+    node :: parse_state.nodes.items[usize(node_id)]
+    match node.kind {
+        .expr_identifier: {
+            tok :: tokens[usize(node.main_token)]
+            try arraylist.append(&renderer.tokens, tok)
+            return node.main_token
+        }
+        .literal_int, .literal_float, .literal_string:
+            return try render_lit(renderer, node_id, parse_state, tokens)
+        else: unreachable
+    }
+}
+
+render_type proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) void ! mem.AllocError {
+    # todo: support more expressive type expressions...
+    node :: parse_state.nodes.items[usize(node_id)]
+    match node.kind {
+        .expr_identifier: {
+            tok :: tokens[usize(node.main_token)]
+            try arraylist.append(&renderer.tokens, tok)
+        }
+        else: unreachable
+    }
+}
+
+render_lit proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) TokenId ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    match node.kind {
+        .literal_int, .literal_float, .literal_string: {
+            tok :: tokens[node.main_token]
+            try arraylist.append(&renderer.tokens, tok)
+            return node.main_token
+        }
+        else: unreachable
+    }
+}
