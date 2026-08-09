@@ -26,16 +26,19 @@ render proc(
     renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
-    tokens []Token,
+    tokens []Token
 ) void ! mem.AllocError {
     node :: parse_state.nodes.items[usize(node_id)]
     match node.kind {
-        .stmt_decl: try render_stmt_decl(renderer, node_id, parse_state, tokens)
+        .literal_int, .literal_float, .literal_string:
+            _ = try render_lit(renderer, node_id, parse_state, tokens)
+        .stmt_decl:
+            try render_decl(renderer, node_id, parse_state, tokens)
         else: unreachable
     }
 }
 
-render_stmt_decl proc(
+hide render_decl proc(
     renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
@@ -65,7 +68,7 @@ render_stmt_decl proc(
     ) try arraylist.append(&renderer.tokens, tokens[eof_idx])
 }
 
-render_expr proc(renderer @mut Renderer,
+hide render_expr proc(renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
     tokens []Token,
@@ -84,7 +87,7 @@ render_expr proc(renderer @mut Renderer,
     }
 }
 
-render_type proc(
+hide render_type proc(
     renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
@@ -101,19 +104,14 @@ render_type proc(
     }
 }
 
-render_lit proc(
+hide render_lit proc(
     renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
     tokens []Token,
 ) TokenId ! mem.AllocError {
     node :: parse_state.nodes.items[usize(node_id)]
-    match node.kind {
-        .literal_int, .literal_float, .literal_string: {
-            tok :: tokens[node.main_token]
-            try arraylist.append(&renderer.tokens, tok)
-            return node.main_token
-        }
-        else: unreachable
-    }
+    tok :: tokens[node.main_token]
+    try arraylist.append(&renderer.tokens, tok)
+    return node.main_token
 }
