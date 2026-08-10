@@ -9,7 +9,7 @@ InternError :: enum { out_of_space }
 
 StringId :: alias u32
 
-NO_ID :: maxval!(StringId)
+NO_ID_STR :: maxval!(StringId)
 
 StringPool :: struct {
     ids hashmap.StringHashMap(StringId) # string → id
@@ -36,7 +36,7 @@ deinit proc(pool @mut StringPool) void {
 intern proc(pool @mut StringPool, str []u8) StringId ! (mem.AllocError | InternError) {
     if hashmap.get(&pool.ids, str) |id| return id
 
-    if (pool.strings.items.len >= usize(NO_ID)) return .out_of_space
+    if (pool.strings.items.len >= usize(NO_ID_STR)) return .out_of_space
     id StringId :: StringId(pool.strings.items.len)
 
     owned_str []mut u8 :: try mem.alloc(u8, pool.allocator, str.len)

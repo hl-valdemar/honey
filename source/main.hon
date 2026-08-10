@@ -1,6 +1,5 @@
 import "@std/debug"
 import "@std/mem"
-import "@std/enums/enummap"
 
 test import "@std/enums/enummap"
 test import "@std/arraylist"
@@ -20,8 +19,11 @@ test import "@source/parser"
 
 program ::
     `# literals
-    `x int :: 123.9
-    `y :: "hello"
+    `x float :: 123.9
+    `y int := 43
+    `z :: "hello"
+    `
+    `a := 1 + 2 * 3
 
 main proc() void! {
     strpool.strings = strpool.init(mem.c_allocator)
@@ -42,13 +44,6 @@ main proc() void! {
     }
     debug.print("]]\n\n", {})
 
-    debug.print("TOKENS::DIAGNOSTICS::[[\n", {})
-    for scan_state.diagnostics.items |diagnostic| {
-        details :: enummap.get(&lexer.error_msg_map, diagnostic.code)
-        debug.print("{}: {}\n", {details?.name, details?.message})
-    }
-    debug.print("]]\n\n", {})
-
     parse_state := parser.init(mem.c_allocator)
     defer parser.deinit(&parse_state)
     root :: parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
@@ -58,21 +53,7 @@ main proc() void! {
 
     debug.print("AST::[[\n", {})
     for parse_state.nodes.items |node, id| {
-        token :: scan_state.tokens.items[node.main_token]
-
-        end :: if (token.kind == .int or token.kind == .float) lbl: {
-            res :: lexer.scan_number(token.start, program) catch {
-                yield :lbl token.start
-            }
-            yield :lbl res.end
-        } else if (token.kind == .string) lbl: {
-            res :: lexer.scan_string(token.start, program) catch {
-                yield :lbl token.start
-            }
-            yield :lbl res.end
-        } else token.start
-
-        debug.print("{} (id = {}): {}\n", { node.kind, id, program[token.start..end] })
+        debug.print("{} (id = {})\n", { node.kind, id })
     }
     debug.print("]]\n\n", {})
 

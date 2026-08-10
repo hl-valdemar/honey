@@ -58,6 +58,21 @@ NO_ID_NODE :: alias ast.NO_ID_NODE
 @hide:file
 NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
 
+BindingPowerScalar :: distinct u32
+
+BindingPower :: struct {
+    left BindingPowerScalar
+    right BindingPowerScalar
+}
+
+infix_binding_power proc(token_kind TokenKind) ?BindingPower {
+    return match token_kind {
+        .plus, .minus: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
+        .star, .slash: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
+        else: null
+    }
+}
+
 State :: struct {
     nodes std.ArrayList(Node)
 
@@ -65,7 +80,7 @@ State :: struct {
     extra std.ArrayList(u32)
 
     tokens []Token = &[]
-    next_token TokenId = TokenId(0)
+    next_token usize = 0
 }
 
 init proc(allocator mem.Allocator) State {
@@ -82,35 +97,65 @@ deinit proc(state @mut State) void {
 
 parse proc(state @mut State, tokens []Token) NodeId ! ParseError {
     state.tokens = tokens
+    return try parse_pkg(state)
+}
+
+parse_pkg proc(state @mut State) NodeId ! ParseError {
+    if (state.next_token < state.tokens.len
+        and state.tokens[state.next_token].kind == .eof
+    ) return NO_ID_NODE
+
+    stmt_ids std.ArrayList(NodeId) := arraylist.init(state.nodes.allocator)
+    defer arraylist.deinit(&stmt_ids)
+
+    while (state.next_token < state.tokens.len
+        and state.tokens[state.next_token].kind != .eof
+    ) {
+        stmt_id :: try parse_stmt(state)
+        try arraylist.append(&stmt_ids, stmt_id)
+    }
+
+    pkg_start :: ast.extra_id(state.extra.items.len)
+    for (stmt_ids.items) |stmt_id| _ = try add_extra(state, u32(stmt_id))
+    pkg_end :: ast.extra_id(state.extra.items.len)
+
+    package :: try add_node(state, Node{
+        kind = .package,
+        data0 = NodeData{ extra_id = pkg_start },
+        data1 = NodeData{ extra_id = pkg_end },
+    })
+
+    return package
+}
+
+parse_stmt proc(state @mut State) NodeId ! ParseError {
     return try parse_decl(state)
 }
 
 parse_decl proc(state @mut State) NodeId ! ParseError {
     # expect identifier
-    try expect(state, .ident)
-    ident_token :: state.next_token
-    state.next_token += 1
+    ident_token :: try consume(state, .ident)
 
     # check for type
     # todo: make a parse_type proc for this
-    type_id :: if (state.tokens[state.next_token].kind == .ident)
+    type_id :: if (next_is(state, .ident))
         try parse_primary(state)
     else
         NO_ID_NODE
 
-    # expect `::` (immutable assignment)
-    mutability_tok_id :: try consume(state, .double_colon)
+    # expect `::` or `:=` (immutable or mutable assignment)
+    mutability_tok_id :: try consume_either(state, &[.double_colon, .colon_equal])
 
     # expect expression
     expr_id :: try parse_expr(state)
 
     # expect statement terminator (newline)
-    _ = try consume_either(state, &[.newline, .eof])
+    while (next_is(state, .newline)) _ = try consume(state, .newline)
 
-    extra_start :: try add_extra(&state.extra, u32(type_id))
-    _ = try add_extra(&state.extra, u32(expr_id))
+    extra_start :: try add_extra(state, u32(type_id))
+    _ = try add_extra(state, u32(expr_id))
 
-    decl :: try add_node(&state.nodes, Node{
+    decl :: try add_node(state, Node{
         kind = .stmt_decl,
         main_token = ident_token,
         data0 = NodeData{ extra_id = extra_start },
@@ -121,34 +166,66 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
 }
 
 parse_expr proc(state @mut State) NodeId ! mem.AllocError {
-    return try parse_primary(state)
+    return try parse_expr_bp(state, BindingPowerScalar(0))
+}
+
+parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) NodeId ! mem.AllocError {
+    lhs := try parse_primary(state)
+
+    while infix_binding_power(state.tokens[state.next_token].kind) |bp| {
+        if (bp.left < min_bp) break
+
+        operator :: TokenId(state.next_token)
+        state.next_token += 1
+
+        rhs :: try parse_expr_bp(state, bp.right)
+        lhs = try add_node(state, Node{
+            kind = .expr_binary,
+            main_token = operator,
+            data0 = NodeData{ node_id = lhs },
+            data1 = NodeData{ node_id = rhs },
+        })
+    }
+
+    return lhs
 }
 
 parse_primary proc(state @mut State) NodeId ! mem.AllocError {
-    start_token :: state.next_token
+    start_idx :: state.next_token
+    start_token :: TokenId(start_idx)
     state.next_token += 1
-    return match state.tokens[start_token].kind {
-        .int: try add_node(&state.nodes, Node{
+    return match state.tokens[start_idx].kind {
+        .int: try add_node(state, Node{
             kind = .literal_int,
             main_token = start_token,
         })
-        .float: try add_node(&state.nodes, Node{
+        .float: try add_node(state, Node{
             kind = .literal_float,
             main_token = start_token,
         })
-        .string: try add_node(&state.nodes, Node{
+        .string: try add_node(state, Node{
             kind = .literal_string,
             main_token = start_token,
         })
-        .ident: try add_node(&state.nodes, Node{
+        .ident: try add_node(state, Node{
             kind = .expr_identifier,
             main_token = start_token,
         })
-        else: try add_node(&state.nodes, Node{
+        else: try add_node(state, Node{
             kind = .invalid,
             main_token = start_token,
         })
     }
+}
+
+next_is proc(state @mut State, token_kind TokenKind) bool {
+    return state.tokens[state.next_token].kind == token_kind
+}
+
+next_is_either proc(state @mut State, token_kinds []TokenKind) bool {
+    is_either := false
+    for (token_kinds) |kind| is_either = is_either or next_is(state, kind)
+    return is_either
 }
 
 expect proc(state @mut State, token_kind TokenKind) void ! ErrorCode {
@@ -162,24 +239,26 @@ expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorCode {
 
 consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
     try expect(state, token_kind)
+    id :: TokenId(state.next_token)
     state.next_token += 1
-    return state.next_token - 1
+    return id
 }
 
 consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCode {
     try expect_either(state, token_kinds)
+    id :: TokenId(state.next_token)
     state.next_token += 1
-    return state.next_token - 1
-}
-
-add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
-    id :: ast.node_id(nodes.items.len)
-    try arraylist.append(nodes, node)
     return id
 }
 
-add_extra proc(extra @mut std.ArrayList(u32), data u32) ExtraId ! mem.AllocError {
-    id :: ast.extra_id(extra.items.len)
-    try arraylist.append(extra, data)
+add_node proc(state @mut State, node Node) NodeId ! mem.AllocError {
+    id :: ast.node_id(state.nodes.items.len)
+    try arraylist.append(&state.nodes, node)
+    return id
+}
+
+add_extra proc(state @mut State, data u32) ExtraId ! mem.AllocError {
+    id :: ast.extra_id(state.extra.items.len)
+    try arraylist.append(&state.extra, data)
     return id
 }

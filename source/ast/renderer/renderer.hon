@@ -43,7 +43,30 @@ render proc(
             _ = try render_lit(renderer, node_id, parse_state, tokens)
         .stmt_decl:
             try render_decl(renderer, node_id, parse_state, tokens)
+        .package:
+            try render_pkg(renderer, node_id, parse_state, tokens)
         else: unreachable
+    }
+}
+
+@hide:file
+render_pkg proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) void ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    extra_start :: usize(node.data0.extra_id)
+    extra_end :: usize(node.data1.extra_id)
+    for extra_start..extra_end |i| {
+        stmt_node_id :: ast.node_id(parse_state.extra.items[i])
+        stmt_node :: parse_state.nodes.items[usize(stmt_node_id)]
+        match stmt_node.kind {
+            .stmt_decl:
+                try render_decl(renderer, stmt_node_id, parse_state, tokens)
+            else: unreachable
+        }
     }
 }
 
@@ -58,8 +81,9 @@ render_decl proc(
     tok_ident :: tokens[usize(node.main_token)]
     try arraylist.append(&renderer.tokens, tok_ident)
 
-    node_id_type :: ast.node_id(parse_state.extra.items[usize(node.data0.extra_id)])
-    try render_type(renderer, node_id_type, parse_state, tokens)
+    raw_node_id_type :: parse_state.extra.items[usize(node.data0.extra_id)]
+    node_id_type :: ast.maybe_node_id(raw_node_id_type)
+    if (node_id_type) |id| try render_type(renderer, id, parse_state, tokens)
 
     tok_assign :: tokens[usize(node.data1.token_id)]
     try arraylist.append(&renderer.tokens, tok_assign)
@@ -84,18 +108,40 @@ render_expr proc(renderer @mut Renderer,
     parse_state @ParseState,
     tokens []Token,
 ) TokenId ! mem.AllocError {
-    # todo: support unary and binary expressions
+    # todo: support unary expressions
     node :: parse_state.nodes.items[usize(node_id)]
-    match node.kind {
+    return match node.kind {
         .expr_identifier: {
             tok :: tokens[usize(node.main_token)]
             try arraylist.append(&renderer.tokens, tok)
-            return node.main_token
+            yield node.main_token
         }
+        .expr_binary:
+            try render_expr_binary(renderer, node_id, parse_state, tokens)
         .literal_int, .literal_float, .literal_string:
-            return try render_lit(renderer, node_id, parse_state, tokens)
+            try render_lit(renderer, node_id, parse_state, tokens)
         else: unreachable
     }
+}
+
+@hide:file
+render_expr_binary proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) TokenId ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    operator :: node.main_token
+    lhs :: node.data0.node_id
+    rhs :: node.data1.node_id
+
+    # render lhs operator rhs
+    _ = try render_expr(renderer, lhs, parse_state, tokens)
+    try arraylist.append(&renderer.tokens, tokens[usize(operator)])
+    last_token :: try render_expr(renderer, rhs, parse_state, tokens)
+
+    return last_token
 }
 
 @hide:file
@@ -124,7 +170,7 @@ render_lit proc(
     tokens []Token,
 ) TokenId ! mem.AllocError {
     node :: parse_state.nodes.items[usize(node_id)]
-    tok :: tokens[node.main_token]
+    tok :: tokens[usize(node.main_token)]
     try arraylist.append(&renderer.tokens, tok)
     return node.main_token
 }

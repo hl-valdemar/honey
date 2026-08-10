@@ -3,7 +3,6 @@ import "@std/mem"
 import "@std/strmap"
 import "@std/enums/enummap"
 import "@std/arraylist"
-import "@std/debug"
 
 import "@source/strpool"
 
@@ -43,8 +42,6 @@ keywords std.StringMap(TokenKind) :: strmap.init([
     { "while", .while },
 ])
 
-TokenId :: distinct u32
-
 Diagnostic :: struct {
     token TokenId
     code ErrorCode
@@ -68,7 +65,6 @@ deinit proc(state @mut State) void {
 }
 
 scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.InternError) {
-    tokens :: &state.tokens
     diagnostics :: &state.diagnostics
 
     cursor := 0
@@ -77,7 +73,7 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
 
         # whitespace
         if char == '\n' {
-            try add_token(tokens, Token{ kind = .newline, start = cursor })
+            try add_token(state, Token{ start = cursor, kind = .newline })
             cursor += 1
             continue
         } else if is_whitespace(char) {
@@ -96,9 +92,9 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         if is_alpha(char) or char == '_' {
             start :: cursor
             result :: scan_ident(start, program)
-            try add_token(tokens, Token{
-                kind = result.kind,
+            try add_token(state, Token{
                 start = start,
+                kind = result.kind,
                 str_id = result.str_id,
             })
             cursor = result.end
@@ -109,15 +105,15 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         if is_digit(char) {
             start :: cursor
             result :: scan_number(start, program) catch |err| {
-                token :: token_id(tokens.items.len)
-                try add_token(tokens, Token{ kind = .invalid, start = start })
+                token :: token_id(state.tokens.items.len)
+                try add_token(state, Token{ start = start, kind = .invalid })
                 try arraylist.append(diagnostics, Diagnostic{ token = token, code = err.code })
                 cursor = err.end
                 continue
             }
 
             kind :: if (result.has_decimal) .float else .int
-            try add_token(tokens, Token{ kind = kind, start = start })
+            try add_token(state, Token{ start = start, kind = kind })
             cursor = result.end
             continue
         }
@@ -126,68 +122,107 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         if char == '"' {
             start :: cursor
             result :: scan_string(start, program) catch |err| {
-                token :: token_id(tokens.items.len)
-                try add_token(tokens, Token{ kind = .invalid, start = start })
+                token :: token_id(state.tokens.items.len)
+                try add_token(state, Token{ start = start, kind = .invalid })
                 try arraylist.append(diagnostics, Diagnostic{ token = token, code = err.code })
                 cursor = err.end
                 continue
             }
 
-            try add_token(tokens, Token{ kind = .string, start = start })
+            try add_token(state, Token{ start = start, kind = .string })
             cursor = result.end
             continue
         }
 
-        # immutable assignment or single colon
+        # immutable decl, mutable decl, or single colon
         if char == ':' {
             if cursor + 1 < program.len and program[cursor + 1] == ':' {
-                try add_token(tokens, Token{ kind = .double_colon, start = cursor })
+                try add_token(state, Token{ start = cursor, kind = .double_colon })
                 cursor += 2
                 continue
             }
 
-            try add_token(tokens, Token{ kind = .colon, start = cursor })
+            if cursor + 1 < program.len and program[cursor + 1] == '=' {
+                try add_token(state, Token{ start = cursor, kind = .colon_equal })
+                cursor += 2
+                continue
+            }
+
+            try add_token(state, Token{ start = cursor, kind = .colon })
             cursor += 1
             continue
         }
 
-        # mutable reassignment
-        if char == '=' {
-            try add_token(tokens, Token{ kind = .equal, start = cursor })
+        # compound arithmetic assignment
+        if char == '+' {
+            if cursor + 1 < program.len and program[cursor + 1] == '=' {
+                try add_token(state, Token{ start = cursor, kind = .plus_equal })
+                cursor += 2
+                continue
+            }
+
+            try add_token(state, Token{ start = cursor, kind = .plus })
+            cursor += 1
+            continue
+        }
+        if char == '-' {
+            if cursor + 1 < program.len and program[cursor + 1] == '=' {
+                try add_token(state, Token{ start = cursor, kind = .minus_equal })
+                cursor += 2
+                continue
+            }
+
+            try add_token(state, Token{ start = cursor, kind = .minus })
+            cursor += 1
+            continue
+        }
+        if char == '*' {
+            if cursor + 1 < program.len and program[cursor + 1] == '=' {
+                try add_token(state, Token{ start = cursor, kind = .star_equal })
+                cursor += 2
+                continue
+            }
+
+            try add_token(state, Token{ start = cursor, kind = .star })
+            cursor += 1
+            continue
+        }
+        if char == '/' {
+            if cursor + 1 < program.len and program[cursor + 1] == '=' {
+                try add_token(state, Token{ start = cursor, kind = .slash_equal })
+                cursor += 2
+                continue
+            }
+
+            try add_token(state, Token{ start = cursor, kind = .slash })
             cursor += 1
             continue
         }
 
-        # parentheses
-        if char == '(' {
-            try add_token(tokens, Token{ kind = .open_paren, start = cursor })
-            cursor += 1
-            continue
-        } else if char == ')' {
-            try add_token(tokens, Token{ kind = .close_paren, start = cursor })
-            cursor += 1
-            continue
+        # single character tokens
+        kind ?TokenKind :: match char {
+            '=': .equal
+            '(': .open_paren
+            ')': .close_paren
+            '{': .open_curly
+            '}': .close_curly
+            else: null
         }
 
-        # curly braces
-        if char == '{' {
-            try add_token(tokens, Token{ kind = .open_curly, start = cursor })
-            cursor += 1
-            continue
-        } else if char == '}' {
-            try add_token(tokens, Token{ kind = .close_curly, start = cursor })
+        if (kind) |k| {
+            try add_token(state, Token{ start = cursor, kind = k })
             cursor += 1
             continue
         }
 
         # invalid character
-        token :: token_id(tokens.items.len)
+        token :: token_id(state.tokens.items.len)
+        try add_token(state, Token{ start = cursor, kind = .invalid })
         try arraylist.append(diagnostics, Diagnostic{ token = token, code = .invalid_character })
-        try add_token(tokens, Token{ kind = .invalid, start = cursor })
         cursor += 1
     }
 
-    try add_token(tokens, Token{ kind = .eof, start = cursor })
+    try add_token(state, Token{ start = cursor, kind = .eof })
 }
 
 ScanIdentResult :: struct {
@@ -210,9 +245,9 @@ scan_ident proc(start usize, program []u8) ScanIdentResult {
 
     # don't intern keywords (already O(1) lookup via token kind)
     str_id :: if (kind == .ident)
-        strpool.intern(&strpool.strings, program[start..cursor]) catch strpool.NO_ID
+        strpool.intern(&strpool.strings, program[start..cursor]) catch strpool.NO_ID_STR
     else
-        strpool.NO_ID
+        strpool.NO_ID_STR
 
     return ScanIdentResult{
         end = cursor,
@@ -243,7 +278,7 @@ scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
     if has_decimal and (cursor >= program.len or !is_digit(program[cursor])) {
         return ScanError{
             code = .float_must_end_with_digit,
-            end = cursor + 1,
+            end = cursor,
         }
     }
 
@@ -300,13 +335,7 @@ is_digit proc(char u8) bool {
 }
 
 @hide
-add_token proc(tokens @mut std.ArrayList(Token), token Token) void ! mem.AllocError {
-    _ = token_id(tokens.items.len)
-    try arraylist.append(tokens, token)
-}
-
-@hide
-token_id proc(idx uint) TokenId {
-    debug.assert(u64(idx) < u64(maxval!(TokenId)))
-    return TokenId(idx)
+add_token proc(state @mut State, token Token) void ! mem.AllocError {
+    _ = token_id(state.tokens.items.len)
+    try arraylist.append(&state.tokens, token)
 }

@@ -1,9 +1,14 @@
+import "@std/debug"
 import "@source/strpool"
 
+TokenId :: distinct u32
+
+NO_ID_TOKEN :: maxval!(TokenId)
+
 Token :: struct {
-    kind TokenKind
     start uint
-    str_id strpool.StringId = strpool.NO_ID
+    kind TokenKind
+    str_id strpool.StringId = strpool.NO_ID_STR
 }
 
 TokenKind :: enum {
@@ -22,7 +27,16 @@ TokenKind :: enum {
     greater, greater_equal
 
     # assignment
-    equal, double_colon
+    double_colon, colon_equal
+    equal
+
+    # arithmetic
+    plus, minus
+    star, slash
+
+    # assignment & arithmetic
+    plus_equal, minus_equal
+    star_equal, slash_equal
 
     # delimiters
     open_paren, close_paren
@@ -35,4 +49,10 @@ TokenKind :: enum {
     # special
     eof
     invalid
+}
+
+@hide
+token_id proc(idx uint) TokenId {
+    debug.assert(u64(idx) < u64(NO_ID_TOKEN))
+    return TokenId(idx)
 }

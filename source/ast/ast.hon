@@ -12,6 +12,9 @@ import "@source/lexer"
 @hide:file
 TokenId :: alias lexer.TokenId
 
+@hide:file
+NO_ID_TOKEN :: alias lexer.NO_ID_TOKEN
+
 NodeId :: distinct u32
 ExtraId :: distinct u32
 
@@ -28,7 +31,7 @@ NodeData :: union {
 
 Node :: struct {
     kind NodeKind
-    main_token TokenId
+    main_token TokenId = NO_ID_TOKEN
 
     data0 NodeData = NodeData{ node_id = NO_ID_NODE }
     data1 NodeData = NodeData{ node_id = NO_ID_NODE }
@@ -45,7 +48,14 @@ NodeKind :: enum {
     # * main_token: token literal
     expr_identifier
 
+    # UNARY:
+    # todo: document
     expr_unary
+
+    # BINARY:
+    # * main_token: operator
+    # * data0: NodeId - left-hand side
+    # * data1: NodeId - right-hand side
     expr_binary
 
     # DECL:
@@ -56,11 +66,23 @@ NodeKind :: enum {
     # * data1: TokenId of either `::` or `:=` indicating mutability
     stmt_decl
 
+    # PACKAGE:
+    # * data0: ExtraId
+    # * data1: ExtraId
+    # 
+    # extra[data0..data1]: NodeId - all statement node ids in package
+    package
+
     invalid
 }
 
 node_id proc(idx uint) NodeId {
     debug.assert(u64(idx) < u64(NO_ID_NODE))
+    return NodeId(idx)
+}
+
+maybe_node_id proc(idx uint) ?NodeId {
+    if (u64(idx) >= u64(NO_ID_NODE)) return null
     return NodeId(idx)
 }
 
