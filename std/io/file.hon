@@ -44,7 +44,7 @@ writer proc(file File) Writer {
     }
 }
 
-hide system_read proc(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError {
+@hide system_read proc(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError {
     request := buffer.len
     maximum usize :: usize(maxval!(c_long))
     if (request > maximum) request = maximum
@@ -60,7 +60,7 @@ hide system_read proc(_ ?@mut anyopaque, handle Handle, buffer []mut u8) usize !
     }
 }
 
-hide system_write proc(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError {
+@hide system_write proc(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError {
     request := bytes.len
     maximum usize :: usize(maxval!(c_long))
     if (request > maximum) request = maximum
@@ -76,7 +76,7 @@ hide system_write proc(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! Wri
     }
 }
 
-hide system_open proc(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
+@hide system_open proc(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
     flags := c.O_RDONLY
     match mode {
         .read_only: flags = c.O_RDONLY
@@ -90,23 +90,23 @@ hide system_open proc(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! Op
     }
 }
 
-hide system_close proc(_ ?@mut anyopaque, handle Handle) void ! CloseError {
+@hide system_close proc(_ ?@mut anyopaque, handle Handle) void ! CloseError {
     if (c.close(handle.file_desc) != 0) return .close_failed
 }
 
-hide system_stdin proc(_ ?@mut anyopaque) Handle {
+@hide system_stdin proc(_ ?@mut anyopaque) Handle {
     return Handle{ file_desc = c_int(Stream.stdin) }
 }
 
-hide system_stdout proc(_ ?@mut anyopaque) Handle {
+@hide system_stdout proc(_ ?@mut anyopaque) Handle {
     return Handle{ file_desc = c_int(Stream.stdout) }
 }
 
-hide system_stderr proc(_ ?@mut anyopaque) Handle {
+@hide system_stderr proc(_ ?@mut anyopaque) Handle {
     return Handle{ file_desc = c_int(Stream.stderr) }
 }
 
-hide system_vtable IoVTable :: IoVTable {
+@hide system_vtable IoVTable :: IoVTable {
     read = system_read,
     write = system_write,
     open = system_open,
@@ -116,7 +116,7 @@ hide system_vtable IoVTable :: IoVTable {
     stderr = system_stderr,
 }
 
-hide system proc() Io {
+@hide system proc() Io {
     return Io {
         context = null,
         vtable = &system_vtable,

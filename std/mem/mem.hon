@@ -116,11 +116,14 @@ empty proc($T type) []mut T {
     return empty_slice(T, 0)
 }
 
-hide empty_storage [1]mut u64 := [0]
+@hide
+empty_storage [1]mut u64 := [0]
 
-hide malloc_alignment usize :: 16 # note: aarch64-macos libc malloc alignment assumption.
+@hide
+malloc_alignment usize :: 16 # note: aarch64-macos libc malloc alignment assumption.
 
-hide power_of_two proc(value usize) bool {
+@hide:file
+power_of_two proc(value usize) bool {
     if (value == 0) return false
     current := value
     while current > 1 {
@@ -131,7 +134,8 @@ hide power_of_two proc(value usize) bool {
     return true
 }
 
-hide c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+@hide:file
+c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
     if (power_of_two(alignment) == false) return null
     if (alignment <= malloc_alignment) return ptrcast!(u8, c.malloc(c_ulong(size)))
 
@@ -142,7 +146,8 @@ hide c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
     return ptrcast!(u8, memory[0])
 }
 
-hide c_realloc proc(
+@hide:file
+c_realloc proc(
     _ ?@mut anyopaque,
     memory ?*mut u8,
     old_size usize,
@@ -174,11 +179,13 @@ hide c_realloc proc(
     return c_alloc(null, new_size, alignment)
 }
 
-hide c_free proc(_ ?@mut anyopaque, memory ?*mut u8, _ usize, _ usize) void {
+@hide:file
+c_free proc(_ ?@mut anyopaque, memory ?*mut u8, _ usize, _ usize) void {
     c.free(memory)
 }
 
-hide c_vtable AllocatorVTable :: AllocatorVTable {
+@hide:file
+c_vtable AllocatorVTable :: AllocatorVTable {
     alloc = c_alloc,
     realloc = c_realloc,
     free = c_free,

@@ -119,7 +119,8 @@ print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError
     }
 }
 
-hide write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
+@hide:file
+write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
     buffer [65]mut u8 := undefined
     end := buffer.len
     current := value
@@ -150,7 +151,8 @@ hide write_integer_signed proc(output Writer, value i64, base u64, uppercase boo
     try write_all(output, buffer[end..])
 }
 
-hide write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
+@hide:file
+write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
     buffer [65]mut u8 := undefined
     end := buffer.len
     current := value
@@ -173,7 +175,8 @@ hide write_integer_unsigned proc(output Writer, value u64, base u64, uppercase b
     try write_all(output, buffer[end..])
 }
 
-hide FormatTokenKind :: enum {
+@hide:file
+FormatTokenKind :: enum {
     unused
     literal
     default
@@ -187,14 +190,16 @@ hide FormatTokenKind :: enum {
     scientific
 }
 
-hide FormatToken :: struct {
+@hide:file
+FormatToken :: struct {
     kind FormatTokenKind
     start usize
     end usize
     field []u8
 }
 
-hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
+@hide:file
+parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
     tokens [N]mut FormatToken := undefined
     for (usize(0))..format.len |index| {
         tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
@@ -321,18 +326,21 @@ hide parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
     return tokens
 }
 
-hide format_field_name proc($T type, index usize) []u8 {
+@hide:file
+format_field_name proc($T type, index usize) []u8 {
     match typeinfo!(T) {
         .record |r|: return r.fields[index].name
         else: compile_error!("io.print arguments must be a tuple")
     }
 }
 
-hide distinct_value proc($Backing, $Distinct type, value Distinct) Backing {
+@hide:file
+distinct_value proc($Backing, $Distinct type, value Distinct) Backing {
     return ptrcast!(Backing, &value)^
 }
 
-hide scalar_or_distinct_type proc($T type) bool {
+@hide:file
+scalar_or_distinct_type proc($T type) bool {
     match typeinfo!(T) {
         .bool: return true
         .integer: return true
@@ -342,7 +350,8 @@ hide scalar_or_distinct_type proc($T type) bool {
     }
 }
 
-hide write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
+@hide:file
+write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
     match typeinfo!(T) {
         .integer: if minval!(T) < 0 {
             try write_integer_signed(output, i64(value), base, uppercase)
@@ -359,7 +368,8 @@ hide write_integer proc(output Writer, $T type, value T, base u64, uppercase boo
 }
 
 # note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
-hide write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
+@hide:file
+write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
     match typeinfo!(T) {
         .float: {
             buffer [64]mut u8 := undefined
@@ -384,7 +394,8 @@ hide write_float proc(output Writer, $T type, value T, scientific bool) void ! W
     }
 }
 
-hide write_decimal proc(output Writer, $T type, value T) void ! WriteError {
+@hide:file
+write_decimal proc(output Writer, $T type, value T) void ! WriteError {
     match typeinfo!(T) {
         .integer: try write_integer(output, value, 10, false)
         .float: try write_float(output, value, false)
@@ -397,7 +408,8 @@ hide write_decimal proc(output Writer, $T type, value T) void ! WriteError {
     }
 }
 
-hide write_character proc(output Writer, $T type, value T) void ! WriteError {
+@hide:file
+write_character proc(output Writer, $T type, value T) void ! WriteError {
     match typeinfo!(T) {
         .integer: {
             if minval!(T) < 0 or maxval!(T) > 255 {
@@ -415,7 +427,8 @@ hide write_character proc(output Writer, $T type, value T) void ! WriteError {
     }
 }
 
-hide write_default proc(output Writer, $T type, value T) void ! WriteError {
+@hide:file
+write_default proc(output Writer, $T type, value T) void ! WriteError {
     match typeinfo!(T) {
         .bool: if value {
             try write_all(output, "true")

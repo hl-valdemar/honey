@@ -31,16 +31,32 @@ error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
     },
 })
 
-hide(file) Token :: alias lexer.Token
-hide(file) TokenId :: alias lexer.TokenId
-hide(file) TokenKind :: alias lexer.TokenKind
-hide(file) Node :: alias ast.Node
-hide(file) NodeId :: alias ast.NodeId
-hide(file) ExtraId :: alias ast.ExtraId
-hide(file) NodeData :: alias ast.NodeData
+@hide:file
+Token :: alias lexer.Token
 
-hide(file) NO_ID_NODE :: alias ast.NO_ID_NODE
-hide(file) NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
+@hide:file
+TokenId :: alias lexer.TokenId
+
+@hide:file
+TokenKind :: alias lexer.TokenKind
+
+@hide:file
+Node :: alias ast.Node
+
+@hide:file
+NodeId :: alias ast.NodeId
+
+@hide:file
+ExtraId :: alias ast.ExtraId
+
+@hide:file
+NodeData :: alias ast.NodeData
+
+@hide:file
+NO_ID_NODE :: alias ast.NO_ID_NODE
+
+@hide:file
+NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
 
 State :: struct {
     nodes std.ArrayList(Node)
@@ -135,34 +151,34 @@ parse_primary proc(state @mut State) NodeId ! mem.AllocError {
     }
 }
 
-hide expect proc(state @mut State, token_kind TokenKind) void ! ErrorCode {
+expect proc(state @mut State, token_kind TokenKind) void ! ErrorCode {
     if (state.tokens[state.next_token].kind != token_kind) return .unexpected_token
 }
 
-hide expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorCode {
+expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorCode {
     for (token_kinds) |kind| if (state.tokens[state.next_token].kind == kind) return
     return .unexpected_token
 }
 
-hide consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
+consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
     try expect(state, token_kind)
     state.next_token += 1
     return state.next_token - 1
 }
 
-hide consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCode {
+consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCode {
     try expect_either(state, token_kinds)
     state.next_token += 1
     return state.next_token - 1
 }
 
-hide add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
+add_node proc(nodes @mut std.ArrayList(Node), node Node) NodeId ! mem.AllocError {
     id :: ast.node_id(nodes.items.len)
     try arraylist.append(nodes, node)
     return id
 }
 
-hide add_extra proc(extra @mut std.ArrayList(u32), data u32) ExtraId ! mem.AllocError {
+add_extra proc(extra @mut std.ArrayList(u32), data u32) ExtraId ! mem.AllocError {
     id :: ast.extra_id(extra.items.len)
     try arraylist.append(extra, data)
     return id
