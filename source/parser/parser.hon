@@ -218,25 +218,30 @@ parse_primary proc(state @mut State) NodeId ! mem.AllocError {
     }
 }
 
+@hide
 next_is proc(state @mut State, token_kind TokenKind) bool {
     return state.tokens[state.next_token].kind == token_kind
 }
 
+@hide
 next_is_either proc(state @mut State, token_kinds []TokenKind) bool {
     is_either := false
     for (token_kinds) |kind| is_either = is_either or next_is(state, kind)
     return is_either
 }
 
+@hide
 expect proc(state @mut State, token_kind TokenKind) void ! ErrorCode {
     if (state.tokens[state.next_token].kind != token_kind) return .unexpected_token
 }
 
+@hide
 expect_either proc(state @mut State, token_kinds []TokenKind) void ! ErrorCode {
     for (token_kinds) |kind| if (state.tokens[state.next_token].kind == kind) return
     return .unexpected_token
 }
 
+@hide
 consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
     try expect(state, token_kind)
     id :: TokenId(state.next_token)
@@ -244,6 +249,7 @@ consume proc(state @mut State, token_kind TokenKind) TokenId ! ErrorCode {
     return id
 }
 
+@hide
 consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCode {
     try expect_either(state, token_kinds)
     id :: TokenId(state.next_token)
@@ -251,12 +257,14 @@ consume_either proc(state @mut State, token_kinds []TokenKind) TokenId ! ErrorCo
     return id
 }
 
+@hide
 add_node proc(state @mut State, node Node) NodeId ! mem.AllocError {
     id :: ast.node_id(state.nodes.items.len)
     try arraylist.append(&state.nodes, node)
     return id
 }
 
+@hide
 add_extra proc(state @mut State, data u32) ExtraId ! mem.AllocError {
     id :: ast.extra_id(state.extra.items.len)
     try arraylist.append(&state.extra, data)
