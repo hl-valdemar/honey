@@ -53,10 +53,10 @@ ExtraId :: alias ast.ExtraId
 NodeData :: alias ast.NodeData
 
 @hide:file
-NO_ID_NODE :: alias ast.NO_ID_NODE
+NO_NODE :: alias ast.NO_NODE
 
 @hide:file
-NO_ID_EXTRA :: alias ast.NO_ID_EXTRA
+NO_EXTRA :: alias ast.NO_EXTRA
 
 BindingPowerScalar :: distinct u32
 
@@ -103,7 +103,7 @@ parse proc(state @mut State, tokens []Token) NodeId ! ParseError {
 parse_pkg proc(state @mut State) NodeId ! ParseError {
     if (state.next_token < state.tokens.len
         and state.tokens[state.next_token].kind == .eof
-    ) return NO_ID_NODE
+    ) return NO_NODE
 
     stmt_ids std.ArrayList(NodeId) := arraylist.init(state.nodes.allocator)
     defer arraylist.deinit(&stmt_ids)
@@ -141,7 +141,7 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
     type_id :: if (next_is(state, .ident))
         try parse_primary(state)
     else
-        NO_ID_NODE
+        NO_NODE
 
     # expect `::` or `:=` (immutable or mutable assignment)
     mutability_tok_id :: try consume_either(state, &[.double_colon, .colon_equal])

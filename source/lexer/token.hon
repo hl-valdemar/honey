@@ -3,12 +3,12 @@ import "@source/strpool"
 
 TokenId :: distinct u32
 
-NO_ID_TOKEN :: maxval!(TokenId)
+NO_TOKEN :: maxval!(TokenId)
 
 Token :: struct {
     start uint
     kind TokenKind
-    str_id strpool.StringId = strpool.NO_ID_STR
+    str_id strpool.StringId = strpool.NO_STR
 }
 
 TokenKind :: enum {
@@ -51,8 +51,32 @@ TokenKind :: enum {
     invalid
 }
 
+render_token proc(tok Token, program []u8) void {
+    match tok.kind {
+        .ident: {
+            str :: strpool.get_str(&strpool.STRINGS, tok.str_id) orelse "null"
+            debug.print("{}({})\n", {tok.kind, str})
+        }
+        .string: {
+            res :: scan_string(tok.start, program) catch |_| {
+                debug.print("{}({})\n", {tok.kind, "null"})
+                return
+            }
+            debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
+        }
+        .int, .float: {
+            res :: scan_number(tok.start, program) catch |_| {
+                debug.print("{}({})\n", {tok.kind, "null"})
+                return
+            }
+            debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
+        }
+        else: debug.print("{}\n", {tok.kind})
+    }
+}
+
 @hide
 token_id proc(idx uint) TokenId {
-    debug.assert(u64(idx) < u64(NO_ID_TOKEN))
+    debug.assert(u64(idx) < u64(NO_TOKEN))
     return TokenId(idx)
 }

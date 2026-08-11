@@ -3,8 +3,8 @@ import "@std/mem"
 import "@std/testing"
 
 handles_keywords_identifiers_and_error_progress test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
 
     state State := init(mem.c_allocator)
     defer deinit(&state)
@@ -20,5 +20,5 @@ handles_keywords_identifiers_and_error_progress test {
     try testing.expect_equal(TokenKind.string, state.tokens.items[6].kind)
     try testing.expect_equal(TokenKind.eof, state.tokens.items[7].kind)
     try testing.expect_equal(2, state.diagnostics.items.len)
-    try testing.expect_equal("name", strpool.get_str(&strpool.strings, state.tokens.items[1].str_id)?)
+    try testing.expect_equal("name", strpool.get_str(&strpool.STRINGS, state.tokens.items[1].str_id)?)
 }
