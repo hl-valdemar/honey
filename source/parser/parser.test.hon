@@ -36,6 +36,34 @@ handles_package_declarations test {
     }
 }
 
+handles_unary_arithmetic_prefix_expression test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+
+    source ::
+        `first :: -42 + 1
+
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source)
+
+    parse_state := init(mem.c_allocator)
+    defer deinit(&parse_state)
+    root :: try parse(&parse_state, scan_state.tokens.items)
+
+    renderer := ast_renderer.init(mem.c_allocator)
+    defer ast_renderer.deinit(&renderer)
+    try ast_renderer.render(&renderer, root, &parse_state, scan_state.tokens.items)
+
+    try testing.expect_equal(scan_state.tokens.items.len, renderer.tokens.items.len)
+    for scan_state.tokens.items |expected, i| {
+        actual :: renderer.tokens.items[i]
+        try testing.expect_equal(expected.kind, actual.kind)
+        try testing.expect_equal(expected.start, actual.start)
+        try testing.expect_equal(expected.str_id, actual.str_id)
+    }
+}
+
 handles_binary_arithmetic_expression test {
     strpool.STRINGS = strpool.init(mem.c_allocator)
     defer strpool.deinit(&strpool.STRINGS)
