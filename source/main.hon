@@ -51,7 +51,41 @@ main proc() void! {
     }
 
     debug.print("AST::[[\n", {})
-    for (parse_state.nodes.items) |node| debug.print("{}\n", { node.kind })
+    for parse_state.nodes.items |node| {
+        match node.kind {
+            .expr_identifier: {
+                ident :: scan_state.tokens.items[usize(node.main_token)]
+                res :: lexer.scan_ident(ident.start, program)
+                debug.print("{}({})\n", { node.kind, program[ident.start..res.end] })
+            }
+            .literal_int, .literal_float: {
+                lit :: scan_state.tokens.items[usize(node.main_token)]
+                res :: lexer.scan_number(lit.start, program) catch |_| {
+                    debug.print("{}\n", { node.kind })
+                    continue
+                }
+                debug.print("{}({})\n", { node.kind, program[lit.start..res.end] })
+            }
+            .literal_string: {
+                str :: scan_state.tokens.items[usize(node.main_token)]
+                res :: lexer.scan_string(str.start, program) catch |_| {
+                    debug.print("{}\n", { node.kind })
+                    continue
+                }
+                debug.print("{}({})\n", { node.kind, program[str.start..res.end] })
+            }
+            .expr_unary, .expr_binary: {
+                operator :: scan_state.tokens.items[usize(node.main_token)]
+                debug.print("{}({})\n", { node.kind, operator.kind })
+            }
+            .stmt_decl: {
+                ident :: scan_state.tokens.items[usize(node.main_token)]
+                res :: lexer.scan_ident(ident.start, program)
+                debug.print("{}({})\n", { node.kind, program[ident.start..res.end] })
+            }
+            else: debug.print("{}\n", { node.kind })
+        }
+    }
     debug.print("]]\n\n", {})
 
     renderer := ast_renderer.init(mem.c_allocator)
