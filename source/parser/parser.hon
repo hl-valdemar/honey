@@ -2,6 +2,7 @@ import "@std"
 import "@std/mem"
 import "@std/arraylist"
 import "@std/enums/enummap"
+import "@std/debug"
 
 import "@source/lexer"
 import "@source/ast"
@@ -58,6 +59,9 @@ NO_NODE :: alias ast.NO_NODE
 @hide:file
 NO_EXTRA :: alias ast.NO_EXTRA
 
+@hide:file
+token_id :: alias lexer.token_id
+
 BindingPowerScalar :: distinct u32
 
 BindingPower :: struct {
@@ -65,10 +69,24 @@ BindingPower :: struct {
     right BindingPowerScalar
 }
 
+prefix_binding_power proc(token_kind TokenKind) ?BindingPowerScalar {
+    return match token_kind {
+        .minus: BindingPowerScalar(30)
+        else: null
+    }
+}
+
 infix_binding_power proc(token_kind TokenKind) ?BindingPower {
     return match token_kind {
         .plus, .minus: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
         .star, .slash: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
+        else: null
+    }
+}
+
+postfix_binding_power proc(token_kind TokenKind) ?BindingPowerScalar {
+    return match token_kind {
+        .open_paren, .open_bracket: BindingPowerScalar(40)
         else: null
     }
 }
@@ -170,21 +188,59 @@ parse_expr proc(state @mut State) NodeId ! mem.AllocError {
 }
 
 parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) NodeId ! mem.AllocError {
-    lhs := try parse_primary(state)
+    # parse left-hand side
+    kind := state.tokens[state.next_token].kind
 
-    while infix_binding_power(state.tokens[state.next_token].kind) |bp| {
-        if (bp.left < min_bp) break
-
-        operator :: TokenId(state.next_token)
+    lhs := if (prefix_binding_power(kind)) |right_bp| {
+        operator :: token_id(state.next_token)
         state.next_token += 1
 
-        rhs :: try parse_expr_bp(state, bp.right)
-        lhs = try add_node(state, Node{
-            kind = .expr_binary,
+        operand :: try parse_expr_bp(state, right_bp)
+
+        yield try add_node(state, Node{
+            kind = .expr_unary,
             main_token = operator,
-            data0 = NodeData{ node_id = lhs },
-            data1 = NodeData{ node_id = rhs },
+            data0 = NodeData{ node_id = operand },
         })
+    } else {
+        yield try parse_primary(state)
+    }
+
+    # parse right-hand side
+    while true {
+        kind = state.tokens[state.next_token].kind
+
+        # try postfix (higher precedence)
+        if postfix_binding_power(kind) |left_bp| {
+            if (left_bp < min_bp) break
+
+            lhs = match state.tokens[state.next_token].kind {
+                .open_paren: debug.unimplemented() # todo: parse call
+                .open_bracket: debug.unimplemented() # todo: parse index
+                else: unreachable
+            }
+            continue
+        }
+
+        # try infex (lower precedence)
+        if infix_binding_power(kind) |bp| {
+            if (bp.left < min_bp) break
+
+            operator :: token_id(state.next_token)
+            state.next_token += 1
+
+            rhs :: try parse_expr_bp(state, bp.right)
+            lhs = try add_node(state, Node{
+                kind = .expr_binary,
+                main_token = operator,
+                data0 = NodeData{ node_id = lhs },
+                data1 = NodeData{ node_id = rhs },
+            })
+
+            continue
+        }
+
+        break
     }
 
     return lhs

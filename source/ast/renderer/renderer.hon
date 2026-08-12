@@ -116,12 +116,32 @@ render_expr proc(renderer @mut Renderer,
             try arraylist.append(&renderer.tokens, tok)
             yield node.main_token
         }
+        .expr_unary:
+            try render_expr_unary(renderer, node_id, parse_state, tokens)
         .expr_binary:
             try render_expr_binary(renderer, node_id, parse_state, tokens)
         .literal_int, .literal_float, .literal_string:
             try render_lit(renderer, node_id, parse_state, tokens)
         else: unreachable
     }
+}
+
+@hide:file
+render_expr_unary proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) TokenId ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    operator :: node.main_token
+    operand :: node.data0.node_id
+
+    # render operator operand
+    try arraylist.append(&renderer.tokens, tokens[usize(operator)])
+    last_token :: try render_expr(renderer, operand, parse_state, tokens)
+
+    return last_token
 }
 
 @hide:file
