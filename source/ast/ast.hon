@@ -59,13 +59,32 @@ NodeKind :: enum {
     # * data1: NodeId - right-hand side
     expr_binary
 
-    # DECL:
+    # STATEMENT DECLS:
     # * main_token: symbol name (identifier)
     # * data0: ExtraId
-    #   + extra[data0]: NodeId - type identifier node
+    #   + extra[data0]: NodeId - type expr or NO_NODE
     #   + extra[data0 + 1]: NodeId - initializer expression
     # * data1: TokenId of either `::` or `:=` indicating mutability
     stmt_decl
+
+    # FUNC DECLS:
+    # * main_token: function name (identifier)
+    # * data0: NodeId - body block (or NO_NODE for extern)
+    # * data1: ExtraId
+    #   + extra[data1]: NodeId - return type
+    #   + extra[data1 + 1]: u32 - param count
+    #   + extra[data1 + 2..]: NodeId - param decls
+    func_decl
+
+    # PARAM DECLS:
+    # * main_token: param name (identifier)
+    # * data0: NodeId - param type
+    param_decl
+
+    # BLOCK:
+    # * data0: ExtraId - statement range start
+    # * data1: ExtraId - statement range end
+    block
 
     # PACKAGE:
     # * data0: ExtraId

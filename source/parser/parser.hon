@@ -32,35 +32,16 @@ error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
     },
 })
 
-@hide:file
-Token :: alias lexer.Token
-
-@hide:file
-TokenId :: alias lexer.TokenId
-
-@hide:file
-TokenKind :: alias lexer.TokenKind
-
-@hide:file
-Node :: alias ast.Node
-
-@hide:file
-NodeId :: alias ast.NodeId
-
-@hide:file
-ExtraId :: alias ast.ExtraId
-
-@hide:file
-NodeData :: alias ast.NodeData
-
-@hide:file
-NO_NODE :: alias ast.NO_NODE
-
-@hide:file
-NO_EXTRA :: alias ast.NO_EXTRA
-
-@hide:file
-token_id :: alias lexer.token_id
+@hide:file Token :: alias lexer.Token
+@hide:file TokenId :: alias lexer.TokenId
+@hide:file TokenKind :: alias lexer.TokenKind
+@hide:file Node :: alias ast.Node
+@hide:file NodeId :: alias ast.NodeId
+@hide:file ExtraId :: alias ast.ExtraId
+@hide:file NodeData :: alias ast.NodeData
+@hide:file NO_NODE :: alias ast.NO_NODE
+@hide:file NO_EXTRA :: alias ast.NO_EXTRA
+@hide:file token_id :: alias lexer.token_id
 
 BindingPowerScalar :: distinct u32
 
@@ -129,7 +110,7 @@ parse_pkg proc(state @mut State) NodeId ! ParseError {
     while (state.next_token < state.tokens.len
         and state.tokens[state.next_token].kind != .eof
     ) {
-        stmt_id :: try parse_stmt(state)
+        stmt_id :: try parse_decl(state)
         try arraylist.append(&stmt_ids, stmt_id)
     }
 
@@ -137,22 +118,112 @@ parse_pkg proc(state @mut State) NodeId ! ParseError {
     for (stmt_ids.items) |stmt_id| _ = try add_extra(state, u32(stmt_id))
     pkg_end :: ast.extra_id(state.extra.items.len)
 
-    package :: try add_node(state, Node{
+    return try add_node(state, Node{
         kind = .package,
         data0 = NodeData{ extra_id = pkg_start },
         data1 = NodeData{ extra_id = pkg_end },
     })
-
-    return package
-}
-
-parse_stmt proc(state @mut State) NodeId ! ParseError {
-    return try parse_decl(state)
 }
 
 parse_decl proc(state @mut State) NodeId ! ParseError {
+    if next_n_is(state, 1, .proc)
+        return try parse_func_decl(state)
+    else
+        return try parse_stmt_decl(state)
+}
+
+parse_func_decl proc(state @mut State) NodeId ! ParseError {
+    ident_tok_id :: try consume(state, .ident)
+    _ = try consume(state, .proc)
+    _ = try consume(state, .open_paren)
+
+    param_decls std.ArrayList(NodeId) := arraylist.init(state.nodes.allocator)
+    defer arraylist.deinit(&param_decls)
+
+    ident_ids std.ArrayList(TokenId) := arraylist.init(state.nodes.allocator)
+    defer arraylist.deinit(&ident_ids)
+
+    while !next_is(state, .close_paren) {
+        arraylist.clear(&ident_ids)
+
+        # collect param group
+        while true {
+            param_tok_id :: try consume(state, .ident)
+            try arraylist.append(&ident_ids, param_tok_id)
+
+            if next_is(state, .ident) break
+            _ = try consume(state, .comma)
+        }
+
+        # collect type
+        try expect(state, .ident)
+        type_id :: try parse_primary(state)
+        for (ident_ids.items) |id| {
+            param_decl :: try add_node(state, Node{
+                kind = .param_decl,
+                main_token = id,
+                data0 = NodeData{ node_id = type_id },
+            })
+            try arraylist.append(&param_decls, param_decl)
+        }
+
+        if next_is(state, .comma) _ = try consume(state, .comma)
+    }
+
+    _ = try consume(state, .close_paren)
+
+    try expect(state, .ident)
+    return_type_id :: try parse_primary(state)
+    block_id :: try parse_block(state)
+
+    while next_is(state, .newline) _ = try consume(state, .newline)
+
+    extra_id :: try add_extra(state, u32(return_type_id))
+    _ = try add_extra(state, u32(param_decls.items.len))
+    for (param_decls.items) |param| _ = try add_extra(state, u32(param))
+
+    return try add_node(state, Node{
+        kind = .func_decl,
+        main_token = ident_tok_id,
+        data0 = NodeData{ node_id = block_id },
+        data1 = NodeData{ extra_id = extra_id },
+    })
+}
+
+parse_block proc(state @mut State) NodeId ! ParseError {
+    stmt_ids std.ArrayList(NodeId) := arraylist.init(state.nodes.allocator)
+    defer arraylist.deinit(&stmt_ids)
+
+    _ = try consume(state, .open_curly)
+    while next_is(state, .newline) _ = try consume(state, .newline)
+
+    while !next_is(state, .close_curly) {
+        stmt_id :: try parse_stmt(state)
+        try arraylist.append(&stmt_ids, stmt_id)
+        while next_is(state, .newline) _ = try consume(state, .newline)
+    }
+
+    _ = try consume(state, .close_curly)
+
+    block_start :: ast.extra_id(state.extra.items.len)
+    for (stmt_ids.items) |id| _ = try add_extra(state, u32(id))
+    block_end :: ast.extra_id(state.extra.items.len)
+
+    return try add_node(state, Node{
+        kind = .block,
+        data0 = NodeData{ extra_id = block_start },
+        data1 = NodeData{ extra_id = block_end },
+    })
+}
+
+parse_stmt proc(state @mut State) NodeId ! ParseError {
+    if next_is(state, .ident) return try parse_stmt_decl(state)
+    return .unexpected_token
+}
+
+parse_stmt_decl proc(state @mut State) NodeId ! ParseError {
     # expect identifier
-    ident_token :: try consume(state, .ident)
+    ident_tok_id :: try consume(state, .ident)
 
     # check for type
     # todo: make a parse_type proc for this
@@ -170,17 +241,15 @@ parse_decl proc(state @mut State) NodeId ! ParseError {
     # expect statement terminator (newline)
     while (next_is(state, .newline)) _ = try consume(state, .newline)
 
-    extra_start :: try add_extra(state, u32(type_id))
+    extra_start_id :: try add_extra(state, u32(type_id))
     _ = try add_extra(state, u32(expr_id))
 
-    decl :: try add_node(state, Node{
+    return try add_node(state, Node{
         kind = .stmt_decl,
-        main_token = ident_token,
-        data0 = NodeData{ extra_id = extra_start },
+        main_token = ident_tok_id,
+        data0 = NodeData{ extra_id = extra_start_id },
         data1 = NodeData{ token_id = mutability_tok_id },
     })
-
-    return decl
 }
 
 parse_expr proc(state @mut State) NodeId ! mem.AllocError {
@@ -248,28 +317,28 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) NodeId ! mem.All
 
 parse_primary proc(state @mut State) NodeId ! mem.AllocError {
     start_idx :: state.next_token
-    start_token :: TokenId(start_idx)
+    start_tok_id :: TokenId(start_idx)
     state.next_token += 1
     return match state.tokens[start_idx].kind {
         .int: try add_node(state, Node{
             kind = .literal_int,
-            main_token = start_token,
+            main_token = start_tok_id,
         })
         .float: try add_node(state, Node{
             kind = .literal_float,
-            main_token = start_token,
+            main_token = start_tok_id,
         })
         .string: try add_node(state, Node{
             kind = .literal_string,
-            main_token = start_token,
+            main_token = start_tok_id,
         })
         .ident: try add_node(state, Node{
             kind = .expr_identifier,
-            main_token = start_token,
+            main_token = start_tok_id,
         })
         else: try add_node(state, Node{
             kind = .invalid,
-            main_token = start_token,
+            main_token = start_tok_id,
         })
     }
 }
@@ -281,9 +350,13 @@ next_is proc(state @mut State, token_kind TokenKind) bool {
 
 @hide
 next_is_either proc(state @mut State, token_kinds []TokenKind) bool {
-    is_either := false
-    for (token_kinds) |kind| is_either = is_either or next_is(state, kind)
-    return is_either
+    for (token_kinds) |kind| if next_is(state, kind) return true
+    return false
+}
+
+@hide
+next_n_is proc(state @mut State, n usize, token_kind TokenKind) bool {
+    return state.tokens[state.next_token + n].kind == token_kind
 }
 
 @hide

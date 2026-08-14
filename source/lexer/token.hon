@@ -43,6 +43,7 @@ TokenKind :: enum {
     open_bracket, close_bracket
     open_curly, close_curly
 
+    comma
     colon
     newline
 
@@ -54,8 +55,12 @@ TokenKind :: enum {
 render_token proc(tok Token, program []u8) void {
     match tok.kind {
         .ident: {
-            str :: strpool.get_str(&strpool.STRINGS, tok.str_id) orelse "null"
-            debug.print("{}({})\n", {tok.kind, str})
+            if (strpool.get_str(&strpool.STRINGS, tok.str_id)) |str| {
+                debug.print("{}({})\n", {tok.kind, str})
+            } else {
+                res :: scan_ident(tok.start, program)
+                debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
+            }
         }
         .string: {
             res :: scan_string(tok.start, program) catch |_| {

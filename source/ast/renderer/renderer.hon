@@ -6,20 +6,11 @@ import "@source/lexer"
 import "@source/parser"
 import "@source/ast"
 
-@hide:file
-TokenId :: alias lexer.TokenId
-
-@hide:file
-Token :: alias lexer.Token
-
-@hide:file
-Node :: alias ast.Node
-
-@hide:file
-NodeId :: alias ast.NodeId
-
-@hide:file
-ParseState :: alias parser.State
+@hide:file TokenId :: alias lexer.TokenId
+@hide:file Token :: alias lexer.Token
+@hide:file Node :: alias ast.Node
+@hide:file NodeId :: alias ast.NodeId
+@hide:file ParseState :: alias parser.State
 
 Renderer :: struct { tokens std.ArrayList(Token) }
 
@@ -42,7 +33,9 @@ render_token_stream proc(
         .literal_int, .literal_float, .literal_string:
             _ = try render_lit(renderer, node_id, parse_state, tokens)
         .stmt_decl:
-            try render_decl(renderer, node_id, parse_state, tokens)
+            try render_stmt_decl(renderer, node_id, parse_state, tokens)
+        .func_decl:
+            try render_func_decl(renderer, node_id, parse_state, tokens)
         .package:
             try render_pkg(renderer, node_id, parse_state, tokens)
         else: unreachable
@@ -64,14 +57,16 @@ render_pkg proc(
         stmt_node :: parse_state.nodes.items[usize(stmt_node_id)]
         match stmt_node.kind {
             .stmt_decl:
-                try render_decl(renderer, stmt_node_id, parse_state, tokens)
+                try render_stmt_decl(renderer, stmt_node_id, parse_state, tokens)
+            .func_decl:
+                try render_func_decl(renderer, stmt_node_id, parse_state, tokens)
             else: unreachable
         }
     }
 }
 
 @hide:file
-render_decl proc(
+render_stmt_decl proc(
     renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
@@ -93,6 +88,7 @@ render_decl proc(
 
     terminator_idx :: usize(last_expr_token) + 1
     tok_terminator :: if (terminator_idx < tokens.len) tokens[terminator_idx] else return
+    if (tok_terminator.kind != .newline and tok_terminator.kind != .eof) return
     try arraylist.append(&renderer.tokens, tok_terminator)
 
     eof_idx :: terminator_idx + 1
@@ -103,7 +99,134 @@ render_decl proc(
 }
 
 @hide:file
-render_expr proc(renderer @mut Renderer,
+render_func_decl proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    parse_state @ParseState,
+    tokens []Token,
+) void ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    ident_idx :: usize(node.main_token)
+    try arraylist.append(&renderer.tokens, tokens[ident_idx])
+    try arraylist.append(&renderer.tokens, tokens[ident_idx + 1])
+    try arraylist.append(&renderer.tokens, tokens[ident_idx + 2])
+
+    payload_start :: usize(node.data1.extra_id)
+    param_count :: usize(parse_state.extra.items[payload_start + 1])
+    first_param :: payload_start + 2
+    for 0..param_count |i| {
+        param_id :: ast.node_id(parse_state.extra.items[first_param + i])
+        param_node :: parse_state.nodes.items[usize(param_id)]
+        type_id :: param_node.data0.node_id
+        type_node :: parse_state.nodes.items[usize(type_id)]
+        try arraylist.append(&renderer.tokens, tokens[usize(param_node.main_token)])
+
+        has_next :: i + 1 < param_count
+        if has_next {
+            next_param_id :: ast.node_id(parse_state.extra.items[first_param + i + 1])
+            next_param :: parse_state.nodes.items[usize(next_param_id)]
+            if (next_param.data0.node_id == type_id) {
+                try arraylist.append(
+                    &renderer.tokens,
+                    tokens[usize(param_node.main_token) + 1],
+                )
+                continue
+            }
+        }
+
+        try render_type(renderer, type_id, parse_state, tokens)
+        if has_next {
+            try arraylist.append(
+                &renderer.tokens,
+                tokens[usize(type_node.main_token) + 1],
+            )
+        }
+    }
+
+    return_type_id :: ast.node_id(parse_state.extra.items[payload_start])
+    return_type_node :: parse_state.nodes.items[usize(return_type_id)]
+    try arraylist.append(
+        &renderer.tokens,
+        tokens[usize(return_type_node.main_token) - 1],
+    )
+    try render_type(renderer, return_type_id, parse_state, tokens)
+
+    open_curly_id :: TokenId(usize(return_type_node.main_token) + 1)
+    close_curly_id :: try render_block(
+        renderer,
+        node.data0.node_id,
+        open_curly_id,
+        parse_state,
+        tokens,
+    )
+
+    terminator_idx :: usize(close_curly_id) + 1
+    if (terminator_idx >= tokens.len) return
+    tok_terminator :: tokens[terminator_idx]
+    if (tok_terminator.kind != .newline and tok_terminator.kind != .eof) return
+    try arraylist.append(&renderer.tokens, tok_terminator)
+
+    eof_idx :: terminator_idx + 1
+    if (tok_terminator.kind == .newline and
+        eof_idx < tokens.len and
+        tokens[eof_idx].kind == .eof
+    ) try arraylist.append(&renderer.tokens, tokens[eof_idx])
+}
+
+@hide:file
+render_block proc(
+    renderer @mut Renderer,
+    node_id NodeId,
+    open_curly_id TokenId,
+    parse_state @ParseState,
+    tokens []Token,
+) TokenId ! mem.AllocError {
+    node :: parse_state.nodes.items[usize(node_id)]
+    open_curly_idx :: usize(open_curly_id)
+    try arraylist.append(&renderer.tokens, tokens[open_curly_idx])
+
+    leading_token := open_curly_idx + 1
+    while (leading_token < tokens.len and tokens[leading_token].kind == .newline) {
+        try arraylist.append(&renderer.tokens, tokens[leading_token])
+        leading_token += 1
+    }
+
+    extra_start :: usize(node.data0.extra_id)
+    extra_end :: usize(node.data1.extra_id)
+    for extra_start..extra_end |i| {
+        stmt_id :: ast.node_id(parse_state.extra.items[i])
+        stmt :: parse_state.nodes.items[usize(stmt_id)]
+        match stmt.kind {
+            .stmt_decl:
+                try render_stmt_decl(renderer, stmt_id, parse_state, tokens)
+            else: unreachable
+        }
+    }
+
+    # ponytail: linear delimiter scan; store brace tokens if nested blocks make rendering hot.
+    depth usize := 1
+    close_curly_idx := open_curly_idx + 1
+    while close_curly_idx < tokens.len {
+        match tokens[close_curly_idx].kind {
+            .open_curly: depth += 1
+            .close_curly: {
+                depth -= 1
+                if (depth == 0) {
+                    try arraylist.append(&renderer.tokens, tokens[close_curly_idx])
+                    return TokenId(close_curly_idx)
+                }
+            }
+            else: {}
+        }
+        close_curly_idx += 1
+    }
+    unreachable
+}
+
+
+@hide:file
+render_expr proc(
+    renderer @mut Renderer,
     node_id NodeId,
     parse_state @ParseState,
     tokens []Token,

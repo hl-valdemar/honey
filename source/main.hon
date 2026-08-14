@@ -25,6 +25,11 @@ program ::
     `
     `a := 1 + 2 * 3
     `b :: -3 / 2 + 1
+    `
+    `empty proc() void {}
+    `grouped proc(a, b T, c U) void {
+    `    value int :: 1
+    `}
 
 main proc() void! {
     strpool.STRINGS = strpool.init(mem.c_allocator)
@@ -51,39 +56,47 @@ main proc() void! {
     }
 
     debug.print("AST::[[\n", {})
-    for parse_state.nodes.items |node| {
+    for parse_state.nodes.items |node, i| {
         match node.kind {
             .expr_identifier: {
                 ident :: scan_state.tokens.items[usize(node.main_token)]
                 res :: lexer.scan_ident(ident.start, program)
-                debug.print("{}({})\n", { node.kind, program[ident.start..res.end] })
+                debug.print("{}: {}({})\n", { i, node.kind, program[ident.start..res.end] })
             }
             .literal_int, .literal_float: {
                 lit :: scan_state.tokens.items[usize(node.main_token)]
                 res :: lexer.scan_number(lit.start, program) catch |_| {
-                    debug.print("{}\n", { node.kind })
+                    debug.print("{}: {}\n", { i, node.kind })
                     continue
                 }
-                debug.print("{}({})\n", { node.kind, program[lit.start..res.end] })
+                debug.print("{}: {}({})\n", { i, node.kind, program[lit.start..res.end] })
             }
             .literal_string: {
                 str :: scan_state.tokens.items[usize(node.main_token)]
                 res :: lexer.scan_string(str.start, program) catch |_| {
-                    debug.print("{}\n", { node.kind })
+                    debug.print("{}: {}\n", { i, node.kind })
                     continue
                 }
-                debug.print("{}({})\n", { node.kind, program[str.start..res.end] })
+                debug.print("{}: {}({})\n", { i, node.kind, program[str.start..res.end] })
             }
-            .expr_unary, .expr_binary: {
+            .expr_unary: {
                 operator :: scan_state.tokens.items[usize(node.main_token)]
-                debug.print("{}({})\n", { node.kind, operator.kind })
+                operand :: node.data0.node_id
+                debug.print("{}: {}({}, operand={})\n", { i, node.kind, operator.kind, operand })
+            }
+            .expr_binary: {
+                operator :: scan_state.tokens.items[usize(node.main_token)]
+                lhs :: node.data0.node_id
+                rhs :: node.data1.node_id
+                debug.print("{}: {}({}, lhs={}, rhs={})\n", { i, node.kind, operator.kind, lhs, rhs })
             }
             .stmt_decl: {
                 ident :: scan_state.tokens.items[usize(node.main_token)]
+                init :: parse_state.extra.items[usize(node.data0.extra_id) + 1]
                 res :: lexer.scan_ident(ident.start, program)
-                debug.print("{}({})\n", { node.kind, program[ident.start..res.end] })
+                debug.print("{}: {}({}, init={})\n", { i, node.kind, program[ident.start..res.end], init })
             }
-            else: debug.print("{}\n", { node.kind })
+            else: debug.print("{}: {}\n", { i, node.kind })
         }
     }
     debug.print("]]\n\n", {})
