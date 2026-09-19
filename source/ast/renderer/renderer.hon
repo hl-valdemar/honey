@@ -15,11 +15,50 @@ deinit proc(renderer @mut Renderer) void {
 }
 
 render proc(renderer @mut Renderer, tree @ast.Tree) void ! mem.AllocError {
-    _ = tree
     arraylist.clear(&renderer.bytes)
     try append_text(renderer, "package\n")
+    for 0..ast.package_decl_count(tree) |index| {
+        declaration :: ast.package_decl(tree, index)
+        match ast.decl_kind(tree, declaration) {
+            .statement: try render_statement(renderer, tree, declaration, "  ")
+            .function: try render_function(renderer, tree, declaration)
+            .invalid: try append_text(renderer, "  invalid declaration\n")
+        }
+    }
 }
 
+@hide:file
+render_function proc(
+    renderer @mut Renderer,
+    tree @ast.Tree,
+    declaration ast.NodeId,
+) void ! mem.AllocError {
+    function :: ast.function_decl(tree, declaration)
+    try append_text(renderer, "  function ")
+    try append_text(renderer, ast.source_text(tree, function.name))
+    try append_text(renderer, "\n")
+    for 0..ast.block_statement_count(tree, function.body) |index| {
+        statement :: ast.block_statement(tree, function.body, index)
+        match ast.stmt_kind(tree, statement) {
+            .declaration: try render_statement(renderer, tree, statement, "    ")
+            .invalid: try append_text(renderer, "    invalid statement\n")
+        }
+    }
+}
+
+@hide:file
+render_statement proc(
+    renderer @mut Renderer,
+    tree @ast.Tree,
+    declaration ast.NodeId,
+    indent []u8,
+) void ! mem.AllocError {
+    statement :: ast.statement_decl(tree, declaration)
+    try append_text(renderer, indent)
+    try append_text(renderer, "declaration ")
+    try append_text(renderer, ast.source_text(tree, statement.name))
+    try append_text(renderer, "\n")
+}
 
 @hide:file
 append_text proc(renderer @mut Renderer, text []u8) void ! mem.AllocError {

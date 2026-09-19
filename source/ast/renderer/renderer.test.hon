@@ -1,0 +1,27 @@
+import "@std/mem"
+import "@std/testing"
+import "@source/ast"
+
+renders_semantic_debug_view test {
+    builder := ast.init_builder(mem.c_allocator, "value :: 42")
+    defer ast.deinit_builder(&builder)
+    value :: try ast.add_literal(&builder, .int, ast.Span{ start = 9, end = 11 })
+    declaration :: try ast.add_statement_decl(
+        &builder,
+        ast.Span{ start = 0, end = 11 },
+        ast.Span{ start = 0, end = 5 },
+        null,
+        .constant,
+        value,
+    )
+    declarations [1]ast.NodeId := [declaration]
+    package :: try ast.add_package(&builder, ast.Span{ start = 0, end = 11 }, declarations[..])
+    tree := ast.finish(&builder, package)
+    defer ast.deinit(&tree)
+    renderer := init(mem.c_allocator)
+    defer deinit(&renderer)
+
+    try render(&renderer, &tree)
+
+    try testing.expect(mem.eql(u8, "package\n  declaration value\n", renderer.bytes.items))
+}
