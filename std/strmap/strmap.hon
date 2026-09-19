@@ -1,6 +1,6 @@
 import "@std/mem"
 
-StringMap proc($V type) type {
+StaticStringMap proc($V type) type {
     return struct {
         keys [][]u8
         values []V
@@ -16,7 +16,7 @@ Pair proc($V type) type {
 }
 
 #! initializes a static string map from a list of key-value pairs (constructed at compile-time).
-init proc($V type, $N usize, $entries [N]Pair(V)) StringMap(V) {
+init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
     if N > usize(maxval!(u32)) {
         compile_error!("static string map has too many entries")
     }
@@ -40,7 +40,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StringMap(V) {
 
     if N == 0 {
         len_indexes [0]u32 := undefined
-        return StringMap(V){
+        return StaticStringMap(V){
             keys = keys[..],
             values = values[..],
             len_indexes = len_indexes[..],
@@ -71,7 +71,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StringMap(V) {
         len_indexes[length] = u32(entry_index)
     }
 
-    return StringMap(V) {
+    return StaticStringMap(V) {
         keys = keys[..],
         values = values[..],
         len_indexes = len_indexes[..],
@@ -80,7 +80,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StringMap(V) {
     }
 }
 
-get proc($V type, map @StringMap(V), key []u8) ?V {
+get proc($V type, map @StaticStringMap(V), key []u8) ?V {
     if (map.keys.len == 0 or key.len > maxval!(u32)) return null
 
     length := u32(key.len)
