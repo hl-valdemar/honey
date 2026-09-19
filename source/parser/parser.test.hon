@@ -66,3 +66,26 @@ parses_function_structure_through_tree_views test {
     try testing.expect_equal(0, diagnostics.len(&diagnostic_store))
 }
 
+recovers_invalid_declaration_and_preserves_sibling test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "@ broken\nvalid :: 1\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+
+    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    invalid_decl :: ast.package_decl(&tree, 0)
+    valid_decl :: ast.package_decl(&tree, 1)
+    try testing.expect_equal(ast.DeclKind.invalid, ast.decl_kind(&tree, invalid_decl))
+    try testing.expect_equal(ast.DeclKind.statement, ast.decl_kind(&tree, valid_decl))
+    invalid_view :: ast.invalid(&tree, invalid_decl)
+    try testing.expect(diagnostics.get(&diagnostic_store, invalid_view.diagnostic) != null)
+    valid_statement :: ast.statement_decl(&tree, valid_decl)
+    try testing.expect_equal("valid", ast.source_text(&tree, valid_statement.name))
+}

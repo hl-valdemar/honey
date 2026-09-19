@@ -34,7 +34,7 @@ parse proc(
     source []u8,
     diagnostic_store @mut diagnostics.Store,
     allocator mem.Allocator,
-) ast.Tree ! ParseError {
+) ast.Tree ! (mem.AllocError | diagnostics.CapacityError) {
     state := State{
         builder = ast.init_builder(allocator, source),
         diagnostics = diagnostic_store,
@@ -48,13 +48,24 @@ parse proc(
 }
 
 @hide:file
-parse_package proc(state @mut State) ast.NodeId ! ParseError {
+parse_package proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     declarations arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&declarations)
 
     skip_newlines(state)
     while !next_is(state, .eof) {
-        declaration :: try parse_decl(state)
+        start :: state.next_token
+        declaration := parse_decl(state) catch |err| {
+            match err {
+                .unexpected_token: {
+                    recovered :: try recover_decl(state, start)
+                    try arraylist.append(&declarations, recovered)
+                    skip_newlines(state)
+                    continue
+                }
+                else: return err
+            }
+        }
         try arraylist.append(&declarations, declaration)
         skip_newlines(state)
     }
@@ -130,7 +141,18 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
     skip_newlines(state)
     while !next_is(state, .close_curly) and !next_is(state, .eof) {
-        statement :: try parse_statement(state)
+        start :: state.next_token
+        statement := parse_statement(state) catch |err| {
+            match err {
+                .unexpected_token: {
+                    recovered :: try recover_statement(state, start)
+                    try arraylist.append(&statements, recovered)
+                    skip_newlines(state)
+                    continue
+                }
+                else: return err
+            }
+        }
         try arraylist.append(&statements, statement)
         skip_newlines(state)
     }
@@ -180,12 +202,12 @@ parse_type proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-parse_expr proc(state @mut State) ast.NodeId ! ParseError {
+parse_expr proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     return try parse_expr_bp(state, BindingPowerScalar(0))
 }
 
 @hide:file
-parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! ParseError {
+parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     token := current(state)
     left := if (prefix_binding_power(token.kind)) |right_bp| {
         state.next_token += 1
@@ -224,7 +246,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
 }
 
 @hide:file
-parse_primary proc(state @mut State) ast.NodeId ! ParseError {
+parse_primary proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     token :: current(state)
     match token.kind {
         .int: {
@@ -243,10 +265,48 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             state.next_token += 1
             return try ast.add_identifier(&state.builder, token.span)
         }
-        else: return .unexpected_token
+        else: {
+            diagnostic :: if (token.data.diagnostic != diagnostics.NO_DIAGNOSTIC)
+                token.data.diagnostic
+            else
+                try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
+            if (token.kind != .newline and token.kind != .close_curly and token.kind != .eof) {
+                state.next_token += 1
+            }
+            return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
+        }
     }
 }
 
+@hide:file
+recover_decl proc(state @mut State, start usize) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+    diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+    span :: synchronize(state, start, false)
+    return try ast.add_invalid_decl(&state.builder, span, diagnostic)
+}
+
+@hide:file
+recover_statement proc(state @mut State, start usize) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+    diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+    span :: synchronize(state, start, true)
+    return try ast.add_invalid_stmt(&state.builder, span, diagnostic)
+}
+
+@hide:file
+synchronize proc(state @mut State, start usize, stop_at_curly bool) ast.Span {
+    first :: state.tokens[start].span
+    end := first.end
+    while !next_is(state, .eof) and !next_is(state, .newline) {
+        if (stop_at_curly and next_is(state, .close_curly)) break
+        end = current(state).span.end
+        state.next_token += 1
+    }
+    if next_is(state, .newline) {
+        end = current(state).span.end
+        state.next_token += 1
+    }
+    return ast.Span{ start = first.start, end = end }
+}
 
 @hide:file
 skip_newlines proc(state @mut State) void {
