@@ -1,14 +1,19 @@
 import "@std/debug"
+import "@source/diagnostics"
 import "@source/strpool"
 
 TokenId :: distinct u32
-
 NO_TOKEN :: maxval!(TokenId)
 
+TokenData :: union {
+    str_id strpool.StringId
+    diagnostic diagnostics.DiagnosticId
+}
+
 Token :: struct {
-    start uint
+    span diagnostics.Span
     kind TokenKind
-    str_id strpool.StringId = strpool.NO_STR
+    data TokenData = TokenData{ str_id = strpool.NO_STR }
 }
 
 TokenKind :: enum {
@@ -55,27 +60,14 @@ TokenKind :: enum {
 render_token proc(tok Token, program []u8) void {
     match tok.kind {
         .ident: {
-            if (strpool.get_str(&strpool.STRINGS, tok.str_id)) |str| {
+            if (strpool.get_str(&strpool.STRINGS, tok.data.str_id)) |str| {
                 debug.print("{}({})\n", {tok.kind, str})
             } else {
-                res :: scan_ident(tok.start, program)
-                debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
+                debug.print("{}({})\n", {tok.kind, program[tok.span.start..tok.span.end]})
             }
         }
-        .string: {
-            res :: scan_string(tok.start, program) catch |_| {
-                debug.print("{}({})\n", {tok.kind, "null"})
-                return
-            }
-            debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
-        }
-        .int, .float: {
-            res :: scan_number(tok.start, program) catch |_| {
-                debug.print("{}({})\n", {tok.kind, "null"})
-                return
-            }
-            debug.print("{}({})\n", {tok.kind, program[tok.start..res.end]})
-        }
+        .string, .int, .float:
+            debug.print("{}({})\n", {tok.kind, program[tok.span.start..tok.span.end]})
         else: debug.print("{}\n", {tok.kind})
     }
 }

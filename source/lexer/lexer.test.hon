@@ -1,14 +1,17 @@
-import "@source/strpool"
 import "@std/mem"
 import "@std/testing"
+import "@source/diagnostics"
+import "@source/strpool"
 
-handles_keywords_identifiers_and_error_progress test {
+reports_invalid_input_and_keeps_scanning test {
     strpool.STRINGS = strpool.init(mem.c_allocator)
     defer strpool.deinit(&strpool.STRINGS)
-
-    state State := init(mem.c_allocator)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
     defer deinit(&state)
-    try scan(&state, "if name # comment\n@1. 2 3.5 \"hi\"")
+
+    try scan(&state, "if name # comment\n@1. 2 3.5 \"hi\"", &diagnostic_store)
 
     try testing.expect_equal(8, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
@@ -19,6 +22,8 @@ handles_keywords_identifiers_and_error_progress test {
     try testing.expect_equal(TokenKind.float, state.tokens.items[5].kind)
     try testing.expect_equal(TokenKind.string, state.tokens.items[6].kind)
     try testing.expect_equal(TokenKind.eof, state.tokens.items[7].kind)
-    try testing.expect_equal(2, state.diagnostics.items.len)
-    try testing.expect_equal("name", strpool.get_str(&strpool.STRINGS, state.tokens.items[1].str_id)?)
+    try testing.expect_equal(2, diagnostics.len(&diagnostic_store))
+    try testing.expect_equal("name", strpool.get_str(&strpool.STRINGS, state.tokens.items[1].data.str_id)?)
+    try testing.expect_equal(u32(3), state.tokens.items[1].span.start)
+    try testing.expect_equal(u32(7), state.tokens.items[1].span.end)
 }

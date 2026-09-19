@@ -1,9 +1,8 @@
-import "@std"
 import "@std/mem"
 import "@std/strmap"
-import "@std/enums/enummap"
 import "@std/arraylist"
 
+import "@source/diagnostics"
 import "@source/strpool"
 
 ScanError :: struct {
@@ -11,29 +10,15 @@ ScanError :: struct {
     end usize
 }
 
+@hide:file
 ErrorCode :: enum {
-    invalid_character,
     float_must_end_with_digit,
     unterminated_string,
 }
+SourceError :: enum { source_too_large }
 
-ErrorDetails :: struct {
-    name []u8
-    message []u8
-}
 
-error_msg_map std.EnumMap(ErrorCode, ErrorDetails) :: enummap.init({
-    invalid_character = ErrorDetails {
-        name = "L0",
-        message = "invalid character",
-    },
-    float_must_end_with_digit = ErrorDetails {
-        name = "L1",
-        message = "float must end with a digit",
-    },
-})
-
-keywords std.StringMap(TokenKind) :: strmap.init([
+keywords strmap.StringMap(TokenKind) :: strmap.init([
     { "proc", .proc },
     { "return", .return },
     { "if", .if },
@@ -42,38 +27,31 @@ keywords std.StringMap(TokenKind) :: strmap.init([
     { "while", .while },
 ])
 
-Diagnostic :: struct {
-    token TokenId
-    code ErrorCode
-}
-
 State :: struct {
-    tokens std.ArrayList(Token)
-    diagnostics std.ArrayList(Diagnostic)
+    tokens arraylist.ArrayList(Token)
 }
 
 init proc(allocator mem.Allocator) State {
-    return State {
-        tokens = arraylist.init(allocator),
-        diagnostics = arraylist.init(allocator),
-    }
+    return State{ tokens = arraylist.init(allocator) }
 }
 
 deinit proc(state @mut State) void {
     arraylist.deinit(&state.tokens)
-    arraylist.deinit(&state.diagnostics)
 }
 
-scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.InternError) {
-    diagnostics :: &state.diagnostics
-
+scan proc(
+    state @mut State,
+    program []u8,
+    diagnostic_store @mut diagnostics.Store,
+) void ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError | SourceError) {
+    if (program.len > usize(maxval!(u32))) return .source_too_large
     cursor := 0
     while cursor < program.len {
         char :: program[cursor]
 
         # whitespace
         if char == '\n' {
-            try add_token(state, Token{ start = cursor, kind = .newline })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .newline })
             cursor += 1
             continue
         } else if is_whitespace(char) {
@@ -84,7 +62,7 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         # comments
         if char == '#' {
             while (cursor < program.len and program[cursor] != '\n') cursor += 1
-            cursor += 1 # also skip newline
+            if (cursor < program.len) cursor += 1
             continue
         }
 
@@ -93,9 +71,9 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
             start :: cursor
             result :: scan_ident(start, program)
             try add_token(state, Token{
-                start = start,
+                span = make_span(start, result.end),
                 kind = result.kind,
-                str_id = result.str_id,
+                data = TokenData{ str_id = result.str_id },
             })
             cursor = result.end
             continue
@@ -105,15 +83,21 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         if is_digit(char) {
             start :: cursor
             result :: scan_number(start, program) catch |err| {
-                token :: token_id(state.tokens.items.len)
-                try add_token(state, Token{ start = start, kind = .invalid })
-                try arraylist.append(diagnostics, Diagnostic{ token = token, code = err.code })
+                id :: try diagnostics.add(
+                    diagnostic_store,
+                    diagnostic_code(err.code),
+                    make_span(start, err.end),
+                )
+                try add_token(state, Token{
+                    span = make_span(start, err.end),
+                    kind = .invalid,
+                    data = TokenData{ diagnostic = id },
+                })
                 cursor = err.end
                 continue
             }
-
             kind :: if (result.has_decimal) .float else .int
-            try add_token(state, Token{ start = start, kind = kind })
+            try add_token(state, Token{ span = make_span(start, result.end), kind = kind })
             cursor = result.end
             continue
         }
@@ -122,14 +106,20 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         if char == '"' {
             start :: cursor
             result :: scan_string(start, program) catch |err| {
-                token :: token_id(state.tokens.items.len)
-                try add_token(state, Token{ start = start, kind = .invalid })
-                try arraylist.append(diagnostics, Diagnostic{ token = token, code = err.code })
+                id :: try diagnostics.add(
+                    diagnostic_store,
+                    diagnostic_code(err.code),
+                    make_span(start, err.end),
+                )
+                try add_token(state, Token{
+                    span = make_span(start, err.end),
+                    kind = .invalid,
+                    data = TokenData{ diagnostic = id },
+                })
                 cursor = err.end
                 continue
             }
-
-            try add_token(state, Token{ start = start, kind = .string })
+            try add_token(state, Token{ span = make_span(start, result.end), kind = .string })
             cursor = result.end
             continue
         }
@@ -137,18 +127,16 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         # immutable decl, mutable decl, or single colon
         if char == ':' {
             if cursor + 1 < program.len and program[cursor + 1] == ':' {
-                try add_token(state, Token{ start = cursor, kind = .double_colon })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .double_colon })
                 cursor += 2
                 continue
             }
-
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ start = cursor, kind = .colon_equal })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .colon_equal })
                 cursor += 2
                 continue
             }
-
-            try add_token(state, Token{ start = cursor, kind = .colon })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .colon })
             cursor += 1
             continue
         }
@@ -156,45 +144,41 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
         # compound arithmetic assignment
         if char == '+' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ start = cursor, kind = .plus_equal })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .plus_equal })
                 cursor += 2
                 continue
             }
-
-            try add_token(state, Token{ start = cursor, kind = .plus })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .plus })
             cursor += 1
             continue
         }
         if char == '-' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ start = cursor, kind = .minus_equal })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .minus_equal })
                 cursor += 2
                 continue
             }
-
-            try add_token(state, Token{ start = cursor, kind = .minus })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .minus })
             cursor += 1
             continue
         }
         if char == '*' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ start = cursor, kind = .star_equal })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .star_equal })
                 cursor += 2
                 continue
             }
-
-            try add_token(state, Token{ start = cursor, kind = .star })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .star })
             cursor += 1
             continue
         }
         if char == '/' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ start = cursor, kind = .slash_equal })
+                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .slash_equal })
                 cursor += 2
                 continue
             }
-
-            try add_token(state, Token{ start = cursor, kind = .slash })
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .slash })
             cursor += 1
             continue
         }
@@ -205,25 +189,33 @@ scan proc(state @mut State, program []u8) void ! (mem.AllocError | strpool.Inter
             ',': .comma
             '(': .open_paren
             ')': .close_paren
+            '[': .open_bracket
+            ']': .close_bracket
             '{': .open_curly
             '}': .close_curly
             else: null
         }
-
-        if (kind) |k| {
-            try add_token(state, Token{ start = cursor, kind = k })
+        if (kind) |value| {
+            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = value })
             cursor += 1
             continue
         }
 
         # invalid character
-        token :: token_id(state.tokens.items.len)
-        try add_token(state, Token{ start = cursor, kind = .invalid })
-        try arraylist.append(diagnostics, Diagnostic{ token = token, code = .invalid_character })
+        id :: try diagnostics.add(
+            diagnostic_store,
+            .invalid_character,
+            make_span(cursor, cursor + 1),
+        )
+        try add_token(state, Token{
+            span = make_span(cursor, cursor + 1),
+            kind = .invalid,
+            data = TokenData{ diagnostic = id },
+        })
         cursor += 1
     }
 
-    try add_token(state, Token{ start = cursor, kind = .eof })
+    try add_token(state, Token{ span = make_span(cursor, cursor), kind = .eof })
 }
 
 ScanIdentResult :: struct {
@@ -234,7 +226,6 @@ ScanIdentResult :: struct {
 
 scan_ident proc(start usize, program []u8) ScanIdentResult {
     cursor := start + 1
-
     # scan whole identifier
     while (cursor < program.len and (
         is_alpha(program[cursor]) or
@@ -242,19 +233,13 @@ scan_ident proc(start usize, program []u8) ScanIdentResult {
         program[cursor] == '_'
     )) cursor += 1
 
-    kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
-
     # don't intern keywords (already O(1) lookup via token kind)
+    kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
     str_id :: if (kind == .ident)
         strpool.intern(&strpool.STRINGS, program[start..cursor]) catch strpool.NO_STR
     else
         strpool.NO_STR
-
-    return ScanIdentResult{
-        end = cursor,
-        kind = kind,
-        str_id = str_id,
-    }
+    return ScanIdentResult{ end = cursor, kind = kind, str_id = str_id }
 }
 
 ScanNumResult :: struct {
@@ -265,53 +250,36 @@ ScanNumResult :: struct {
 scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
     cursor := start
     has_decimal := false
-
     # scan integer part
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
-
     # check for decimal
     if cursor < program.len and program[cursor] == '.' {
         has_decimal = true
         cursor += 1
     }
-
     # assert non-terminating decimal
     if has_decimal and (cursor >= program.len or !is_digit(program[cursor])) {
-        return ScanError{
-            code = .float_must_end_with_digit,
-            end = cursor,
-        }
+        return ScanError{ code = .float_must_end_with_digit, end = cursor }
     }
-
     # scan fractional part
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
-
-    return ScanNumResult{
-        end = cursor,
-        has_decimal = has_decimal,
-    }
+    return ScanNumResult{ end = cursor, has_decimal = has_decimal }
 }
 
 ScanStrResult :: struct { end usize }
 
 scan_string proc(start usize, program []u8) ScanStrResult ! ScanError {
     cursor := start + 1 # skip first `"`
-
     # scan entire string
     while cursor < program.len and program[cursor] != '"' and program[cursor] != '\n' : cursor += 1 {
         # ignore escaped characters
         if (program[cursor] == '\\' and cursor + 1 < program.len) cursor += 1
     }
-
     # assert string terminal
-    if (cursor >= program.len or program[cursor] != '"') return ScanError{
-        code = .unterminated_string,
-        end = cursor,
+    if (cursor >= program.len or program[cursor] != '"') {
+        return ScanError{ code = .unterminated_string, end = cursor }
     }
-
-    return ScanStrResult{
-        end = cursor + 1, # skip last `"`
-    }
+    return ScanStrResult{ end = cursor + 1 } # skip last `"`
 }
 
 @hide
@@ -333,6 +301,19 @@ is_digit proc(char u8) bool {
         '0'..='9': true
         else: false
     }
+}
+
+@hide:file
+diagnostic_code proc(code ErrorCode) diagnostics.Code {
+    return match code {
+        .float_must_end_with_digit: .float_must_end_with_digit
+        .unterminated_string: .unterminated_string
+    }
+}
+
+@hide:file
+make_span proc(start, end usize) diagnostics.Span {
+    return diagnostics.Span{ start = u32(start), end = u32(end) }
 }
 
 @hide

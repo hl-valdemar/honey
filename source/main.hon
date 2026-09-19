@@ -1,20 +1,24 @@
 import "@std/debug"
 import "@std/mem"
 
+import "@source/diagnostics"
+import "@source/strpool"
+import "@source/lexer"
+import "@source/ast"
+import "@source/parser"
+
+ast_renderer :: import "@source/ast/renderer"
+
 test import "@std/enums/enummap"
 test import "@std/arraylist"
 test import "@std/hashmap"
 test import "@std/strmap"
 test import "@std/meta"
-
-import "@source/strpool"
-import "@source/lexer"
-import "@source/parser"
-
-ast_renderer :: import "@source/ast/renderer"
-
+test import "@source/diagnostics"
 test import "@source/strpool"
 test import "@source/lexer"
+test import "@source/ast"
+test import "@source/ast/renderer"
 test import "@source/parser"
 
 program ::
@@ -35,77 +39,25 @@ main proc() void! {
     strpool.STRINGS = strpool.init(mem.c_allocator)
     defer strpool.deinit(&strpool.STRINGS)
 
-    debug.print("PROGRAM::[[\n{}\n]]\n\n", {program})
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
 
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    lexer.scan(&scan_state, program) catch |err| {
-        debug.print("failed to scan: {}\n", {err})
-        return
-    }
+    try lexer.scan(&scan_state, program, &diagnostic_store)
 
-    debug.print("TOKENS::[[\n", {})
-    for (scan_state.tokens.items) |tok| lexer.render_token(tok, program)
-    debug.print("]]\n\n", {})
-
-    parse_state := parser.init(mem.c_allocator)
-    defer parser.deinit(&parse_state)
-    root :: parser.parse(&parse_state, scan_state.tokens.items) catch |err| {
-        debug.print("failed to parse: {}\n", {err})
-        return
-    }
-
-    debug.print("AST::[[\n", {})
-    for parse_state.nodes.items |node, i| {
-        match node.kind {
-            .expr_identifier: {
-                ident :: scan_state.tokens.items[usize(node.main_token)]
-                res :: lexer.scan_ident(ident.start, program)
-                debug.print("{}: {}({})\n", { i, node.kind, program[ident.start..res.end] })
-            }
-            .literal_int, .literal_float: {
-                lit :: scan_state.tokens.items[usize(node.main_token)]
-                res :: lexer.scan_number(lit.start, program) catch |_| {
-                    debug.print("{}: {}\n", { i, node.kind })
-                    continue
-                }
-                debug.print("{}: {}({})\n", { i, node.kind, program[lit.start..res.end] })
-            }
-            .literal_string: {
-                str :: scan_state.tokens.items[usize(node.main_token)]
-                res :: lexer.scan_string(str.start, program) catch |_| {
-                    debug.print("{}: {}\n", { i, node.kind })
-                    continue
-                }
-                debug.print("{}: {}({})\n", { i, node.kind, program[str.start..res.end] })
-            }
-            .expr_unary: {
-                operator :: scan_state.tokens.items[usize(node.main_token)]
-                operand :: node.data0.node_id
-                debug.print("{}: {}({}, operand={})\n", { i, node.kind, operator.kind, operand })
-            }
-            .expr_binary: {
-                operator :: scan_state.tokens.items[usize(node.main_token)]
-                lhs :: node.data0.node_id
-                rhs :: node.data1.node_id
-                debug.print("{}: {}({}, lhs={}, rhs={})\n", { i, node.kind, operator.kind, lhs, rhs })
-            }
-            .stmt_decl: {
-                ident :: scan_state.tokens.items[usize(node.main_token)]
-                init :: parse_state.extra.items[usize(node.data0.extra_id) + 1]
-                res :: lexer.scan_ident(ident.start, program)
-                debug.print("{}: {}({}, init={})\n", { i, node.kind, program[ident.start..res.end], init })
-            }
-            else: debug.print("{}: {}\n", { i, node.kind })
-        }
-    }
-    debug.print("]]\n\n", {})
+    tree := try parser.parse(
+        scan_state.tokens.items,
+        program,
+        &diagnostic_store,
+        mem.c_allocator,
+    )
+    defer ast.deinit(&tree)
 
     renderer := ast_renderer.init(mem.c_allocator)
     defer ast_renderer.deinit(&renderer)
-    try ast_renderer.render_token_stream(&renderer, root, &parse_state, scan_state.tokens.items)
+    try ast_renderer.render(&renderer, &tree)
 
-    debug.print("AST Render::[[\n", {})
-    for (renderer.tokens.items) |tok| lexer.render_token(tok, program)
-    debug.print("]]\n", {})
+    debug.print("{s}", {renderer.bytes.items})
+    debug.print("diagnostics: {}\n", {diagnostics.len(&diagnostic_store)})
 }

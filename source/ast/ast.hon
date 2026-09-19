@@ -7,106 +7,478 @@
 #! * stmt ..... -> decl
 
 import "@std/debug"
-import "@source/lexer"
+import "@std/mem"
+import "@std/arraylist"
+import "@source/diagnostics"
 
-@hide:file
-TokenId :: alias lexer.TokenId
-
-@hide:file
-NO_TOKEN :: alias lexer.NO_TOKEN
+Span :: alias diagnostics.Span
+DiagnosticId :: alias diagnostics.DiagnosticId
+NO_DIAGNOSTIC :: alias diagnostics.NO_DIAGNOSTIC
 
 NodeId :: distinct u32
-ExtraId :: distinct u32
 
+@hide:file
 NO_NODE :: maxval!(NodeId)
-NO_EXTRA :: maxval!(ExtraId)
 
-# unsafe access on its own; NodeKind serves as a the tag
-# that determines the variant.
-NodeData :: union {
-    token_id TokenId
-    node_id NodeId
-    extra_id ExtraId
+LiteralKind :: enum { int, float, string }
+ExprKind :: enum { literal_int, literal_float, literal_string, identifier, unary, binary, invalid }
+DeclKind :: enum { statement, function, invalid }
+StmtKind :: enum { declaration, invalid }
+Mutability :: enum { constant, variable }
+UnaryOperator :: enum { negate }
+BinaryOperator :: enum { add, subtract, multiply, divide }
+
+@hide:file
+NodeKind :: enum {
+    literal_int,
+    literal_float,
+    literal_string,
+    expr_identifier,
+    expr_unary,
+    expr_binary,
+    stmt_decl,
+    func_decl,
+    param_decl,
+    block,
+    package,
+    invalid_expr,
+    invalid_stmt,
+    invalid_decl,
 }
 
+@hide:file
+NodeData :: union {
+    node_id NodeId
+    extra u32
+    diagnostic DiagnosticId
+    mutability Mutability
+    unary_operator UnaryOperator
+    binary_operator BinaryOperator
+}
+
+@hide:file
 Node :: struct {
     kind NodeKind
-    main_token TokenId = NO_TOKEN
-
+    main NodeData = NodeData{ node_id = NO_NODE }
     data0 NodeData = NodeData{ node_id = NO_NODE }
     data1 NodeData = NodeData{ node_id = NO_NODE }
 }
 
-NodeKind :: enum {
-    # LITERALS:
-    # * main_token: token literal
-    literal_int
-    literal_float
-    literal_string
-
-    # IDENTIFIER EXPR:
-    # * main_token: token literal
-    expr_identifier
-
-    # UNARY:
-    # * main_token: operator
-    # * data0: NodeId - expression
-    expr_unary
-
-    # BINARY:
-    # * main_token: operator
-    # * data0: NodeId - left-hand side
-    # * data1: NodeId - right-hand side
-    expr_binary
-
-    # STATEMENT DECLS:
-    # * main_token: symbol name (identifier)
-    # * data0: ExtraId
-    #   + extra[data0]: NodeId - type expr or NO_NODE
-    #   + extra[data0 + 1]: NodeId - initializer expression
-    # * data1: TokenId of either `::` or `:=` indicating mutability
-    stmt_decl
-
-    # FUNC DECLS:
-    # * main_token: function name (identifier)
-    # * data0: NodeId - body block (or NO_NODE for extern)
-    # * data1: ExtraId
-    #   + extra[data1]: NodeId - return type
-    #   + extra[data1 + 1]: u32 - param count
-    #   + extra[data1 + 2..]: NodeId - param decls
-    func_decl
-
-    # PARAM DECLS:
-    # * main_token: param name (identifier)
-    # * data0: NodeId - param type
-    param_decl
-
-    # BLOCK:
-    # * data0: ExtraId - statement range start
-    # * data1: ExtraId - statement range end
-    block
-
-    # PACKAGE:
-    # * data0: ExtraId
-    # * data1: ExtraId
-    # 
-    # extra[data0..data1]: NodeId - all statement node ids in package
-    package
-
-    invalid
+@hide:file
+Storage :: struct {
+    nodes arraylist.ArrayList(Node)
+    extra arraylist.ArrayList(u32)
+    spans arraylist.ArrayList(Span)
 }
 
-node_id proc(idx uint) NodeId {
-    debug.assert(u64(idx) < u64(NO_NODE))
-    return NodeId(idx)
+Builder :: struct {
+    storage Storage
+    source []u8
 }
 
-maybe_node_id proc(idx uint) ?NodeId {
-    if (u64(idx) >= u64(NO_NODE)) return null
-    return NodeId(idx)
+Tree :: struct {
+    storage Storage
+    source []u8
+    root NodeId
 }
 
-extra_id proc(idx uint) ExtraId {
-    debug.assert(u64(idx) < u64(NO_EXTRA))
-    return ExtraId(idx)
+StatementDeclView :: struct {
+    span Span
+    name Span
+    type ?NodeId
+    mutability Mutability
+    initializer NodeId
+}
+
+FunctionDeclView :: struct {
+    span Span
+    name Span
+    return_type NodeId
+    body NodeId
+}
+
+ParamView :: struct {
+    span Span
+    name Span
+    type NodeId
+}
+
+UnaryExprView :: struct {
+    span Span
+    operator UnaryOperator
+    operand NodeId
+}
+
+BinaryExprView :: struct {
+    span Span
+    operator BinaryOperator
+    left NodeId
+    right NodeId
+}
+
+InvalidView :: struct {
+    span Span
+    diagnostic DiagnosticId
+}
+
+init_builder proc(allocator mem.Allocator, source []u8) Builder {
+    return Builder{
+        storage = Storage{
+            nodes = arraylist.init(allocator),
+            extra = arraylist.init(allocator),
+            spans = arraylist.init(allocator),
+        },
+        source = source,
+    }
+}
+
+deinit_builder proc(builder @mut Builder) void {
+    arraylist.deinit(&builder.storage.nodes)
+    arraylist.deinit(&builder.storage.extra)
+    arraylist.deinit(&builder.storage.spans)
+}
+
+finish proc(builder @mut Builder, root NodeId) Tree {
+    tree :: Tree{ storage = builder.storage, source = builder.source, root = root }
+    allocator :: builder.storage.nodes.allocator
+    builder.storage = Storage{
+        nodes = arraylist.init(allocator),
+        extra = arraylist.init(allocator),
+        spans = arraylist.init(allocator),
+    }
+    builder.source = &[]
+    return tree
+}
+
+deinit proc(tree @mut Tree) void {
+    arraylist.deinit(&tree.storage.nodes)
+    arraylist.deinit(&tree.storage.extra)
+    arraylist.deinit(&tree.storage.spans)
+}
+
+add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem.AllocError {
+    node_kind :: match kind {
+        .int: .literal_int
+        .float: .literal_float
+        .string: .literal_string
+    }
+    return try add_node(builder, Node{ kind = node_kind }, span)
+}
+
+add_identifier proc(builder @mut Builder, span Span) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{ kind = .expr_identifier }, span)
+}
+
+add_unary proc(
+    builder @mut Builder,
+    span Span,
+    operator UnaryOperator,
+    operand NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_unary,
+        main = NodeData{ unary_operator = operator },
+        data0 = NodeData{ node_id = operand },
+    }, span)
+}
+
+add_binary proc(
+    builder @mut Builder,
+    span Span,
+    operator BinaryOperator,
+    left NodeId,
+    right NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_binary,
+        main = NodeData{ binary_operator = operator },
+        data0 = NodeData{ node_id = left },
+        data1 = NodeData{ node_id = right },
+    }, span)
+}
+
+add_statement_decl proc(
+    builder @mut Builder,
+    span Span,
+    name Span,
+    type ?NodeId,
+    mutability Mutability,
+    initializer NodeId,
+) NodeId ! mem.AllocError {
+    raw_type :: if (type) |id| u32(id) else u32(NO_NODE)
+    extra :: try add_extra(builder, name.start)
+    _ = try add_extra(builder, name.end)
+    _ = try add_extra(builder, raw_type)
+    _ = try add_extra(builder, u32(initializer))
+    return try add_node(builder, Node{
+        kind = .stmt_decl,
+        main = NodeData{ extra = extra },
+        data0 = NodeData{ mutability = mutability },
+    }, span)
+}
+
+add_param proc(builder @mut Builder, span, name Span, type NodeId) NodeId ! mem.AllocError {
+    extra :: try add_extra(builder, name.start)
+    _ = try add_extra(builder, name.end)
+    return try add_node(builder, Node{
+        kind = .param_decl,
+        main = NodeData{ extra = extra },
+        data0 = NodeData{ node_id = type },
+    }, span)
+}
+
+add_function_decl proc(
+    builder @mut Builder,
+    span Span,
+    name Span,
+    return_type NodeId,
+    params []NodeId,
+    body NodeId,
+) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    _ = try add_extra(builder, name.start)
+    _ = try add_extra(builder, name.end)
+    _ = try add_extra(builder, u32(return_type))
+    for (params) |parameter| _ = try add_extra(builder, u32(parameter))
+    return try add_node(builder, Node{
+        kind = .func_decl,
+        main = NodeData{ extra = u32(start) },
+        data0 = NodeData{ node_id = body },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_block proc(builder @mut Builder, span Span, statements []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (statements) |statement| _ = try add_extra(builder, u32(statement))
+    return try add_node(builder, Node{
+        kind = .block,
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_package proc(builder @mut Builder, span Span, declarations []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (declarations) |declaration| _ = try add_extra(builder, u32(declaration))
+    return try add_node(builder, Node{
+        kind = .package,
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_invalid_expr proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .invalid_expr,
+        main = NodeData{ diagnostic = diagnostic },
+    }, span)
+}
+
+add_invalid_stmt proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .invalid_stmt,
+        main = NodeData{ diagnostic = diagnostic },
+    }, span)
+}
+
+add_invalid_decl proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .invalid_decl,
+        main = NodeData{ diagnostic = diagnostic },
+    }, span)
+}
+
+package_decl_count proc(tree @Tree) usize {
+    root :: get_node(&tree.storage, tree.root)
+    debug.assert(root.kind == .package)
+    return usize(root.data1.extra - root.data0.extra)
+}
+
+package_decl proc(tree @Tree, index usize) NodeId {
+    root :: get_node(&tree.storage, tree.root)
+    debug.assert(root.kind == .package)
+    debug.assert(index < usize(root.data1.extra - root.data0.extra))
+    return NodeId(tree.storage.extra.items[usize(root.data0.extra) + index])
+}
+
+decl_kind proc(tree @Tree, id NodeId) DeclKind {
+    return match get_node(&tree.storage, id).kind {
+        .stmt_decl: .statement
+        .func_decl: .function
+        .invalid_decl: .invalid
+        else: unreachable
+    }
+}
+
+stmt_kind proc(tree @Tree, id NodeId) StmtKind {
+    return match get_node(&tree.storage, id).kind {
+        .stmt_decl: .declaration
+        .invalid_stmt: .invalid
+        else: unreachable
+    }
+}
+
+statement_decl proc(tree @Tree, id NodeId) StatementDeclView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_decl)
+    extra :: usize(node.main.extra)
+    raw_type :: tree.storage.extra.items[extra + 2]
+    return StatementDeclView{
+        span = get_span(&tree.storage, id),
+        name = span_from_extra(&tree.storage, extra),
+        type = maybe_node_id(raw_type),
+        initializer = NodeId(tree.storage.extra.items[extra + 3]),
+        mutability = node.data0.mutability,
+    }
+}
+
+function_decl proc(tree @Tree, id NodeId) FunctionDeclView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .func_decl)
+    extra :: usize(node.main.extra)
+    return FunctionDeclView{
+        span = get_span(&tree.storage, id),
+        name = span_from_extra(&tree.storage, extra),
+        return_type = NodeId(tree.storage.extra.items[extra + 2]),
+        body = node.data0.node_id,
+    }
+}
+
+function_param_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .func_decl)
+    return usize(node.data1.extra - node.main.extra - 3)
+}
+
+function_param proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .func_decl)
+    debug.assert(index < usize(node.data1.extra - node.main.extra - 3))
+    return NodeId(tree.storage.extra.items[usize(node.main.extra) + 3 + index])
+}
+
+param proc(tree @Tree, id NodeId) ParamView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .param_decl)
+    return ParamView{
+        span = get_span(&tree.storage, id),
+        name = span_from_extra(&tree.storage, usize(node.main.extra)),
+        type = node.data0.node_id,
+    }
+}
+
+block_statement_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .block)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+block_statement proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .block)
+    debug.assert(index < usize(node.data1.extra - node.data0.extra))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+expr_kind proc(tree @Tree, id NodeId) ExprKind {
+    return match get_node(&tree.storage, id).kind {
+        .literal_int: .literal_int
+        .literal_float: .literal_float
+        .literal_string: .literal_string
+        .expr_identifier: .identifier
+        .expr_unary: .unary
+        .expr_binary: .binary
+        .invalid_expr: .invalid
+        else: unreachable
+    }
+}
+
+unary_expr proc(tree @Tree, id NodeId) UnaryExprView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_unary)
+    return UnaryExprView{
+        span = get_span(&tree.storage, id),
+        operator = node.main.unary_operator,
+        operand = node.data0.node_id,
+    }
+}
+
+binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_binary)
+    return BinaryExprView{
+        span = get_span(&tree.storage, id),
+        operator = node.main.binary_operator,
+        left = node.data0.node_id,
+        right = node.data1.node_id,
+    }
+}
+
+node_span proc(tree @Tree, id NodeId) Span { return get_span(&tree.storage, id) }
+
+invalid proc(tree @Tree, id NodeId) InvalidView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .invalid_expr or node.kind == .invalid_stmt or node.kind == .invalid_decl)
+    return InvalidView{ span = get_span(&tree.storage, id), diagnostic = node.main.diagnostic }
+}
+
+source_text proc(tree @Tree, span Span) []u8 {
+    debug.assert(span.start <= span.end and usize(span.end) <= tree.source.len)
+    return tree.source[usize(span.start)..usize(span.end)]
+}
+
+builder_span proc(builder @Builder, id NodeId) Span {
+    return get_span(&builder.storage, id)
+}
+
+@hide:file
+span_from_extra proc(storage @Storage, start usize) Span {
+    return Span{
+        start = storage.extra.items[start],
+        end = storage.extra.items[start + 1],
+    }
+}
+
+@hide:file
+add_node proc(builder @mut Builder, node Node, span Span) NodeId ! mem.AllocError {
+    debug.assert(builder.storage.nodes.items.len == builder.storage.spans.items.len)
+    id :: node_id(builder.storage.nodes.items.len)
+    try arraylist.reserve(&builder.storage.nodes, builder.storage.nodes.items.len + 1)
+    try arraylist.reserve(&builder.storage.spans, builder.storage.spans.items.len + 1)
+    try arraylist.append(&builder.storage.nodes, node)
+    try arraylist.append(&builder.storage.spans, span)
+    return id
+}
+
+@hide:file
+add_extra proc(builder @mut Builder, value u32) u32 ! mem.AllocError {
+    debug.assert(u64(builder.storage.extra.items.len) < u64(maxval!(u32)))
+    id :: u32(builder.storage.extra.items.len)
+    try arraylist.append(&builder.storage.extra, value)
+    return id
+}
+
+@hide:file
+get_node proc(storage @Storage, id NodeId) Node {
+    debug.assert(usize(id) < storage.nodes.items.len)
+    return storage.nodes.items[usize(id)]
+}
+
+@hide:file
+get_span proc(storage @Storage, id NodeId) Span {
+    debug.assert(usize(id) < storage.spans.items.len)
+    return storage.spans.items[usize(id)]
+}
+
+@hide:file
+node_id proc(index usize) NodeId {
+    debug.assert(u64(index) < u64(NO_NODE))
+    return NodeId(index)
+}
+
+@hide:file
+maybe_node_id proc(value u32) ?NodeId {
+    if (value == u32(NO_NODE)) return null
+    return NodeId(value)
 }

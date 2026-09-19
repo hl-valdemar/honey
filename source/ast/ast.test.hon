@@ -1,0 +1,34 @@
+import "@std/mem"
+import "@std/testing"
+
+exposes_typed_declaration_views test {
+    builder := init_builder(mem.c_allocator, "value :: 42")
+    defer deinit_builder(&builder)
+
+    value_name :: Span{ start = 0, end = 5 }
+    value :: try add_literal(&builder, .int, Span{ start = 9, end = 11 })
+    declaration :: try add_statement_decl(
+        &builder,
+        Span{ start = 0, end = 11 },
+        value_name,
+        null,
+        .constant,
+        value,
+    )
+    declarations [1]NodeId := [declaration]
+    package :: try add_package(&builder, Span{ start = 0, end = 11 }, declarations[..])
+    tree := finish(&builder, package)
+    defer deinit(&tree)
+
+    try testing.expect_equal(1, package_decl_count(&tree))
+    decl :: package_decl(&tree, 0)
+    try testing.expect_equal(DeclKind.statement, decl_kind(&tree, decl))
+
+    statement :: statement_decl(&tree, decl)
+    try testing.expect_equal(value_name.start, statement.name.start)
+    try testing.expect_equal(value_name.end, statement.name.end)
+    try testing.expect_equal(Mutability.constant, statement.mutability)
+    try testing.expect_equal(null, statement.type)
+    try testing.expect_equal(ExprKind.literal_int, expr_kind(&tree, statement.initializer))
+    try testing.expect_equal("value", source_text(&tree, statement.name))
+}
