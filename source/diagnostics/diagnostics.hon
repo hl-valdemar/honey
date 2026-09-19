@@ -21,30 +21,30 @@ Diagnostic :: struct {
     span Span
 }
 
-Store :: struct { items arraylist.ArrayList(Diagnostic) }
+Store :: struct { list arraylist.ArrayList(Diagnostic) }
 
 CapacityError :: enum { diagnostic_limit_reached }
 
 init proc(allocator mem.Allocator) Store {
-    return Store{ items = arraylist.init(allocator) }
+    return Store{ list = arraylist.init(allocator) }
 }
 
 deinit proc(store @mut Store) void {
-    arraylist.deinit(&store.items)
+    arraylist.deinit(&store.list)
 }
 
 add proc(store @mut Store, code Code, span Span) DiagnosticId ! (mem.AllocError | CapacityError) {
-    if (store.items.items.len >= usize(NO_DIAGNOSTIC)) return .diagnostic_limit_reached
-    id :: DiagnosticId(store.items.items.len)
-    try arraylist.append(&store.items, Diagnostic{ code = code, span = span })
+    if (store.list.items.len >= usize(NO_DIAGNOSTIC)) return .diagnostic_limit_reached
+    id :: DiagnosticId(store.list.items.len)
+    try arraylist.append(&store.list, Diagnostic{ code = code, span = span })
     return id
 }
 
 get proc(store @Store, id DiagnosticId) ?Diagnostic {
-    if (usize(id) >= store.items.items.len) return null
-    return store.items.items[usize(id)]
+    if (usize(id) >= store.list.items.len) return null
+    return store.list.items[usize(id)]
 }
 
-len proc(store @Store) usize {
-    return store.items.items.len
+count proc(store @Store) usize {
+    return store.list.items.len
 }

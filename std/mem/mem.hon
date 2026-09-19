@@ -48,7 +48,7 @@ alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
 
     memory := raw_alloc(allocator, count * element_size, alignof!(T))
     if memory |bytes| {
-        pointer *mut T :: ptrcast!(T, bytes)
+        pointer *mut T :: ptrcast!(bytes)
         return pointer[..count]
     }
 
@@ -75,7 +75,7 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
     old_memory ?*mut u8 := null
     old_size := 0
     if memory.len != 0 {
-        old_memory = ptrcast!(u8, memory.ptr)
+        old_memory = ptrcast!(memory.ptr)
         old_size = memory.len * element_size
     }
 
@@ -88,7 +88,7 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
     )
 
     if resized |bytes| {
-        pointer *mut T :: ptrcast!(T, bytes)
+        pointer *mut T :: ptrcast!(bytes)
         return pointer[..new_count]
     }
 
@@ -100,7 +100,6 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 free proc($T type, allocator Allocator, memory []T) void {
     if (memory.len == 0 or sizeof!(T) == 0) return
     raw_free(allocator, ptrcast!(
-        u8,
         constcast!(memory).ptr),
         memory.len * sizeof!(T),
         alignof!(T),
@@ -112,7 +111,7 @@ free proc($T type, allocator Allocator, memory []T) void {
 #! exceeds its backing storage.
 @hide:file
 empty_slice proc($T type, count usize) []mut T {
-    pointer *mut T :: ptrcast!(T, (&empty_storage).ptr)
+    pointer *mut T :: ptrcast!((&empty_storage).ptr)
     return pointer[..count]
 }
 
@@ -142,13 +141,13 @@ power_of_two proc(value usize) bool {
 @hide:file
 c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
     if (power_of_two(alignment) == false) return null
-    if (alignment <= malloc_alignment) return ptrcast!(u8, c.malloc(c_ulong(size)))
+    if (alignment <= malloc_alignment) return ptrcast!(c.malloc(c_ulong(size)))
 
     memory [1]mut ?*mut anyopaque := [null]
     status := c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
     if (status != 0) return null
 
-    return ptrcast!(u8, memory[0])
+    return ptrcast!(memory[0])
 }
 
 @hide:file
@@ -168,7 +167,7 @@ c_realloc proc(
 
     if memory |old_memory| {
         if alignment <= malloc_alignment {
-            return ptrcast!(u8, c.realloc(old_memory, c_ulong(new_size)))
+            return ptrcast!(c.realloc(old_memory, c_ulong(new_size)))
         }
 
         new_memory := c_alloc(null, new_size, alignment)

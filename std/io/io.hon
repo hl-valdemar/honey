@@ -336,7 +336,7 @@ format_field_name proc($T type, index usize) []u8 {
 
 @hide:file
 distinct_value proc($Backing, $Distinct type, value Distinct) Backing {
-    return ptrcast!(Backing, &value)^
+    return ptrcast!(@Backing, &value)^
 }
 
 @hide:file
@@ -375,12 +375,12 @@ write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteE
             buffer [64]mut u8 := undefined
             count := 0
             if sizeof!(T) == 4 {
-                if (scientific) count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
-                else count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
+                if (scientific) count = c.snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len), "%.8e", value)
+                else count = c.snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len), "%.9g", value)
             } else if scientific {
-                count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.16e", value)
+                count = c.snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len), "%.16e", value)
             } else {
-                count = c.snprintf(ptrcast!(c_char, (&buffer).ptr), c_ulong(buffer.len), "%.17g", value)
+                count = c.snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len), "%.17g", value)
             }
             if (count < 0 or usize(count) >= buffer.len) return .write_failed
             try write_all(output, buffer[0..usize(count)])
