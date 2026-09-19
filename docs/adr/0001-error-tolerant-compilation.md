@@ -1,0 +1,3 @@
+# Compile through recoverable source errors
+
+Honey produces an executable whenever source errors can be represented safely: structurally valid syntax trees may contain typed invalid nodes carrying source spans and diagnostic identities, and semantic checking or lowering turns demanded invalid code into diagnostic runtime traps. Clean compilation returns status `0`, compilation that emits an executable with source diagnostics returns `1`, and unrecoverable infrastructure or backend failure returns `2`. This deliberately favors testing unaffected program paths over conventional fail-fast compilation; parser recovery must preserve valid surrounding syntax, while compact syntax-tree storage remains private behind typed views.
