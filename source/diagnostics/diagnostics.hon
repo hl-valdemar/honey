@@ -1,0 +1,50 @@
+import "@std/mem"
+import "@std/arraylist"
+
+Span :: struct {
+    start u32
+    end u32
+}
+
+DiagnosticId :: distinct u32
+NO_DIAGNOSTIC :: maxval!(DiagnosticId)
+
+Code :: enum {
+    invalid_character,
+    float_must_end_with_digit,
+    unterminated_string,
+    unexpected_token,
+}
+
+Diagnostic :: struct {
+    code Code
+    span Span
+}
+
+Store :: struct { items arraylist.ArrayList(Diagnostic) }
+
+CapacityError :: enum { diagnostic_limit_reached }
+
+init proc(allocator mem.Allocator) Store {
+    return Store{ items = arraylist.init(allocator) }
+}
+
+deinit proc(store @mut Store) void {
+    arraylist.deinit(&store.items)
+}
+
+add proc(store @mut Store, code Code, span Span) DiagnosticId ! (mem.AllocError | CapacityError) {
+    if (store.items.items.len >= usize(NO_DIAGNOSTIC)) return .diagnostic_limit_reached
+    id :: DiagnosticId(store.items.items.len)
+    try arraylist.append(&store.items, Diagnostic{ code = code, span = span })
+    return id
+}
+
+get proc(store @Store, id DiagnosticId) ?Diagnostic {
+    if (usize(id) >= store.items.items.len) return null
+    return store.items.items[usize(id)]
+}
+
+len proc(store @Store) usize {
+    return store.items.items.len
+}
