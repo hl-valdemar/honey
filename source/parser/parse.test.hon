@@ -33,6 +33,37 @@ parses_expression_precedence_through_tree_views test {
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
+parses_grouped_expression_precedence test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "value :: a + ((b - c)) * 2 / 3\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+
+    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(1, ast.package_decl_count(&tree))
+    statement :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+    add :: ast.binary_expr(&tree, statement.initializer)
+    try testing.expect_equal(ast.BinaryOperator.add, add.operator)
+    try testing.expect_equal("a", ast.source_text(&tree, ast.node_span(&tree, add.left)))
+    divide :: ast.binary_expr(&tree, add.right)
+    try testing.expect_equal(ast.BinaryOperator.divide, divide.operator)
+    try testing.expect_equal("3", ast.source_text(&tree, ast.node_span(&tree, divide.right)))
+    multiply :: ast.binary_expr(&tree, divide.left)
+    try testing.expect_equal(ast.BinaryOperator.multiply, multiply.operator)
+    try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, multiply.right)))
+    subtract :: ast.binary_expr(&tree, multiply.left)
+    try testing.expect_equal(ast.BinaryOperator.subtract, subtract.operator)
+    try testing.expect_equal("b", ast.source_text(&tree, ast.node_span(&tree, subtract.left)))
+    try testing.expect_equal("c", ast.source_text(&tree, ast.node_span(&tree, subtract.right)))
+}
+
 parses_function_structure_through_tree_views test {
     strpool.STRINGS = strpool.init(mem.c_allocator)
     defer strpool.deinit(&strpool.STRINGS)
@@ -88,4 +119,43 @@ recovers_invalid_declaration_and_preserves_sibling test {
     try testing.expect(diagnostics.get(&diagnostic_store, invalid_view.diagnostic) != null)
     valid_statement :: ast.statement_decl(&tree, valid_decl)
     try testing.expect_equal("valid", ast.source_text(&tree, valid_statement.name))
+}
+
+recovers_malformed_groups_and_preserves_following_statements test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    empty :: ()
+        `    operand :: (1 + )
+        `    missing :: (2
+        `    valid :: (3)
+        `}
+        `after :: 4
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+
+    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    try testing.expect_equal(4, ast.block_statement_count(&tree, function.body))
+    empty :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, empty.initializer))
+    operand :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1))
+    add :: ast.binary_expr(&tree, operand.initializer)
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, add.right))
+    missing :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 2))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, missing.initializer))
+    valid :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 3))
+    try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, valid.initializer))
+    try testing.expect_equal("3", ast.source_text(&tree, ast.node_span(&tree, valid.initializer)))
+    after :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal("after", ast.source_text(&tree, after.name))
+    try testing.expect_equal("4", ast.source_text(&tree, ast.node_span(&tree, after.initializer)))
 }

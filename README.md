@@ -7,3 +7,5 @@ Build Honey from this directory:
 ```sh
 bro build
 ```
+
+The parser supports arithmetic expressions with nested parenthesized groups, such as `a + (b - c) * 2 / 3`. Groups control precedence without adding AST nodes; inner expression spans exclude the grouping parentheses.

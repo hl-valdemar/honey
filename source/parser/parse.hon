@@ -249,6 +249,19 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! (me
 parse_primary proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     token :: current(state)
     match token.kind {
+        .open_paren: {
+            state.next_token += 1
+            expression :: try parse_expr(state)
+            if next_is(state, .close_paren) {
+                state.next_token += 1
+                return expression
+            }
+            diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+            return try ast.add_invalid_expr(&state.builder, ast.Span{
+                start = token.span.start,
+                end = ast.builder_span(&state.builder, expression).end,
+            }, diagnostic)
+        }
         .int: {
             state.next_token += 1
             return try ast.add_literal(&state.builder, .int, token.span)
@@ -270,9 +283,11 @@ parse_primary proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
                 token.data.diagnostic
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
-            if (token.kind != .newline and token.kind != .close_curly and token.kind != .eof) {
+
+            if (token.kind != .newline and token.kind != .close_paren and token.kind != .close_curly and token.kind != .eof) {
                 state.next_token += 1
             }
+
             return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
         }
     }
