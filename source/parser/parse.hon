@@ -167,8 +167,18 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_statement proc(state @mut State) ast.NodeId ! ParseError {
-    if next_is(state, .ident) return try parse_statement_decl(state)
-    return .unexpected_token
+    if (next_is(state, .ident) and (
+        next_n_is(state, 1, .ident) or
+        next_n_is(state, 1, .double_colon) or
+        next_n_is(state, 1, .colon_equal)
+    )) return try parse_statement_decl(state)
+    match current(state).kind {
+        .ident, .int, .float, .string, .minus, .open_paren: {
+            expression :: try parse_expr(state)
+            return try ast.add_expression_stmt(&state.builder, expression)
+        }
+        else: return .unexpected_token
+    }
 }
 
 @hide:file
@@ -202,12 +212,12 @@ parse_type proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-parse_expr proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+parse_expr proc(state @mut State) ast.NodeId ! ParseError {
     return try parse_expr_bp(state, BindingPowerScalar(0))
 }
 
 @hide:file
-parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! ParseError {
     token := current(state)
     left := if (prefix_binding_power(token.kind)) |right_bp| {
         state.next_token += 1
@@ -225,6 +235,10 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! (me
 
     while true {
         token = current(state)
+        if (token.kind == .open_paren) {
+            left = try parse_call(state, left)
+            continue
+        }
         if (infix_binding_power(token.kind)) |power| {
             if (power.left < min_bp) break
             state.next_token += 1
@@ -246,7 +260,30 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! (me
 }
 
 @hide:file
-parse_primary proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
+    _ = try consume(state, .open_paren)
+    arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
+    defer arraylist.deinit(&arguments)
+
+    while !next_is(state, .close_paren) and !next_is(state, .newline) and
+        !next_is(state, .close_curly) and !next_is(state, .eof)
+    {
+        argument :: try parse_expr(state)
+        try arraylist.append(&arguments, argument)
+        if (!next_is(state, .comma)) break
+        state.next_token += 1
+    }
+    close :: try consume(state, .close_paren)
+    return try ast.add_call(
+        &state.builder,
+        ast.Span{ start = ast.builder_span(&state.builder, callee).start, end = close.span.end },
+        callee,
+        arguments.items,
+    )
+}
+
+@hide:file
+parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
         .open_paren: {
@@ -284,7 +321,7 @@ parse_primary proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 
-            if (token.kind != .newline and token.kind != .close_paren and token.kind != .close_curly and token.kind != .eof) {
+            if (token.kind != .newline and token.kind != .comma and token.kind != .close_paren and token.kind != .close_curly and token.kind != .eof) {
                 state.next_token += 1
             }
 

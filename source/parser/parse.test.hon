@@ -159,3 +159,103 @@ recovers_malformed_groups_and_preserves_following_statements test {
     try testing.expect_equal("after", ast.source_text(&tree, after.name))
     try testing.expect_equal("4", ast.source_text(&tree, ast.node_span(&tree, after.initializer)))
 }
+
+parses_call_statements_and_postfix_precedence test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    ping()
+        `    result int := -factory()(add(1, 2 * 3), (4 + 5),) + 6
+        `    (handler)(result)
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    try testing.expect_equal(3, ast.block_statement_count(&tree, function.body))
+    ping_stmt :: ast.block_statement(&tree, function.body, 0)
+    try testing.expect_equal(ast.StmtKind.expression, ast.stmt_kind(&tree, ping_stmt))
+    ping :: ast.statement_expr(&tree, ping_stmt)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, ping))
+    try testing.expect_equal(0, ast.call_arg_count(&tree, ping))
+    try testing.expect_equal("ping", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, ping).callee)))
+    try testing.expect_equal("ping()", ast.source_text(&tree, ast.call_expr(&tree, ping).span))
+
+    result :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1))
+    try testing.expect_equal(ast.Mutability.variable, result.mutability)
+    add :: ast.binary_expr(&tree, result.initializer)
+    try testing.expect_equal(ast.BinaryOperator.add, add.operator)
+    try testing.expect_equal("6", ast.source_text(&tree, ast.node_span(&tree, add.right)))
+    negate :: ast.unary_expr(&tree, add.left)
+    call :: negate.operand
+    try testing.expect_equal(2, ast.call_arg_count(&tree, call))
+    factory :: ast.call_expr(&tree, call).callee
+    try testing.expect_equal(0, ast.call_arg_count(&tree, factory))
+    try testing.expect_equal("factory", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, factory).callee)))
+    nested :: ast.call_arg(&tree, call, 0)
+    try testing.expect_equal(2, ast.call_arg_count(&tree, nested))
+    try testing.expect_equal("add", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, nested).callee)))
+    try testing.expect_equal("1", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, nested, 0))))
+    multiply :: ast.binary_expr(&tree, ast.call_arg(&tree, nested, 1))
+    try testing.expect_equal(ast.BinaryOperator.multiply, multiply.operator)
+    try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, multiply.left)))
+    try testing.expect_equal("3", ast.source_text(&tree, ast.node_span(&tree, multiply.right)))
+    grouped :: ast.binary_expr(&tree, ast.call_arg(&tree, call, 1))
+    try testing.expect_equal(ast.BinaryOperator.add, grouped.operator)
+    try testing.expect_equal("4", ast.source_text(&tree, ast.node_span(&tree, grouped.left)))
+    try testing.expect_equal("5", ast.source_text(&tree, ast.node_span(&tree, grouped.right)))
+
+    handler :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 2))
+    try testing.expect_equal("handler", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, handler).callee)))
+    try testing.expect_equal(1, ast.call_arg_count(&tree, handler))
+    try testing.expect_equal("result", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, handler, 0))))
+}
+
+recovers_malformed_calls_and_preserves_siblings test {
+    strpool.STRINGS = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.STRINGS)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    bad(1 2)
+        `    good()
+        `    missing(1
+        `    after :: 3
+        `    holes(, 2)
+        `}
+        `tail :: f()
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    try testing.expect_equal(5, ast.block_statement_count(&tree, function.body))
+    for ([0, 2]) |index| {
+        statement :: ast.block_statement(&tree, function.body, usize(index))
+        try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, statement))
+        try testing.expect(diagnostics.get(&diagnostic_store, ast.invalid(&tree, statement).diagnostic) != null)
+    }
+    good :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 1))
+    try testing.expect_equal("good", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, good).callee)))
+    after :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 3))
+    try testing.expect_equal("after", ast.source_text(&tree, after.name))
+    holes :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 4))
+    try testing.expect_equal(2, ast.call_arg_count(&tree, holes))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, ast.call_arg(&tree, holes, 0)))
+    try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, holes, 1))))
+    tail :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal("tail", ast.source_text(&tree, tail.name))
+    try testing.expect_equal(0, ast.call_arg_count(&tree, tail.initializer))
+}

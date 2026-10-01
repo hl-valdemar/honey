@@ -2,9 +2,10 @@
 #! * type ..... -> identifier
 #! * assignment -> :: | :=
 #! * literal .. -> int | float | string
-#! * expr ..... -> identifier | literal
+#! * op ....... -> '+' | '-' | '*' | '/'
+#! * expr ..... -> identifier | literal | '(' expr ')' | '-' expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
 #! * decl ..... -> identifier [type] assignment expr
-#! * stmt ..... -> decl
+#! * stmt ..... -> decl | expr
 
 import "@std/debug"
 import "@std/mem"
@@ -20,13 +21,38 @@ NodeId :: distinct u32
 @hide:file
 NO_NODE :: maxval!(NodeId)
 
-LiteralKind :: enum { int, float, string }
-ExprKind :: enum { literal_int, literal_float, literal_string, identifier, unary, binary, invalid }
-DeclKind :: enum { statement, function, invalid }
-StmtKind :: enum { declaration, invalid }
-Mutability :: enum { constant, variable }
+LiteralKind :: enum {
+    int, float, string
+}
+
+ExprKind :: enum {
+    literal_int
+    literal_float
+    literal_string
+    identifier
+    unary
+    binary
+    call
+    invalid
+}
+
+DeclKind :: enum {
+    statement, function, invalid
+}
+
+StmtKind :: enum {
+    declaration, expression, invalid
+}
+
+Mutability :: enum {
+    constant, variable
+}
+
 UnaryOperator :: enum { negate }
-BinaryOperator :: enum { add, subtract, multiply, divide }
+
+BinaryOperator :: enum {
+    add, subtract, multiply, divide
+}
 
 @hide:file
 NodeKind :: enum {
@@ -36,6 +62,8 @@ NodeKind :: enum {
     expr_identifier,
     expr_unary,
     expr_binary,
+    expr_call,
+    stmt_expr,
     stmt_decl,
     func_decl,
     param_decl,
@@ -114,6 +142,11 @@ BinaryExprView :: struct {
     operator BinaryOperator
     left NodeId
     right NodeId
+}
+
+CallExprView :: struct {
+    span Span
+    callee NodeId
 }
 
 InvalidView :: struct {
@@ -195,6 +228,29 @@ add_binary proc(
         data0 = NodeData{ node_id = left },
         data1 = NodeData{ node_id = right },
     }, span)
+}
+
+add_call proc(
+    builder @mut Builder,
+    span Span,
+    callee NodeId,
+    arguments []NodeId,
+) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (arguments) |argument| _ = try add_extra(builder, u32(argument))
+    return try add_node(builder, Node{
+        kind = .expr_call,
+        main = NodeData{ node_id = callee },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_expression_stmt proc(builder @mut Builder, expression NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .stmt_expr,
+        main = NodeData{ node_id = expression },
+    }, builder_span(builder, expression))
 }
 
 add_statement_decl proc(
@@ -314,9 +370,16 @@ decl_kind proc(tree @Tree, id NodeId) DeclKind {
 stmt_kind proc(tree @Tree, id NodeId) StmtKind {
     return match get_node(&tree.storage, id).kind {
         .stmt_decl: .declaration
+        .stmt_expr: .expression
         .invalid_stmt: .invalid
         else: unreachable
     }
+}
+
+statement_expr proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_expr)
+    return node.main.node_id
 }
 
 statement_decl proc(tree @Tree, id NodeId) StatementDeclView {
@@ -389,6 +452,7 @@ expr_kind proc(tree @Tree, id NodeId) ExprKind {
         .expr_identifier: .identifier
         .expr_unary: .unary
         .expr_binary: .binary
+        .expr_call: .call
         .invalid_expr: .invalid
         else: unreachable
     }
@@ -413,6 +477,28 @@ binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
         left = node.data0.node_id,
         right = node.data1.node_id,
     }
+}
+
+call_expr proc(tree @Tree, id NodeId) CallExprView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_call)
+    return CallExprView{
+        span = get_span(&tree.storage, id),
+        callee = node.main.node_id,
+    }
+}
+
+call_arg_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_call)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+call_arg proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_call)
+    debug.assert(index < usize(node.data1.extra - node.data0.extra))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
 }
 
 node_span proc(tree @Tree, id NodeId) Span { return get_span(&tree.storage, id) }

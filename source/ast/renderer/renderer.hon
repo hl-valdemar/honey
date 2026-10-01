@@ -41,6 +41,12 @@ render_function proc(
         statement :: ast.block_statement(tree, function.body, index)
         match ast.stmt_kind(tree, statement) {
             .declaration: try render_statement(renderer, tree, statement, "    ")
+            .expression: {
+                expression :: ast.statement_expr(tree, statement)
+                try append_text(renderer, "    expression ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, expression)))
+                try append_text(renderer, "\n")
+            }
             .invalid: try append_text(renderer, "    invalid statement\n")
         }
     }
