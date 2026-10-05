@@ -22,7 +22,19 @@ These guidelines apply to Honey programs, the compiler, and the standard library
 - Break long parameter lists and aggregate initializers across lines, with a trailing comma on the last item.
 - Use early returns for terminal cases so the main path stays shallow.
 - Register `defer` cleanup immediately after acquiring a resource. Use `errdefer` for cleanup needed only until ownership is transferred successfully.
-- Write comments for invariants, ownership, or reasons that the code alone does not explain. Use `#!` for API documentation.
+
+## allocation and ownership
+
+- put comptime parameters first, then the allocator as the first runtime parameter, then ordinary runtime inputs. for example: `duplicate(u32, allocator, source)`. use the same order for allocation, reallocation, and freeing operations.
+- keep fixed-size temporary storage local. for dynamic storage, accept an allocator explicitly or use one retained by the object being operated on.
+- an allocator argument means caller-controlled dynamic memory, not necessarily ownership of the result or an allocation on every call.
+- document whether allocated storage is temporary, returned to the caller, or retained by an object. for caller-owned results, name the cleanup operation and any requirement to use the same allocator.
+- release temporary storage before returning, including on error. objects that retain an allocator use it for subsequent allocations and release owned storage through their cleanup operation.
+
+## documentation
+
+- prefer lowercase prose in documentation, including headings and sentence starts. preserve the case of code identifiers, proper names, and acronyms.
+- write comments for invariants, ownership, or reasons that the code alone does not explain. use `#!` for API documentation.
 
 ## Library operations
 
