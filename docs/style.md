@@ -35,6 +35,7 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 
 - prefer lowercase prose in documentation, including headings and sentence starts. preserve the case of code identifiers, proper names, and acronyms.
 - write comments for invariants, ownership, or reasons that the code alone does not explain. use `#!` for API documentation.
+- when editing a function, review its existing comments and API documentation against the resulting implementation. update comments that remain useful; remove those that are obsolete or merely restate self-explanatory code. retain contracts and rationale that callers or maintainers cannot infer from the implementation.
 
 ## library operations
 
