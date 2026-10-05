@@ -20,6 +20,29 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 - use four-space indentation and put opening braces on the declaration or control-flow line.
 - use single-line bodies for simple operations. use braces for multiple statements or nested control flow.
 - break long parameter lists and aggregate initializers across lines, with a trailing comma on the last item.
+- when breaking boolean or arithmetic expressions across lines, put continuation operators at the start of each line. indent operands one level inside the enclosing parentheses and put the closing parenthesis on its own line.
+- wrap multiline `if` and `while` guards in parentheses, with the opening body brace after the closing parenthesis, so the guard's end is visually distinct from its body.
+
+```hon
+debug.assert(
+    node.kind == .invalid_expr
+    or node.kind == .invalid_stmt
+    or node.kind == .invalid_decl
+)
+
+while (
+    !next_is(state, .close_paren)
+    and !next_is(state, .newline)
+    and !next_is(state, .close_curly)
+    and !next_is(state, .eof)
+) {
+    argument :: try parse_expr(state)
+    try arraylist.append(&arguments, argument)
+    if (!next_is(state, .comma)) break
+    state.next_token += 1
+}
+```
+
 - use early returns for terminal cases so the main path stays shallow.
 - register `defer` cleanup immediately after acquiring a resource. use `errdefer` for cleanup needed only until ownership is transferred successfully.
 
