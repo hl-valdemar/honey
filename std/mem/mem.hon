@@ -35,6 +35,12 @@ eql proc($T type, left, right []T) bool {
     return true
 }
 
+#! assign `value` to each slice element, preserving its typed value rather than repeating a byte.
+#! an empty destination is a no-op.
+set proc($T type, destination []mut T, value T) void {
+    for (0..destination.len) |i| destination[i] = value
+}
+
 #! allocate memory for a slice of type `T` with `count` elements.
 alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
     if (count == 0) return empty_slice(T, 0)
