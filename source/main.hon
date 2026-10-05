@@ -6,6 +6,7 @@ import "@source/strpool"
 import "@source/lexer"
 import "@source/ast"
 import "@source/parser"
+import "@source/sema"
 
 ast_renderer :: import "@source/ast/renderer"
 
@@ -20,6 +21,7 @@ test import "@source/lexer"
 test import "@source/ast"
 test import "@source/ast/renderer"
 test import "@source/parser"
+test import "@source/sema"
 
 program ::
     `# literals
@@ -30,11 +32,13 @@ program ::
     `a := 1 + 2 * 3
     `b :: -3 / 2 + 1
     `
-    `empty proc() void {}
-    `grouped proc(a, b T, c U) void {
-    `    value int :: 1
+    `grouped proc(left, right int, extra float) void {
+    `    value int :: later + left
+    `    later int :: right
     `    empty()
+    `    grouped(value, later, extra)
     `}
+    `empty proc() void {}
 
 main proc() void! {
     strpool.STRINGS = strpool.init(mem.c_allocator)
@@ -54,6 +58,9 @@ main proc() void! {
         mem.c_allocator,
     )
     defer ast.deinit(&tree)
+
+    resolution := try sema.resolve(&tree, &diagnostic_store, mem.c_allocator)
+    defer sema.deinit(&resolution)
 
     renderer := ast_renderer.init(mem.c_allocator)
     defer ast_renderer.deinit(&renderer)
