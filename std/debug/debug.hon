@@ -17,23 +17,17 @@ print proc($format []u8, $Args type, args Args) void {
         handle = io.Handle{ file_desc = c_int(io.Stream.stderr) },
         write = write,
     }
-    io.print(writer, format, Args, args) catch |_| {}
+    io.print(format, Args, writer, args) catch |_| {}
 }
 
-@hide
+@hide:file
 write proc(_ ?@mut anyopaque, handle io.Handle, bytes []u8) usize ! io.WriteError {
     request := bytes.len
     maximum :: usize(maxval!(c_long))
-    if request > maximum {
-        request = maximum
-    }
+    if (request > maximum) request = maximum
     while true {
         count :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
-        if count >= 0 {
-            return usize(count)
-        }
-        if c.__error()?^ != c.EINTR {
-            return .write_failed
-        }
+        if (count >= 0) return usize(count)
+        if (c.__error()?^ != c.EINTR) return .write_failed
     }
 }

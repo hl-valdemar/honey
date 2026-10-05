@@ -7,8 +7,8 @@ import "@source/lexer"
 import "@source/ast"
 
 parses_expression_precedence_through_tree_views test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: 1 + 2 * 3\n"
@@ -16,7 +16,7 @@ parses_expression_precedence_through_tree_views test {
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
 
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(1, ast.package_decl_count(&tree))
@@ -34,8 +34,8 @@ parses_expression_precedence_through_tree_views test {
 }
 
 parses_grouped_expression_precedence test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: a + ((b - c)) * 2 / 3\n"
@@ -43,7 +43,7 @@ parses_grouped_expression_precedence test {
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
 
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -65,8 +65,8 @@ parses_grouped_expression_precedence test {
 }
 
 parses_function_structure_through_tree_views test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -77,7 +77,7 @@ parses_function_structure_through_tree_views test {
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
 
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     declaration :: ast.package_decl(&tree, 0)
@@ -98,8 +98,8 @@ parses_function_structure_through_tree_views test {
 }
 
 recovers_invalid_declaration_and_preserves_sibling test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "@ broken\nvalid :: 1\n"
@@ -107,7 +107,7 @@ recovers_invalid_declaration_and_preserves_sibling test {
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
 
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(2, ast.package_decl_count(&tree))
@@ -122,8 +122,8 @@ recovers_invalid_declaration_and_preserves_sibling test {
 }
 
 recovers_malformed_groups_and_preserves_following_statements test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -138,7 +138,7 @@ recovers_malformed_groups_and_preserves_following_statements test {
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
 
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
@@ -161,8 +161,8 @@ recovers_malformed_groups_and_preserves_following_statements test {
 }
 
 parses_call_statements_and_postfix_precedence test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -174,7 +174,7 @@ parses_call_statements_and_postfix_precedence test {
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -185,7 +185,10 @@ parses_call_statements_and_postfix_precedence test {
     ping :: ast.statement_expr(&tree, ping_stmt)
     try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, ping))
     try testing.expect_equal(0, ast.call_arg_count(&tree, ping))
-    try testing.expect_equal("ping", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, ping).callee)))
+    try testing.expect_equal(
+        "ping",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, ping).callee)),
+    )
     try testing.expect_equal("ping()", ast.source_text(&tree, ast.call_expr(&tree, ping).span))
 
     result :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1))
@@ -198,11 +201,20 @@ parses_call_statements_and_postfix_precedence test {
     try testing.expect_equal(2, ast.call_arg_count(&tree, call))
     factory :: ast.call_expr(&tree, call).callee
     try testing.expect_equal(0, ast.call_arg_count(&tree, factory))
-    try testing.expect_equal("factory", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, factory).callee)))
+    try testing.expect_equal(
+        "factory",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, factory).callee)),
+    )
     nested :: ast.call_arg(&tree, call, 0)
     try testing.expect_equal(2, ast.call_arg_count(&tree, nested))
-    try testing.expect_equal("add", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, nested).callee)))
-    try testing.expect_equal("1", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, nested, 0))))
+    try testing.expect_equal(
+        "add",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, nested).callee)),
+    )
+    try testing.expect_equal(
+        "1",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, nested, 0))),
+    )
     multiply :: ast.binary_expr(&tree, ast.call_arg(&tree, nested, 1))
     try testing.expect_equal(ast.BinaryOperator.multiply, multiply.operator)
     try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, multiply.left)))
@@ -213,14 +225,20 @@ parses_call_statements_and_postfix_precedence test {
     try testing.expect_equal("5", ast.source_text(&tree, ast.node_span(&tree, grouped.right)))
 
     handler :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 2))
-    try testing.expect_equal("handler", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, handler).callee)))
+    try testing.expect_equal(
+        "handler",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, handler).callee)),
+    )
     try testing.expect_equal(1, ast.call_arg_count(&tree, handler))
-    try testing.expect_equal("result", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, handler, 0))))
+    try testing.expect_equal(
+        "result",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, handler, 0))),
+    )
 }
 
 recovers_malformed_calls_and_preserves_siblings test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -235,7 +253,7 @@ recovers_malformed_calls_and_preserves_siblings test {
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
-    tree := try parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
     try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
@@ -245,16 +263,24 @@ recovers_malformed_calls_and_preserves_siblings test {
     for ([0, 2]) |index| {
         statement :: ast.block_statement(&tree, function.body, usize(index))
         try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, statement))
-        try testing.expect(diagnostics.get(&diagnostic_store, ast.invalid(&tree, statement).diagnostic) != null)
+        try testing.expect(
+            diagnostics.get(&diagnostic_store, ast.invalid(&tree, statement).diagnostic) != null,
+        )
     }
     good :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 1))
-    try testing.expect_equal("good", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, good).callee)))
+    try testing.expect_equal(
+        "good",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, good).callee)),
+    )
     after :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 3))
     try testing.expect_equal("after", ast.source_text(&tree, after.name))
     holes :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 4))
     try testing.expect_equal(2, ast.call_arg_count(&tree, holes))
     try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, ast.call_arg(&tree, holes, 0)))
-    try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, holes, 1))))
+    try testing.expect_equal(
+        "2",
+        ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, holes, 1))),
+    )
     tail :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
     try testing.expect_equal("tail", ast.source_text(&tree, tail.name))
     try testing.expect_equal(0, ast.call_arg_count(&tree, tail.initializer))

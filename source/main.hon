@@ -24,6 +24,7 @@ test import "@source/ast/renderer"
 test import "@source/parser"
 test import "@source/sema"
 
+@hide:file
 program ::
     `# literals
     `x float :: 123.9
@@ -42,8 +43,8 @@ program ::
     `empty proc() void {}
 
 main proc() void! {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
 
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
@@ -53,14 +54,14 @@ main proc() void! {
     try lexer.scan(&scan_state, program, &diagnostic_store)
 
     tree := try parser.parse(
+        mem.c_allocator,
         scan_state.tokens.items,
         program,
         &diagnostic_store,
-        mem.c_allocator,
     )
     defer ast.deinit(&tree)
 
-    resolution := try sema.resolve(&tree, &diagnostic_store, mem.c_allocator)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
     defer sema.deinit(&resolution)
 
     renderer := ast_renderer.init(mem.c_allocator)

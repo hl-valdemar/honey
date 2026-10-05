@@ -1,5 +1,7 @@
 import "@std/mem"
 
+#! owns item storage and retains its allocator; release storage with deinit.
+#! items is a borrowed view invalidated by growth or deinit.
 ArrayList proc($T type) type {
     return struct {
         items []mut T
@@ -8,6 +10,7 @@ ArrayList proc($T type) type {
     }
 }
 
+#! retain allocator for later growth and cleanup; this call does not allocate.
 init proc($T type, allocator mem.Allocator) ArrayList(T) {
     return ArrayList(T) {
         items = mem.empty(T),
@@ -16,6 +19,7 @@ init proc($T type, allocator mem.Allocator) ArrayList(T) {
     }
 }
 
+#! release owned storage using the retained allocator and reset the list.
 deinit proc($T type, list @mut ArrayList(T)) void {
     allocation :: list.items.ptr[..list.capacity]
     mem.free(list.allocator, allocation)
@@ -23,10 +27,13 @@ deinit proc($T type, list @mut ArrayList(T)) void {
     list.capacity = 0
 }
 
-reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.AllocError {
-    if min_capacity <= list.capacity {
-        return
-    }
+#! grow owned storage with the retained allocator; growth invalidates borrowed item views.
+reserve proc(
+    $T type,
+    list @mut ArrayList(T),
+    min_capacity usize,
+) void ! mem.AllocError {
+    if (min_capacity <= list.capacity) return
 
     new_capacity := 8
     if list.capacity >= 8 {
@@ -41,9 +48,9 @@ reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.All
         new_capacity = min_capacity
     }
 
-    length usize :: list.items.len
-    allocation []mut T :: list.items.ptr[..list.capacity]
-    grown []mut T :: mem.realloc(list.allocator, allocation, new_capacity) catch |_| {
+    length :: list.items.len
+    allocation :: list.items.ptr[..list.capacity]
+    grown :: mem.realloc(list.allocator, allocation, new_capacity) catch |_| {
         return .out_of_memory
     }
     list.items = grown.ptr[..length]
@@ -52,7 +59,7 @@ reserve proc($T type, list @mut ArrayList(T), min_capacity usize) void ! mem.All
 }
 
 append proc($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
-    length usize :: list.items.len
+    length :: list.items.len
     if length == maxval!(usize) {
         return .out_of_memory
     }

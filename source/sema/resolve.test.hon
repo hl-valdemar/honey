@@ -8,8 +8,8 @@ import "@source/parser"
 import "@source/ast"
 
 resolves_forward_references_recursion_and_builtin_signatures test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -26,9 +26,9 @@ resolves_forward_references_recursion_and_builtin_signatures test {
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
-    tree := try parser.parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try resolve(&tree, &diagnostic_store, mem.c_allocator)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
     defer deinit(&resolution)
 
     first :: ast.package_decl(&tree, 0)
@@ -85,10 +85,22 @@ resolves_forward_references_recursion_and_builtin_signatures test {
     } else {
         return .expectation_failed
     }
-    try testing.expect_equal(BindingKind.builtin, binding(&resolution, ast.param(&tree, q).type).kind)
-    try testing.expect_equal(BuiltinType.float, binding(&resolution, ast.param(&tree, q).type).data.builtin)
-    try testing.expect_equal(BindingKind.builtin, binding(&resolution, ast.param(&tree, s).type).kind)
-    try testing.expect_equal(BuiltinType.string, binding(&resolution, ast.param(&tree, s).type).data.builtin)
+    try testing.expect_equal(
+        BindingKind.builtin,
+        binding(&resolution, ast.param(&tree, q).type).kind,
+    )
+    try testing.expect_equal(
+        BuiltinType.float,
+        binding(&resolution, ast.param(&tree, q).type).data.builtin,
+    )
+    try testing.expect_equal(
+        BindingKind.builtin,
+        binding(&resolution, ast.param(&tree, s).type).kind,
+    )
+    try testing.expect_equal(
+        BuiltinType.string,
+        binding(&resolution, ast.param(&tree, s).type).data.builtin,
+    )
     return_types [2]ast.NodeId :: [alpha_view.return_type, beta_view.return_type]
     for return_types |id| {
         try testing.expect_equal(BindingKind.builtin, binding(&resolution, id).kind)
@@ -98,8 +110,8 @@ resolves_forward_references_recursion_and_builtin_signatures test {
 }
 
 rejects_shadowing_and_duplicates_without_cascades test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -121,10 +133,10 @@ rejects_shadowing_and_duplicates_without_cascades test {
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
-    tree := try parser.parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(&tree, &diagnostic_store, mem.c_allocator)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
     defer deinit(&resolution)
 
     function :: ast.package_decl(&tree, 0)
@@ -140,34 +152,64 @@ rejects_shadowing_and_duplicates_without_cascades test {
     local_p :: ast.block_statement(&tree, view.body, 2)
     local_int :: ast.block_statement(&tree, view.body, 3)
     local_pkg :: ast.block_statement(&tree, view.body, 4)
-    rejected [8]ast.NodeId :: [outer_param, duplicate_p, first_outer, second_outer, local_p, local_int, local_pkg, second_same]
+    rejected [8]ast.NodeId :: [
+        outer_param,
+        duplicate_p,
+        first_outer,
+        second_outer,
+        local_p,
+        local_int,
+        local_pkg,
+        second_same,
+    ]
     for rejected |id| {
         invalid_binding :: binding(&resolution, id)
         try testing.expect_equal(BindingKind.invalid, invalid_binding.kind)
         if (diagnostics.get(&diagnostic_store, invalid_binding.data.diagnostic)) |diagnostic| {
             try testing.expect_equal(diagnostics.Code.duplicate_name, diagnostic.code)
-            name :: if (id == outer_param or id == duplicate_p) ast.param(&tree, id).name else ast.statement_decl(&tree, id).name
+            name :: if (id == outer_param or id == duplicate_p)
+                ast.param(&tree, id).name
+            else
+                ast.statement_decl(&tree, id).name
             try testing.expect_equal(name.start, diagnostic.span.start)
             try testing.expect_equal(name.end, diagnostic.span.end)
         } else {
             return .expectation_failed
         }
     }
-    try testing.expect(binding(&resolution, first_outer).data.diagnostic != binding(&resolution, second_outer).data.diagnostic)
-    try testing.expect(binding(&resolution, outer_param).data.diagnostic != binding(&resolution, first_outer).data.diagnostic)
-    try testing.expect(binding(&resolution, duplicate_p).data.diagnostic != binding(&resolution, local_p).data.diagnostic)
+    try testing.expect(
+        binding(&resolution, first_outer).data.diagnostic !=
+            binding(&resolution, second_outer).data.diagnostic,
+    )
+    try testing.expect(
+        binding(&resolution, outer_param).data.diagnostic !=
+            binding(&resolution, first_outer).data.diagnostic,
+    )
+    try testing.expect(
+        binding(&resolution, duplicate_p).data.diagnostic !=
+            binding(&resolution, local_p).data.diagnostic,
+    )
     outer_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, view.body, 5))
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, outer_ref).kind)
-    try testing.expect_equal(binding(&resolution, outer_param).data.diagnostic, binding(&resolution, outer_ref).data.diagnostic)
+    try testing.expect_equal(
+        binding(&resolution, outer_param).data.diagnostic,
+        binding(&resolution, outer_ref).data.diagnostic,
+    )
     p_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, view.body, 6))
     try testing.expect_equal(BindingKind.declaration, binding(&resolution, p_ref).kind)
     try testing.expect_equal(p, binding(&resolution, p_ref).data.declaration)
     int_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, view.body, 7))
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, int_ref).kind)
-    try testing.expect_equal(binding(&resolution, local_int).data.diagnostic, binding(&resolution, int_ref).data.diagnostic)
+    try testing.expect_equal(
+        binding(&resolution, local_int).data.diagnostic,
+        binding(&resolution, int_ref).data.diagnostic,
+    )
     pkg_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, view.body, 8))
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, pkg_ref).kind)
-    try testing.expect_equal(binding(&resolution, local_pkg).data.diagnostic, binding(&resolution, pkg_ref).data.diagnostic)
+    try testing.expect_equal(
+        binding(&resolution, local_pkg).data.diagnostic,
+        binding(&resolution, pkg_ref).data.diagnostic,
+    )
     try testing.expect_equal(BindingKind.declaration, binding(&resolution, view.return_type).kind)
     try testing.expect_equal(outer, binding(&resolution, view.return_type).data.declaration)
     parameter_type :: ast.param(&tree, outer_param).type
@@ -189,8 +231,8 @@ rejects_shadowing_and_duplicates_without_cascades test {
 }
 
 preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
-    strpool.STRINGS = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.STRINGS)
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -205,7 +247,7 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &diagnostic_store)
-    tree := try parser.parse(scan_state.tokens.items, source, &diagnostic_store, mem.c_allocator)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     syntax_count :: diagnostics.count(&diagnostic_store)
     invalid_decl :: ast.package_decl(&tree, 0)
@@ -216,7 +258,7 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
     try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, empty))
     invalid_statement :: ast.block_statement(&tree, view.body, 4)
     try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, invalid_statement))
-    resolution := try resolve(&tree, &diagnostic_store, mem.c_allocator)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
     defer deinit(&resolution)
 
     invalid_nodes [3]ast.NodeId :: [invalid_decl, empty, invalid_statement]
@@ -229,8 +271,14 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
     a :: ast.function_param(&tree, function, 0)
     b :: ast.function_param(&tree, function, 1)
     shared_type :: ast.param(&tree, a).type
-    try testing.expect_equal(binding(&resolution, shared_type).data.diagnostic, binding(&resolution, ast.param(&tree, b).type).data.diagnostic)
-    bad :: ast.binary_expr(&tree, ast.statement_decl(&tree, ast.block_statement(&tree, view.body, 1)).initializer)
+    try testing.expect_equal(
+        binding(&resolution, shared_type).data.diagnostic,
+        binding(&resolution, ast.param(&tree, b).type).data.diagnostic,
+    )
+    bad :: ast.binary_expr(
+        &tree,
+        ast.statement_decl(&tree, ast.block_statement(&tree, view.body, 1)).initializer,
+    )
     unknown_nodes [3]ast.NodeId :: [shared_type, bad.left, bad.right]
     for unknown_nodes |id| {
         invalid_binding :: binding(&resolution, id)
@@ -243,7 +291,10 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
             return .expectation_failed
         }
     }
-    try testing.expect(binding(&resolution, bad.left).data.diagnostic != binding(&resolution, bad.right).data.diagnostic)
+    try testing.expect(
+        binding(&resolution, bad.left).data.diagnostic !=
+            binding(&resolution, bad.right).data.diagnostic,
+    )
     valid :: ast.block_statement(&tree, view.body, 2)
     later :: ast.block_statement(&tree, view.body, 3)
     valid_ref :: ast.statement_decl(&tree, valid).initializer

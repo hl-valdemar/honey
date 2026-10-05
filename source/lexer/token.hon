@@ -57,22 +57,22 @@ TokenKind :: enum {
     invalid
 }
 
-render_token proc(tok Token, program []u8) void {
-    match tok.kind {
+render_token proc(token Token, program []u8) void {
+    match token.kind {
         .ident: {
-            if (strpool.get_str(&strpool.STRINGS, tok.data.str_id)) |str| {
-                debug.print("{}({})\n", {tok.kind, str})
+            if (strpool.get_str(&strpool.strings, token.data.str_id)) |str| {
+                debug.print("{}({})\n", {token.kind, str})
             } else {
-                debug.print("{}({})\n", {tok.kind, program[tok.span.start..tok.span.end]})
+                debug.print("{}({})\n", {token.kind, program[token.span.start..token.span.end]})
             }
         }
         .string, .int, .float:
-            debug.print("{}({})\n", {tok.kind, program[tok.span.start..tok.span.end]})
-        else: debug.print("{}\n", {tok.kind})
+            debug.print("{}({})\n", {token.kind, program[token.span.start..token.span.end]})
+        else: debug.print("{}\n", {token.kind})
     }
 }
 
-token_id proc(idx uint) TokenId {
-    debug.assert(u64(idx) < u64(NO_TOKEN))
-    return TokenId(idx)
+token_id proc(index uint) TokenId {
+    debug.assert(u64(index) < u64(NO_TOKEN))
+    return TokenId(index)
 }

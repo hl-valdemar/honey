@@ -4,6 +4,7 @@ AllocError :: enum {
     out_of_memory
 }
 
+#! allocator context and vtable are borrowed and must outlive allocations made through them.
 Allocator :: struct {
     context ?@mut anyopaque
     vtable @AllocatorVTable
@@ -15,23 +16,40 @@ AllocatorVTable :: struct {
     free @proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void
 }
 
-raw_alloc proc(allocator Allocator, size usize, alignment usize) ?*mut u8 {
+#! returned storage belongs to the caller; release it with raw_free using the same allocator, size, and alignment.
+raw_alloc proc(
+    allocator Allocator,
+    size usize,
+    alignment usize,
+) ?*mut u8 {
     return allocator.vtable.alloc(allocator.context, size, alignment)
 }
 
-raw_realloc proc(allocator Allocator, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+#! resize caller-owned storage with its original allocator and alignment.
+#! on allocation failure with nonzero new_size, original storage remains caller-owned; release the result with raw_free.
+raw_realloc proc(
+    allocator Allocator,
+    memory ?*mut u8,
+    old_size usize,
+    new_size usize,
+    alignment usize,
+) ?*mut u8 {
     return allocator.vtable.realloc(allocator.context, memory, old_size, new_size, alignment)
 }
 
-raw_free proc(allocator Allocator, memory ?*mut u8, size usize, alignment usize) void {
+#! release caller-owned storage with its original allocator, size, and alignment.
+raw_free proc(
+    allocator Allocator,
+    memory ?*mut u8,
+    size usize,
+    alignment usize,
+) void {
     allocator.vtable.free(allocator.context, memory, size, alignment)
 }
 
 eql proc($T type, left, right []T) bool {
     if (left.len != right.len) return false
-    for (0..left.len) |i| if (left[i] != right[i]) {
-        return false
-    }
+    for (0..left.len) |i| if (left[i] != right[i]) return false
     return true
 }
 
@@ -42,17 +60,18 @@ set proc($T type, destination []mut T, value T) void {
 }
 
 #! allocate memory for a slice of type `T` with `count` elements.
+#! returned storage belongs to the caller; release it with free using the same allocator.
 alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
     if (count == 0) return empty_slice(T, 0)
 
-    element_size usize :: sizeof!(T)
+    element_size :: sizeof!(T)
     if (element_size == 0) return empty_slice(T, count)
 
     if count > divtrunc!(maxval!(usize), element_size) {
         return .out_of_memory
     }
 
-    memory := raw_alloc(allocator, count * element_size, alignof!(T))
+    memory :: raw_alloc(allocator, count * element_size, alignof!(T))
     if memory |bytes| {
         pointer *mut T :: ptrcast!(bytes)
         return pointer[..count]
@@ -64,17 +83,22 @@ alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
 #! reallocate memory for a slice of type `T` with `new_count` elements.
 #! reallocating with `new_count == 0` will free the memory and return an empty slice.
 #! note: memory must be reallocated with the same allocator that was used to allocate it.
-realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mut T ! AllocError {
-    if new_count == memory.len {
-        return memory
-    }
+#! the result belongs to the caller; release it with free using that allocator.
+#! on failure the original slice remains valid and caller-owned.
+realloc proc(
+    $T type,
+    allocator Allocator,
+    memory []mut T,
+    new_count usize,
+) []mut T ! AllocError {
+    if (new_count == memory.len) return memory
 
     if new_count == 0 {
         free(allocator, memory)
         return empty_slice(T, 0)
     }
 
-    element_size usize :: sizeof!(T)
+    element_size :: sizeof!(T)
     if (element_size == 0) return empty_slice(T, new_count)
     if (new_count > divtrunc!(maxval!(usize), element_size)) return .out_of_memory
 
@@ -85,7 +109,7 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
         old_size = memory.len * element_size
     }
 
-    resized := raw_realloc(
+    resized :: raw_realloc(
         allocator,
         old_memory,
         old_size,
@@ -105,8 +129,9 @@ realloc proc($T type, allocator Allocator, memory []mut T, new_count usize) []mu
 #! note: memory must be freed with the same allocator that was used to allocate it.
 free proc($T type, allocator Allocator, memory []T) void {
     if (memory.len == 0 or sizeof!(T) == 0) return
-    raw_free(allocator, ptrcast!(
-        constcast!(memory).ptr),
+    raw_free(
+        allocator,
+        ptrcast!(constcast!(memory).ptr),
         memory.len * sizeof!(T),
         alignof!(T),
     )
@@ -122,14 +147,15 @@ empty_slice proc($T type, count usize) []mut T {
 }
 
 #! get an empty slice of type `T` with 0 elements.
+#! the view borrows shared empty storage and requires no cleanup.
 empty proc($T type) []mut T {
     return empty_slice(T, 0)
 }
 
-@hide
+@hide:file
 empty_storage [1]mut u64 := [0]
 
-@hide
+@hide:file
 malloc_alignment usize :: 16 # note: aarch64-macos libc malloc alignment assumption.
 
 @hide:file
@@ -137,7 +163,7 @@ power_of_two proc(value usize) bool {
     if (value == 0) return false
     current := value
     while current > 1 {
-        half := divtrunc!(current, 2)
+        half :: divtrunc!(current, 2)
         if (half * 2 != current) return false
         current = half
     }
@@ -150,7 +176,7 @@ c_alloc proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
     if (alignment <= malloc_alignment) return ptrcast!(c.malloc(c_ulong(size)))
 
     memory [1]mut ?*mut anyopaque := [null]
-    status := c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
+    status :: c.posix_memalign((&memory).ptr, c_ulong(alignment), c_ulong(size))
     if (status != 0) return null
 
     return ptrcast!(memory[0])
@@ -176,7 +202,7 @@ c_realloc proc(
             return ptrcast!(c.realloc(old_memory, c_ulong(new_size)))
         }
 
-        new_memory := c_alloc(null, new_size, alignment)
+        new_memory :: c_alloc(null, new_size, alignment)
         if new_memory |new_bytes| {
             copy_size := old_size
             if (new_size < copy_size) copy_size = new_size

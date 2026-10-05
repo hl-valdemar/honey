@@ -8,15 +8,17 @@ StringId :: alias u32
 
 NO_STR :: maxval!(StringId)
 
-# cross-cutting concern, hence global singleton (owned by main.hon)
-STRINGS StringPool := undefined
+#! global pool owned by main.hon; initialize before scanning and release with deinit.
+strings StringPool := undefined
 
+#! retains its allocator and owns interned copies; release all storage with deinit.
 StringPool :: struct {
     ids hashmap.StringHashMap(StringId) # string → id
     strings arraylist.ArrayList([]u8)   # id → owned string
     allocator mem.Allocator
 }
 
+#! retains allocator for interned copies and indexes; the caller owns the pool.
 init proc(allocator mem.Allocator) StringPool {
     return StringPool{
         ids = hashmap.init(allocator),
@@ -25,19 +27,19 @@ init proc(allocator mem.Allocator) StringPool {
     }
 }
 
+#! releases interned strings and indexes with the retained allocator.
 deinit proc(pool @mut StringPool) void {
     hashmap.deinit(&pool.ids)
-    for pool.strings.items |str| {
-        mem.free(pool.allocator, str)
-    }
+    for (pool.strings.items) |str| mem.free(pool.allocator, str)
     arraylist.deinit(&pool.strings)
 }
 
+#! copies new strings into pool-owned storage; IDs and borrowed strings last until deinit.
 intern proc(pool @mut StringPool, str []u8) StringId ! (mem.AllocError | InternError) {
     if hashmap.get(&pool.ids, str) |id| return id
 
     if (pool.strings.items.len >= usize(NO_STR)) return .out_of_space
-    id StringId :: StringId(pool.strings.items.len)
+    id :: StringId(pool.strings.items.len)
 
     owned_str []mut u8 :: try mem.alloc(u8, pool.allocator, str.len)
     errdefer mem.free(pool.allocator, owned_str)
@@ -56,6 +58,7 @@ intern proc(pool @mut StringPool, str []u8) StringId ! (mem.AllocError | InternE
     return id
 }
 
+#! returns pool-owned text borrowed until deinit; the caller must not free it.
 get_str proc(pool @StringPool, id StringId) ?[]u8 {
     if (usize(id) >= pool.strings.items.len) return null
     return pool.strings.items[usize(id)]

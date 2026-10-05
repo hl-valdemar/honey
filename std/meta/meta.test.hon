@@ -1,18 +1,24 @@
 import "@std/testing"
 
+@hide:file
 TestTokenKind :: enum(u8) {
     ident = 3
     int = 8
     eof = 21
 }
 
+@hide:file
 TestNames :: alias EnumFieldStruct(TestTokenKind, ?[]u8, some!(null))
+@hide:file
 TestArrayAlias :: alias [3]u16
+@hide:file
 TestInner :: distinct u16
+@hide:file
 TestOuter :: distinct TestInner
+@hide:file
 TestOuterAlias :: alias TestOuter
 
-@hide
+@hide:file
 array_info_matches proc($Array, $Child type, $len usize) bool {
     return match typeinfo!(Array) {
         .array |info|: info.child == Child and info.len == len
@@ -20,7 +26,7 @@ array_info_matches proc($Array, $Child type, $len usize) bool {
     }
 }
 
-@hide
+@hide:file
 distinct_info_matches proc($Distinct, $Backing type) bool {
     return match typeinfo!(Distinct) {
         .distinct |backing|: backing == Backing
@@ -43,7 +49,7 @@ distinct_reflection_exposes_immediate_backing test {
 }
 
 enum_field_struct_defaults test {
-    names TestNames := {
+    names TestNames :: {
         ident = "identifier",
         int = "integer",
     }
@@ -60,6 +66,6 @@ enum_field_struct_defaults test {
 
     if (field!(names, "eof")) |_| try testing.expect(false)
 
-    empty TestNames := {}
+    empty TestNames :: {}
     if (field!(empty, "ident")) |_| try testing.expect(false)
 }

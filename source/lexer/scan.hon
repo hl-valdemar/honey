@@ -5,6 +5,7 @@ import "@std/arraylist"
 import "@source/diagnostics"
 import "@source/strpool"
 
+@hide:file
 ScanError :: struct {
     code ErrorCode
     end usize
@@ -17,7 +18,7 @@ ErrorCode :: enum {
 }
 SourceError :: enum { source_too_large }
 
-
+@hide:file
 keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "proc", .proc },
     { "return", .return },
@@ -27,18 +28,25 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "while", .while },
 ])
 
+#! owns token storage and retains its allocator; release with deinit.
+#! identifier IDs refer to strings in the separately owned strpool.strings.
 State :: struct {
     tokens arraylist.ArrayList(Token)
 }
 
+#! retains allocator for scanned tokens; the caller owns the returned State.
 init proc(allocator mem.Allocator) State {
     return State{ tokens = arraylist.init(allocator) }
 }
 
+#! releases token storage with the retained allocator, without releasing strpool.strings.
 deinit proc(state @mut State) void {
     arraylist.deinit(&state.tokens)
 }
 
+#! borrows program and diagnostic_store during scanning; tokens remain state-owned.
+#! token allocation uses the retained allocator; identifiers use strpool.strings's allocator.
+#! initialize strpool.strings before scanning and keep it alive while using identifier IDs.
 scan proc(
     state @mut State,
     program []u8,
@@ -49,24 +57,22 @@ scan proc(
     while cursor < program.len {
         char :: program[cursor]
 
-        # whitespace
         if char == '\n' {
             try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .newline })
             cursor += 1
             continue
-        } else if is_whitespace(char) {
+        }
+        if is_whitespace(char) {
             cursor += 1
             continue
         }
 
-        # comments
         if char == '#' {
             while (cursor < program.len and program[cursor] != '\n') cursor += 1
             if (cursor < program.len) cursor += 1
             continue
         }
 
-        # identifiers and keywords
         if is_alpha(char) or char == '_' {
             start :: cursor
             result :: scan_ident(start, program)
@@ -79,7 +85,6 @@ scan proc(
             continue
         }
 
-        # numeric literals
         if is_digit(char) {
             start :: cursor
             result :: scan_number(start, program) catch |err| {
@@ -102,7 +107,6 @@ scan proc(
             continue
         }
 
-        # string literals
         if char == '"' {
             start :: cursor
             result :: scan_string(start, program) catch |err| {
@@ -124,15 +128,20 @@ scan proc(
             continue
         }
 
-        # immutable decl, mutable decl, or single colon
         if char == ':' {
             if cursor + 1 < program.len and program[cursor + 1] == ':' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .double_colon })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .double_colon,
+                })
                 cursor += 2
                 continue
             }
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .colon_equal })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .colon_equal,
+                })
                 cursor += 2
                 continue
             }
@@ -141,10 +150,12 @@ scan proc(
             continue
         }
 
-        # compound arithmetic assignment
         if char == '+' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .plus_equal })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .plus_equal,
+                })
                 cursor += 2
                 continue
             }
@@ -154,7 +165,10 @@ scan proc(
         }
         if char == '-' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .minus_equal })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .minus_equal,
+                })
                 cursor += 2
                 continue
             }
@@ -164,7 +178,10 @@ scan proc(
         }
         if char == '*' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .star_equal })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .star_equal,
+                })
                 cursor += 2
                 continue
             }
@@ -174,7 +191,10 @@ scan proc(
         }
         if char == '/' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
-                try add_token(state, Token{ span = make_span(cursor, cursor + 2), kind = .slash_equal })
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = .slash_equal,
+                })
                 cursor += 2
                 continue
             }
@@ -183,7 +203,6 @@ scan proc(
             continue
         }
 
-        # single character tokens
         kind ?TokenKind :: match char {
             '=': .equal
             ',': .comma
@@ -201,7 +220,6 @@ scan proc(
             continue
         }
 
-        # invalid character
         id :: try diagnostics.add(
             diagnostic_store,
             .invalid_character,
@@ -218,15 +236,16 @@ scan proc(
     try add_token(state, Token{ span = make_span(cursor, cursor), kind = .eof })
 }
 
+@hide:file
 ScanIdentResult :: struct {
     end usize
     kind TokenKind
     str_id strpool.StringId
 }
 
+@hide:file
 scan_ident proc(start usize, program []u8) ScanIdentResult {
     cursor := start + 1
-    # scan whole identifier
     while (cursor < program.len and (
         is_alpha(program[cursor]) or
         is_digit(program[cursor]) or
@@ -236,58 +255,62 @@ scan_ident proc(start usize, program []u8) ScanIdentResult {
     # don't intern keywords (already O(1) lookup via token kind)
     kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
     str_id :: if (kind == .ident)
-        strpool.intern(&strpool.STRINGS, program[start..cursor]) catch strpool.NO_STR
+        strpool.intern(&strpool.strings, program[start..cursor]) catch strpool.NO_STR
     else
         strpool.NO_STR
     return ScanIdentResult{ end = cursor, kind = kind, str_id = str_id }
 }
 
+@hide:file
 ScanNumResult :: struct {
     end usize
     has_decimal bool
 }
 
+@hide:file
 scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
     cursor := start
     has_decimal := false
-    # scan integer part
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
-    # check for decimal
     if cursor < program.len and program[cursor] == '.' {
         has_decimal = true
         cursor += 1
     }
-    # assert non-terminating decimal
     if has_decimal and (cursor >= program.len or !is_digit(program[cursor])) {
-        return ScanError{ code = .float_must_end_with_digit, end = cursor }
+        return ScanError{
+            code = .float_must_end_with_digit,
+            end = cursor,
+        }
     }
-    # scan fractional part
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
     return ScanNumResult{ end = cursor, has_decimal = has_decimal }
 }
 
+@hide:file
 ScanStrResult :: struct { end usize }
 
+@hide:file
 scan_string proc(start usize, program []u8) ScanStrResult ! ScanError {
     cursor := start + 1 # skip first `"`
-    # scan entire string
     while cursor < program.len and program[cursor] != '"' and program[cursor] != '\n' : cursor += 1 {
-        # ignore escaped characters
+        # escaped quotes do not terminate the string.
         if (program[cursor] == '\\' and cursor + 1 < program.len) cursor += 1
     }
-    # assert string terminal
     if (cursor >= program.len or program[cursor] != '"') {
-        return ScanError{ code = .unterminated_string, end = cursor }
+        return ScanError{
+            code = .unterminated_string,
+            end = cursor,
+        }
     }
     return ScanStrResult{ end = cursor + 1 } # skip last `"`
 }
 
-@hide
+@hide:file
 is_whitespace proc(char u8) bool {
     return char == ' ' or char == '\t' or char == '\n' or char == '\r'
 }
 
-@hide
+@hide:file
 is_alpha proc(char u8) bool {
     return match char {
         'a'..='z', 'A'..='Z': true
@@ -295,7 +318,7 @@ is_alpha proc(char u8) bool {
     }
 }
 
-@hide
+@hide:file
 is_digit proc(char u8) bool {
     return match char {
         '0'..='9': true
@@ -316,7 +339,7 @@ make_span proc(start, end usize) diagnostics.Span {
     return diagnostics.Span{ start = u32(start), end = u32(end) }
 }
 
-@hide
+@hide:file
 add_token proc(state @mut State, token Token) void ! mem.AllocError {
     _ = token_id(state.tokens.items.len)
     try arraylist.append(&state.tokens, token)

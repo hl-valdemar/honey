@@ -16,6 +16,7 @@ Pair proc($V type) type {
 }
 
 #! initializes a static string map from a list of key-value pairs (constructed at compile-time).
+#! returned views use compile-time storage and require no cleanup.
 init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
     if N > usize(maxval!(u32)) {
         compile_error!("static string map has too many entries")
@@ -39,7 +40,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
     }
 
     if N == 0 {
-        len_indexes [0]u32 := undefined
+        len_indexes [0]u32 :: undefined
         return StaticStringMap(V){
             keys = keys[..],
             values = values[..],
@@ -83,7 +84,7 @@ init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
 get proc($V type, map @StaticStringMap(V), key []u8) ?V {
     if (map.keys.len == 0 or key.len > maxval!(u32)) return null
 
-    length := u32(key.len)
+    length :: u32(key.len)
     if (length < map.min_len or length > map.max_len) return null
 
     idx := usize(map.len_indexes[usize(length)])

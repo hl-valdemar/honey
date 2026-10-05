@@ -1,4 +1,6 @@
 import "@ffi/c"
+import "@std/mem"
+# typeinfo! requires this import even without a qualified meta reference.
 import "@std/meta"
 
 ReadError :: enum {
@@ -23,6 +25,7 @@ Stream :: enum(c_int) {
     stderr = c.STDERR_FILENO
 }
 
+#! context and vtable are borrowed and must outlive derived readers and writers.
 Io :: struct {
     context ?@mut anyopaque
     vtable @IoVTable
@@ -38,12 +41,14 @@ IoVTable :: struct {
     stderr @proc(context ?@mut anyopaque) Handle
 }
 
+#! borrows its context and handle; it does not close the handle.
 Reader :: struct {
     context ?@mut anyopaque
     handle Handle
     read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
 }
 
+#! borrows its context and handle; it does not close the handle.
 Writer :: struct {
     context ?@mut anyopaque
     handle Handle
@@ -101,7 +106,7 @@ stderr proc(io Io) Writer {
     }
 }
 
-print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError {
+print proc($format []u8, $Args type, output Writer, args Args) void ! WriteError {
     inline for parse_format(format.len, format, Args) |token| {
         match token.kind {
             .unused: break
@@ -120,14 +125,19 @@ print proc(output Writer, $format []u8, $Args type, args Args) void ! WriteError
 }
 
 @hide:file
-write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) void ! WriteError {
+write_integer_signed proc(
+    output Writer,
+    value i64,
+    base u64,
+    uppercase bool,
+) void ! WriteError {
     buffer [65]mut u8 := undefined
     end := buffer.len
     current := value
 
     while true {
         digit_value i64 :: rem!(current, i64(base))
-        digit := if (digit_value < 0)
+        digit :: if (digit_value < 0)
             u8(-digit_value)
         else
             u8(digit_value)
@@ -152,7 +162,12 @@ write_integer_signed proc(output Writer, value i64, base u64, uppercase bool) vo
 }
 
 @hide:file
-write_integer_unsigned proc(output Writer, value u64, base u64, uppercase bool) void ! WriteError {
+write_integer_unsigned proc(
+    output Writer,
+    value u64,
+    base u64,
+    uppercase bool,
+) void ! WriteError {
     buffer [65]mut u8 := undefined
     end := buffer.len
     current := value
@@ -201,9 +216,7 @@ FormatToken :: struct {
 @hide:file
 parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
     tokens [N]mut FormatToken := undefined
-    for (usize(0))..format.len |index| {
-        tokens[index] = FormatToken{ kind = .unused, start = 0, end = 0, field = "" }
-    }
+    mem.set(FormatToken, tokens[..], FormatToken{ kind = .unused, start = 0, end = 0, field = "" })
 
     field_count := 0
     match typeinfo!(Args) {
@@ -314,7 +327,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
     if literal_start < format.len {
         tokens[token_count] = FormatToken{
             kind = .literal,
-             start = literal_start,
+            start = literal_start,
             end = format.len,
             field = "",
         }
@@ -351,7 +364,13 @@ scalar_or_distinct_type proc($T type) bool {
 }
 
 @hide:file
-write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) void ! WriteError {
+write_integer proc(
+    $T type,
+    output Writer,
+    value T,
+    base u64,
+    uppercase bool,
+) void ! WriteError {
     match typeinfo!(T) {
         .integer: if minval!(T) < 0 {
             try write_integer_signed(output, i64(value), base, uppercase)
@@ -369,7 +388,7 @@ write_integer proc(output Writer, $T type, value T, base u64, uppercase bool) vo
 
 # note: libc keeps float formatting small; replace it with a native shortest-roundtrip writer if locale independence matters.
 @hide:file
-write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteError {
+write_float proc($T type, output Writer, value T, scientific bool) void ! WriteError {
     match typeinfo!(T) {
         .float: {
             buffer [64]mut u8 := undefined
@@ -395,7 +414,7 @@ write_float proc(output Writer, $T type, value T, scientific bool) void ! WriteE
 }
 
 @hide:file
-write_decimal proc(output Writer, $T type, value T) void ! WriteError {
+write_decimal proc($T type, output Writer, value T) void ! WriteError {
     match typeinfo!(T) {
         .integer: try write_integer(output, value, 10, false)
         .float: try write_float(output, value, false)
@@ -409,13 +428,13 @@ write_decimal proc(output Writer, $T type, value T) void ! WriteError {
 }
 
 @hide:file
-write_character proc(output Writer, $T type, value T) void ! WriteError {
+write_character proc($T type, output Writer, value T) void ! WriteError {
     match typeinfo!(T) {
         .integer: {
             if minval!(T) < 0 or maxval!(T) > 255 {
                 compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
             }
-            buffer [1]u8 := [u8(value)]
+            buffer [1]u8 :: [u8(value)]
             try write_all(output, buffer[..])
         }
         .distinct |backing|: if scalar_or_distinct_type(backing) {
@@ -428,7 +447,7 @@ write_character proc(output Writer, $T type, value T) void ! WriteError {
 }
 
 @hide:file
-write_default proc(output Writer, $T type, value T) void ! WriteError {
+write_default proc($T type, output Writer, value T) void ! WriteError {
     match typeinfo!(T) {
         .bool: if value {
             try write_all(output, "true")

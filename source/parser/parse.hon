@@ -29,11 +29,14 @@ State :: struct {
     next_token usize
 }
 
+#! borrows tokens and source while parsing; the returned Tree borrows source until ast.deinit.
+#! allocator supplies returned node storage and temporary lists released before return.
+#! the caller owns the Tree and must release it with ast.deinit.
 parse proc(
+    allocator mem.Allocator,
     tokens []lexer.Token,
     source []u8,
     diagnostic_store @mut diagnostics.Store,
-    allocator mem.Allocator,
 ) ast.Tree ! (mem.AllocError | diagnostics.CapacityError) {
     state := State{
         builder = ast.init_builder(allocator, source),
@@ -55,7 +58,7 @@ parse_package proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
     skip_newlines(state)
     while !next_is(state, .eof) {
         start :: state.next_token
-        declaration := parse_decl(state) catch |err| {
+        declaration :: parse_decl(state) catch |err| {
             match err {
                 .unexpected_token: {
                     recovered :: try recover_decl(state, start)
@@ -79,9 +82,7 @@ parse_package proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
 
 @hide:file
 parse_decl proc(state @mut State) ast.NodeId ! ParseError {
-    if next_is(state, .ident) and next_n_is(state, 1, .proc) {
-        return try parse_func_decl(state)
-    }
+    if (next_is(state, .ident) and next_n_is(state, 1, .proc)) return try parse_func_decl(state)
     return try parse_statement_decl(state)
 }
 
@@ -142,7 +143,7 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
     skip_newlines(state)
     while !next_is(state, .close_curly) and !next_is(state, .eof) {
         start :: state.next_token
-        statement := parse_statement(state) catch |err| {
+        statement :: parse_statement(state) catch |err| {
             match err {
                 .unexpected_token: {
                     recovered :: try recover_statement(state, start)
@@ -184,7 +185,7 @@ parse_statement proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
     name :: try consume(state, .ident)
-    type_id ?ast.NodeId := if next_is(state, .ident)
+    type_id ?ast.NodeId :: if next_is(state, .ident)
         try parse_type(state)
     else
         null
@@ -266,8 +267,7 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     defer arraylist.deinit(&arguments)
 
     while !next_is(state, .close_paren) and !next_is(state, .newline) and
-        !next_is(state, .close_curly) and !next_is(state, .eof)
-    {
+        !next_is(state, .close_curly) and !next_is(state, .eof) {
         argument :: try parse_expr(state)
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
@@ -276,7 +276,10 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     close :: try consume(state, .close_paren)
     return try ast.add_call(
         &state.builder,
-        ast.Span{ start = ast.builder_span(&state.builder, callee).start, end = close.span.end },
+        ast.Span{
+            start = ast.builder_span(&state.builder, callee).start,
+            end = close.span.end,
+        },
         callee,
         arguments.items,
     )
@@ -293,7 +296,11 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
                 state.next_token += 1
                 return expression
             }
-            diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+            diagnostic :: try diagnostics.add(
+                state.diagnostics,
+                .unexpected_token,
+                current(state).span,
+            )
             return try ast.add_invalid_expr(&state.builder, ast.Span{
                 start = token.span.start,
                 end = ast.builder_span(&state.builder, expression).end,
@@ -321,9 +328,9 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 
-            if (token.kind != .newline and token.kind != .comma and token.kind != .close_paren and token.kind != .close_curly and token.kind != .eof) {
-                state.next_token += 1
-            }
+            if (token.kind != .newline and token.kind != .comma and
+                token.kind != .close_paren and token.kind != .close_curly and
+                token.kind != .eof) state.next_token += 1
 
             return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
         }
@@ -331,14 +338,20 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-recover_decl proc(state @mut State, start usize) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+recover_decl proc(
+    state @mut State,
+    start usize,
+) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
     span :: synchronize(state, start, false)
     return try ast.add_invalid_decl(&state.builder, span, diagnostic)
 }
 
 @hide:file
-recover_statement proc(state @mut State, start usize) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+recover_statement proc(
+    state @mut State,
+    start usize,
+) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
     span :: synchronize(state, start, true)
     return try ast.add_invalid_stmt(&state.builder, span, diagnostic)

@@ -1,4 +1,4 @@
-#! GRAMMAR:
+#! grammar:
 #! * type ..... -> identifier
 #! * assignment -> :: | :=
 #! * literal .. -> int | float | string
@@ -99,11 +99,13 @@ Storage :: struct {
     spans arraylist.ArrayList(Span)
 }
 
+#! owns node storage, retains its allocator, and borrows source until finish or deinit_builder.
 Builder :: struct {
     storage Storage
     source []u8
 }
 
+#! owns node storage and borrows source; source must remain valid until deinit.
 Tree :: struct {
     storage Storage
     source []u8
@@ -154,6 +156,7 @@ InvalidView :: struct {
     diagnostic DiagnosticId
 }
 
+#! retains allocator for node storage and borrows source; release with deinit_builder.
 init_builder proc(allocator mem.Allocator, source []u8) Builder {
     return Builder{
         storage = Storage{
@@ -165,12 +168,14 @@ init_builder proc(allocator mem.Allocator, source []u8) Builder {
     }
 }
 
+#! releases builder-owned node storage with its retained allocator, without freeing source.
 deinit_builder proc(builder @mut Builder) void {
     arraylist.deinit(&builder.storage.nodes)
     arraylist.deinit(&builder.storage.extra)
     arraylist.deinit(&builder.storage.spans)
 }
 
+#! transfers node storage and the source borrow to a caller-owned Tree; release with deinit.
 finish proc(builder @mut Builder, root NodeId) Tree {
     tree :: Tree{ storage = builder.storage, source = builder.source, root = root }
     allocator :: builder.storage.nodes.allocator
@@ -183,6 +188,7 @@ finish proc(builder @mut Builder, root NodeId) Tree {
     return tree
 }
 
+#! releases owned node storage with its retained allocator, without freeing source.
 deinit proc(tree @mut Tree) void {
     arraylist.deinit(&tree.storage.nodes)
     arraylist.deinit(&tree.storage.extra)
@@ -324,21 +330,33 @@ add_package proc(builder @mut Builder, span Span, declarations []NodeId) NodeId 
     }, span)
 }
 
-add_invalid_expr proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+add_invalid_expr proc(
+    builder @mut Builder,
+    span Span,
+    diagnostic DiagnosticId,
+) NodeId ! mem.AllocError {
     return try add_node(builder, Node{
         kind = .invalid_expr,
         main = NodeData{ diagnostic = diagnostic },
     }, span)
 }
 
-add_invalid_stmt proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+add_invalid_stmt proc(
+    builder @mut Builder,
+    span Span,
+    diagnostic DiagnosticId,
+) NodeId ! mem.AllocError {
     return try add_node(builder, Node{
         kind = .invalid_stmt,
         main = NodeData{ diagnostic = diagnostic },
     }, span)
 }
 
-add_invalid_decl proc(builder @mut Builder, span Span, diagnostic DiagnosticId) NodeId ! mem.AllocError {
+add_invalid_decl proc(
+    builder @mut Builder,
+    span Span,
+    diagnostic DiagnosticId,
+) NodeId ! mem.AllocError {
     return try add_node(builder, Node{
         kind = .invalid_decl,
         main = NodeData{ diagnostic = diagnostic },
@@ -505,14 +523,24 @@ call_arg proc(tree @Tree, id NodeId, index usize) NodeId {
     return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
 }
 
-node_span proc(tree @Tree, id NodeId) Span { return get_span(&tree.storage, id) }
+node_span proc(tree @Tree, id NodeId) Span {
+    return get_span(&tree.storage, id)
+}
 
 invalid proc(tree @Tree, id NodeId) InvalidView {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .invalid_expr or node.kind == .invalid_stmt or node.kind == .invalid_decl)
-    return InvalidView{ span = get_span(&tree.storage, id), diagnostic = node.main.diagnostic }
+    debug.assert(
+        node.kind == .invalid_expr or
+        node.kind == .invalid_stmt or
+        node.kind == .invalid_decl
+    )
+    return InvalidView{
+        span = get_span(&tree.storage, id),
+        diagnostic = node.main.diagnostic,
+    }
 }
 
+#! returns text borrowed from the source buffer; the caller must not free it.
 source_text proc(tree @Tree, span Span) []u8 {
     debug.assert(span.start <= span.end and usize(span.end) <= tree.source.len)
     return tree.source[usize(span.start)..usize(span.end)]

@@ -23,18 +23,22 @@ Diagnostic :: struct {
     span Span
 }
 
+#! owns diagnostic storage and retains its allocator; release with deinit.
 Store :: struct { list arraylist.ArrayList(Diagnostic) }
 
 CapacityError :: enum { diagnostic_limit_reached }
 
+#! retains allocator for added diagnostics; the caller owns the returned Store.
 init proc(allocator mem.Allocator) Store {
     return Store{ list = arraylist.init(allocator) }
 }
 
+#! releases diagnostic storage with the retained allocator.
 deinit proc(store @mut Store) void {
     arraylist.deinit(&store.list)
 }
 
+#! allocates from the retained allocator; the returned ID is valid until deinit.
 add proc(store @mut Store, code Code, span Span) DiagnosticId ! (mem.AllocError | CapacityError) {
     if (store.list.items.len >= usize(NO_DIAGNOSTIC)) return .diagnostic_limit_reached
     id :: DiagnosticId(store.list.items.len)

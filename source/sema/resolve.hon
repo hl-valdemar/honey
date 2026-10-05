@@ -35,6 +35,8 @@ Storage :: struct {
     allocator mem.Allocator
 }
 
+#! owns binding storage and retains its allocator; release with deinit.
+#! node and diagnostic IDs refer to the caller's Tree and diagnostics.Store.
 Resolution :: struct { storage Storage }
 
 @hide:file
@@ -51,10 +53,13 @@ State :: struct {
     allocator mem.Allocator
 }
 
+#! borrows tree and diagnostic_store during resolution, without retaining their storage.
+#! allocator supplies caller-owned bindings and temporary scopes released before return.
+#! release the returned Resolution with deinit, which uses the retained allocator.
 resolve proc(
+    allocator mem.Allocator,
     tree @ast.Tree,
     diagnostic_store @mut diagnostics.Store,
-    allocator mem.Allocator,
 ) Resolution ! (mem.AllocError | diagnostics.CapacityError) {
     bindings :: try mem.alloc(Binding, allocator, ast.node_count(tree))
     errdefer mem.free(allocator, bindings)
@@ -90,6 +95,7 @@ resolve proc(
     return Resolution{ storage = Storage{ bindings = bindings, allocator = allocator } }
 }
 
+#! releases binding storage with the allocator retained by resolve.
 deinit proc(resolution @mut Resolution) void {
     mem.free(resolution.storage.allocator, resolution.storage.bindings)
 }
@@ -141,7 +147,7 @@ predeclare proc(
     value := Binding{ kind = .declaration, data = BindingData{ declaration = id } }
     if lookup(scope.parent, name) |_| {
         diagnostic :: try diagnostics.add(state.diagnostics, .duplicate_name, name_span)
-        # Poison the inner name rather than silently binding uses to its ancestor.
+        # poison the inner name rather than silently binding uses to its ancestor.
         value = Binding{ kind = .invalid, data = BindingData{ diagnostic = diagnostic } }
     }
     try put_name(scope, name, value)
@@ -156,7 +162,7 @@ resolve_function proc(
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     function :: ast.function_decl(tree, id)
-    # Signatures cannot see parameters or body-local declarations.
+    # signatures cannot see parameters or body-local declarations.
     try resolve_expr(state, package_scope, function.return_type)
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
@@ -212,7 +218,7 @@ resolve_expr proc(
     scope @Scope,
     id ast.NodeId,
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
-    # Grouped parameters share their type node, including any diagnostic it owns.
+    # grouped parameters share their type node, including any diagnostic it owns.
     if (state.bindings[usize(id)].kind != .none) return
     tree :: state.tree
     match ast.expr_kind(tree, id) {
