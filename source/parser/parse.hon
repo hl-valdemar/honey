@@ -168,11 +168,16 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_statement proc(state @mut State) ast.NodeId ! ParseError {
-    if (next_is(state, .ident) and (
-        next_n_is(state, 1, .ident) or
-        next_n_is(state, 1, .double_colon) or
-        next_n_is(state, 1, .colon_equal)
-    )) return try parse_statement_decl(state)
+    if (
+        next_is(state, .ident)
+        and (
+            next_n_is(state, 1, .ident)
+            or next_n_is(state, 1, .double_colon)
+            or next_n_is(state, 1, .colon_equal)
+        )
+    ) {
+        return try parse_statement_decl(state)
+    }
     match current(state).kind {
         .ident, .int, .float, .string, .minus, .open_paren: {
             expression :: try parse_expr(state)
@@ -266,8 +271,12 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&arguments)
 
-    while !next_is(state, .close_paren) and !next_is(state, .newline) and
-        !next_is(state, .close_curly) and !next_is(state, .eof) {
+    while (
+        !next_is(state, .close_paren)
+        and !next_is(state, .newline)
+        and !next_is(state, .close_curly)
+        and !next_is(state, .eof)
+    ) {
         argument :: try parse_expr(state)
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
@@ -328,9 +337,15 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 
-            if (token.kind != .newline and token.kind != .comma and
-                token.kind != .close_paren and token.kind != .close_curly and
-                token.kind != .eof) state.next_token += 1
+            if (
+                token.kind != .newline
+                and token.kind != .comma
+                and token.kind != .close_paren
+                and token.kind != .close_curly
+                and token.kind != .eof
+            ) {
+                state.next_token += 1
+            }
 
             return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
         }

@@ -246,11 +246,16 @@ ScanIdentResult :: struct {
 @hide:file
 scan_ident proc(start usize, program []u8) ScanIdentResult {
     cursor := start + 1
-    while (cursor < program.len and (
-        is_alpha(program[cursor]) or
-        is_digit(program[cursor]) or
-        program[cursor] == '_'
-    )) cursor += 1
+    while (
+        cursor < program.len
+        and (
+            is_alpha(program[cursor])
+            or is_digit(program[cursor])
+            or program[cursor] == '_'
+        )
+    ) {
+        cursor += 1
+    }
 
     # don't intern keywords (already O(1) lookup via token kind)
     kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
