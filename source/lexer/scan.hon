@@ -34,7 +34,7 @@ State :: struct {
     tokens arraylist.ArrayList(Token)
 }
 
-#! retains allocator for scanned tokens; the caller owns the returned State.
+#! retains `allocator` for scanned tokens; the caller owns the returned State.
 init proc(allocator mem.Allocator) State {
     return State{ tokens = arraylist.init(allocator) }
 }
@@ -44,7 +44,7 @@ deinit proc(state @mut State) void {
     arraylist.deinit(&state.tokens)
 }
 
-#! borrows program and diagnostic_store during scanning; tokens remain state-owned.
+#! borrows `program` and `diagnostic_store` during scanning; tokens remain state-owned.
 #! token allocation uses the retained allocator; identifiers use strpool.strings's allocator.
 #! initialize strpool.strings before scanning and keep it alive while using identifier IDs.
 scan proc(

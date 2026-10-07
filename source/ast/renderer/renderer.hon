@@ -7,7 +7,7 @@ Renderer :: struct {
     bytes arraylist.ArrayList(u8)
 }
 
-#! retains allocator for rendered output; the caller owns the returned Renderer.
+#! retains `allocator` for rendered output; the caller owns the returned Renderer.
 init proc(allocator mem.Allocator) Renderer {
     return Renderer{ bytes = arraylist.init(allocator) }
 }
@@ -17,7 +17,7 @@ deinit proc(renderer @mut Renderer) void {
     arraylist.deinit(&renderer.bytes)
 }
 
-#! borrows tree during rendering; output stays renderer-owned until render or deinit.
+#! borrows `tree` during rendering; output stays renderer-owned until render or deinit.
 render proc(renderer @mut Renderer, tree @ast.Tree) void ! mem.AllocError {
     arraylist.clear(&renderer.bytes)
     try append_text(renderer, "package\n")
