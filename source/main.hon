@@ -9,6 +9,7 @@ import "@source/parser"
 import "@source/sema"
 
 ast_renderer :: import "@source/ast/renderer"
+typecheck :: import "@source/sema/check"
 
 test import "@std/mem"
 test import "@std/enummap"
@@ -23,6 +24,7 @@ test import "@source/ast"
 test import "@source/ast/renderer"
 test import "@source/parser"
 test import "@source/sema"
+test import "@source/sema/check"
 
 @hide:file
 program ::
@@ -32,7 +34,7 @@ program ::
     `z :: "hello"
     `
     `a := 1 + 2 * 3
-    `b :: -3 / 2 + 1
+    `b :: -3.0 / 2 + 1
     `
     `grouped proc(left, right int, extra float) void {
     `    value int :: later + left
@@ -63,6 +65,9 @@ main proc() void! {
 
     resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
     defer sema.deinit(&resolution)
+
+    checked := try typecheck.check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer typecheck.deinit(&checked)
 
     renderer := ast_renderer.init(mem.c_allocator)
     defer ast_renderer.deinit(&renderer)
