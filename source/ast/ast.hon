@@ -14,12 +14,12 @@ import "@source/diagnostics"
 
 Span :: alias diagnostics.Span
 DiagnosticId :: alias diagnostics.DiagnosticId
-NO_DIAGNOSTIC :: alias diagnostics.NO_DIAGNOSTIC
+no_diagnostic :: alias diagnostics.no_diagnostic
 
 NodeId :: distinct u32
 
 @hide:file
-NO_NODE :: maxval!(NodeId)
+no_node :: maxval!(NodeId)
 
 LiteralKind :: enum {
     int, float, string
@@ -87,9 +87,9 @@ NodeData :: union {
 @hide:file
 Node :: struct {
     kind NodeKind
-    main NodeData = NodeData{ node_id = NO_NODE }
-    data0 NodeData = NodeData{ node_id = NO_NODE }
-    data1 NodeData = NodeData{ node_id = NO_NODE }
+    main NodeData = NodeData{ node_id = no_node }
+    data0 NodeData = NodeData{ node_id = no_node }
+    data1 NodeData = NodeData{ node_id = no_node }
 }
 
 @hide:file
@@ -267,7 +267,7 @@ add_statement_decl proc(
     mutability Mutability,
     initializer NodeId,
 ) NodeId ! mem.AllocError {
-    raw_type :: if (type) |id| u32(id) else u32(NO_NODE)
+    raw_type :: if (type) |id| u32(id) else u32(no_node)
     extra :: try add_extra(builder, name.start)
     _ = try add_extra(builder, name.end)
     _ = try add_extra(builder, raw_type)
@@ -591,12 +591,12 @@ get_span proc(storage @Storage, id NodeId) Span {
 
 @hide:file
 node_id proc(index usize) NodeId {
-    debug.assert(u64(index) < u64(NO_NODE))
+    debug.assert(u64(index) < u64(no_node))
     return NodeId(index)
 }
 
 @hide:file
 maybe_node_id proc(value u32) ?NodeId {
-    if (value == u32(NO_NODE)) return null
+    if (value == u32(no_node)) return null
     return NodeId(value)
 }

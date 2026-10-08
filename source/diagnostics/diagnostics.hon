@@ -7,7 +7,7 @@ Span :: struct {
 }
 
 DiagnosticId :: distinct u32
-NO_DIAGNOSTIC :: maxval!(DiagnosticId)
+no_diagnostic :: maxval!(DiagnosticId)
 
 Code :: enum {
     invalid_character,
@@ -40,7 +40,7 @@ deinit proc(store @mut Store) void {
 
 #! allocates from the retained allocator; the returned ID is valid until deinit.
 add proc(store @mut Store, code Code, span Span) DiagnosticId ! (mem.AllocError | CapacityError) {
-    if (store.list.items.len >= usize(NO_DIAGNOSTIC)) return .diagnostic_limit_reached
+    if (store.list.items.len >= usize(no_diagnostic)) return .diagnostic_limit_reached
     id :: DiagnosticId(store.list.items.len)
     try arraylist.append(&store.list, Diagnostic{ code = code, span = span })
     return id

@@ -4,7 +4,7 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 
 ## names
 
-- use `snake_case` for procedures, variables, fields, and enum members; `PascalCase` for types; `SCREAMING_SNAKE_CASE` for named sentinel constants.
+- use `snake_case` for procedures, variables, constants, fields, and enum members; `PascalCase` for types.
 - choose names that describe the value or operation. short loop indices are appropriate when their meaning is local. preserve external ABI names.
 - qualify imported operations with their module, such as `mem.alloc` and `ast.node_count`. mark file-local implementation details with `@hide:file`.
 
