@@ -209,6 +209,16 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
                 try resolve_arm(state, scope, conditional.then_block)
                 if (conditional.else_block) |other| try resolve_arm(state, scope, other)
             }
+            .assignment_stmt: {
+                assignment :: ast.assignment_stmt(tree, statement)
+                try resolve_expr(state, scope, assignment.target)
+                try resolve_expr(state, scope, assignment.value)
+            }
+            .while_stmt: {
+                loop :: ast.while_stmt(tree, statement)
+                try resolve_expr(state, scope, loop.condition)
+                try resolve_arm(state, scope, loop.body)
+            }
             .invalid: resolve_invalid(state, statement)
         }
     }

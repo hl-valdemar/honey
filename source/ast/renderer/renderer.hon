@@ -77,6 +77,21 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                     try render_block(renderer, tree, alternative, depth + 1)
                 }
             }
+            .assignment_stmt: {
+                assignment :: ast.assignment_stmt(tree, statement)
+                try append_text(renderer, "assignment ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, assignment.target)))
+                try append_text(renderer, " = ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, assignment.value)))
+                try append_text(renderer, "\n")
+            }
+            .while_stmt: {
+                loop :: ast.while_stmt(tree, statement)
+                try append_text(renderer, "while ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, loop.condition)))
+                try append_text(renderer, "\n")
+                try render_block(renderer, tree, loop.body, depth + 1)
+            }
             .invalid: try append_text(renderer, "invalid statement\n")
         }
     }

@@ -671,3 +671,111 @@ boolean_equality_and_branching_use_boolean_payloads test {
         }
     }
 }
+
+assign_local_replaces_initialized_values_without_producing_a_result test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [1]ir.Type :: [.int]
+    main :: try add_function(&module, types[..], 0, .int, 3)
+    module.entry = main
+    try emit(&module, main, integer(0, 1))
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(0) })
+    try emit(&module, main, integer(1, 42))
+    try emit(&module, main, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(2), slot = 0 })
+    return_value(&module, main, ir.ValueId(2))
+    outcome :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.int, outcome.value.type)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+    try testing.expect_equal(usize(0), diagnostics.count(&store))
+}
+
+reset_local_invalidates_reads_and_assignments_at_the_instruction_span test {
+    operations [2]ir.Op :: [.load_local, .assign_local]
+    codes [2]diagnostics.Code :: [.read_before_initialization, .write_before_initialization]
+    for (operations) |op, index| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        types [1]ir.Type :: [.int]
+        main :: try add_function(&module, types[..], 0, .int, 2)
+        module.entry = main
+        span :: diagnostics.Span{ start = 21, end = 26 }
+        try emit(&module, main, integer(0, 42))
+        try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(0) })
+        try emit(&module, main, ir.Instruction{ op = .reset_local, slot = 0 })
+        destination ir.ValueId :: if (op == .load_local) ir.ValueId(1) else ir.no_value
+        try emit(&module, main, ir.Instruction{
+            op = op, type = .int, destination = destination, slot = 0, left = ir.ValueId(0), span = span,
+        })
+        outcome :: try run(mem.c_allocator, &module, &store)
+        try expect_trap(outcome, &store, codes[index], span)
+        try testing.expect_equal(usize(1), diagnostics.count(&store))
+    }
+}
+
+premature_assignment_and_reset_traps_release_frames_at_all_allocation_boundaries test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [1]ir.Type :: [.int]
+    main :: try add_function(&module, types[..], 0, .int, 1)
+    module.entry = main
+    span :: diagnostics.Span{ start = 14, end = 19 }
+    try emit(&module, main, integer(0, 42))
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(0) })
+    try emit(&module, main, ir.Instruction{ op = .reset_local, slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(0), span = span })
+    failures := usize(0)
+    succeeded := false
+    for (usize(0)..usize(16)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome :: run(allocator, &module, &store) catch |error| {
+            match error {
+                .out_of_memory: {}
+                else: return .expectation_failed
+            }
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        succeeded = true
+        try expect_trap(outcome, &store, .write_before_initialization, span)
+        try testing.expect_equal(usize(0), state.live)
+    }
+    try testing.expect(succeeded)
+    try testing.expect(failures > 0)
+}
+
+assignment_diagnostic_allocation_failure_releases_runtime_storage test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    types [1]ir.Type :: [.int]
+    main :: try add_function(&module, types[..], 0, .int, 1)
+    module.entry = main
+    try emit(&module, main, integer(0, 42))
+    try emit(&module, main, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(0) })
+    diagnostic_state := AllocationState{ remaining = 0 }
+    diagnostic_allocator :: mem.Allocator{ context = &diagnostic_state, vtable = &limited_vtable }
+    store := diagnostics.init(diagnostic_allocator)
+    defer diagnostics.deinit(&store)
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    _ = run(allocator, &module, &store) catch |error| {
+        match error {
+            .out_of_memory: {}
+            else: return .expectation_failed
+        }
+        try testing.expect_equal(usize(0), state.live)
+        try testing.expect_equal(usize(0), diagnostic_state.live)
+        try testing.expect_equal(usize(0), diagnostics.count(&store))
+        return
+    }
+    return .expectation_failed
+}

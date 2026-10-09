@@ -168,6 +168,9 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    if (next_is(state, .ident) and next_n_is(state, 1, .equal)) {
+        return try parse_assignment(state, allow_else)
+    }
     if (
         next_is(state, .ident)
         and (
@@ -180,6 +183,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
     }
     match current(state).kind {
         .if: return try parse_if(state)
+        .while: return try parse_while(state, allow_else)
         .return: return try parse_return(state, allow_else)
         .ident, .int, .float, .string, .true, .false, .minus, .open_paren: {
             expression :: try parse_expr(state)
@@ -215,8 +219,72 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
 }
 
 @hide:file
+parse_assignment proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    name :: try consume(state, .ident)
+    target :: try ast.add_identifier(&state.builder, name.span)
+    _ = try consume(state, .equal)
+    value :: try parse_expr(state)
+    if (
+        !next_is(state, .newline)
+        and !next_is(state, .close_curly)
+        and !next_is(state, .eof)
+        and !(allow_else and next_is(state, .else))
+    ) {
+        return .unexpected_token
+    }
+    end :: state.tokens[state.next_token - 1].span.end
+    return try ast.add_assignment_stmt(
+        &state.builder,
+        ast.Span{ start = name.span.start, end = end },
+        target,
+        value,
+    )
+}
+
+@hide:file
 parse_if proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
+    condition :: try parse_guard(state)
+    braced :: next_is(state, .open_curly)
+    then_block :: try parse_arm(state, true)
+    # only a braced arm permits its else on a later line.
+    after_then :: state.next_token
+    if (braced) skip_newlines(state)
+    alternative ?ast.NodeId := null
+    if next_is(state, .else) {
+        state.next_token += 1
+        alternative = try parse_arm(state, true)
+    } else {
+        state.next_token = after_then
+    }
+    end :: if (alternative) |block|
+        ast.builder_span(&state.builder, block).end
+    else
+        ast.builder_span(&state.builder, then_block).end
+    return try ast.add_if_stmt(
+        &state.builder,
+        ast.Span{ start = keyword.span.start, end = end },
+        condition,
+        then_block,
+        alternative,
+    )
+}
+
+@hide:file
+parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .while)
+    condition :: try parse_guard(state)
+    body :: try parse_arm(state, allow_else)
+    return try ast.add_while_stmt(
+        &state.builder,
+        ast.Span{ start = keyword.span.start, end = ast.builder_span(&state.builder, body).end },
+        condition,
+        body,
+    )
+}
+
+@hide:file
+parse_guard proc(state @mut State) ast.NodeId ! ParseError {
     condition_start :: state.next_token
     condition := parse_expr(state) catch |err| {
         match err {
@@ -227,12 +295,14 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
         yield try ast.add_invalid_expr(&state.builder, current(state).span, diagnostic)
     }
     if (ast.builder_expr_kind(&state.builder, condition) == .invalid) {
-        # discard a malformed guard's tail, but leave its arm and enclosing block intact.
+        # discard a malformed guard's tail, but leave its body and enclosing block intact.
         while (
             !next_is(state, .open_curly) and !next_is(state, .close_curly)
             and !next_is(state, .newline) and !next_is(state, .eof)
-            and !next_is(state, .else) and !next_is(state, .return) and !next_is(state, .if)
+            and !next_is(state, .else) and !next_is(state, .return)
+            and !next_is(state, .if) and !next_is(state, .while)
         ) {
+            if (next_is(state, .ident) and next_n_is(state, 1, .equal)) break
             state.next_token += 1
         }
     }
@@ -249,29 +319,7 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
             diagnostic,
         )
     }
-    braced :: next_is(state, .open_curly)
-    then_block :: try parse_arm(state)
-    # only a braced arm permits its else on a later line.
-    after_then :: state.next_token
-    if (braced) skip_newlines(state)
-    alternative ?ast.NodeId := null
-    if next_is(state, .else) {
-        state.next_token += 1
-        alternative = try parse_arm(state)
-    } else {
-        state.next_token = after_then
-    }
-    end :: if (alternative) |block|
-        ast.builder_span(&state.builder, block).end
-    else
-        ast.builder_span(&state.builder, then_block).end
-    return try ast.add_if_stmt(
-        &state.builder,
-        ast.Span{ start = keyword.span.start, end = end },
-        condition,
-        then_block,
-        alternative,
-    )
+    return condition
 }
 
 @hide:file
@@ -290,10 +338,10 @@ parenthesized_guard proc(state @State, start usize) bool {
 }
 
 @hide:file
-parse_arm proc(state @mut State) ast.NodeId ! ParseError {
+parse_arm proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     if next_is(state, .open_curly) return try parse_block(state)
     start :: state.next_token
-    statement :: parse_statement(state, true) catch |err| {
+    statement :: parse_statement(state, allow_else) catch |err| {
         match err {
             .unexpected_token: {}
             else: return err
@@ -314,10 +362,14 @@ parse_arm proc(state @mut State) ast.NodeId ! ParseError {
 synchronize_arm proc(state @mut State, start usize) ast.Span {
     first :: state.tokens[start].span
     end := first.end
-    while (
-        !next_is(state, .eof) and !next_is(state, .newline)
-        and !next_is(state, .close_curly) and !next_is(state, .else)
-    ) {
+    depth usize := 0
+    while !next_is(state, .eof) {
+        if (
+            depth == 0
+            and (next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .else))
+        ) break
+        if next_is(state, .open_curly) depth += 1
+        if (next_is(state, .close_curly) and depth > 0) depth -= 1
         end = current(state).span.end
         state.next_token += 1
     }
@@ -485,7 +537,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 is_expression_boundary proc(kind lexer.TokenKind) bool {
     return match kind {
-        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .eof: true
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .eof: true
         else: false
     }
 }
@@ -514,8 +566,12 @@ recover_statement proc(
 synchronize proc(state @mut State, start usize, stop_at_curly bool) ast.Span {
     first :: state.tokens[start].span
     end := first.end
-    while !next_is(state, .eof) and !next_is(state, .newline) {
-        if (stop_at_curly and next_is(state, .close_curly)) break
+    depth usize := 0
+    while !next_is(state, .eof) {
+        if (depth == 0 and next_is(state, .newline)) break
+        if (stop_at_curly and depth == 0 and next_is(state, .close_curly)) break
+        if (stop_at_curly and next_is(state, .open_curly)) depth += 1
+        if (stop_at_curly and next_is(state, .close_curly) and depth > 0) depth -= 1
         end = current(state).span.end
         state.next_token += 1
     }

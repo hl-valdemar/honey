@@ -113,6 +113,18 @@ run proc(
                 }
                 continue
             }
+            .assign_local: {
+                local :: &frames.items[frame_index].locals[usize(instruction.slot)]
+                if (!local.initialized) {
+                    return try runtime_trap(diagnostic_store, .write_before_initialization, instruction.span)
+                }
+                local.value = frames.items[frame_index].values[usize(instruction.left)]
+                continue
+            }
+            .reset_local: {
+                frames.items[frame_index].locals[usize(instruction.slot)].initialized = false
+                continue
+            }
             .load_global: {
                 global_index :: usize(instruction.slot)
                 match globals[global_index].status {

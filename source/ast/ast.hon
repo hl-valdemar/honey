@@ -1,13 +1,13 @@
 #! grammar:
 #! * type ..... -> identifier
-#! * assignment -> :: | :=
+#! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>='
 #! * expr ..... -> identifier | literal | '(' expr ')' | '-' expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
-#! * decl ..... -> identifier [type] assignment expr
+#! * decl ..... -> identifier [type] binding expr
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
-#! * stmt ..... -> decl | expr | 'return' [expr] | 'if' expr arm ['else' arm]
+#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'if' expr arm ['else' arm] | 'while' expr arm
 #! braceless guards require parentheses unless the condition is a call; else binds to the nearest if.
 
 import "@std/debug"
@@ -47,7 +47,11 @@ DeclKind :: enum {
 StmtKind :: enum {
     declaration,
     expression,
-    return_stmt, if_stmt, invalid
+    assignment_stmt,
+    return_stmt,
+    if_stmt,
+    while_stmt,
+    invalid
 }
 
 Mutability :: enum {
@@ -78,6 +82,8 @@ NodeKind :: enum {
     stmt_decl,
     stmt_return,
     stmt_if,
+    stmt_assignment,
+    stmt_while,
     func_decl,
     param_decl,
     block,
@@ -174,6 +180,18 @@ IfView :: struct {
     condition NodeId
     then_block NodeId
     else_block ?NodeId
+}
+
+AssignmentView :: struct {
+    span Span
+    target NodeId
+    value NodeId
+}
+
+WhileView :: struct {
+    span Span
+    condition NodeId
+    body NodeId
 }
 
 InvalidView :: struct {
@@ -306,6 +324,32 @@ add_if_stmt proc(
         main = NodeData{ node_id = condition },
         data0 = NodeData{ node_id = then_block },
         data1 = NodeData{ node_id = alternative },
+    }, span)
+}
+
+add_assignment_stmt proc(
+    builder @mut Builder,
+    span Span,
+    target NodeId,
+    value NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .stmt_assignment,
+        main = NodeData{ node_id = target },
+        data0 = NodeData{ node_id = value },
+    }, span)
+}
+
+add_while_stmt proc(
+    builder @mut Builder,
+    span Span,
+    condition NodeId,
+    body NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .stmt_while,
+        main = NodeData{ node_id = condition },
+        data0 = NodeData{ node_id = body },
     }, span)
 }
 
@@ -445,6 +489,8 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_expr: .expression
         .stmt_return: .return_stmt
         .stmt_if: .if_stmt
+        .stmt_assignment: .assignment_stmt
+        .stmt_while: .while_stmt
         .invalid_stmt: .invalid
         else: unreachable
     }
@@ -473,6 +519,26 @@ if_stmt proc(tree @Tree, id NodeId) IfView {
         condition = node.main.node_id,
         then_block = node.data0.node_id,
         else_block = maybe_node_id(u32(node.data1.node_id)),
+    }
+}
+
+assignment_stmt proc(tree @Tree, id NodeId) AssignmentView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_assignment)
+    return AssignmentView{
+        span = get_span(&tree.storage, id),
+        target = node.main.node_id,
+        value = node.data0.node_id,
+    }
+}
+
+while_stmt proc(tree @Tree, id NodeId) WhileView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_while)
+    return WhileView{
+        span = get_span(&tree.storage, id),
+        condition = node.main.node_id,
+        body = node.data0.node_id,
     }
 }
 

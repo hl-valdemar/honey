@@ -27,7 +27,20 @@ Result :: struct { storage Storage }
 no_index :: maxval!(usize)
 
 @hide:file
-Role :: enum { none, expression, declaration, parameter, function, annotation, invalid, body, return_stmt, if_stmt }
+Role :: enum {
+    none,
+    expression,
+    declaration,
+    parameter,
+    function,
+    annotation,
+    invalid,
+    body,
+    return_stmt,
+    if_stmt,
+    assignment_stmt,
+    while_stmt,
+}
 
 @hide:file
 Cell :: struct {
@@ -39,6 +52,8 @@ Cell :: struct {
     anchored bool = false
     demand TypeKind = .none
     fixed bool = false
+    local bool = false
+    assignment_value bool = false
     first_edge usize = no_index
     return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
 }
@@ -57,6 +72,8 @@ State :: struct {
     types []mut Type
     cells []mut Cell
     edges arraylist.ArrayList(Edge)
+    collecting_assignment bool = false
+    has_assignments bool = false
 }
 
 #! borrows the AST, resolution, and diagnostic store only during checking.
@@ -95,6 +112,19 @@ check proc(
             .invalid: collect_invalid(&state, id)
         }
     }
+    for (0..count) |i| {
+        if (cells[i].role != .assignment_stmt) continue
+        target :: ast.assignment_stmt(tree, ast.NodeId(i)).target
+        binding :: sema.binding(resolution, target)
+        if (binding.kind == .invalid) {
+            cells[i].type = invalid_type(binding.data.diagnostic)
+            continue
+        }
+        if (binding.kind != .declaration or mutable_target(&state, target)) continue
+        cells[i].type = invalid_type(try diagnostics.add(
+            diagnostic_store, .invalid_assignment_target, ast.node_span(tree, target),
+        ))
+    }
 
     # aliases share a type variable; explicit annotations and parameters are boundaries.
     for (0..count) |i| {
@@ -113,138 +143,155 @@ check proc(
         }
         if (cells[i].role != .expression or ast.expr_kind(tree, id) != .identifier) continue
         binding :: sema.binding(resolution, id)
-        if (binding.kind == .declaration and !cells[usize(binding.data.declaration)].fixed) {
+        if (binding.kind == .declaration and !cells[i].assignment_value and !cells[usize(binding.data.declaration)].fixed) {
             join(&state, id, binding.data.declaration)
         }
     }
 
-    # function aliases are known before any calls or bodies are checked. Honey's
-    # return annotations are scalar, so a call cannot introduce a function type.
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .call) continue
-        callee :: ast.call_expr(tree, id).callee
-        signature :: group_type(&state, callee)
-        if (signature.function != ast.NodeId(maxval!(u32))) {
-            result :: ast.function_decl(tree, signature.function).return_type
-            seed(&state, id, types[usize(result)])
-        } else if (signature.kind == .invalid) {
-            seed(&state, id, signature)
-        }
-    }
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .call) continue
-        callee :: ast.call_expr(tree, id).callee
-        signature :: group_type(&state, callee)
-        if (signature.function != ast.NodeId(maxval!(u32))) continue
-        if (signature.kind == .invalid) {
-            seed(&state, id, signature)
-        } else if (signature.kind != .none or cells[root(&state, usize(callee))].numeric) {
-            seed(&state, id, invalid_type(try diagnostics.add(diagnostic_store, .not_callable, ast.node_span(tree, callee))))
-        } else {
-            # without a function anchor this dependency cannot become callable;
-            # share its eventual inference error instead of emitting a cascade.
-            join(&state, id, callee)
-        }
-    }
-    for (0..count) |i| {
-        if (cells[i].role == .none or cells[i].role == .body) continue
-        types[i] = cells[root(&state, i)].type
-    }
-    # reject inherently nonnumeric operations before connecting their operands.
-    # their otherwise valid inputs must not join a failed constraint component.
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role != .expression) continue
-        match ast.expr_kind(tree, id) {
-            .unary: try require_numeric(&state, id, ast.unary_expr(tree, id).operand)
-            .binary: {
-                expression :: ast.binary_expr(tree, id)
-                if (bool_equality(&state, id)) continue
-                try require_numeric(&state, id, expression.left)
-                try require_numeric(&state, id, expression.right)
+    # assignment inputs observe established declaration types, never contribute
+    # constraints back into those declarations.
+    for 0..2 |phase| {
+        if (phase == 1 and !state.has_assignments) break
+        assignment_values :: phase == 1
+        if (assignment_values) {
+            for (0..count) |i| {
+                id :: ast.NodeId(i)
+                if (!cells[i].assignment_value or cells[i].role != .expression or ast.expr_kind(tree, id) != .identifier) continue
+                binding :: sema.binding(resolution, id)
+                if (binding.kind == .declaration) cells[i].type = types[usize(binding.data.declaration)]
             }
-            else: {}
         }
-    }
-    propagate(&state, queue)
+        # function aliases are known before calls; scalar return annotations
+        # mean a call cannot introduce a function type.
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            callee :: ast.call_expr(tree, id).callee
+            signature :: group_type(&state, callee)
+            if (signature.function != ast.NodeId(maxval!(u32))) {
+                result :: ast.function_decl(tree, signature.function).return_type
+                seed(&state, id, types[usize(result)])
+            } else if (signature.kind == .invalid) {
+                seed(&state, id, signature)
+            }
+        }
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            callee :: ast.call_expr(tree, id).callee
+            signature :: group_type(&state, callee)
+            if (signature.function != ast.NodeId(maxval!(u32))) continue
+            if (signature.kind == .invalid) {
+                seed(&state, id, signature)
+            } else if (signature.kind != .none or cells[root(&state, usize(callee))].numeric) {
+                seed(&state, id, invalid_type(try diagnostics.add(diagnostic_store, .not_callable, ast.node_span(tree, callee))))
+            } else {
+                # without a function anchor, share the eventual inference error.
+                join(&state, id, callee)
+            }
+        }
+        for (0..count) |i| {
+            if (cells[i].role == .none or cells[i].role == .body or cells[i].assignment_value != assignment_values or types[i].kind == .invalid) continue
+            types[i] = cells[root(&state, i)].type
+        }
+        # reject nonnumeric operations before connecting otherwise valid inputs.
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values) continue
+            match ast.expr_kind(tree, id) {
+                .unary: try require_numeric(&state, id, ast.unary_expr(tree, id).operand)
+                .binary: {
+                    expression :: ast.binary_expr(tree, id)
+                    if (bool_equality(&state, id)) continue
+                    try require_numeric(&state, id, expression.left)
+                    try require_numeric(&state, id, expression.right)
+                }
+                else: {}
+            }
+        }
+        propagate(&state, queue)
 
-    # numeric edges are undirected constraints, not a traversal-time conversion.
-    # rigid values supply demands without joining the component they constrain.
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role != .expression) continue
-        match ast.expr_kind(tree, id) {
-            .unary: try numeric_operand(&state, id, ast.unary_expr(tree, id).operand)
-            .binary: {
-                expression :: ast.binary_expr(tree, id)
-                if (comparison(expression.operator)) {
-                    if (!bool_equality(&state, id)) try comparison_operands(&state, id)
-                } else {
-                    try numeric_operand(&state, id, expression.left)
-                    try numeric_operand(&state, id, expression.right)
-                    if (expression.operator == .divide) {
-                        try impose(&state, id, .float, .integer_division, expression.span)
+        # numeric edges join flexible operands; rigid inputs supply only demands.
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values) continue
+            match ast.expr_kind(tree, id) {
+                .unary: try numeric_operand(&state, id, ast.unary_expr(tree, id).operand)
+                .binary: {
+                    expression :: ast.binary_expr(tree, id)
+                    if (comparison(expression.operator)) {
+                        if (!bool_equality(&state, id)) try comparison_operands(&state, id)
+                    } else {
+                        try numeric_operand(&state, id, expression.left)
+                        try numeric_operand(&state, id, expression.right)
+                        if (expression.operator == .divide) {
+                            try impose(&state, id, .float, .integer_division, expression.span)
+                        }
                     }
                 }
-            }
-            else: {}
-        }
-    }
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role == .declaration) {
-            declaration :: ast.statement_decl(tree, id)
-            if (declaration.type) |annotation| {
-                try demand(&state, declaration.initializer, types[usize(annotation)], .type_mismatch)
+                else: {}
             }
         }
-        if (cells[i].role == .return_stmt) {
-            if (ast.return_stmt(tree, id).value) |value| {
-                try demand(&state, value, types[usize(cells[i].return_annotation)], .return_type_mismatch)
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (!assignment_values and cells[i].role == .declaration) {
+                declaration :: ast.statement_decl(tree, id)
+                if (declaration.type) |annotation| {
+                    try demand(&state, declaration.initializer, types[usize(annotation)], .type_mismatch)
+                }
+            }
+            if (!assignment_values and cells[i].role == .return_stmt) {
+                if (ast.return_stmt(tree, id).value) |value| {
+                    try demand(&state, value, types[usize(cells[i].return_annotation)], .return_type_mismatch)
+                }
+            }
+            if (assignment_values and cells[i].role == .assignment_stmt) {
+                assignment :: ast.assignment_stmt(tree, id)
+                if (mutable_target(&state, assignment.target)) {
+                    try demand(&state, assignment.value, types[usize(assignment.target)], .type_mismatch)
+                }
+            }
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            signature :: group_type(&state, ast.call_expr(tree, id).callee)
+            if (signature.function == ast.NodeId(maxval!(u32))) continue
+            parameter_count :: ast.function_param_count(tree, signature.function)
+            for (0..ast.call_arg_count(tree, id)) |j| {
+                if (j >= parameter_count) continue
+                parameter :: ast.function_param(tree, signature.function, j)
+                try demand(&state, ast.call_arg(tree, id, j), cells[usize(parameter)].type, .type_mismatch)
             }
         }
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .call) continue
-        signature :: group_type(&state, ast.call_expr(tree, id).callee)
-        if (signature.function == ast.NodeId(maxval!(u32))) continue
-        parameter_count :: ast.function_param_count(tree, signature.function)
-        for (0..ast.call_arg_count(tree, id)) |j| {
-            if (j >= parameter_count) continue
-            parameter :: ast.function_param(tree, signature.function, j)
-            try demand(&state, ast.call_arg(tree, id, j), cells[usize(parameter)].type, .type_mismatch)
-        }
-    }
 
-    # default only after the complete program has supplied its numeric demands.
-    for (0..count) |i| {
-        if (root(&state, i) != i) continue
-        if (cells[i].type.kind == .invalid) continue
-        if (cells[i].numeric and cells[i].anchored) {
-            kind TypeKind :: if (cells[i].demand == .float) .float else .int
-            cells[i].type = Type{ kind = kind }
+        # defaults follow ordinary program demands, then isolated assignment demands.
+        for (0..count) |i| {
+            if (root(&state, i) != i or cells[i].assignment_value != assignment_values) continue
+            if (cells[i].type.kind == .invalid) continue
+            if (cells[i].numeric and cells[i].anchored) {
+                kind TypeKind :: if (cells[i].demand == .float) .float else .int
+                cells[i].type = Type{ kind = kind }
+            }
         }
-    }
-    for (0..count) |i| {
-        id :: ast.NodeId(i)
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .call) continue
-        callee :: ast.call_expr(tree, id).callee
-        signature :: group_type(&state, callee)
-        if (signature.function != ast.NodeId(maxval!(u32)) or signature.kind == .none or signature.kind == .invalid) continue
-        if (group_type(&state, id).kind != .invalid) {
-            seed(&state, id, invalid_type(try diagnostics.add(diagnostic_store, .not_callable, ast.node_span(tree, callee))))
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            callee :: ast.call_expr(tree, id).callee
+            signature :: group_type(&state, callee)
+            if (signature.function != ast.NodeId(maxval!(u32)) or signature.kind == .none or signature.kind == .invalid) continue
+            if (group_type(&state, id).kind != .invalid) {
+                seed(&state, id, invalid_type(try diagnostics.add(diagnostic_store, .not_callable, ast.node_span(tree, callee))))
+            }
         }
-    }
-    for (0..count) |i| {
-        if (cells[i].role != .declaration or types[i].kind == .invalid) continue
-        index :: root(&state, i)
-        if (cells[index].type.kind != .none) continue
-        diagnostic :: try diagnostics.add(diagnostic_store, .cannot_infer_type, ast.statement_decl(tree, ast.NodeId(i)).name)
-        cells[index].type = invalid_type(diagnostic)
-    }
-    for (0..count) |i| {
-        if (cells[i].role == .none or cells[i].role == .body or types[i].kind == .invalid) continue
-        types[i] = cells[root(&state, i)].type
+        for (0..count) |i| {
+            if (assignment_values or cells[i].role != .declaration or types[i].kind == .invalid) continue
+            index :: root(&state, i)
+            if (cells[index].type.kind != .none) continue
+            diagnostic :: try diagnostics.add(diagnostic_store, .cannot_infer_type, ast.statement_decl(tree, ast.NodeId(i)).name)
+            cells[index].type = invalid_type(diagnostic)
+        }
+        for (0..count) |i| {
+            if (cells[i].role == .none or cells[i].role == .body or cells[i].assignment_value != assignment_values or types[i].kind == .invalid) continue
+            types[i] = cells[root(&state, i)].type
+        }
     }
     for (0..count) |i| try validate(&state, ast.NodeId(i))
 
@@ -253,8 +300,9 @@ check proc(
     propagate(&state, queue)
     # validate conditions after operand errors have reached their users.
     for (0..count) |i| {
-        if (cells[i].role != .if_stmt) continue
-        condition :: ast.if_stmt(tree, ast.NodeId(i)).condition
+        id :: ast.NodeId(i)
+        if (cells[i].role != .if_stmt and cells[i].role != .while_stmt) continue
+        condition :: if (cells[i].role == .if_stmt) ast.if_stmt(tree, id).condition else ast.while_stmt(tree, id).condition
         actual :: types[usize(condition)]
         if (actual.kind != .invalid and actual.kind != .bool) {
             try fail(&state, condition, .condition_not_bool, ast.node_span(tree, condition))
@@ -465,7 +513,10 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (m
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
         match ast.stmt_kind(tree, statement) {
-            .declaration: try collect_declaration(state, statement)
+            .declaration: {
+                state.cells[usize(statement)].local = true
+                try collect_declaration(state, statement)
+            }
             .expression: try collect_expression(state, ast.statement_expr(tree, statement))
             .return_stmt: {
                 state.cells[usize(statement)].role = .return_stmt
@@ -489,6 +540,35 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (m
                     try depend(state, other, id)
                 }
             }
+            .assignment_stmt: {
+                assignment :: ast.assignment_stmt(tree, statement)
+                state.cells[usize(statement)].role = .assignment_stmt
+                state.has_assignments = true
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                binding :: sema.binding(state.resolution, assignment.target)
+                if (binding.kind == .builtin) {
+                    state.cells[usize(assignment.target)].role = .expression
+                    state.cells[usize(assignment.target)].type = invalid_type(try diagnostics.add(
+                        state.diagnostics, .invalid_assignment_target, ast.node_span(tree, assignment.target),
+                    ))
+                } else {
+                    try collect_expression(state, assignment.target)
+                }
+                state.collecting_assignment = true
+                try collect_expression(state, assignment.value)
+                state.collecting_assignment = false
+                try depend(state, assignment.target, statement)
+                try depend(state, assignment.value, statement)
+            }
+            .while_stmt: {
+                loop :: ast.while_stmt(tree, statement)
+                state.cells[usize(statement)].role = .while_stmt
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                try collect_expression(state, loop.condition)
+                try depend(state, loop.condition, statement)
+                try collect_block(state, loop.body, return_annotation)
+                try depend(state, loop.body, id)
+            }
             .invalid: collect_invalid(state, statement)
         }
         source :: if (ast.stmt_kind(tree, statement) == .expression) ast.statement_expr(tree, statement) else statement
@@ -501,6 +581,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
     if (state.cells[usize(id)].role != .none) return
     tree :: state.tree
     state.cells[usize(id)].role = .expression
+    state.cells[usize(id)].assignment_value = state.collecting_assignment
     match ast.expr_kind(tree, id) {
         .literal_int: {
             state.cells[usize(id)].numeric = true
@@ -642,10 +723,38 @@ fail proc(state @mut State, id ast.NodeId, code diagnostics.Code, span ast.Span)
 }
 
 @hide:file
+mutable_target proc(state @State, id ast.NodeId) bool {
+    binding :: sema.binding(state.resolution, id)
+    if (binding.kind != .declaration) return false
+    target :: binding.data.declaration
+    if (state.cells[usize(target)].role != .declaration or !state.cells[usize(target)].local) return false
+    return ast.statement_decl(state.tree, target).mutability == .variable
+}
+
+@hide:file
+same_signature proc(state @State, left, right ast.NodeId) bool {
+    tree :: state.tree
+    if (ast.function_param_count(tree, left) != ast.function_param_count(tree, right)) return false
+    left_result :: ast.function_decl(tree, left).return_type
+    right_result :: ast.function_decl(tree, right).return_type
+    if (state.types[usize(left_result)].kind != state.types[usize(right_result)].kind) return false
+    for (0..ast.function_param_count(tree, left)) |i| {
+        left_param :: ast.function_param(tree, left, i)
+        right_param :: ast.function_param(tree, right, i)
+        if (state.types[usize(left_param)].kind != state.types[usize(right_param)].kind) return false
+    }
+    return true
+}
+
+@hide:file
 compatible proc(state @mut State, value ast.NodeId, expected Type) void ! (mem.AllocError | diagnostics.CapacityError) {
     actual :: state.types[usize(value)]
     if (actual.kind == .invalid or expected.kind == .invalid) return
-    if (actual.kind != expected.kind) try fail(state, value, .type_mismatch, ast.node_span(state.tree, value))
+    if (actual.kind != expected.kind) {
+        try fail(state, value, .type_mismatch, ast.node_span(state.tree, value))
+    } else if (actual.kind == .function and !same_signature(state, actual.function, expected.function)) {
+        try fail(state, value, .type_mismatch, ast.node_span(state.tree, value))
+    }
 }
 
 @hide:file
@@ -658,6 +767,12 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                 try fail(state, declaration.initializer, .type_mismatch, ast.node_span(tree, declaration.initializer))
             }
             if (declaration.type) |type| try compatible(state, declaration.initializer, state.types[usize(type)])
+        }
+        .assignment_stmt: {
+            assignment :: ast.assignment_stmt(tree, id)
+            if (mutable_target(state, assignment.target)) {
+                try compatible(state, assignment.value, state.types[usize(assignment.target)])
+            }
         }
         .return_stmt: {
             statement :: ast.return_stmt(tree, id)

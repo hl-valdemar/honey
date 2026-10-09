@@ -28,11 +28,13 @@ Code :: enum {
     missing_return,
     return_type_mismatch,
     condition_not_bool,
+    invalid_assignment_target,
     missing_entry,
     invalid_entry,
     literal_out_of_range,
     invalid_escape,
     read_before_initialization,
+    write_before_initialization,
     initialization_cycle,
     integer_overflow,
 }
@@ -93,12 +95,14 @@ message proc(code Code) []u8 {
         .cannot_infer_type: "cannot infer a type without a type anchor"
         .missing_return: "nonvoid function can finish without returning a value"
         .return_type_mismatch: "return does not match the function result type"
-        .condition_not_bool: "if condition must have type bool"
+        .condition_not_bool: "condition must have type bool"
+        .invalid_assignment_target: "assignment requires a mutable local binding"
         .missing_entry: "program requires a main function"
         .invalid_entry: "main must be a function with no parameters"
         .literal_out_of_range: "numeric literal is outside its runtime type's range"
         .invalid_escape: "invalid string escape"
         .read_before_initialization: "local value was read before initialization"
+        .write_before_initialization: "local value was assigned before initialization"
         .initialization_cycle: "global initialization cycle"
         .integer_overflow: "integer arithmetic overflow"
     }

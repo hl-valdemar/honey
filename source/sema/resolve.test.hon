@@ -366,3 +366,76 @@ resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
     try testing.expect_equal(binding(&resolution, shadow).data.diagnostic, binding(&resolution, use).data.diagnostic)
     try testing.expect_equal(4, diagnostics.count(&diagnostic_store))
 }
+
+resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc(flag bool) void {
+        `    outer := 2
+        `    while flag {
+        `        later = outer
+        `        later := 1
+        `        while later > 0 {
+        `            outer = later
+        `            inner := later
+        `        }
+        `        inner
+        `    }
+        `    while flag { later := 3 }
+        `    later = unknown_rhs
+        `    while flag {
+        `        outer := 1
+        `        outer = 2
+        `        bool := false
+        `    }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+
+    function :: ast.package_decl(&tree, 0)
+    body :: ast.function_decl(&tree, function).body
+    flag :: ast.function_param(&tree, function, 0)
+    outer :: ast.block_statement(&tree, body, 0)
+    first :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal(flag, binding(&resolution, first.condition).data.declaration)
+    forward :: ast.assignment_stmt(&tree, ast.block_statement(&tree, first.body, 0))
+    later :: ast.block_statement(&tree, first.body, 1)
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, forward.target).kind)
+    try testing.expect_equal(later, binding(&resolution, forward.target).data.declaration)
+    try testing.expect_equal(outer, binding(&resolution, forward.value).data.declaration)
+    nested :: ast.while_stmt(&tree, ast.block_statement(&tree, first.body, 2))
+    guard :: ast.binary_expr(&tree, nested.condition)
+    try testing.expect_equal(later, binding(&resolution, guard.left).data.declaration)
+    update :: ast.assignment_stmt(&tree, ast.block_statement(&tree, nested.body, 0))
+    try testing.expect_equal(outer, binding(&resolution, update.target).data.declaration)
+    try testing.expect_equal(later, binding(&resolution, update.value).data.declaration)
+    inner :: ast.block_statement(&tree, nested.body, 1)
+    try testing.expect_equal(later, binding(&resolution, ast.statement_decl(&tree, inner).initializer).data.declaration)
+    escaped_inner :: ast.statement_expr(&tree, ast.block_statement(&tree, first.body, 3))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, escaped_inner).kind)
+    sibling :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 2))
+    sibling_local :: ast.block_statement(&tree, sibling.body, 0)
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, sibling_local).kind)
+    try testing.expect(sibling_local != later)
+    escaped :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, escaped.target).kind)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, escaped.value).kind)
+    try testing.expect(binding(&resolution, escaped.target).data.diagnostic != binding(&resolution, escaped.value).data.diagnostic)
+    forbidden :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 4))
+    shadow :: ast.block_statement(&tree, forbidden.body, 0)
+    poisoned :: ast.assignment_stmt(&tree, ast.block_statement(&tree, forbidden.body, 1))
+    builtin :: ast.block_statement(&tree, forbidden.body, 2)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, shadow).kind)
+    try testing.expect_equal(binding(&resolution, shadow).data.diagnostic, binding(&resolution, poisoned.target).data.diagnostic)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, builtin).kind)
+    try testing.expect_equal(5, diagnostics.count(&diagnostic_store))
+}

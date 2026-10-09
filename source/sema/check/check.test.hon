@@ -968,3 +968,284 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
     try testing.expect_equal(2, code_count(&diagnostic_store, .missing_return))
     try testing.expect_equal(1, code_count(&diagnostic_store, .condition_not_bool))
 }
+
+assignments_preserve_established_types_and_contextualize_numeric_values test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `take_float proc(value float) int { return 1 }
+        `main proc() void {
+        `    number := 0
+        `    number = 1.5
+        `    number = number + 1.5
+        `    number = take_float(number)
+        `    observed :: number
+        `    quotient float := 0
+        `    quotient = 3 / 2
+        `    inferred := 0
+        `    context float :: inferred
+        `    inferred = 5 / 2
+        `    rigid int := 1
+        `    quotient = rigid
+        `    flag := true
+        `    flag = false
+        `    text := "before"
+        `    text = "after"
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    number :: ast.block_statement(&tree, body, 0)
+    observed :: ast.block_statement(&tree, body, 4)
+    quotient :: ast.block_statement(&tree, body, 5)
+    inferred :: ast.block_statement(&tree, body, 7)
+    rigid :: ast.block_statement(&tree, body, 10)
+    declarations [3]ast.NodeId :: [number, observed, rigid]
+    for declarations |id| {
+        try expect_kind(&result, id, .int)
+        try expect_kind(&result, ast.statement_decl(&tree, id).initializer, .int)
+    }
+    try expect_kind(&result, quotient, .float)
+    try expect_kind(&result, inferred, .float)
+    bad_values [2]usize :: [1, 11]
+    for bad_values |index| {
+        statement :: ast.block_statement(&tree, body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        original :: try expect_error(&result, &diagnostic_store, assignment.value, .type_mismatch, ast.node_span(&tree, assignment.value))
+        try testing.expect_equal(original, type_of(&result, statement).diagnostic)
+        expected :: if (index == 1) TypeKind.int else TypeKind.float
+        try expect_kind(&result, assignment.target, expected)
+    }
+    arithmetic_statement :: ast.block_statement(&tree, body, 2)
+    arithmetic :: ast.assignment_stmt(&tree, arithmetic_statement)
+    original :: try expect_error(&result, &diagnostic_store, arithmetic.value, .invalid_operand, ast.node_span(&tree, arithmetic.value))
+    try testing.expect_equal(original, type_of(&result, arithmetic_statement).diagnostic)
+    try expect_kind(&result, arithmetic.target, .int)
+    try expect_kind(&result, ast.binary_expr(&tree, arithmetic.value).left, .int)
+    call_statement :: ast.block_statement(&tree, body, 3)
+    call :: ast.assignment_stmt(&tree, call_statement)
+    argument :: ast.call_arg(&tree, call.value, 0)
+    call_error :: try expect_error(&result, &diagnostic_store, argument, .type_mismatch, ast.node_span(&tree, argument))
+    try testing.expect_equal(call_error, type_of(&result, call_statement).diagnostic)
+    try expect_kind(&result, call.target, .int)
+    divisions [2]usize :: [6, 9]
+    for divisions |index| {
+        statement :: ast.block_statement(&tree, body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        division :: ast.binary_expr(&tree, assignment.value)
+        try expect_kind(&result, statement, .void)
+        try expect_kind(&result, assignment.target, .float)
+        try expect_kind(&result, assignment.value, .float)
+        try expect_kind(&result, division.left, .float)
+        try expect_kind(&result, division.right, .float)
+    }
+    scalar_assignments [2]usize :: [13, 15]
+    for scalar_assignments |index| {
+        statement :: ast.block_statement(&tree, body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        expected :: if (index == 13) TypeKind.bool else TypeKind.string
+        try expect_kind(&result, statement, .void)
+        try expect_kind(&result, assignment.target, expected)
+        try expect_kind(&result, assignment.value, expected)
+    }
+    try testing.expect_equal(3, code_count(&diagnostic_store, .type_mismatch))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .invalid_operand))
+    try testing.expect_equal(0, code_count(&diagnostic_store, .integer_division))
+}
+
+assignment_target_errors_preserve_bindings_and_independent_rhs_diagnostics test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `global := 1
+        `named proc() void {}
+        `main proc(parameter int) void {
+        `    constant :: 1
+        `    constant = 2
+        `    parameter = 2
+        `    global = 2
+        `    named = named
+        `    int = 2
+        `    absent = other_missing
+        `    constant = -false
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    function :: ast.package_decl(&tree, 2)
+    body :: ast.function_decl(&tree, function).body
+    for usize(1)..usize(6) |index| {
+        statement :: ast.block_statement(&tree, body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        _ = try expect_error(&result, &diagnostic_store, statement, .invalid_assignment_target, ast.node_span(&tree, assignment.target))
+        expected :: if (index == 4) TypeKind.function else TypeKind.int
+        try expect_kind(&result, assignment.value, expected)
+        if (index != 5) try testing.expect(type_of(&result, assignment.target).kind != .invalid)
+    }
+    unknown_statement :: ast.block_statement(&tree, body, 6)
+    unknown :: ast.assignment_stmt(&tree, unknown_statement)
+    target_error :: sema.binding(&resolution, unknown.target).data.diagnostic
+    value_error :: sema.binding(&resolution, unknown.value).data.diagnostic
+    try testing.expect(target_error != value_error)
+    try testing.expect_equal(target_error, type_of(&result, unknown.target).diagnostic)
+    try testing.expect_equal(target_error, type_of(&result, unknown_statement).diagnostic)
+    try testing.expect_equal(value_error, type_of(&result, unknown.value).diagnostic)
+    independent_statement :: ast.block_statement(&tree, body, 7)
+    independent :: ast.assignment_stmt(&tree, independent_statement)
+    _ = try expect_error(&result, &diagnostic_store, independent.value, .invalid_operand, ast.node_span(&tree, independent.value))
+    _ = try expect_error(&result, &diagnostic_store, independent_statement, .invalid_assignment_target, ast.node_span(&tree, independent.target))
+    try expect_kind(&result, ast.block_statement(&tree, body, 0), .int)
+    try expect_kind(&result, ast.function_param(&tree, function, 0), .int)
+    try expect_kind(&result, ast.package_decl(&tree, 0), .int)
+    try expect_kind(&result, ast.package_decl(&tree, 1), .function)
+    try testing.expect_equal(6, code_count(&diagnostic_store, .invalid_assignment_target))
+    try testing.expect_equal(2, code_count(&diagnostic_store, .unknown_name))
+    try testing.expect_equal(0, code_count(&diagnostic_store, .type_not_value))
+}
+
+function_assignment_checks_complete_signatures_without_retargeting_calls test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `first proc(a int) int { return a }
+        `same proc(renamed int) int { return renamed + 1 }
+        `wrong_parameter proc(a float) int { return 1 }
+        `wrong_result proc(a int) bool { return true }
+        `wrong_count proc() int { return 2 }
+        `main proc() int {
+        `    chosen := first
+        `    chosen = same
+        `    chosen = wrong_parameter
+        `    chosen = wrong_result
+        `    chosen = wrong_count
+        `    answer :: chosen(7)
+        `    return answer
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    first :: ast.package_decl(&tree, 0)
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 5)).body
+    chosen :: ast.block_statement(&tree, body, 0)
+    try expect_kind(&result, chosen, .function)
+    try testing.expect_equal(first, type_of(&result, chosen).function)
+    try expect_kind(&result, ast.block_statement(&tree, body, 1), .void)
+    for usize(2)..usize(5) |index| {
+        statement :: ast.block_statement(&tree, body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        original :: try expect_error(&result, &diagnostic_store, assignment.value, .type_mismatch, ast.node_span(&tree, assignment.value))
+        try testing.expect_equal(original, type_of(&result, statement).diagnostic)
+        try expect_kind(&result, assignment.target, .function)
+        try testing.expect_equal(first, type_of(&result, assignment.target).function)
+    }
+    answer :: ast.block_statement(&tree, body, 5)
+    call :: ast.statement_decl(&tree, answer).initializer
+    try expect_kind(&result, answer, .int)
+    try expect_kind(&result, call, .int)
+    try testing.expect_equal(first, type_of(&result, ast.call_expr(&tree, call).callee).function)
+    try testing.expect_equal(3, code_count(&diagnostic_store, .type_mismatch))
+    try testing.expect_equal(0, code_count(&diagnostic_store, .argument_count_mismatch))
+}
+
+while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `missing proc() int { while true { return 1 } }
+        `bad_body proc() int { while false { -"bad" } }
+        `continues proc() int {
+        `    while false { -"bad" }
+        `    return 7
+        `}
+        `bad_condition proc() int { while 1 { -"bad" } }
+        `unknown_condition proc() int { while absent { missing_body } }
+        `nested proc() void {
+        `    counter := 2
+        `    while counter > 0 {
+        `        inner := 1
+        `        while inner > 0 {
+        `            inner = inner - 1
+        `            counter = counter - 1
+        `        }
+        `    }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    for usize(0)..usize(2) |index| {
+        body :: ast.function_decl(&tree, ast.package_decl(&tree, index)).body
+        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
+    }
+    continues_body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
+    loop_statement :: ast.block_statement(&tree, continues_body, 0)
+    loop :: ast.while_stmt(&tree, loop_statement)
+    invalid_body :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 0))
+    original :: try expect_error(&result, &diagnostic_store, invalid_body, .invalid_operand, ast.node_span(&tree, invalid_body))
+    try testing.expect_equal(original, type_of(&result, loop.body).diagnostic)
+    try testing.expect_equal(original, type_of(&result, continues_body).diagnostic)
+    try expect_kind(&result, loop_statement, .void)
+    try expect_kind(&result, ast.block_statement(&tree, continues_body, 1), .void)
+    bad_condition_body :: ast.function_decl(&tree, ast.package_decl(&tree, 3)).body
+    bad_condition_statement :: ast.block_statement(&tree, bad_condition_body, 0)
+    condition :: ast.while_stmt(&tree, bad_condition_statement).condition
+    condition_error :: try expect_error(&result, &diagnostic_store, condition, .condition_not_bool, ast.node_span(&tree, condition))
+    try testing.expect_equal(condition_error, type_of(&result, bad_condition_statement).diagnostic)
+    unknown_body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body
+    unknown_statement :: ast.block_statement(&tree, unknown_body, 0)
+    unknown :: ast.while_stmt(&tree, unknown_statement).condition
+    try testing.expect_equal(sema.binding(&resolution, unknown).data.diagnostic, type_of(&result, unknown_statement).diagnostic)
+    nested_body :: ast.function_decl(&tree, ast.package_decl(&tree, 5)).body
+    try expect_kind(&result, nested_body, .none)
+    outer_loop :: ast.while_stmt(&tree, ast.block_statement(&tree, nested_body, 1))
+    inner_loop :: ast.while_stmt(&tree, ast.block_statement(&tree, outer_loop.body, 1))
+    for usize(0)..usize(2) |index| {
+        statement :: ast.block_statement(&tree, inner_loop.body, index)
+        assignment :: ast.assignment_stmt(&tree, statement)
+        try expect_kind(&result, statement, .void)
+        try expect_kind(&result, assignment.target, .int)
+        try expect_kind(&result, assignment.value, .int)
+    }
+    try testing.expect_equal(2, code_count(&diagnostic_store, .missing_return))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .condition_not_bool))
+    try testing.expect_equal(3, code_count(&diagnostic_store, .invalid_operand))
+}

@@ -175,7 +175,7 @@ finish proc(state @mut State, value ir.ValueId, span diagnostics.Span) void {
 emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! mem.AllocError {
     function := &state.module.functions.items[state.function]
     operation := instruction
-    if (operation.op != .store_local) {
+    if (operation.op != .store_local and operation.op != .assign_local and operation.op != .reset_local) {
         operation.destination = ir.ValueId(function.value_count)
         function.value_count += 1
     }
@@ -226,7 +226,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
         if (trap_type(state, ast.function_param(tree, id, i))) return
     }
     if (trap_type(state, id)) return
-    try lower_block(state, declaration.body)
+    try lower_block(state, declaration.body, false)
     if (state.terminated) return
     # aggregate arm errors are not demanded by fallthrough; only missing_return is.
     body_type :: typecheck.type_of(state.checked, declaration.body)
@@ -256,13 +256,26 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError
                 try predeclare_locals(state, conditional.then_block)
                 if (conditional.else_block) |alternative| try predeclare_locals(state, alternative)
             }
+            .while_stmt: try predeclare_locals(state, ast.while_stmt(state.tree, statement).body)
             else: {}
         }
     }
 }
 
 @hide:file
-lower_block proc(state @mut State, block ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    # reset every direct declaration before control can return or trap within the scope.
+    if (fresh_scope) {
+        for (0..ast.block_statement_count(state.tree, block)) |i| {
+            declaration :: ast.block_statement(state.tree, block, i)
+            if (ast.stmt_kind(state.tree, declaration) != .declaration) continue
+            _ = try emit(state, ir.Instruction{
+                op = .reset_local,
+                slot = state.storage[usize(declaration)].index,
+                span = ast.node_span(state.tree, declaration),
+            })
+        }
+    }
     for (0..ast.block_statement_count(state.tree, block)) |i| {
         if (state.terminated) return
         try lower_statement(state, ast.block_statement(state.tree, block, i))
@@ -293,12 +306,12 @@ lower_if proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
         span = ast.node_span(state.tree, conditional.condition),
     }
     state.block = consequent
-    try lower_block(state, conditional.then_block)
+    try lower_block(state, conditional.then_block, true)
     consequent_end :: state.block
     consequent_falls :: !state.terminated
     state.block = alternative
     state.terminated = false
-    if (conditional.else_block) |block| try lower_block(state, block)
+    if (conditional.else_block) |block| try lower_block(state, block, true)
     alternative_end :: state.block
     alternative_falls :: !state.terminated
     if (!consequent_falls and !alternative_falls) {
@@ -321,10 +334,56 @@ lower_if proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
 }
 
 @hide:file
+lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    loop :: ast.while_stmt(state.tree, id)
+    origin :: state.block
+    guard :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+        kind = .jump, target = guard, span = loop.span,
+    }
+    state.block = guard
+    condition :: try lower_expression(state, loop.condition)
+    if (state.terminated) return
+    body :: try add_block(state)
+    exit :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(guard)].terminator = ir.Terminator{
+        kind = .branch,
+        value = condition,
+        target = body,
+        alternative = exit,
+        span = ast.node_span(state.tree, loop.condition),
+    }
+    state.block = body
+    try lower_block(state, loop.body, true)
+    if (!state.terminated) {
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = guard, span = loop.span,
+        }
+    }
+    state.block = exit
+    state.terminated = false
+}
+
+@hide:file
 lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     match ast.stmt_kind(tree, id) {
         .if_stmt: try lower_if(state, id)
+        .while_stmt: try lower_while(state, id)
+        .assignment_stmt: {
+            assignment :: ast.assignment_stmt(tree, id)
+            if (trap_binding(state, assignment.target) or trap_type(state, id)) return
+            value :: try lower_expression(state, assignment.value)
+            if (state.terminated) return
+            binding :: sema.binding(state.resolution, assignment.target)
+            _ = try emit(state, ir.Instruction{
+                op = .assign_local,
+                type = lower_type(typecheck.type_of(state.checked, assignment.target)),
+                left = value,
+                slot = state.storage[usize(binding.data.declaration)].index,
+                span = ast.node_span(tree, assignment.target),
+            })
+        }
         .invalid: {
             invalid :: ast.invalid(tree, id)
             trap(state, invalid.diagnostic, invalid.span)
