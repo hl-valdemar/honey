@@ -961,3 +961,125 @@ recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
     after :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
     try testing.expect_equal("after", ast.source_text(&tree, after.name))
 }
+
+parses_leaf_loop_controls_and_nearest_else test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    while (true) {
+        `        if (true) if (false) break else continue
+        `        while (false) continue
+        `        break
+        `    }
+        `    while (false) if (true) break else continue
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(2, ast.block_statement_count(&tree, body))
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(3, ast.block_statement_count(&tree, loop.body))
+    outer_if :: ast.if_stmt(&tree, ast.block_statement(&tree, loop.body, 0))
+    try testing.expect(outer_if.else_block == null)
+    inner_if :: ast.if_stmt(&tree, ast.block_statement(&tree, outer_if.then_block, 0))
+    transfer :: ast.block_statement(&tree, inner_if.then_block, 0)
+    try testing.expect_equal(ast.StmtKind.break_stmt, ast.stmt_kind(&tree, transfer))
+    try testing.expect_equal("break", ast.source_text(&tree, ast.node_span(&tree, transfer)))
+    if (inner_if.else_block) |other| {
+        alternate :: ast.block_statement(&tree, other, 0)
+        try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(&tree, alternate))
+        try testing.expect_equal("continue", ast.source_text(&tree, ast.node_span(&tree, alternate)))
+    } else return .expectation_failed
+    nested :: ast.while_stmt(&tree, ast.block_statement(&tree, loop.body, 1))
+    try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, nested.body, 0)))
+    braceless :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 1))
+    conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, braceless.body, 0))
+    try testing.expect(conditional.else_block != null)
+}
+
+rejects_control_tails_and_preserves_following_declarations test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `break
+        `continue
+        `bad :: break
+        `bad_continue :: continue
+        `main proc() void {
+        `    while (true) {
+        `        break 1
+        `        first :: 1
+        `        continue label
+        `        second :: 2
+        `        if (true) break label else continue
+        `        if (true) continue 2 else break
+        `        break 3 }
+        `    after :: 3
+        `}
+        `last :: 4
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(9, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(6, ast.package_decl_count(&tree))
+    for (usize(0)..usize(2)) |index| try testing.expect_equal(ast.DeclKind.invalid, ast.decl_kind(&tree, ast.package_decl(&tree, index)))
+    for (usize(2)..usize(4)) |index| {
+        declaration :: ast.package_decl(&tree, index)
+        try testing.expect_equal(ast.DeclKind.statement, ast.decl_kind(&tree, declaration))
+        try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, ast.statement_decl(&tree, declaration).initializer))
+    }
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body
+    try testing.expect_equal(2, ast.block_statement_count(&tree, body))
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(7, ast.block_statement_count(&tree, loop.body))
+    for ([usize(1), usize(3)]) |index| {
+        try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, loop.body, index)))
+    }
+    conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, loop.body, 4))
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, conditional.then_block, 0)))
+    if (conditional.else_block) |other| {
+        try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, other, 0)))
+    } else return .expectation_failed
+    try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 1)))
+    try testing.expect_equal(ast.DeclKind.statement, ast.decl_kind(&tree, ast.package_decl(&tree, 5)))
+}
+
+preserves_control_bodies_after_malformed_guards test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    while (true break
+        `    while predicate( continue
+        `    while (true) { continue }
+        `    after :: 1
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(4, ast.block_statement_count(&tree, body))
+    expected [3]ast.StmtKind :: [.break_stmt, .continue_stmt, .continue_stmt]
+    for (expected) |kind, index| {
+        loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, index))
+        try testing.expect_equal(kind, ast.stmt_kind(&tree, ast.block_statement(&tree, loop.body, 0)))
+        if (index < 2) try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, loop.condition))
+    }
+    try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 3)))
+}

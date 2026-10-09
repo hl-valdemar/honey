@@ -7,7 +7,7 @@
 #! * decl ..... -> identifier [type] binding expr
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
-#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'if' expr arm ['else' arm] | 'while' expr arm
+#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm
 #! braceless guards require parentheses unless the condition is a call; else binds to the nearest if.
 #! precedence (tightest first): calls, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or.
 #! binary operators associate left; unary operators associate right.
@@ -51,6 +51,8 @@ StmtKind :: enum {
     expression,
     assignment_stmt,
     return_stmt,
+    break_stmt,
+    continue_stmt,
     if_stmt,
     while_stmt,
     invalid
@@ -84,6 +86,8 @@ NodeKind :: enum {
     stmt_expr,
     stmt_decl,
     stmt_return,
+    stmt_break,
+    stmt_continue,
     stmt_if,
     stmt_assignment,
     stmt_while,
@@ -314,6 +318,14 @@ add_return_stmt proc(builder @mut Builder, span Span, value ?NodeId) NodeId ! me
     }, span)
 }
 
+add_break_stmt proc(builder @mut Builder, span Span) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{ kind = .stmt_break }, span)
+}
+
+add_continue_stmt proc(builder @mut Builder, span Span) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{ kind = .stmt_continue }, span)
+}
+
 add_if_stmt proc(
     builder @mut Builder,
     span Span,
@@ -491,6 +503,8 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_decl: .declaration
         .stmt_expr: .expression
         .stmt_return: .return_stmt
+        .stmt_break: .break_stmt
+        .stmt_continue: .continue_stmt
         .stmt_if: .if_stmt
         .stmt_assignment: .assignment_stmt
         .stmt_while: .while_stmt

@@ -1548,3 +1548,147 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
     try testing.expect_equal(3, code_count(&diagnostic_store, .invalid_operand))
     try testing.expect_equal(18, diagnostics.count(&diagnostic_store))
 }
+
+loop_controls_follow_lexical_bodies_and_check_unreachable_code test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `scopes proc(flag bool) void {
+        `    while flag {
+        `        if (flag) break else continue
+        `        while flag {
+        `            if (flag) continue else break
+        `        }
+        `        absent
+        `    }
+        `    break
+        `    continue
+        `}
+        `caller proc() void {
+        `    while true {
+        `        callee()
+        `        break
+        `    }
+        `}
+        `callee proc() void { continue }
+        `dead proc() void {
+        `    return
+        `    break
+        `    continue
+        `}
+        `arms proc() void {
+        `    if (false) break else continue
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    scopes_body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    outer_statement :: ast.block_statement(&tree, scopes_body, 0)
+    outer :: ast.while_stmt(&tree, outer_statement)
+    outer_if :: ast.if_stmt(&tree, ast.block_statement(&tree, outer.body, 0))
+    inner_statement :: ast.block_statement(&tree, outer.body, 1)
+    inner :: ast.while_stmt(&tree, inner_statement)
+    inner_if :: ast.if_stmt(&tree, ast.block_statement(&tree, inner.body, 0))
+    caller_body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    caller_loop :: ast.while_stmt(&tree, ast.block_statement(&tree, caller_body, 0))
+    valid [5]ast.NodeId :: [
+        ast.block_statement(&tree, outer_if.then_block, 0),
+        ast.block_statement(&tree, outer_if.else_block?, 0),
+        ast.block_statement(&tree, inner_if.then_block, 0),
+        ast.block_statement(&tree, inner_if.else_block?, 0),
+        ast.block_statement(&tree, caller_loop.body, 1),
+    ]
+    for (valid) |statement| try expect_kind(&result, statement, .void)
+    try expect_kind(&result, outer_statement, .void)
+    try expect_kind(&result, inner_statement, .void)
+    unknown :: ast.statement_expr(&tree, ast.block_statement(&tree, outer.body, 2))
+    original :: sema.binding(&resolution, unknown).data.diagnostic
+    try testing.expect_equal(original, type_of(&result, unknown).diagnostic)
+    outside_break :: ast.block_statement(&tree, scopes_body, 1)
+    outside_continue :: ast.block_statement(&tree, scopes_body, 2)
+    _ = try expect_error(&result, &diagnostic_store, outside_break, .break_outside_loop, ast.node_span(&tree, outside_break))
+    _ = try expect_error(&result, &diagnostic_store, outside_continue, .continue_outside_loop, ast.node_span(&tree, outside_continue))
+    callee_body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
+    callee_control :: ast.block_statement(&tree, callee_body, 0)
+    _ = try expect_error(&result, &diagnostic_store, callee_control, .continue_outside_loop, ast.node_span(&tree, callee_control))
+    dead_body :: ast.function_decl(&tree, ast.package_decl(&tree, 3)).body
+    dead_break :: ast.block_statement(&tree, dead_body, 1)
+    dead_continue :: ast.block_statement(&tree, dead_body, 2)
+    _ = try expect_error(&result, &diagnostic_store, dead_break, .break_outside_loop, ast.node_span(&tree, dead_break))
+    _ = try expect_error(&result, &diagnostic_store, dead_continue, .continue_outside_loop, ast.node_span(&tree, dead_continue))
+    arms_body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body
+    arms :: ast.if_stmt(&tree, ast.block_statement(&tree, arms_body, 0))
+    arm_break :: ast.block_statement(&tree, arms.then_block, 0)
+    arm_continue :: ast.block_statement(&tree, arms.else_block?, 0)
+    _ = try expect_error(&result, &diagnostic_store, arm_break, .break_outside_loop, ast.node_span(&tree, arm_break))
+    _ = try expect_error(&result, &diagnostic_store, arm_continue, .continue_outside_loop, ast.node_span(&tree, arm_continue))
+    for (usize(0)..usize(5)) |index| try expect_kind(&result, ast.package_decl(&tree, index), .function)
+    try testing.expect_equal(3, code_count(&diagnostic_store, .break_outside_loop))
+    try testing.expect_equal(4, code_count(&diagnostic_store, .continue_outside_loop))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .unknown_name))
+    try testing.expect_equal(8, diagnostics.count(&diagnostic_store))
+}
+
+loop_controls_do_not_guarantee_function_returns test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `breaking proc() int { while true { break } }
+        `continuing proc() int { while false { continue } }
+        `mixed proc(flag bool) int {
+        `    while flag {
+        `        if (flag) return 42 else break
+        `    }
+        `}
+        `closed proc(flag bool) int {
+        `    while flag {
+        `        if (flag) break else continue
+        `        -"bad"
+        `    }
+        `    return 42
+        `}
+        `invalid proc() int { break }
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    defer deinit(&result)
+
+    for (usize(0)..usize(3)) |index| {
+        body :: ast.function_decl(&tree, ast.package_decl(&tree, index)).body
+        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
+    }
+    closed_body :: ast.function_decl(&tree, ast.package_decl(&tree, 3)).body
+    loop_statement :: ast.block_statement(&tree, closed_body, 0)
+    loop :: ast.while_stmt(&tree, loop_statement)
+    dead_expression :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 1))
+    original :: try expect_error(&result, &diagnostic_store, dead_expression, .invalid_operand, ast.node_span(&tree, dead_expression))
+    try testing.expect_equal(original, type_of(&result, closed_body).diagnostic)
+    try expect_kind(&result, loop_statement, .void)
+    try expect_kind(&result, ast.block_statement(&tree, closed_body, 1), .void)
+    invalid_body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body
+    invalid_control :: ast.block_statement(&tree, invalid_body, 0)
+    control_error :: try expect_error(&result, &diagnostic_store, invalid_control, .break_outside_loop, ast.node_span(&tree, invalid_control))
+    try testing.expect_equal(control_error, type_of(&result, invalid_body).diagnostic)
+    for (usize(0)..usize(5)) |index| try expect_kind(&result, ast.package_decl(&tree, index), .function)
+    try testing.expect_equal(3, code_count(&diagnostic_store, .missing_return))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .invalid_operand))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .break_outside_loop))
+    try testing.expect_equal(5, diagnostics.count(&diagnostic_store))
+}

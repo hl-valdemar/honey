@@ -186,6 +186,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .if: return try parse_if(state)
         .while: return try parse_while(state, allow_else)
         .return: return try parse_return(state, allow_else)
+        .break, .continue: return try parse_loop_control(state, allow_else)
         .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren: {
             expression :: try parse_expr(state)
             return try ast.add_expression_stmt(&state.builder, expression)
@@ -217,6 +218,23 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         ast.Span{ start = keyword.span.start, end = end },
         value,
     )
+}
+
+@hide:file
+parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    keyword :: current(state)
+    state.next_token += 1
+    if (
+        !next_is(state, .newline)
+        and !next_is(state, .close_curly)
+        and !next_is(state, .eof)
+        and !(allow_else and next_is(state, .else))
+    ) return .unexpected_token
+
+    if (keyword.kind == .break)
+        return try ast.add_break_stmt(&state.builder, keyword.span)
+
+    return try ast.add_continue_stmt(&state.builder, keyword.span)
 }
 
 @hide:file
@@ -302,6 +320,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             and !next_is(state, .newline) and !next_is(state, .eof)
             and !next_is(state, .else) and !next_is(state, .return)
             and !next_is(state, .if) and !next_is(state, .while)
+            and !next_is(state, .break) and !next_is(state, .continue)
         ) {
             if (next_is(state, .ident) and next_n_is(state, 1, .equal)) break
             state.next_token += 1
@@ -467,7 +486,7 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&arguments)
 
-    while (!is_expression_boundary(current(state).kind)) {
+    while (!is_call_boundary(current(state).kind)) {
         argument :: try parse_expr(state)
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
@@ -550,6 +569,15 @@ is_expression_boundary proc(kind lexer.TokenKind) bool {
         .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .eof: true
         else: false
     }
+}
+
+@hide:file
+is_call_boundary proc(kind lexer.TokenKind) bool {
+    return (
+        kind == .break
+        or kind == .continue
+        or is_expression_boundary(kind)
+    )
 }
 
 @hide:file

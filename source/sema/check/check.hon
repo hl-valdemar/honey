@@ -40,6 +40,7 @@ Role :: enum {
     if_stmt,
     assignment_stmt,
     while_stmt,
+    loop_control,
 }
 
 @hide:file
@@ -510,11 +511,11 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
         state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
         state.cells[usize(id)].type.function = id
     }
-    try collect_block(state, function.body, function.return_type)
+    try collect_block(state, function.body, function.return_type, false)
 }
 
 @hide:file
-collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     state.cells[usize(id)].role = .body
     for (0..ast.block_statement_count(tree, id)) |i| {
@@ -540,10 +541,10 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (m
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 try collect_expression(state, conditional.condition)
                 try depend(state, conditional.condition, statement)
-                try collect_block(state, conditional.then_block, return_annotation)
+                try collect_block(state, conditional.then_block, return_annotation, in_loop)
                 try depend(state, conditional.then_block, id)
                 if (conditional.else_block) |other| {
-                    try collect_block(state, other, return_annotation)
+                    try collect_block(state, other, return_annotation, in_loop)
                     try depend(state, other, id)
                 }
             }
@@ -573,8 +574,21 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (m
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 try collect_expression(state, loop.condition)
                 try depend(state, loop.condition, statement)
-                try collect_block(state, loop.body, return_annotation)
+                try collect_block(state, loop.body, return_annotation, true)
                 try depend(state, loop.body, id)
+            }
+            .break_stmt, .continue_stmt: {
+                state.cells[usize(statement)].role = .loop_control
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                if (!in_loop) {
+                    code :: if (ast.stmt_kind(tree, statement) == .break_stmt)
+                        diagnostics.Code.break_outside_loop
+                    else
+                        diagnostics.Code.continue_outside_loop
+                    state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
+                        state.diagnostics, code, ast.node_span(tree, statement),
+                    ))
+                }
             }
             .invalid: collect_invalid(state, statement)
         }
@@ -889,7 +903,7 @@ block_falls_through proc(state @State, id ast.NodeId) bool {
         source :: if (kind == .expression) ast.statement_expr(tree, statement) else statement
         if (state.types[usize(source)].kind == .invalid) return false
         match kind {
-            .return_stmt, .invalid: return false
+            .return_stmt, .break_stmt, .continue_stmt, .invalid: return false
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 then_falls :: block_falls_through(state, conditional.then_block)

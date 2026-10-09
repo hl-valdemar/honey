@@ -17,6 +17,12 @@ Storage :: struct {
 }
 
 @hide:file
+LoopTargets :: struct {
+    guard ir.BlockId
+    exit ir.BlockId
+}
+
+@hide:file
 State :: struct {
     tree @ast.Tree
     resolution @sema.Resolution
@@ -28,6 +34,7 @@ State :: struct {
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
+    loop ?LoopTargets = null
 }
 
 #! lowers checked source into caller-owned executable storage; release with ir.deinit.
@@ -357,6 +364,9 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
         alternative = exit,
         span = ast.node_span(state.tree, loop.condition),
     }
+    previous_loop :: state.loop
+    state.loop = LoopTargets{ guard = guard, exit = exit }
+    defer state.loop = previous_loop
     state.block = body
     try lower_block(state, loop.body, true)
     if (!state.terminated) {
@@ -374,6 +384,18 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
     match ast.stmt_kind(tree, id) {
         .if_stmt: try lower_if(state, id)
         .while_stmt: try lower_while(state, id)
+        .break_stmt, .continue_stmt: {
+            if (trap_type(state, id)) return
+            if (state.loop) |targets| {
+                target := targets.exit
+                # continue restarts the whole guard, before any short-circuit branches.
+                if (ast.stmt_kind(tree, id) == .continue_stmt) target = targets.guard
+                state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                    kind = .jump, target = target, span = ast.node_span(tree, id),
+                }
+                state.terminated = true
+            } else unreachable
+        }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
             if (trap_binding(state, assignment.target) or trap_type(state, id)) return

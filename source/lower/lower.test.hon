@@ -443,6 +443,12 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `        pass :: identity(text)
         `        identity(pass)
         `        remaining = remaining - 1
+        `        inner := 2
+        `        while inner > 0 {
+        `            inner = inner - 1
+        `            if (inner > 0) continue else break
+        `        }
+        `        if (remaining > 0) continue else break
         `    }
         `    if computed > 0 and (enabled or false) {
         `        saved :: identity(text)
@@ -475,12 +481,11 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
             try testing.expect_equal(usize(0), state.live)
             continue
         }
-        outcome :: interpreter.run(mem.c_allocator, &module, &diagnostic_store) catch |error| {
-            ir.deinit(&module)
-            return error
-        }
-        ir.deinit(&module)
+        errdefer ir.deinit(&module)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         try testing.expect(outcome.trap == null)
+        try testing.expect(mem.eql(outcome.value.data.string, "owned\nstring"))
+        ir.deinit(&module)
         try testing.expect_equal(usize(0), state.live)
         succeeded = true
         break
@@ -763,14 +768,26 @@ forward_assignments_check_initialization_after_evaluating_the_rhs test {
 }
 
 loop_and_reentered_arm_locals_are_uninitialized_before_later_declarations test {
-    sources [5][]u8 :: [
+    sources [11][]u8 :: [
         "main proc() int {\n n := 2\n while n > 0 {\n if n == 1 { return later }\n later :: 42\n n = n - 1\n }\n return 0\n}\n",
         "main proc() int {\n n := 2\n while n > 0 {\n if n == 1 {\n later = 42\n return later\n }\n later := 0\n n = n - 1\n }\n return 0\n}\n",
         "main proc() int {\n n := 2\n while n > 0 {\n if true {\n if n == 1 { return later }\n later :: 42\n }\n n = n - 1\n }\n return 0\n}\n",
         "main proc() int {\n n := 2\n while n > 0 {\n if true {\n if n == 1 {\n later = 42\n return later\n }\n later := 0\n }\n n = n - 1\n }\n return 0\n}\n",
         "main proc() int {\n n := 2\n while n > 0 {\n if false {} else {\n if n == 1 { return later }\n later :: 42\n }\n n = n - 1\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if n == 0 { return later }\n if (n == 1) continue\n later :: 42\n continue\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if n == 0 { later = 42 }\n if (n == 1) continue\n later := 0\n continue\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if true {\n if n == 0 { return later }\n if (n == 1) continue\n later :: 42\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if true {\n if n == 0 { later = 42 }\n if (n == 1) continue\n later := 0\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if false {} else {\n if n == 0 { return later }\n if (n == 1) continue\n later :: 42\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n n := 3\n while n > 0 {\n n = n - 1\n if false {} else {\n if n == 0 { later = 42 }\n if (n == 1) continue\n later := 0\n continue\n }\n }\n return 0\n}\n",
     ]
-    codes [5]diagnostics.Code :: [.read_before_initialization, .write_before_initialization, .read_before_initialization, .write_before_initialization, .read_before_initialization]
+    codes [11]diagnostics.Code :: [
+        .read_before_initialization, .write_before_initialization,
+        .read_before_initialization, .write_before_initialization, .read_before_initialization,
+        .read_before_initialization, .write_before_initialization,
+        .read_before_initialization, .write_before_initialization,
+        .read_before_initialization, .write_before_initialization,
+    ]
     for (sources) |source, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
@@ -835,17 +852,19 @@ zero_iteration_body_errors_are_checked_but_not_executed test {
 }
 
 loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_overflow test {
-    sources [3][]u8 :: [
+    sources [5][]u8 :: [
         "main proc() int {\n while true { return 42 }\n}\n",
         "main proc() int {\n while false { return 42 }\n}\n",
         "main proc() int {\n value := 9223372036854775807\n while true {\n value = value + 1\n return value\n }\n return 0\n}\n",
+        "main proc() int {\n while true { break }\n}\n",
+        "main proc() int {\n while false { continue }\n}\n",
     ]
     for (sources) |source, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
-        if (index < 2) {
+        if (index != 2) {
             try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
             diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
             try testing.expect_equal(diagnostics.Code.missing_return, diagnostic.code)
@@ -855,16 +874,17 @@ loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_over
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(i64(42), outcome.value.data.integer)
         } else {
-            code diagnostics.Code :: if (index == 1) .missing_return else .integer_overflow
+            code diagnostics.Code :: if (index == 2) .integer_overflow else .missing_return
             try expect_trap(outcome, &diagnostic_store, code)
+            if (index != 2) try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         }
     }
 }
 
 bounded_pure_loops_do_not_allocate_per_iteration_and_release_runtime_storage test {
     sources [2][]u8 :: [
-        "main proc() int {\n n := 0\n while (n < 1 and !(n == 1)) or false {\n local :: n\n n = local + 1\n }\n return n\n}\n",
-        "main proc() int {\n n := 0\n while (n < 10000 and !(n == 10000)) or false {\n local :: n\n n = local + 1\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 1 and !(n == 1)) or false {\n local :: n\n n = local + 1\n if (n == 1) break\n continue\n later :: 0\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 10000 and !(n == 10000)) or false {\n local :: n\n n = local + 1\n if (n == 10000) break\n continue\n later :: 0\n }\n return n\n}\n",
     ]
     expected [2]i64 :: [1, 10000]
     allocations := usize(0)
@@ -1098,6 +1118,11 @@ lazy_branchful_global_initializers_and_calls_release_every_runtime_allocation te
         `later :: false or !false
         `both proc(left bool, right bool) bool { return left and right }
         `main proc() bool {
+        `    n := 3
+        `    while both(first and first, both(false or later, !false and later)) and n > 0 {
+        `        n = n - 1
+        `        if (n > 0) continue else break
+        `    }
         `    return both(first and first, both(false or later, !false and later))
         `}
     module := try compile_owned(source, &diagnostic_store)
@@ -1142,5 +1167,135 @@ skipped_rhs_does_not_hide_a_demanded_outer_type_mismatch test {
         outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
+    }
+}
+
+break_and_continue_skip_iterations_exit_early_and_restore_outer_targets test {
+    sources [3][]u8 :: [
+        "main proc() int {\n n := 0\n total := 0\n while n < 10 {\n n = n + 1\n if (n == 2 or n == 4) continue\n if (n == 6) break\n total = total + n\n }\n return total + 33\n}\n",
+        "main proc() int {\n outer := 3\n total := 0\n while outer > 0 {\n outer = outer - 1\n inner := 3\n while inner > 0 {\n inner = inner - 1\n if (inner == 1) continue\n if (inner == 0) break\n total = total + 7\n }\n if (outer > 0) continue else break\n }\n return total + 21\n}\n",
+        "main proc() int {\n n := 0\n while n < 5 {\n n = n + 1\n if (n < 3) continue else break\n n = n + 100\n }\n return n + 39\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}
+
+continue_restarts_composed_calling_guards_after_branchful_body_calls test {
+    guards [3][]u8 :: [
+        "(positive(3 - n) and !(n == 2)) or n == 2",
+        "!(n >= 3) and (positive(3 - n) or false)",
+        "positive(3 - n) and ((n < 3 or false) and !false)",
+    ]
+    for (guards) |guard| {
+        source := arraylist.init(u8, mem.c_allocator)
+        defer arraylist.deinit(&source)
+        for ("positive proc(n int) bool { return n > 0 }\nadvance proc(flag bool, n int) int {\n if flag { return n + 1 }\n return n + 1\n}\nmain proc() int {\n n := 0\n while ") |byte| try arraylist.append(&source, byte)
+        for (guard) |byte| try arraylist.append(&source, byte)
+        # bound a stale guard too, so incorrect continue lowering fails instead of hanging.
+        for (" {\n n = advance(n == 0 or n == 1, n)\n if (n > 5) break\n continue\n n = n + 100\n }\n return n + 39\n}\n") |byte| try arraylist.append(&source, byte)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source.items, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}
+
+reached_outside_controls_preserve_diagnostic_identity_and_keyword_span test {
+    sources [4][]u8 :: [
+        "main proc() int {\n break\n return 42\n}\n",
+        "main proc() int {\n continue\n return 42\n}\n",
+        "bad proc() void {\n break\n}\nmain proc() int {\n while true { bad()\n break }\n return 42\n}\n",
+        "main proc() int {\n while true { break }\n continue\n return 42\n}\n",
+    ]
+    codes [4]diagnostics.Code :: [.break_outside_loop, .continue_outside_loop, .break_outside_loop, .continue_outside_loop]
+    keywords [4][]u8 :: ["break", "continue", "break", "continue"]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        try testing.expect_equal(codes[index], original.code)
+        try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], keywords[index]))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+untaken_outside_controls_remain_checked_without_trapping test {
+    sources [5][]u8 :: [
+        "main proc() int {\n if (false) break\n return 42\n}\n",
+        "main proc() int {\n if true { return 42 } else continue\n}\n",
+        "main proc() int {\n return 42\n break\n}\n",
+        "main proc() int {\n return 42\n continue\n}\n",
+        "bad proc() void {\n continue\n}\nmain proc() int {\n while false { bad() }\n return 42\n}\n",
+    ]
+    codes [5]diagnostics.Code :: [.break_outside_loop, .continue_outside_loop, .break_outside_loop, .continue_outside_loop, .continue_outside_loop]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        try testing.expect_equal(codes[index], original.code)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+source_errors_after_loop_transfers_stay_checked_but_unreached test {
+    sources [4][]u8 :: [
+        "main proc() int {\n n := 2\n while n > 0 {\n n = n - 1\n continue\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n while true {\n break\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n n := 2\n while n > 0 {\n n = n - 1\n if (n > 0) continue else break\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n while true {\n return 42\n break\n continue\n missing\n }\n return 0\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        try testing.expect_equal(diagnostics.Code.unknown_name, original.code)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+traps_before_loop_controls_keep_the_original_error test {
+    sources [2][]u8 :: [
+        "main proc() int {\n while true {\n missing\n break\n }\n return 42\n}\n",
+        "main proc() int {\n while true {\n missing\n continue\n }\n return 42\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try expect_trap(outcome, &diagnostic_store, .unknown_name)
+        try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
     }
 }

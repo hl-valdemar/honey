@@ -439,3 +439,49 @@ resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, builtin).kind)
     try testing.expect_equal(5, diagnostics.count(&diagnostic_store))
 }
+
+resolves_all_code_and_preserves_scopes_after_loop_controls test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    while (true) {
+        `        break
+        `        before :: later
+        `        continue
+        `        later :: 1
+        `        missing_after_break
+        `        if (true) {
+        `            continue
+        `            private :: later
+        `            int :: 2
+        `        }
+        `        private
+        `    }
+        `    later
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(4, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 0))
+    before :: ast.block_statement(&tree, loop.body, 1)
+    later :: ast.block_statement(&tree, loop.body, 3)
+    reference :: ast.statement_decl(&tree, before).initializer
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, reference).kind)
+    try testing.expect_equal(later, binding(&resolution, reference).data.declaration)
+    conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, loop.body, 5))
+    private_decl :: ast.block_statement(&tree, conditional.then_block, 1)
+    private_ref :: ast.statement_decl(&tree, private_decl).initializer
+    try testing.expect_equal(later, binding(&resolution, private_ref).data.declaration)
+    forbidden :: ast.block_statement(&tree, conditional.then_block, 2)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, forbidden).kind)
+}
