@@ -5,7 +5,7 @@
 #! * op ....... -> '+' | '-' | '*' | '/'
 #! * expr ..... -> identifier | literal | '(' expr ')' | '-' expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
 #! * decl ..... -> identifier [type] assignment expr
-#! * stmt ..... -> decl | expr
+#! * stmt ..... -> decl | expr | 'return' [expr]
 
 import "@std/debug"
 import "@std/mem"
@@ -41,7 +41,7 @@ DeclKind :: enum {
 }
 
 StmtKind :: enum {
-    declaration, expression, invalid
+    declaration, expression, return_stmt, invalid
 }
 
 Mutability :: enum {
@@ -65,6 +65,7 @@ NodeKind :: enum {
     expr_call,
     stmt_expr,
     stmt_decl,
+    stmt_return,
     func_decl,
     param_decl,
     block,
@@ -149,6 +150,11 @@ BinaryExprView :: struct {
 CallExprView :: struct {
     span Span
     callee NodeId
+}
+
+ReturnView :: struct {
+    span Span
+    value ?NodeId
 }
 
 InvalidView :: struct {
@@ -257,6 +263,14 @@ add_expression_stmt proc(builder @mut Builder, expression NodeId) NodeId ! mem.A
         kind = .stmt_expr,
         main = NodeData{ node_id = expression },
     }, builder_span(builder, expression))
+}
+
+add_return_stmt proc(builder @mut Builder, span Span, value ?NodeId) NodeId ! mem.AllocError {
+    raw_value :: if (value) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .stmt_return,
+        main = NodeData{ node_id = raw_value },
+    }, span)
 }
 
 add_statement_decl proc(
@@ -393,6 +407,7 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
     return match get_node(&tree.storage, id).kind {
         .stmt_decl: .declaration
         .stmt_expr: .expression
+        .stmt_return: .return_stmt
         .invalid_stmt: .invalid
         else: unreachable
     }
@@ -402,6 +417,15 @@ statement_expr proc(tree @Tree, id NodeId) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .stmt_expr)
     return node.main.node_id
+}
+
+return_stmt proc(tree @Tree, id NodeId) ReturnView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_return)
+    return ReturnView{
+        span = get_span(&tree.storage, id),
+        value = maybe_node_id(u32(node.main.node_id)),
+    }
 }
 
 statement_decl proc(tree @Tree, id NodeId) StatementDeclView {

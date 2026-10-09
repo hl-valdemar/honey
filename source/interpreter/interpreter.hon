@@ -1,0 +1,247 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@source/ir"
+import "@source/diagnostics"
+
+Outcome :: struct {
+    value ir.Value = ir.Value{}
+    trap ?diagnostics.DiagnosticId = null
+}
+
+@hide:file
+Slot :: struct {
+    initialized bool = false
+    value ir.Value = ir.Value{}
+}
+
+@hide:file
+GlobalStatus :: enum { uninitialized, initializing, ready }
+
+@hide:file
+GlobalState :: struct {
+    status GlobalStatus = .uninitialized
+    value ir.Value = ir.Value{}
+}
+
+@hide:file
+Frame :: struct {
+    function ir.FunctionId
+    next_instruction usize = 0
+    destination ir.ValueId = ir.no_value
+    global ?usize = null
+    locals []mut Slot
+    values []mut ir.Value
+}
+
+#! executes only typed IR; invocation and global state are temporary and released on every exit.
+#! returned strings borrow `module`; runtime source errors are traps, not infrastructure errors.
+run proc(
+    allocator mem.Allocator,
+    module @ir.Module,
+    diagnostic_store @mut diagnostics.Store,
+) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
+    entry ir.FunctionId := ir.FunctionId(0)
+    if module.entry |function| {
+        entry = function
+    } else {
+        return Outcome{ trap = module.entry_diagnostic }
+    }
+
+    globals :: try mem.alloc(GlobalState, allocator, module.globals.items.len)
+    defer mem.free(allocator, globals)
+    mem.set(globals, GlobalState{})
+    frames := arraylist.init(Frame, allocator)
+    defer {
+        for (frames.items) |frame| free_frame(allocator, frame)
+        arraylist.deinit(&frames)
+    }
+    try push_frame(allocator, module, &frames, entry, ir.no_value, null)
+
+    while frames.items.len != 0 {
+        frame_index :: frames.items.len - 1
+        function :: &module.functions.items[usize(frames.items[frame_index].function)]
+        block :: &function.blocks.items[usize(function.entry)]
+        instruction_index :: frames.items[frame_index].next_instruction
+        if instruction_index == block.instructions.items.len {
+            terminator :: block.terminator
+            if (terminator.kind == .trap) return Outcome{ trap = terminator.diagnostic }
+            value := ir.Value{}
+            if terminator.value != ir.no_value {
+                value = frames.items[frame_index].values[usize(terminator.value)]
+            }
+            completed :: frames.items[frame_index]
+            _ = arraylist.pop(&frames)
+            free_frame(allocator, completed)
+            if completed.global |global_index| {
+                globals[global_index].value = value
+                globals[global_index].status = .ready
+            }
+            if (frames.items.len == 0) return Outcome{ value = value }
+            if completed.destination != ir.no_value {
+                frames.items[frames.items.len - 1].values[usize(completed.destination)] = value
+            }
+            continue
+        }
+
+        instruction :: &block.instructions.items[instruction_index]
+        frames.items[frame_index].next_instruction += 1
+        value := ir.Value{}
+        match instruction.op {
+            .constant: value = instruction.constant
+            .load_local: {
+                local :: &frames.items[frame_index].locals[usize(instruction.slot)]
+                if !local.initialized {
+                    return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
+                }
+                value = local.value
+            }
+            .store_local: {
+                frames.items[frame_index].locals[usize(instruction.slot)] = Slot{
+                    initialized = true,
+                    value = frames.items[frame_index].values[usize(instruction.left)],
+                }
+                continue
+            }
+            .load_global: {
+                global_index :: usize(instruction.slot)
+                match globals[global_index].status {
+                    .ready: value = globals[global_index].value
+                    .initializing: {
+                        return try runtime_trap(diagnostic_store, .initialization_cycle, instruction.span)
+                    }
+                    .uninitialized: {
+                        try push_frame(
+                            allocator,
+                            module,
+                            &frames,
+                            module.globals.items[global_index].initializer,
+                            instruction.destination,
+                            global_index,
+                        )
+                        globals[global_index].status = .initializing
+                        continue
+                    }
+                }
+            }
+            .call: {
+                callee :: frames.items[frame_index].values[usize(instruction.left)].data.function
+                try push_frame(allocator, module, &frames, callee, instruction.destination, null)
+                # frame indices survive stack growth; pointers into frames.items do not.
+                for (0..instruction.arguments_count) |argument_index| {
+                    argument :: block.arguments.items[instruction.arguments_start + argument_index]
+                    frames.items[frame_index + 1].locals[argument_index] = Slot{
+                        initialized = true,
+                        value = frames.items[frame_index].values[usize(argument)],
+                    }
+                }
+                continue
+            }
+            .negate: {
+                operand :: frames.items[frame_index].values[usize(instruction.left)]
+                if instruction.type == .float {
+                    value = ir.Value{ type = .float, data = ir.ValueData{ real = -operand.data.real } }
+                } else {
+                    if operand.data.integer == minval!(i64) {
+                        return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                    }
+                    value = ir.Value{ type = .int, data = ir.ValueData{ integer = -operand.data.integer } }
+                }
+            }
+            .add, .subtract, .multiply, .divide: {
+                left :: frames.items[frame_index].values[usize(instruction.left)]
+                right :: frames.items[frame_index].values[usize(instruction.right)]
+                if instruction.type == .float {
+                    result f64 := 0
+                    match instruction.op {
+                        .add: result = left.data.real + right.data.real
+                        .subtract: result = left.data.real - right.data.real
+                        .multiply: result = left.data.real * right.data.real
+                        .divide: result = left.data.real / right.data.real
+                        else: unreachable
+                    }
+                    value = ir.Value{ type = .float, data = ir.ValueData{ real = result } }
+                } else {
+                    result :: checked_integer(instruction.op, left.data.integer, right.data.integer)
+                    if result |result_integer| {
+                        value = ir.Value{ type = .int, data = ir.ValueData{ integer = result_integer } }
+                    } else {
+                        return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                    }
+                }
+            }
+        }
+        if instruction.destination != ir.no_value {
+            frames.items[frame_index].values[usize(instruction.destination)] = value
+        }
+    }
+    unreachable
+}
+
+@hide:file
+push_frame proc(
+    allocator mem.Allocator,
+    module @ir.Module,
+    frames @mut arraylist.ArrayList(Frame),
+    function ir.FunctionId,
+    destination ir.ValueId,
+    global ?usize,
+) void ! mem.AllocError {
+    signature :: &module.functions.items[usize(function)]
+    locals :: try mem.alloc(Slot, allocator, signature.locals.items.len)
+    errdefer mem.free(allocator, locals)
+    mem.set(locals, Slot{})
+    values :: try mem.alloc(ir.Value, allocator, signature.value_count)
+    errdefer mem.free(allocator, values)
+    # typed IR assigns each temporary before use; only local slots need initialization flags.
+    try arraylist.append(frames, Frame{
+        function = function,
+        destination = destination,
+        global = global,
+        locals = locals,
+        values = values,
+    })
+}
+
+@hide:file
+free_frame proc(allocator mem.Allocator, frame Frame) void {
+    mem.free(allocator, frame.locals)
+    mem.free(allocator, frame.values)
+}
+
+@hide:file
+runtime_trap proc(
+    diagnostic_store @mut diagnostics.Store,
+    code diagnostics.Code,
+    span diagnostics.Span,
+) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
+    return Outcome{ trap = try diagnostics.add(diagnostic_store, code, span) }
+}
+
+@hide:file
+checked_integer proc(op ir.Op, left i64, right i64) ?i64 {
+    minimum :: minval!(i64)
+    maximum :: maxval!(i64)
+    match op {
+        .add: {
+            if (right > 0 and left > maximum - right) return null
+            if (right < 0 and left < minimum - right) return null
+            return left + right
+        }
+        .subtract: {
+            if (right > 0 and left < minimum + right) return null
+            if (right < 0 and left > maximum + right) return null
+            return left - right
+        }
+        .multiply: {
+            if left > 0 {
+                if (right > 0 and left > divtrunc!(maximum, right)) return null
+                if (right < 0 and right < divtrunc!(minimum, left)) return null
+            } else if left < 0 {
+                if (right > 0 and left < divtrunc!(minimum, right)) return null
+                if (right < 0 and left < divtrunc!(maximum, right)) return null
+            }
+            return left * right
+        }
+        else: unreachable
+    }
+}

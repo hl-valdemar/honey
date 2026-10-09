@@ -1,5 +1,8 @@
-import "@std/debug"
+import "@ffi/c"
 import "@std/mem"
+import "@std/arraylist"
+import "@std/io"
+import "@std/process"
 
 import "@source/diagnostics"
 import "@source/strpool"
@@ -7,8 +10,9 @@ import "@source/lexer"
 import "@source/ast"
 import "@source/parser"
 import "@source/sema"
-
-ast_renderer :: import "@source/ast/renderer"
+import "@source/ir"
+import "@source/lower"
+import "@source/interpreter"
 typecheck :: import "@source/sema/check"
 
 test import "@std/mem"
@@ -21,58 +25,198 @@ test import "@source/diagnostics"
 test import "@source/strpool"
 test import "@source/lexer"
 test import "@source/ast"
-test import "@source/ast/renderer"
 test import "@source/parser"
 test import "@source/sema"
 test import "@source/sema/check"
+test import "@source/lower"
+test import "@source/interpreter"
 
 @hide:file
-program ::
-    `# literals
-    `x float :: 123.9
-    `y int := 43
-    `z :: "hello"
-    `
-    `a := 1 + 2 * 3
-    `b :: -3 / 2 + 1
-    `
-    `grouped proc(left, right int, extra float) void {
-    `    value int :: later + left
-    `    later int :: right
-    `    empty()
-    `    grouped(value, later, extra)
-    `}
-    `empty proc() void {}
+DriverError :: alias (
+    mem.AllocError
+    | diagnostics.CapacityError
+    | lexer.SourceError
+    | strpool.InternError
+    | io.OpenError
+    | io.CloseError
+    | io.ReadError
+    | io.WriteError
+)
 
-main proc() void! {
-    strpool.strings = strpool.init(mem.c_allocator)
+main proc(init process.Init) i32 {
+    return command(mem.c_allocator, init.io) catch |err| {
+        if (process.argument(2)) |path| {
+            io.print("{s}: infrastructure error: {s}\n", io.stderr(init.io), {
+                argument_text(path), infrastructure_message(err),
+            }) catch |_| {}
+        } else {
+            io.print("honey: infrastructure error: {s}\n", io.stderr(init.io), {
+                infrastructure_message(err),
+            }) catch |_| {}
+        }
+        return 2
+    }
+}
+
+@hide:file
+infrastructure_message proc(error DriverError) []u8 {
+    return match error {
+        .out_of_memory: "out of memory"
+        .diagnostic_limit_reached: "diagnostic limit reached"
+        .source_too_large: "source file is too large"
+        .out_of_space: "identifier storage is full"
+        .open_failed: "cannot open source file"
+        .close_failed: "cannot close source file"
+        .not_open_for_reading: "source file is not readable"
+        .read_failed: "cannot read source file"
+        .not_open_for_writing: "output is not writable"
+        .write_failed: "cannot write output"
+        .no_progress: "output writer made no progress"
+    }
+}
+
+@hide:file
+command proc(allocator mem.Allocator, runtime io.Io) i32 ! DriverError {
+    if (process.argument_count() != 3) {
+        try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
+        return 2
+    }
+    if (process.argument(1)) |operation| {
+        if (!mem.eql(argument_text(operation), "run")) {
+            try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
+            return 2
+        }
+    } else {
+        return 2
+    }
+    if (process.argument(2)) |path| return try run_file(allocator, runtime, path)
+    return 2
+}
+
+@hide:file
+argument_text proc(pointer [*;0]u8) []u8 {
+    length := usize(0)
+    while (pointer[length] != 0) length += 1
+    return pointer[..length]
+}
+
+@hide:file
+read_source proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) arraylist.ArrayList(u8) ! DriverError {
+    # bootstrap cannot construct a dynamic sentinel slice from argv's sentinel pointer.
+    descriptor := c_int(-1)
+    while true {
+        descriptor = c.open(ptrcast!(path), c.O_RDONLY)
+        if (descriptor >= 0) break
+        if (c.__error()?^ != c.EINTR) return .open_failed
+    }
+    file :: io.File{ io = runtime, handle = io.Handle{ file_desc = descriptor } }
+    closing := false
+    defer {
+        if (!closing) io.close(file) catch |_| {}
+    }
+    bytes := arraylist.init(u8, allocator)
+    errdefer arraylist.deinit(&bytes)
+    input :: io.reader(file)
+    maximum :: usize(maxval!(u32))
+    while true {
+        length :: bytes.items.len
+        if (length == maximum) {
+            probe [1]mut u8 := undefined
+            if (try io.read(input, (&probe)[..]) != 0) return .source_too_large
+            break
+        }
+        if (length == bytes.capacity) {
+            growth := usize(4096)
+            if (growth > maximum - length) growth = maximum - length
+            try arraylist.reserve(&bytes, length + growth)
+        }
+        storage :: bytes.items.ptr[..bytes.capacity]
+        end := bytes.capacity
+        if (end > maximum) end = maximum
+        count :: try io.read(input, storage[length..end])
+        if (count == 0) break
+        bytes.items = storage[..length + count]
+    }
+    closing = true
+    try io.close(file)
+    return bytes
+}
+
+@hide:file
+compile proc(allocator mem.Allocator, source []u8, diagnostic_store @mut diagnostics.Store) ir.Module ! DriverError {
+    strpool.strings = strpool.init(allocator)
     defer strpool.deinit(&strpool.strings)
-
-    diagnostic_store := diagnostics.init(mem.c_allocator)
-    defer diagnostics.deinit(&diagnostic_store)
-
-    scan_state := lexer.init(mem.c_allocator)
+    scan_state := lexer.init(allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, program, &diagnostic_store)
-
-    tree := try parser.parse(
-        mem.c_allocator,
-        scan_state.tokens.items,
-        program,
-        &diagnostic_store,
-    )
+    try lexer.scan(&scan_state, source, diagnostic_store)
+    tree := try parser.parse(allocator, scan_state.tokens.items, source, diagnostic_store)
     defer ast.deinit(&tree)
-
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(allocator, &tree, diagnostic_store)
     defer sema.deinit(&resolution)
-
-    checked := try typecheck.check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
+    checked := try typecheck.check(allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)
+    return try lower.lower(allocator, &tree, &resolution, &checked, diagnostic_store)
+}
 
-    renderer := ast_renderer.init(mem.c_allocator)
-    defer ast_renderer.deinit(&renderer)
-    try ast_renderer.render(&renderer, &tree)
+@hide:file
+run_file proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) i32 ! DriverError {
+    source := try read_source(allocator, runtime, path)
+    defer arraylist.deinit(&source)
+    diagnostic_store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile(allocator, source.items, &diagnostic_store)
+    defer ir.deinit(&module)
+    outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
+    if (outcome.trap == null) try print_result(io.stdout(runtime), outcome.value)
+    try report_diagnostics(allocator, io.stderr(runtime), argument_text(path), source.items, &diagnostic_store, outcome.trap)
+    if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
+    return 0
+}
 
-    debug.print("{s}", {renderer.bytes.items})
-    debug.print("diagnostics: {}\n", {diagnostics.count(&diagnostic_store)})
+@hide:file
+print_result proc(output io.Writer, value ir.Value) void ! io.WriteError {
+    match value.type {
+        .int: try io.print("{}\n", output, {value.data.integer})
+        .float: try io.print("{d}\n", output, {value.data.real})
+        .string: try io.print("{s}\n", output, {value.data.string})
+        .void: {}
+        else: unreachable
+    }
+}
+
+@hide:file
+report_diagnostics proc(
+    allocator mem.Allocator,
+    output io.Writer,
+    path []u8,
+    source []u8,
+    diagnostic_store @diagnostics.Store,
+    trap ?diagnostics.DiagnosticId,
+) void ! (mem.AllocError | io.WriteError) {
+    if (diagnostics.count(diagnostic_store) == 0) return
+    starts := arraylist.init(usize, allocator)
+    defer arraylist.deinit(&starts)
+    try arraylist.append(&starts, usize(0))
+    for (source) |byte, index| {
+        if (byte == '\n') try arraylist.append(&starts, index + 1)
+    }
+    for (0..diagnostics.count(diagnostic_store)) |index| {
+        if (diagnostics.get(diagnostic_store, diagnostics.DiagnosticId(index))) |diagnostic| {
+            offset :: usize(diagnostic.span.start)
+            line := usize(0)
+            end := starts.items.len
+            while (line + 1 < end) {
+                middle :: line + divtrunc!(end - line, 2)
+                if (starts.items[middle] <= offset) line = middle
+                else end = middle
+            }
+            label []u8 := "error"
+            if (trap) |id| {
+                if (id == diagnostics.DiagnosticId(index)) label = "runtime trap"
+            }
+            try io.print("{s}:{}:{}: {s}: {s}\n", output, {
+                path, line + 1, offset - starts.items[line] + 1, label, diagnostics.message(diagnostic.code),
+            })
+        }
+    }
 }

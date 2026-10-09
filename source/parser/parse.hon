@@ -179,12 +179,32 @@ parse_statement proc(state @mut State) ast.NodeId ! ParseError {
         return try parse_statement_decl(state)
     }
     match current(state).kind {
+        .return: return try parse_return(state)
         .ident, .int, .float, .string, .minus, .open_paren: {
             expression :: try parse_expr(state)
             return try ast.add_expression_stmt(&state.builder, expression)
         }
         else: return .unexpected_token
     }
+}
+
+@hide:file
+parse_return proc(state @mut State) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .return)
+    if (next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)) {
+        return try ast.add_return_stmt(&state.builder, keyword.span, null)
+    }
+    value :: try parse_expr(state)
+    if (!next_is(state, .newline) and !next_is(state, .close_curly) and !next_is(state, .eof)) {
+        return .unexpected_token
+    }
+    # include consumed grouping punctuation, which has no separate expression node.
+    end :: state.tokens[state.next_token - 1].span.end
+    return try ast.add_return_stmt(
+        &state.builder,
+        ast.Span{ start = keyword.span.start, end = end },
+        value,
+    )
 }
 
 @hide:file

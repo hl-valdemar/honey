@@ -187,6 +187,9 @@ resolve_function proc(
         match ast.stmt_kind(tree, statement) {
             .declaration: try resolve_statement_decl(state, &scope, statement)
             .expression: try resolve_expr(state, &scope, ast.statement_expr(tree, statement))
+            .return_stmt: {
+                if (ast.return_stmt(tree, statement).value) |value| try resolve_expr(state, &scope, value)
+            }
             .invalid: resolve_invalid(state, statement)
         }
     }

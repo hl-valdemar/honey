@@ -1,0 +1,132 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@source/diagnostics"
+
+FunctionId :: distinct u32
+GlobalId :: distinct u32
+LocalId :: distinct u32
+ValueId :: distinct u32
+BlockId :: distinct u32
+no_value :: maxval!(ValueId)
+
+Type :: enum { invalid, int, float, string, void, function }
+ValueData :: union {
+    integer i64
+    real f64
+    string []u8
+    function FunctionId
+}
+Value :: struct {
+    type Type = .void
+    data ValueData = ValueData{ integer = 0 }
+}
+
+Op :: enum {
+    constant
+    load_local
+    store_local
+    load_global
+    negate
+    add
+    subtract
+    multiply
+    divide
+    call
+}
+
+Instruction :: struct {
+    op Op
+    type Type = .void
+    span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
+    destination ValueId = no_value
+    left ValueId = no_value
+    right ValueId = no_value
+    slot u32 = 0
+    constant Value = Value{}
+    arguments_start usize = 0
+    arguments_count usize = 0
+}
+
+TerminatorKind :: enum { return_value, trap }
+Terminator :: struct {
+    kind TerminatorKind = .return_value
+    value ValueId = no_value
+    diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
+    span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
+}
+
+Block :: struct {
+    instructions arraylist.ArrayList(Instruction)
+    arguments arraylist.ArrayList(ValueId)
+    terminator Terminator = Terminator{}
+}
+
+Function :: struct {
+    parameters arraylist.ArrayList(Type)
+    locals arraylist.ArrayList(Type)
+    result Type = .void
+    blocks arraylist.ArrayList(Block)
+    entry BlockId = BlockId(0)
+    value_count usize = 0
+    span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
+}
+
+Global :: struct {
+    type Type
+    initializer FunctionId
+    span diagnostics.Span
+}
+
+#! owns executable storage, including decoded strings; no AST or binding table is retained.
+#! spans and diagnostic IDs refer to the caller's source and diagnostic store.
+Module :: struct {
+    allocator mem.Allocator
+    functions arraylist.ArrayList(Function)
+    globals arraylist.ArrayList(Global)
+    strings arraylist.ArrayList([]mut u8)
+    entry ?FunctionId = null
+    entry_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
+}
+
+init proc(allocator mem.Allocator) Module {
+    return Module{
+        allocator = allocator,
+        functions = arraylist.init(allocator),
+        globals = arraylist.init(allocator),
+        strings = arraylist.init(allocator),
+    }
+}
+
+init_function proc(allocator mem.Allocator) Function {
+    return Function{
+        parameters = arraylist.init(allocator),
+        locals = arraylist.init(allocator),
+        blocks = arraylist.init(allocator),
+    }
+}
+
+init_block proc(allocator mem.Allocator) Block {
+    return Block{
+        instructions = arraylist.init(allocator),
+        arguments = arraylist.init(allocator),
+    }
+}
+
+#! releases all executable storage using the retained allocator.
+deinit proc(module @mut Module) void {
+    for (0..(module.functions.items.len)) |i| {
+        function :: &module.functions.items[i]
+        for (0..(function.blocks.items.len)) |j| {
+            block :: &function.blocks.items[j]
+            arraylist.deinit(&block.instructions)
+            arraylist.deinit(&block.arguments)
+        }
+        arraylist.deinit(&function.parameters)
+        arraylist.deinit(&function.locals)
+        arraylist.deinit(&function.blocks)
+    }
+    for (module.strings.items) |string| mem.free(module.allocator, string)
+    arraylist.deinit(&module.functions)
+    arraylist.deinit(&module.globals)
+    arraylist.deinit(&module.strings)
+}

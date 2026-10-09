@@ -27,7 +27,7 @@ Result :: struct { storage Storage }
 no_index :: maxval!(usize)
 
 @hide:file
-Role :: enum { none, expression, declaration, parameter, function, annotation, invalid, body }
+Role :: enum { none, expression, declaration, parameter, function, annotation, invalid, body, return_stmt }
 
 @hide:file
 Cell :: struct {
@@ -40,6 +40,7 @@ Cell :: struct {
     demand TypeKind = .none
     fixed bool = false
     first_edge usize = no_index
+    return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
 }
 
 @hide:file
@@ -192,6 +193,11 @@ check proc(
             declaration :: ast.statement_decl(tree, id)
             if (declaration.type) |annotation| {
                 try demand(&state, declaration.initializer, types[usize(annotation)], .type_mismatch)
+            }
+        }
+        if (cells[i].role == .return_stmt) {
+            if (ast.return_stmt(tree, id).value) |value| {
+                try demand(&state, value, types[usize(cells[i].return_annotation)], .return_type_mismatch)
             }
         }
         if (cells[i].role != .expression or ast.expr_kind(tree, id) != .call) continue
@@ -427,6 +433,15 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
         match ast.stmt_kind(tree, statement) {
             .declaration: try collect_declaration(state, statement)
             .expression: try collect_expression(state, ast.statement_expr(tree, statement))
+            .return_stmt: {
+                state.cells[usize(statement)].role = .return_stmt
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                state.cells[usize(statement)].return_annotation = function.return_type
+                if (ast.return_stmt(tree, statement).value) |value| {
+                    try collect_expression(state, value)
+                    try depend(state, value, statement)
+                }
+            }
             .invalid: collect_invalid(state, statement)
         }
         source :: if (ast.stmt_kind(tree, statement) == .expression) ast.statement_expr(tree, statement) else statement
@@ -557,11 +572,30 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
             function :: ast.function_decl(tree, id)
             result :: state.types[usize(function.return_type)]
             if (result.kind == .void or result.kind == .invalid or state.types[usize(id)].kind == .invalid) return
+            for (0..ast.block_statement_count(tree, function.body)) |i| {
+                if (ast.stmt_kind(tree, ast.block_statement(tree, function.body, i)) == .return_stmt) return
+            }
             if (syntactically_valid_body(tree, function.body)) {
                 diagnostic :: try diagnostics.add(state.diagnostics, .missing_return, ast.node_span(tree, function.body))
                 if (state.types[usize(function.body)].kind != .invalid) {
                     state.types[usize(function.body)] = invalid_type(diagnostic)
                 }
+            }
+        }
+        .return_stmt: {
+            statement :: ast.return_stmt(tree, id)
+            expected :: state.types[usize(state.cells[usize(id)].return_annotation)]
+            if (expected.kind == .invalid) return
+            if (statement.value) |value| {
+                actual :: state.types[usize(value)]
+                if (actual.kind == .invalid) {
+                    state.types[usize(id)] = actual
+                } else if (actual.kind != expected.kind) {
+                    try fail(state, value, .return_type_mismatch, ast.node_span(tree, value))
+                    state.types[usize(id)] = state.types[usize(value)]
+                }
+            } else if (expected.kind != .void) {
+                try fail(state, id, .return_type_mismatch, statement.span)
             }
         }
         .expression: {
@@ -643,6 +677,11 @@ syntactically_valid_body proc(tree @ast.Tree, id ast.NodeId) bool {
             .invalid: return false
             .expression: {
                 if (!syntactically_valid_expression(tree, ast.statement_expr(tree, statement))) return false
+            }
+            .return_stmt: {
+                if (ast.return_stmt(tree, statement).value) |value| {
+                    if (!syntactically_valid_expression(tree, value)) return false
+                }
             }
             .declaration: {
                 if (!syntactically_valid_expression(tree, ast.statement_decl(tree, statement).initializer)) return false

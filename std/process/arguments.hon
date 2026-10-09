@@ -1,0 +1,16 @@
+# the bootstrap Init currently exposes only io; macOS provides process-lifetime argv storage.
+@hide:file
+_NSGetArgc c_func() @c_int
+
+@hide:file
+_NSGetArgv c_func() @*[*;0]u8
+
+argument_count proc() usize {
+    return usize(_NSGetArgc()^)
+}
+
+#! returns a borrowed, zero-terminated argument; storage lasts for the process lifetime.
+argument proc(index usize) ?[*;0]u8 {
+    if (index >= argument_count()) return null
+    return _NSGetArgv()^[index]
+}

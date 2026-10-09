@@ -26,6 +26,14 @@ Code :: enum {
     argument_count_mismatch,
     cannot_infer_type,
     missing_return,
+    return_type_mismatch,
+    missing_entry,
+    invalid_entry,
+    literal_out_of_range,
+    invalid_escape,
+    read_before_initialization,
+    initialization_cycle,
+    integer_overflow,
 }
 
 Diagnostic :: struct {
@@ -63,4 +71,33 @@ get proc(store @Store, id DiagnosticId) ?Diagnostic {
 
 count proc(store @Store) usize {
     return store.list.items.len
+}
+
+message proc(code Code) []u8 {
+    return match code {
+        .invalid_character: "invalid character"
+        .float_must_end_with_digit: "float literal must end with a digit"
+        .unterminated_string: "unterminated string literal"
+        .unexpected_token: "unexpected token"
+        .duplicate_name: "duplicate name or forbidden shadowing"
+        .unknown_name: "unknown name"
+        .expected_type: "annotation must name a type"
+        .type_not_value: "type name cannot be used as a value"
+        .invalid_void_type: "void cannot be stored or used as a parameter type"
+        .type_mismatch: "incompatible value type"
+        .invalid_operand: "arithmetic requires compatible numeric operands"
+        .integer_division: "division requires float operands"
+        .not_callable: "value is not callable"
+        .argument_count_mismatch: "argument count does not match the function signature"
+        .cannot_infer_type: "cannot infer a type without a type anchor"
+        .missing_return: "nonvoid function can finish without returning a value"
+        .return_type_mismatch: "return does not match the function result type"
+        .missing_entry: "program requires a main function"
+        .invalid_entry: "main must be a function with no parameters"
+        .literal_out_of_range: "numeric literal is outside its runtime type's range"
+        .invalid_escape: "invalid string escape"
+        .read_before_initialization: "local value was read before initialization"
+        .initialization_cycle: "global initialization cycle"
+        .integer_overflow: "integer arithmetic overflow"
+    }
 }

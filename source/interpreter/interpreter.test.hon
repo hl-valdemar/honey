@@ -1,0 +1,479 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@std/testing"
+import "@source/ir"
+import "@source/diagnostics"
+
+@hide:file
+add_function proc(
+    module @mut ir.Module,
+    locals []ir.Type,
+    parameter_count usize,
+    result ir.Type,
+    value_count usize,
+) ir.FunctionId ! mem.AllocError {
+    function := ir.init_function(module.allocator)
+    errdefer {
+        arraylist.deinit(&function.parameters)
+        arraylist.deinit(&function.locals)
+        for (function.blocks.items) |block| {
+            owned := block
+            arraylist.deinit(&owned.instructions)
+            arraylist.deinit(&owned.arguments)
+        }
+        arraylist.deinit(&function.blocks)
+    }
+    for (locals) |type, index| {
+        try arraylist.append(&function.locals, type)
+        if (index < parameter_count) try arraylist.append(&function.parameters, type)
+    }
+    function.result = result
+    function.value_count = value_count
+    try arraylist.append(&function.blocks, ir.init_block(module.allocator))
+    id :: ir.FunctionId(module.functions.items.len)
+    try arraylist.append(&module.functions, function)
+    return id
+}
+
+@hide:file
+emit proc(module @mut ir.Module, function ir.FunctionId, instruction ir.Instruction) void ! mem.AllocError {
+    try arraylist.append(&module.functions.items[usize(function)].blocks.items[0].instructions, instruction)
+}
+
+@hide:file
+return_value proc(module @mut ir.Module, function ir.FunctionId, value ir.ValueId) void {
+    module.functions.items[usize(function)].blocks.items[0].terminator = ir.Terminator{ value = value }
+}
+
+@hide:file
+integer proc(destination u32, value i64) ir.Instruction {
+    return ir.Instruction{
+        op = .constant,
+        type = .int,
+        destination = ir.ValueId(destination),
+        constant = ir.Value{ type = .int, data = ir.ValueData{ integer = value } },
+    }
+}
+
+@hide:file
+function_value proc(destination u32, function ir.FunctionId) ir.Instruction {
+    return ir.Instruction{
+        op = .constant,
+        type = .function,
+        destination = ir.ValueId(destination),
+        constant = ir.Value{ type = .function, data = ir.ValueData{ function = function } },
+    }
+}
+
+@hide:file
+expect_trap proc(
+    outcome Outcome,
+    store @diagnostics.Store,
+    code diagnostics.Code,
+    span diagnostics.Span,
+) void ! testing.Error {
+    if outcome.trap |id| {
+        if diagnostics.get(store, id) |diagnostic| {
+            try testing.expect_equal(code, diagnostic.code)
+            try testing.expect_equal(span.start, diagnostic.span.start)
+            try testing.expect_equal(span.end, diagnostic.span.end)
+            return
+        }
+    }
+    return .expectation_failed
+}
+
+repeated_calls_have_fresh_parameters_locals_and_temporaries test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [2]ir.Type :: [.int, .int]
+    bump :: try add_function(&module, types[..], 1, .int, 4)
+    try emit(&module, bump, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0 })
+    try emit(&module, bump, integer(1, 1))
+    try emit(&module, bump, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+    try emit(&module, bump, ir.Instruction{ op = .store_local, left = ir.ValueId(2), slot = 1 })
+    try emit(&module, bump, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(3), slot = 1 })
+    return_value(&module, bump, ir.ValueId(3))
+    noop :: try add_function(&module, mem.empty(ir.Type), 0, .void, 0)
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 8)
+    module.entry = main
+    try emit(&module, main, function_value(0, bump))
+    try emit(&module, main, integer(1, 19))
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[0].arguments, ir.ValueId(1))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), arguments_count = 1 })
+    try emit(&module, main, integer(3, 21))
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[0].arguments, ir.ValueId(3))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(4), left = ir.ValueId(0), arguments_start = 1, arguments_count = 1 })
+    try emit(&module, main, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(5), left = ir.ValueId(2), right = ir.ValueId(4) })
+    try emit(&module, main, function_value(6, noop))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(7), left = ir.ValueId(6) })
+    return_value(&module, main, ir.ValueId(5))
+    outcome :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.int, outcome.value.type)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+    try testing.expect_equal(usize(0), diagnostics.count(&store))
+}
+
+lazy_globals_follow_forward_dependencies_and_reset_between_runs test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    first :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    second :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+    try emit(&module, first, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 1 })
+    try emit(&module, first, integer(1, 1))
+    try emit(&module, first, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+    return_value(&module, first, ir.ValueId(2))
+    try emit(&module, second, integer(0, 20))
+    return_value(&module, second, ir.ValueId(0))
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = first, span = diagnostics.Span{ start = 0, end = 0 } })
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = second, span = diagnostics.Span{ start = 0, end = 0 } })
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(1), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+    return_value(&module, main, ir.ValueId(2))
+    initial :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(initial.trap == null)
+    try testing.expect_equal(i64(42), initial.value.data.integer)
+    module.functions.items[usize(second)].blocks.items[0].instructions.items[0] = integer(0, 30)
+    repeated :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(repeated.trap == null)
+    try testing.expect_equal(i64(62), repeated.value.data.integer)
+}
+
+function_aliases_and_borrowed_string_values_execute test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    text :: "line\n\"quoted\"\x00"
+    target :: try add_function(&module, mem.empty(ir.Type), 0, .string, 1)
+    try emit(&module, target, ir.Instruction{
+        op = .constant,
+        type = .string,
+        destination = ir.ValueId(0),
+        constant = ir.Value{ type = .string, data = ir.ValueData{ string = text } },
+    })
+    return_value(&module, target, ir.ValueId(0))
+    initializer :: try add_function(&module, mem.empty(ir.Type), 0, .function, 1)
+    try emit(&module, initializer, function_value(0, target))
+    return_value(&module, initializer, ir.ValueId(0))
+    try arraylist.append(&module.globals, ir.Global{ type = .function, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .string, 2)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .load_global, type = .function, destination = ir.ValueId(0), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .call, type = .string, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    return_value(&module, main, ir.ValueId(1))
+    outcome :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.string, outcome.value.type)
+    try testing.expect_equal([]u8, text, outcome.value.data.string)
+}
+
+premature_local_reads_and_global_cycles_report_instruction_spans test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    span :: diagnostics.Span{ start = 14, end = 19 }
+    types [1]ir.Type :: [.int]
+    main :: try add_function(&module, types[..], 0, .int, 1)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0, span = span })
+    return_value(&module, main, ir.ValueId(0))
+    premature :: try run(mem.c_allocator, &module, &store)
+    try expect_trap(premature, &store, .read_before_initialization, span)
+
+    first :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+    second :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+    cycle_span :: diagnostics.Span{ start = 40, end = 44 }
+    try emit(&module, first, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 1 })
+    try emit(&module, second, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0, span = cycle_span })
+    return_value(&module, first, ir.ValueId(0))
+    return_value(&module, second, ir.ValueId(0))
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = first, span = diagnostics.Span{ start = 0, end = 0 } })
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = second, span = diagnostics.Span{ start = 0, end = 0 } })
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 }
+    cycle :: try run(mem.c_allocator, &module, &store)
+    try expect_trap(cycle, &store, .initialization_cycle, cycle_span)
+    retry :: try run(mem.c_allocator, &module, &store)
+    try expect_trap(retry, &store, .initialization_cycle, cycle_span)
+}
+
+existing_trap_identity_entry_failures_and_unused_errors_survive test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    entry_id :: try diagnostics.add(&store, .missing_entry, diagnostics.Span{ start = 0, end = 0 })
+    module.entry_diagnostic = entry_id
+    absent :: try run(mem.c_allocator, &module, &store)
+    try testing.expect_equal(entry_id, absent.trap?)
+    invalid_id :: try diagnostics.add(&store, .unknown_name, diagnostics.Span{ start = 12, end = 17 })
+    bad :: try add_function(&module, mem.empty(ir.Type), 0, .invalid, 0)
+    module.functions.items[usize(bad)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = invalid_id }
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 2)
+    module.entry = main
+    try emit(&module, main, integer(0, 42))
+    return_value(&module, main, ir.ValueId(0))
+    success :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(success.trap == null)
+    try testing.expect_equal(i64(42), success.value.data.integer)
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = function_value(0, bad)
+    try emit(&module, main, ir.Instruction{ op = .call, type = .invalid, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    trapped :: try run(mem.c_allocator, &module, &store)
+    try testing.expect_equal(invalid_id, trapped.trap?)
+    try testing.expect_equal(usize(2), diagnostics.count(&store))
+}
+
+@hide:file
+IntegerCase :: struct {
+    op ir.Op
+    left i64
+    right i64
+    expected ?i64
+}
+
+integer_arithmetic_checks_boundaries_before_host_operations test {
+    cases [19]IntegerCase :: [
+        IntegerCase{ op = .add, left = 19, right = 23, expected = 42 },
+        IntegerCase{ op = .add, left = maxval!(i64), right = 0, expected = maxval!(i64) },
+        IntegerCase{ op = .add, left = maxval!(i64), right = 1, expected = null },
+        IntegerCase{ op = .add, left = minval!(i64), right = -1, expected = null },
+        IntegerCase{ op = .add, left = minval!(i64), right = maxval!(i64), expected = -1 },
+        IntegerCase{ op = .subtract, left = minval!(i64), right = 0, expected = minval!(i64) },
+        IntegerCase{ op = .subtract, left = minval!(i64), right = 1, expected = null },
+        IntegerCase{ op = .subtract, left = maxval!(i64), right = -1, expected = null },
+        IntegerCase{ op = .subtract, left = -1, right = minval!(i64), expected = maxval!(i64) },
+        IntegerCase{ op = .multiply, left = minval!(i64), right = 1, expected = minval!(i64) },
+        IntegerCase{ op = .multiply, left = minval!(i64), right = -1, expected = null },
+        IntegerCase{ op = .multiply, left = -1, right = minval!(i64), expected = null },
+        IntegerCase{ op = .multiply, left = maxval!(i64), right = 2, expected = null },
+        IntegerCase{ op = .multiply, left = minval!(i64), right = 2, expected = null },
+        IntegerCase{ op = .multiply, left = -3, right = -14, expected = 42 },
+        IntegerCase{ op = .multiply, left = -3, right = 14, expected = -42 },
+        IntegerCase{ op = .multiply, left = 3, right = -14, expected = -42 },
+        IntegerCase{ op = .multiply, left = minval!(i64), right = 0, expected = 0 },
+        IntegerCase{ op = .multiply, left = 0, right = minval!(i64), expected = 0 },
+    ]
+    for (cases) |case| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        span :: diagnostics.Span{ start = 8, end = 16 }
+        main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+        module.entry = main
+        try emit(&module, main, integer(0, case.left))
+        try emit(&module, main, integer(1, case.right))
+        try emit(&module, main, ir.Instruction{ op = case.op, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1), span = span })
+        return_value(&module, main, ir.ValueId(2))
+        outcome :: try run(mem.c_allocator, &module, &store)
+        if case.expected |expected| {
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(expected, outcome.value.data.integer)
+        } else {
+            try expect_trap(outcome, &store, .integer_overflow, span)
+        }
+    }
+}
+
+integer_negation_traps_only_at_minimum test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    span :: diagnostics.Span{ start = 21, end = 27 }
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 2)
+    module.entry = main
+    try emit(&module, main, integer(0, minval!(i64)))
+    try emit(&module, main, ir.Instruction{ op = .negate, type = .int, destination = ir.ValueId(1), left = ir.ValueId(0), span = span })
+    return_value(&module, main, ir.ValueId(1))
+    trapped :: try run(mem.c_allocator, &module, &store)
+    try expect_trap(trapped, &store, .integer_overflow, span)
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = integer(0, maxval!(i64))
+    success :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(success.trap == null)
+    try testing.expect_equal(-maxval!(i64), success.value.data.integer)
+}
+
+float_arithmetic_and_ieee_zero_division_execute test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .float, 7)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .float, destination = ir.ValueId(0), constant = ir.Value{ type = .float, data = ir.ValueData{ real = 10.5 } } })
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .float, destination = ir.ValueId(1), constant = ir.Value{ type = .float, data = ir.ValueData{ real = 2.0 } } })
+    try emit(&module, main, ir.Instruction{ op = .multiply, type = .float, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .add, type = .float, destination = ir.ValueId(3), left = ir.ValueId(2), right = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .subtract, type = .float, destination = ir.ValueId(4), left = ir.ValueId(3), right = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .divide, type = .float, destination = ir.ValueId(5), left = ir.ValueId(4), right = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .negate, type = .float, destination = ir.ValueId(6), left = ir.ValueId(5) })
+    return_value(&module, main, ir.ValueId(6))
+    result :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(result.trap == null)
+    try testing.expect_equal(ir.Type.float, result.value.type)
+    try testing.expect_equal(f64(-10.5), result.value.data.real)
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[0].constant.data.real = 0
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[1].constant.data.real = 0
+    nan :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(nan.trap == null)
+    try testing.expect(nan.value.data.real != nan.value.data.real)
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[0].constant.data.real = 1
+    module.functions.items[usize(main)].blocks.items[0].instructions.items[2].op = .add
+    infinite :: try run(mem.c_allocator, &module, &store)
+    try testing.expect(infinite.trap == null)
+    try testing.expect(infinite.value.data.real < f64(-1000000000))
+    try testing.expect_equal(infinite.value.data.real, infinite.value.data.real * f64(2))
+    try testing.expect_equal(usize(0), diagnostics.count(&store))
+}
+
+@hide:file
+AllocationState :: struct {
+    remaining usize
+    live usize = 0
+}
+
+@hide:file
+limited_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+    if context |userdata| {
+        state @mut AllocationState :: ptrcast!(userdata)
+        if (state.remaining == 0) return null
+        state.remaining -= 1
+        memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
+        if (memory) |_| state.live += 1
+        return memory
+    }
+    unreachable
+}
+
+@hide:file
+limited_realloc proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+    if context |userdata| {
+        state @mut AllocationState :: ptrcast!(userdata)
+        if (state.remaining == 0) return null
+        state.remaining -= 1
+        resized :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+        if resized |_| {
+            if (memory) |_| {} else state.live += 1
+        }
+        return resized
+    }
+    unreachable
+}
+
+@hide:file
+limited_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void {
+    if context |userdata| {
+        state @mut AllocationState :: ptrcast!(userdata)
+        if (memory) |_| state.live -= 1
+        mem.raw_free(mem.c_allocator, memory, size, alignment)
+        return
+    }
+    unreachable
+}
+
+@hide:file
+limited_vtable :: mem.AllocatorVTable{ alloc = limited_alloc, realloc = limited_realloc, free = limited_free }
+
+recursive_invocations_use_heap_frames_and_free_on_allocation_failure test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .void, 2)
+    module.entry = main
+    try emit(&module, main, function_value(0, main))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    state := AllocationState{ remaining = 2048 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    _ = run(allocator, &module, &store) catch |error| {
+        match error {
+            .out_of_memory: {}
+            else: return .expectation_failed
+        }
+        try testing.expect_equal(usize(0), state.live)
+        try testing.expect_equal(usize(0), diagnostics.count(&store))
+        return
+    }
+    return .expectation_failed
+}
+
+frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [1]ir.Type :: [.int]
+    initializer :: try add_function(&module, types[..], 0, .int, 1)
+    try emit(&module, initializer, integer(0, 42))
+    return_value(&module, initializer, ir.ValueId(0))
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
+    main :: try add_function(&module, types[..], 0, .int, 1)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
+    return_value(&module, main, ir.ValueId(0))
+    succeeded := false
+    failures usize := 0
+    for (usize(0)..usize(16)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome :: run(allocator, &module, &store) catch |error| {
+            match error {
+                .out_of_memory: {}
+                else: return .expectation_failed
+            }
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        succeeded = true
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+        try testing.expect_equal(usize(0), state.live)
+    }
+    try testing.expect(succeeded)
+    try testing.expect(failures > 0)
+    trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
+    module.functions.items[usize(initializer)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    trapped :: try run(allocator, &module, &store)
+    try testing.expect_equal(trap_id, trapped.trap?)
+    try testing.expect_equal(usize(0), state.live)
+}
+
+runtime_diagnostic_allocation_failure_is_infrastructure_error_and_frees_frames test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    types [1]ir.Type :: [.int]
+    main :: try add_function(&module, types[..], 0, .int, 1)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0 })
+    return_value(&module, main, ir.ValueId(0))
+    diagnostic_state := AllocationState{ remaining = 0 }
+    diagnostic_allocator :: mem.Allocator{ context = &diagnostic_state, vtable = &limited_vtable }
+    store := diagnostics.init(diagnostic_allocator)
+    defer diagnostics.deinit(&store)
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    _ = run(allocator, &module, &store) catch |error| {
+        match error {
+            .out_of_memory: {}
+            else: return .expectation_failed
+        }
+        try testing.expect_equal(usize(0), state.live)
+        try testing.expect_equal(usize(0), diagnostic_state.live)
+        try testing.expect_equal(usize(0), diagnostics.count(&store))
+        return
+    }
+    return .expectation_failed
+}

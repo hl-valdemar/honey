@@ -1,0 +1,468 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@ffi/c"
+import "@source/ast"
+import "@source/diagnostics"
+import "@source/ir"
+sema :: import "@source/sema"
+typecheck :: import "@source/sema/check"
+
+@hide:file
+StorageKind :: enum { none, function, global, local }
+
+@hide:file
+Storage :: struct {
+    kind StorageKind = .none
+    index u32 = 0
+}
+
+@hide:file
+State :: struct {
+    tree @ast.Tree
+    resolution @sema.Resolution
+    checked @typecheck.Result
+    diagnostics @mut diagnostics.Store
+    module @mut ir.Module
+    storage []mut Storage
+    function usize = 0
+    terminated bool = false
+}
+
+#! lowers checked source into caller-owned executable storage; release with ir.deinit.
+#! no frontend storage or source bytes are retained by the returned module.
+lower proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    checked @typecheck.Result,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
+    module := ir.init(allocator)
+    errdefer ir.deinit(&module)
+    storage :: try mem.alloc(Storage, allocator, ast.node_count(tree))
+    defer mem.free(allocator, storage)
+    mem.set(storage, Storage{})
+    state := State{
+        tree = tree,
+        resolution = resolution,
+        checked = checked,
+        diagnostics = diagnostic_store,
+        module = &module,
+        storage = storage,
+    }
+
+    # allocate every package identity before lowering any initializer or body.
+    for (0..ast.package_decl_count(tree)) |i| {
+        id :: ast.package_decl(tree, i)
+        match ast.decl_kind(tree, id) {
+            .function: {
+                function :: try add_function(&module, ast.node_span(tree, id))
+                storage[usize(id)] = Storage{ kind = .function, index = u32(function) }
+            }
+            .statement: {
+                initializer :: try add_function(&module, ast.node_span(tree, id))
+                global :: u32(module.globals.items.len)
+                try arraylist.append(&module.globals, ir.Global{
+                    type = lower_type(typecheck.type_of(checked, id)),
+                    initializer = initializer,
+                    span = ast.node_span(tree, id),
+                })
+                storage[usize(id)] = Storage{ kind = .global, index = global }
+            }
+            .invalid: {}
+        }
+    }
+    try find_entry(&state)
+    for (0..ast.package_decl_count(tree)) |i| {
+        id :: ast.package_decl(tree, i)
+        match ast.decl_kind(tree, id) {
+            .function: try lower_function(&state, id)
+            .statement: try lower_global(&state, id)
+            .invalid: {}
+        }
+    }
+    return module
+}
+
+@hide:file
+lower_type proc(type typecheck.Type) ir.Type {
+    return match type.kind {
+        .int: .int
+        .float: .float
+        .string: .string
+        .void: .void
+        .function: .function
+        .none, .invalid: .invalid
+    }
+}
+
+@hide:file
+add_function proc(module @mut ir.Module, span diagnostics.Span) ir.FunctionId ! mem.AllocError {
+    id :: ir.FunctionId(module.functions.items.len)
+    try arraylist.append(&module.functions, ir.init_function(module.allocator))
+    function := &module.functions.items[usize(id)]
+    function.span = span
+    try arraylist.append(&function.blocks, ir.init_block(module.allocator))
+    return id
+}
+
+@hide:file
+find_entry proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    for (0..ast.package_decl_count(tree)) |i| {
+        id :: ast.package_decl(tree, i)
+        name := diagnostics.Span{ start = 0, end = 0 }
+        match ast.decl_kind(tree, id) {
+            .function: name = ast.function_decl(tree, id).name
+            .statement: name = ast.statement_decl(tree, id).name
+            .invalid: continue
+        }
+        if (!mem.eql(ast.source_text(tree, name), "main")) continue
+        if (ast.decl_kind(tree, id) != .function) {
+            state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
+            return
+        }
+        declaration :: ast.function_decl(tree, id)
+        result :: lower_type(typecheck.type_of(state.checked, declaration.return_type))
+        if (ast.function_param_count(tree, id) != 0 or result == .function) {
+            state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
+            return
+        }
+        state.module.entry = ir.FunctionId(state.storage[usize(id)].index)
+        return
+    }
+    state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .missing_entry, ast.node_span(tree, tree.root))
+}
+
+@hide:file
+trap proc(state @mut State, diagnostic diagnostics.DiagnosticId, span diagnostics.Span) void {
+    state.module.functions.items[state.function].blocks.items[0].terminator = ir.Terminator{
+        kind = .trap,
+        diagnostic = diagnostic,
+        span = span,
+    }
+    state.terminated = true
+}
+
+@hide:file
+trap_type proc(state @mut State, id ast.NodeId) bool {
+    type :: typecheck.type_of(state.checked, id)
+    if (type.kind != .invalid) return false
+    trap(state, type.diagnostic, ast.node_span(state.tree, id))
+    return true
+}
+
+@hide:file
+trap_binding proc(state @mut State, id ast.NodeId) bool {
+    binding :: sema.binding(state.resolution, id)
+    if (binding.kind != .invalid) return false
+    trap(state, binding.data.diagnostic, ast.node_span(state.tree, id))
+    return true
+}
+
+@hide:file
+finish proc(state @mut State, value ir.ValueId, span diagnostics.Span) void {
+    state.module.functions.items[state.function].blocks.items[0].terminator = ir.Terminator{
+        value = value,
+        span = span,
+    }
+    state.terminated = true
+}
+
+@hide:file
+emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! mem.AllocError {
+    function := &state.module.functions.items[state.function]
+    operation := instruction
+    if (operation.op != .store_local) {
+        operation.destination = ir.ValueId(function.value_count)
+        function.value_count += 1
+    }
+    try arraylist.append(&function.blocks.items[0].instructions, operation)
+    return operation.destination
+}
+
+@hide:file
+constant proc(state @mut State, value ir.Value, span diagnostics.Span) ir.ValueId ! mem.AllocError {
+    return try emit(state, ir.Instruction{ op = .constant, type = value.type, constant = value, span = span })
+}
+
+@hide:file
+lower_global proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    global :: state.module.globals.items[usize(state.storage[usize(id)].index)]
+    state.function = usize(global.initializer)
+    state.terminated = false
+    state.module.functions.items[state.function].result = global.type
+    if (trap_binding(state, id)) return
+    declaration :: ast.statement_decl(state.tree, id)
+    if (declaration.type) |annotation| if (trap_type(state, annotation)) return
+    value :: try lower_expression(state, declaration.initializer)
+    if (state.terminated or trap_type(state, id)) return
+    finish(state, value, declaration.span)
+}
+
+@hide:file
+lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    declaration :: ast.function_decl(tree, id)
+    state.function = usize(state.storage[usize(id)].index)
+    state.terminated = false
+    function := &state.module.functions.items[state.function]
+    function.result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
+    for (0..ast.function_param_count(tree, id)) |i| {
+        parameter :: ast.function_param(tree, id, i)
+        type :: lower_type(typecheck.type_of(state.checked, parameter))
+        state.storage[usize(parameter)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
+        try arraylist.append(&function.parameters, type)
+        try arraylist.append(&function.locals, type)
+    }
+    for (0..ast.block_statement_count(tree, declaration.body)) |i| {
+        statement :: ast.block_statement(tree, declaration.body, i)
+        if (ast.stmt_kind(tree, statement) != .declaration) continue
+        state.storage[usize(statement)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
+        try arraylist.append(&function.locals, lower_type(typecheck.type_of(state.checked, statement)))
+    }
+    # signature errors are entry traps; body errors are reached in statement order.
+    if (trap_binding(state, id) or trap_type(state, declaration.return_type)) return
+    for (0..ast.function_param_count(tree, id)) |i| {
+        if (trap_type(state, ast.function_param(tree, id, i))) return
+    }
+    if (trap_type(state, id)) return
+    for (0..ast.block_statement_count(tree, declaration.body)) |i| {
+        if (state.terminated) return
+        try lower_statement(state, ast.block_statement(tree, declaration.body, i))
+    }
+    if (state.terminated or trap_type(state, declaration.body)) return
+    finish(state, ir.no_value, ast.node_span(tree, declaration.body))
+}
+
+@hide:file
+lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    match ast.stmt_kind(tree, id) {
+        .invalid: {
+            invalid :: ast.invalid(tree, id)
+            trap(state, invalid.diagnostic, invalid.span)
+        }
+        .expression: _ = try lower_expression(state, ast.statement_expr(tree, id))
+        .declaration: {
+            if (trap_binding(state, id)) return
+            declaration :: ast.statement_decl(tree, id)
+            if (declaration.type) |annotation| if (trap_type(state, annotation)) return
+            value :: try lower_expression(state, declaration.initializer)
+            if (state.terminated or trap_type(state, id)) return
+            _ = try emit(state, ir.Instruction{
+                op = .store_local,
+                type = lower_type(typecheck.type_of(state.checked, id)),
+                left = value,
+                slot = state.storage[usize(id)].index,
+                span = declaration.span,
+            })
+        }
+        .return_stmt: {
+            statement :: ast.return_stmt(tree, id)
+            value := ir.no_value
+            if (statement.value) |expression| value = try lower_expression(state, expression)
+            if (state.terminated or trap_type(state, id)) return
+            finish(state, value, statement.span)
+        }
+    }
+}
+
+@hide:file
+lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    span :: ast.node_span(tree, id)
+    type :: lower_type(typecheck.type_of(state.checked, id))
+    match ast.expr_kind(tree, id) {
+        .invalid: {
+            invalid :: ast.invalid(tree, id)
+            trap(state, invalid.diagnostic, invalid.span)
+        }
+        .literal_int, .literal_float: {
+            if (trap_type(state, id)) return ir.no_value
+            return try lower_number(state, id)
+        }
+        .literal_string: {
+            if (trap_type(state, id)) return ir.no_value
+            return try lower_string(state, id)
+        }
+        .identifier: {
+            if (trap_binding(state, id) or trap_type(state, id)) return ir.no_value
+            binding :: sema.binding(state.resolution, id)
+            location :: state.storage[usize(binding.data.declaration)]
+            match location.kind {
+                .function: return try constant(state, ir.Value{
+                    type = .function,
+                    data = ir.ValueData{ function = ir.FunctionId(location.index) },
+                }, span)
+                .global: return try emit(state, ir.Instruction{ op = .load_global, type = type, slot = location.index, span = span })
+                .local: return try emit(state, ir.Instruction{ op = .load_local, type = type, slot = location.index, span = span })
+                .none: unreachable
+            }
+        }
+        .unary: {
+            expression :: ast.unary_expr(tree, id)
+            if (type == .int and ast.expr_kind(tree, expression.operand) == .literal_int) {
+                text :: ast.source_text(tree, ast.node_span(tree, expression.operand))
+                if (integer_magnitude(text, u64(maxval!(i64)) + 1)) |magnitude| {
+                    if (magnitude == u64(maxval!(i64)) + 1) {
+                        return try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = minval!(i64) } }, span)
+                    }
+                }
+            }
+            operand :: try lower_expression(state, expression.operand)
+            if (state.terminated or trap_type(state, id)) return ir.no_value
+            return try emit(state, ir.Instruction{ op = .negate, type = type, left = operand, span = span })
+        }
+        .binary: {
+            expression :: ast.binary_expr(tree, id)
+            left :: try lower_expression(state, expression.left)
+            if (state.terminated) return ir.no_value
+            right :: try lower_expression(state, expression.right)
+            if (state.terminated or trap_type(state, id)) return ir.no_value
+            op ir.Op :: match expression.operator {
+                .add: .add
+                .subtract: .subtract
+                .multiply: .multiply
+                .divide: .divide
+            }
+            return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
+        }
+        .call: {
+            callee :: try lower_expression(state, ast.call_expr(tree, id).callee)
+            if (state.terminated) return ir.no_value
+            # reserve this call's packed slice before nested calls append theirs.
+            block := &state.module.functions.items[state.function].blocks.items[0]
+            start :: block.arguments.items.len
+            count :: ast.call_arg_count(tree, id)
+            for (0..count) |_| try arraylist.append(&block.arguments, ir.no_value)
+            for (0..count) |i| {
+                argument :: try lower_expression(state, ast.call_arg(tree, id, i))
+                if (state.terminated) return ir.no_value
+                block.arguments.items[start + i] = argument
+            }
+            if (trap_type(state, id)) return ir.no_value
+            return try emit(state, ir.Instruction{
+                op = .call,
+                type = type,
+                left = callee,
+                arguments_start = start,
+                arguments_count = count,
+                span = span,
+            })
+        }
+    }
+    return ir.no_value
+}
+
+@hide:file
+integer_magnitude proc(text []u8, limit u64) ?u64 {
+    value := u64(0)
+    for (text) |byte| {
+        if (byte < '0' or byte > '9') return null
+        digit :: u64(byte - '0')
+        if (value > divtrunc!(limit - digit, u64(10))) return null
+        value = value * 10 + digit
+    }
+    return value
+}
+
+@hide:file
+lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, id)
+    text :: ast.source_text(state.tree, span)
+    type :: lower_type(typecheck.type_of(state.checked, id))
+    if (type == .int) {
+        if (integer_magnitude(text, u64(maxval!(i64)))) |magnitude| {
+            return try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = i64(magnitude) } }, span)
+        }
+    } else {
+        buffer :: try mem.alloc(u8, state.module.allocator, text.len + 1)
+        defer mem.free(state.module.allocator, buffer)
+        for (text) |byte, i| buffer[i] = byte
+        buffer[text.len] = 0
+        c.__error()?^ = 0
+        value :: f64(c.strtod(ptrcast!(buffer.ptr), null))
+        # libc reports ERANGE for representable subnormals as well as zero/infinity.
+        if (c.__error()?^ != c.ERANGE or (value > 0 and value < 1)) {
+            return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
+        }
+    }
+    trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
+    return ir.no_value
+}
+
+@hide:file
+hex_digit proc(byte u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0'
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10
+    return null
+}
+
+@hide:file
+lower_string proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, id)
+    text :: ast.source_text(state.tree, span)
+    owned :: try mem.alloc(u8, state.module.allocator, text.len - 2)
+    transferred := false
+    defer if (!transferred) mem.free(state.module.allocator, owned)
+    length := usize(0)
+    cursor := usize(1)
+    end :: text.len - 1
+    valid := true
+    while (cursor < end) {
+        byte := text[cursor]
+        cursor += 1
+        if (byte == '\\') {
+            if (cursor >= end) {
+                valid = false
+                break
+            }
+            escape :: text[cursor]
+            cursor += 1
+            match escape {
+                '\\': byte = '\\'
+                '"': byte = '"'
+                'n': byte = '\n'
+                'r': byte = '\r'
+                't': byte = '\t'
+                '0': byte = 0
+                'x': {
+                    if (end - cursor < 2) {
+                        valid = false
+                        break
+                    }
+                    high := u8(0)
+                    low := u8(0)
+                    if (hex_digit(text[cursor])) |digit| high = digit
+                    else {
+                        valid = false
+                        break
+                    }
+                    if (hex_digit(text[cursor + 1])) |digit| low = digit
+                    else {
+                        valid = false
+                        break
+                    }
+                    byte = high * 16 + low
+                    cursor += 2
+                }
+                else: {
+                    valid = false
+                    break
+                }
+            }
+        }
+        owned[length] = byte
+        length += 1
+    }
+    if (!valid) {
+        trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
+        return ir.no_value
+    }
+    # retain the complete allocation for freeing, but expose only decoded bytes.
+    try arraylist.append(&state.module.strings, owned)
+    transferred = true
+    return try constant(state, ir.Value{ type = .string, data = ir.ValueData{ string = owned[..length] } }, span)
+}

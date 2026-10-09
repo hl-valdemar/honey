@@ -285,3 +285,48 @@ recovers_malformed_calls_and_preserves_siblings test {
     try testing.expect_equal("tail", ast.source_text(&tree, tail.name))
     try testing.expect_equal(0, ast.call_arg_count(&tree, tail.initializer))
 }
+
+parses_return_boundaries_and_recovers_trailing_tokens test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `return 1
+        `main proc() void {
+        `    return
+        `    2
+        `    return (3 + 4)
+        `    return 5 stray
+        `    after :: 6
+        `    return }
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    try testing.expect_equal(ast.DeclKind.invalid, ast.decl_kind(&tree, ast.package_decl(&tree, 0)))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    try testing.expect_equal(6, ast.block_statement_count(&tree, body))
+    first :: ast.block_statement(&tree, body, 0)
+    try testing.expect_equal(ast.StmtKind.return_stmt, ast.stmt_kind(&tree, first))
+    try testing.expect(ast.return_stmt(&tree, first).value == null)
+    try testing.expect_equal("return", ast.source_text(&tree, ast.return_stmt(&tree, first).span))
+    try testing.expect_equal(ast.StmtKind.expression, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 1)))
+    grouped :: ast.return_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal("return (3 + 4)", ast.source_text(&tree, grouped.span))
+    if (grouped.value) |value| {
+        try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, value))
+    } else {
+        return .expectation_failed
+    }
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 3)))
+    after :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 4))
+    try testing.expect_equal("after", ast.source_text(&tree, after.name))
+    last :: ast.return_stmt(&tree, ast.block_statement(&tree, body, 5))
+    try testing.expect(last.value == null)
+    try testing.expect_equal("return", ast.source_text(&tree, last.span))
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+}
