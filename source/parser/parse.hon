@@ -185,6 +185,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
     match current(state).kind {
         .if: return try parse_if(state)
         .while: return try parse_while(state, allow_else)
+        .for: return try parse_for(state, allow_else)
         .return: return try parse_return(state, allow_else)
         .break, .continue: return try parse_loop_control(state, allow_else)
         .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren: {
@@ -303,6 +304,92 @@ parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
 }
 
 @hide:file
+CaptureList :: struct {
+    item ?ast.NodeId = null
+    index ?ast.NodeId = null
+    pointer bool = false
+    indexed bool = false
+}
+
+@hide:file
+parse_capture_name proc(state @mut State) ?ast.NodeId ! ParseError {
+    name :: try consume(state, .ident)
+    capture ?ast.NodeId := null
+    if (
+        name.span.end != name.span.start + 1
+        or state.builder.source[usize(name.span.start)] != '_'
+    ) capture = try ast.add_identifier(&state.builder, name.span)
+    return capture
+}
+
+@hide:file
+parse_captures proc(state @mut State) CaptureList ! ParseError {
+    _ = try consume(state, .pipe)
+    captures := CaptureList{}
+    if next_is(state, .at) {
+        captures.pointer = true
+        state.next_token += 1
+    }
+    captures.item = try parse_capture_name(state)
+    if next_is(state, .comma) {
+        captures.indexed = true
+        state.next_token += 1
+        captures.index = try parse_capture_name(state)
+    }
+    _ = try consume(state, .pipe)
+    return captures
+}
+
+@hide:file
+parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .for)
+    skip_newlines(state)
+    iterable_start :: state.next_token
+    iterable := try parse_expr(state)
+    grouped :: parenthesized_guard(state, iterable_start)
+    skip_newlines(state)
+    captures :: parse_captures(state) catch |err| {
+        match err {
+            .unexpected_token: {}
+            else: return err
+        }
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        iterable = try ast.add_invalid_expr(
+            &state.builder, ast.builder_span(&state.builder, iterable), diagnostic,
+        )
+        while (
+            !next_is(state, .open_curly) and !next_is(state, .close_curly)
+            and !next_is(state, .newline) and !next_is(state, .eof)
+            and !next_is(state, .else)
+        ) state.next_token += 1
+        yield CaptureList{}
+    }
+    after_captures :: state.next_token
+    skip_newlines(state)
+    if (
+        !next_is(state, .open_curly) and !grouped
+        and ast.builder_expr_kind(&state.builder, iterable) != .call
+        and ast.builder_expr_kind(&state.builder, iterable) != .invalid
+    ) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        iterable = try ast.add_invalid_expr(
+            &state.builder, ast.builder_span(&state.builder, iterable), diagnostic,
+        )
+    }
+    # a malformed capture list must not swallow the next line's sibling.
+    if (
+        ast.builder_expr_kind(&state.builder, iterable) == .invalid
+        and !next_is(state, .open_curly)
+    ) state.next_token = after_captures
+    body :: try parse_arm(state, allow_else)
+    return try ast.add_for_stmt(
+        &state.builder,
+        ast.Span{ start = keyword.span.start, end = ast.builder_span(&state.builder, body).end },
+        iterable, captures.item, captures.index, captures.pointer, captures.indexed, body,
+    )
+}
+
+@hide:file
 parse_guard proc(state @mut State) ast.NodeId ! ParseError {
     condition_start :: state.next_token
     condition := parse_expr(state) catch |err| {
@@ -320,6 +407,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             and !next_is(state, .newline) and !next_is(state, .eof)
             and !next_is(state, .else) and !next_is(state, .return)
             and !next_is(state, .if) and !next_is(state, .while)
+            and !next_is(state, .for)
             and !next_is(state, .break) and !next_is(state, .continue)
         ) {
             if (next_is(state, .ident) and next_n_is(state, 1, .equal)) break
@@ -435,6 +523,7 @@ parse_expr proc(state @mut State) ast.NodeId ! ParseError {
 parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! ParseError {
     skip_operand_newlines(state)
     token := current(state)
+    expression_start :: state.next_token
     left := if (prefix_binding_power(token.kind)) |right_bp| {
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
@@ -449,12 +538,32 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     } else {
         yield try parse_primary(state)
     }
+    left_grouped := parenthesized_guard(state, expression_start)
 
     while true {
         skip_continuation_newlines(state)
         token = current(state)
         if (token.kind == .open_paren) {
             left = try parse_call(state, left)
+            left_grouped = false
+            continue
+        }
+        if (token.kind == .range or token.kind == .range_inclusive) {
+            if (min_bp > BindingPowerScalar(0)) break
+            left = try validate_range_bound(state, left, left_grouped)
+            state.next_token += 1
+            right_start :: state.next_token
+            right := try parse_expr_bp(state, BindingPowerScalar(1))
+            right = try validate_range_bound(state, right, parenthesized_guard(state, right_start))
+            left = try ast.add_range(
+                &state.builder,
+                ast.Span{
+                    start = state.tokens[expression_start].span.start,
+                    end = state.tokens[state.next_token - 1].span.end,
+                },
+                left, right, token.kind == .range_inclusive,
+            )
+            left_grouped = false
             continue
         }
         if (infix_binding_power(token.kind)) |power| {
@@ -470,11 +579,27 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
                 left,
                 right,
             )
+            left_grouped = false
             continue
         }
         break
     }
     return left
+}
+
+@hide:file
+validate_range_bound proc(
+    state @mut State, bound ast.NodeId, grouped bool,
+) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (grouped) return bound
+    match ast.builder_expr_kind(&state.builder, bound) {
+        .unary, .binary, .range: {
+            span :: ast.builder_span(&state.builder, bound)
+            diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, span)
+            return try ast.add_invalid_expr(&state.builder, span, diagnostic)
+        }
+        else: return bound
+    }
 }
 
 @hide:file
@@ -566,7 +691,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 is_expression_boundary proc(kind lexer.TokenKind) bool {
     return match kind {
-        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .eof: true
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .for, .eof: true
         else: false
     }
 }
@@ -586,6 +711,7 @@ is_expression_recovery_boundary proc(kind lexer.TokenKind) bool {
         kind == .comma
         or kind == .and
         or kind == .or
+        or kind == .pipe
         or is_expression_boundary(kind)
     )
 }

@@ -220,6 +220,19 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
                 try resolve_expr(state, scope, loop.condition)
                 try resolve_arm(state, scope, loop.body)
             }
+            .for_stmt: {
+                loop :: ast.for_stmt(tree, statement)
+                try resolve_expr(state, scope, loop.iterable)
+                body_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+                defer hashmap.deinit(&body_scope.names)
+                if (loop.capture) |capture| {
+                    try predeclare(state, &body_scope, capture, ast.node_span(tree, capture))
+                }
+                if (loop.index) |index| {
+                    try predeclare(state, &body_scope, index, ast.node_span(tree, index))
+                }
+                try resolve_block(state, &body_scope, loop.body)
+            }
             .invalid: resolve_invalid(state, statement)
         }
     }
@@ -274,6 +287,11 @@ resolve_expr proc(
             expression :: ast.binary_expr(tree, id)
             try resolve_expr(state, scope, expression.left)
             try resolve_expr(state, scope, expression.right)
+        }
+        .range: {
+            expression :: ast.range_expr(tree, id)
+            try resolve_expr(state, scope, expression.start)
+            try resolve_expr(state, scope, expression.end)
         }
         .call: {
             try resolve_expr(state, scope, ast.call_expr(tree, id).callee)

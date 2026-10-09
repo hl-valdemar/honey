@@ -3,13 +3,13 @@
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
+#! * expr ..... -> identifier | literal | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr ('..' | '..=') expr
 #! * decl ..... -> identifier [type] binding expr
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
-#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm
-#! braceless guards require parentheses unless the condition is a call; else binds to the nearest if.
-#! precedence (tightest first): calls, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or.
+#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! braceless guards/iterables require parentheses unless they are calls; else binds to the nearest if.
+#! precedence (tightest first): calls, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -39,6 +39,7 @@ ExprKind :: enum {
     unary
     binary
     call
+    range
     invalid
 }
 
@@ -55,6 +56,7 @@ StmtKind :: enum {
     continue_stmt,
     if_stmt,
     while_stmt,
+    for_stmt,
     invalid
 }
 
@@ -83,6 +85,7 @@ NodeKind :: enum {
     expr_unary,
     expr_binary,
     expr_call,
+    expr_range,
     stmt_expr,
     stmt_decl,
     stmt_return,
@@ -91,6 +94,7 @@ NodeKind :: enum {
     stmt_if,
     stmt_assignment,
     stmt_while,
+    stmt_for,
     func_decl,
     param_decl,
     block,
@@ -201,6 +205,23 @@ WhileView :: struct {
     body NodeId
 }
 
+RangeView :: struct {
+    span Span
+    start NodeId
+    end NodeId
+    inclusive bool
+}
+
+ForView :: struct {
+    span Span
+    iterable NodeId
+    capture ?NodeId
+    index ?NodeId
+    pointer_capture bool
+    index_capture bool
+    body NodeId
+}
+
 InvalidView :: struct {
     span Span
     diagnostic DiagnosticId
@@ -287,6 +308,18 @@ add_binary proc(
     }, span)
 }
 
+add_range proc(
+    builder @mut Builder, span Span, start NodeId, end NodeId, inclusive bool,
+) NodeId ! mem.AllocError {
+    flag :: if (inclusive) u32(1) else u32(0)
+    return try add_node(builder, Node{
+        kind = .expr_range,
+        main = NodeData{ extra = flag },
+        data0 = NodeData{ node_id = start },
+        data1 = NodeData{ node_id = end },
+    }, span)
+}
+
 add_call proc(
     builder @mut Builder,
     span Span,
@@ -365,6 +398,26 @@ add_while_stmt proc(
         kind = .stmt_while,
         main = NodeData{ node_id = condition },
         data0 = NodeData{ node_id = body },
+    }, span)
+}
+
+add_for_stmt proc(
+    builder @mut Builder, span Span, iterable NodeId, capture, index ?NodeId,
+    pointer_capture, index_capture bool, body NodeId,
+) NodeId ! mem.AllocError {
+    raw_capture :: if (capture) |id| u32(id) else u32(no_node)
+    raw_index :: if (index) |id| u32(id) else u32(no_node)
+    pointer_flag :: if (pointer_capture) u32(1) else u32(0)
+    index_flag :: if (index_capture) u32(1) else u32(0)
+    extra :: try add_extra(builder, raw_capture)
+    _ = try add_extra(builder, raw_index)
+    _ = try add_extra(builder, pointer_flag)
+    _ = try add_extra(builder, index_flag)
+    return try add_node(builder, Node{
+        kind = .stmt_for,
+        main = NodeData{ node_id = iterable },
+        data0 = NodeData{ node_id = body },
+        data1 = NodeData{ extra = extra },
     }, span)
 }
 
@@ -508,6 +561,7 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_if: .if_stmt
         .stmt_assignment: .assignment_stmt
         .stmt_while: .while_stmt
+        .stmt_for: .for_stmt
         .invalid_stmt: .invalid
         else: unreachable
     }
@@ -555,6 +609,21 @@ while_stmt proc(tree @Tree, id NodeId) WhileView {
     return WhileView{
         span = get_span(&tree.storage, id),
         condition = node.main.node_id,
+        body = node.data0.node_id,
+    }
+}
+
+for_stmt proc(tree @Tree, id NodeId) ForView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_for)
+    extra :: usize(node.data1.extra)
+    return ForView{
+        span = get_span(&tree.storage, id),
+        iterable = node.main.node_id,
+        capture = maybe_node_id(tree.storage.extra.items[extra]),
+        index = maybe_node_id(tree.storage.extra.items[extra + 1]),
+        pointer_capture = tree.storage.extra.items[extra + 2] != 0,
+        index_capture = tree.storage.extra.items[extra + 3] != 0,
         body = node.data0.node_id,
     }
 }
@@ -640,6 +709,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_unary: .unary
         .expr_binary: .binary
         .expr_call: .call
+        .expr_range: .range
         .invalid_expr: .invalid
         else: unreachable
     }
@@ -663,6 +733,17 @@ binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
         operator = node.main.binary_operator,
         left = node.data0.node_id,
         right = node.data1.node_id,
+    }
+}
+
+range_expr proc(tree @Tree, id NodeId) RangeView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_range)
+    return RangeView{
+        span = get_span(&tree.storage, id),
+        start = node.data0.node_id,
+        end = node.data1.node_id,
+        inclusive = node.main.extra != 0,
     }
 }
 

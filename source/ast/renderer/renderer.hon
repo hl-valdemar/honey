@@ -94,6 +94,28 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 try append_text(renderer, "\n")
                 try render_block(renderer, tree, loop.body, depth + 1)
             }
+            .for_stmt: {
+                loop :: ast.for_stmt(tree, statement)
+                try append_text(renderer, "for ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, loop.iterable)))
+                try append_text(renderer, " |")
+                if (loop.pointer_capture) try append_text(renderer, "@")
+                if (loop.capture) |capture| {
+                    try append_text(renderer, ast.source_text(tree, ast.node_span(tree, capture)))
+                } else {
+                    try append_text(renderer, "_")
+                }
+                if (loop.index_capture) {
+                    try append_text(renderer, ", ")
+                    if (loop.index) |index| {
+                        try append_text(renderer, ast.source_text(tree, ast.node_span(tree, index)))
+                    } else {
+                        try append_text(renderer, "_")
+                    }
+                }
+                try append_text(renderer, "|\n")
+                try render_block(renderer, tree, loop.body, depth + 1)
+            }
             .invalid: try append_text(renderer, "invalid statement\n")
         }
     }

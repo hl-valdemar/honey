@@ -11,7 +11,7 @@ reports_invalid_input_and_keeps_scanning test {
     state := init(mem.c_allocator)
     defer deinit(&state)
 
-    try scan(&state, "if name # comment\n@1. 2 3.5 \"hi\"", &diagnostic_store)
+    try scan(&state, "if name # comment\n$1. 2 3.5 \"hi\"", &diagnostic_store)
 
     try testing.expect_equal(8, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
@@ -99,4 +99,26 @@ scans_loop_controls_with_exact_keyword_boundaries test {
     try testing.expect_equal("breakfast", strpool.get_str(&strpool.strings, state.tokens.items[2].data.str_id)?)
     try testing.expect_equal("continued", strpool.get_str(&strpool.strings, state.tokens.items[3].data.str_id)?)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+scans_ranges_without_consuming_float_dots test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "0..10 0..=10 1.5..2.5 |@item, _| ... 1.", &diagnostic_store)
+    expected [19]TokenKind :: [
+        .int, .range, .int, .int, .range_inclusive, .int,
+        .float, .range, .float, .pipe, .at, .ident, .comma, .ident, .pipe,
+        .range, .invalid, .invalid, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(u32(1), state.tokens.items[1].span.start)
+    try testing.expect_equal(u32(3), state.tokens.items[1].span.end)
+    try testing.expect_equal(u32(7), state.tokens.items[4].span.start)
+    try testing.expect_equal(u32(10), state.tokens.items[4].span.end)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
 }

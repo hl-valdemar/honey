@@ -485,3 +485,121 @@ resolves_all_code_and_preserves_scopes_after_loop_controls test {
     forbidden :: ast.block_statement(&tree, conditional.then_block, 2)
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, forbidden).kind)
 }
+
+range_bounds_use_outer_scope_and_captures_are_body_declarations test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    for lower..upper |item| {
+        `        before :: later
+        `        later :: item
+        `        continue
+        `        item
+        `    }
+        `    for lower..upper |item| { item }
+        `    lower :: 0
+        `    upper :: 2
+        `    item
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 0))
+    sibling :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
+    lower :: ast.block_statement(&tree, body, 2)
+    upper :: ast.block_statement(&tree, body, 3)
+    bounds :: ast.range_expr(&tree, loop.iterable)
+    try testing.expect_equal(lower, binding(&resolution, bounds.start).data.declaration)
+    try testing.expect_equal(upper, binding(&resolution, bounds.end).data.declaration)
+    if (loop.capture) |capture| {
+        try testing.expect_equal(capture, binding(&resolution, capture).data.declaration)
+        later :: ast.block_statement(&tree, loop.body, 1)
+        before_ref :: ast.statement_decl(&tree, ast.block_statement(&tree, loop.body, 0)).initializer
+        try testing.expect_equal(later, binding(&resolution, before_ref).data.declaration)
+        capture_ref :: ast.statement_decl(&tree, later).initializer
+        try testing.expect_equal(capture, binding(&resolution, capture_ref).data.declaration)
+        dead_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 3))
+        try testing.expect_equal(capture, binding(&resolution, dead_ref).data.declaration)
+    } else return .expectation_failed
+    if (sibling.capture) |capture| {
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, capture).kind)
+        sibling_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, sibling.body, 0))
+        try testing.expect_equal(capture, binding(&resolution, sibling_ref).data.declaration)
+    } else return .expectation_failed
+    escaped :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 4))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, escaped).kind)
+    try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+}
+
+range_captures_preserve_duplicate_builtin_and_discard_errors test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    outer :: 0
+        `    for outer..2 |outer| { outer }
+        `    for 0..2 |int| { int }
+        `    for 0..2 |item, item| { item }
+        `    for 0..2 |local| {
+        `        local :: 1
+        `        local
+        `    }
+        `    for 0..2 |_| {
+        `        break
+        `        _
+        `        missing
+        `    }
+        `    for missing_start..missing_end |i| {}
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    for (usize(1)..usize(3)) |index| {
+        loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, index))
+        if (loop.capture) |capture| {
+            try testing.expect_equal(BindingKind.invalid, binding(&resolution, capture).kind)
+            reference :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 0))
+            try testing.expect_equal(
+                binding(&resolution, capture).data.diagnostic,
+                binding(&resolution, reference).data.diagnostic,
+            )
+        } else return .expectation_failed
+    }
+    indexed :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 3))
+    if (indexed.index) |index| {
+        try testing.expect_equal(BindingKind.invalid, binding(&resolution, index).kind)
+    } else return .expectation_failed
+    if (indexed.capture) |capture| {
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, indexed.body, 0))
+        try testing.expect_equal(capture, binding(&resolution, reference).data.declaration)
+    } else return .expectation_failed
+    local_loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 4))
+    duplicate :: ast.block_statement(&tree, local_loop.body, 0)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, duplicate).kind)
+    discard :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 5))
+    try testing.expect(discard.capture == null)
+    for (usize(1)..usize(3)) |index| {
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, discard.body, index))
+        try testing.expect_equal(BindingKind.invalid, binding(&resolution, reference).kind)
+    }
+    missing_loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 6))
+    bounds :: ast.range_expr(&tree, missing_loop.iterable)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, bounds.start).kind)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, bounds.end).kind)
+    try testing.expect_equal(8, diagnostics.count(&diagnostic_store))
+}

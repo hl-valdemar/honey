@@ -439,6 +439,15 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `main proc() string {
         `    computed float :: factor * 2
         `    remaining := 2
+        `    for 0..=2 |item| {
+        `        saved :: identity(text)
+        `        for 0..2 |_| {
+        `            nested :: identity(saved)
+        `            identity(nested)
+        `            if (item == 1) continue else break
+        `        }
+        `        if (item < 2) continue else break
+        `    }
         `    while compose(remaining > 0 and enabled, compose(!false, compose(true or false, compose(true, compose(true, true))))) {
         `        pass :: identity(text)
         `        identity(pass)
@@ -1117,8 +1126,16 @@ lazy_branchful_global_initializers_and_calls_release_every_runtime_allocation te
         `first :: true and later
         `later :: false or !false
         `both proc(left bool, right bool) bool { return left and right }
+        `bound proc(flag bool, value int) int {
+        `    if flag { return value }
+        `    return 0
+        `}
         `main proc() bool {
         `    n := 3
+        `    for bound(first or false, 0)..bound(both(first, true and later), 3) |i| {
+        `        local :: both(first and first, later or false)
+        `        if (local and i < 2) continue else break
+        `    }
         `    while both(first and first, both(false or later, !false and later)) and n > 0 {
         `        n = n - 1
         `        if (n > 0) continue else break
@@ -1297,5 +1314,223 @@ traps_before_loop_controls_keep_the_original_error test {
         try expect_trap(outcome, &diagnostic_store, .unknown_name)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+owned_integer_ranges_execute_exclusive_inclusive_empty_signed_and_discard_forms test {
+    sources [13][]u8 :: [
+        "main proc() int {\n sum := 0\n for 0..7 |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n sum := 0\n for (0..=6) |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n sum := 0\n for (-3)..3 |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n sum := 0\n for (-3)..=3 |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n sum := 0\n for 7..7 |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n sum := 0\n for 7..=7 |i| { sum = sum + i }\n return sum\n}\n",
+        "main proc() int {\n count := 0\n for 7..2 |_| { count = count + 1 }\n for 7..=2 |_| { count = count + 1 }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for (0..4) |_| count = count + 1\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 9223372036854775807..=9223372036854775807 |i| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 9223372036854775806..=9223372036854775807 |_| {\n count = count + 1\n if (count > 3) break\n continue\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 9223372036854775806..9223372036854775807 |i| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
+        "main proc() int {\n for (-9223372036854775808)..(-9223372036854775807) |i| { return i }\n return 0\n}\n",
+        "main proc() int {\n sum := 0\n for 0..(3 + 1) |i| { sum = sum + i }\n return sum\n}\n",
+    ]
+    expected [13]i64 :: [21, 21, -3, 0, 0, 7, 0, 4, 1, 2, 1, minval!(i64), 6]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.int, outcome.value.type)
+        try testing.expect_equal(expected[index], outcome.value.data.integer)
+    }
+}
+
+range_bounds_calls_and_globals_are_frozen_before_branchful_body_calls test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `seed :: choose(true or false, identity(0))
+        `limit :: choose(false or true, identity(4))
+        `identity proc(value int) int { return value }
+        `choose proc(flag bool, value int) int {
+        `    if flag { return value }
+        `    return 99
+        `}
+        `main proc() int {
+        `    first := seed
+        `    last := limit
+        `    sum := 0
+        `    for choose(true and !false, identity(first))..choose(false or true, choose(true or false, last)) |i| {
+        `        sum = choose(i == 0 or i > 0, identity(sum + i))
+        `        first = 100
+        `        last = 0
+        `    }
+        `    return sum + 36
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
+range_break_continue_and_nested_for_while_restore_lexical_targets test {
+    sources [3][]u8 :: [
+        "main proc() int {\n sum := 0\n count := 0\n for 0..10 |i| {\n count = count + 1\n if (count > 12) break\n if (i == 2 or i == 4) continue\n if (i == 6) break\n sum = sum + i\n }\n return sum + 33\n}\n",
+        "main proc() int {\n sum := 0\n count := 0\n for 0..3 |outer| {\n count = count + 1\n if (count > 4) break\n inner := 3\n while inner > 0 {\n inner = inner - 1\n if (inner == 1) continue\n if (inner == 0) break\n sum = sum + 7\n }\n if (outer < 2) continue else break\n }\n return sum + 21\n}\n",
+        "main proc() int {\n outer := 3\n sum := 0\n while outer > 0 {\n outer = outer - 1\n count := 0\n for 0..3 |i| {\n count = count + 1\n if (count > 4) break\n for 0..3 |j| {\n if (j == 0) continue\n sum = sum + 7\n break\n }\n if (i == 0) continue else break\n }\n if (outer > 0) continue else break\n }\n return sum\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}
+
+range_body_and_arm_locals_reset_before_continued_later_declarations test {
+    sources [6][]u8 :: [
+        "main proc() int {\n for 0..3 |i| {\n if i == 2 { return later }\n if (i == 1) continue\n later :: 42\n continue\n }\n return 0\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n if i == 2 { later = 42 }\n if (i == 1) continue\n later := 0\n continue\n }\n return 0\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n if true {\n if i == 2 { return later }\n if (i == 1) continue\n later :: 42\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n if true {\n if i == 2 { later = 42 }\n if (i == 1) continue\n later := 0\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n if false {} else {\n if i == 2 { return later }\n if (i == 1) continue\n later :: 42\n continue\n }\n }\n return 0\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n if false {} else {\n if i == 2 { later = 42 }\n if (i == 1) continue\n later := 0\n continue\n }\n }\n return 0\n}\n",
+    ]
+    codes [6]diagnostics.Code :: [
+        .read_before_initialization, .write_before_initialization,
+        .read_before_initialization, .write_before_initialization,
+        .read_before_initialization, .write_before_initialization,
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try expect_trap(outcome, &diagnostic_store, codes[index])
+        diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+        try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "later"))
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+untaken_range_errors_and_errors_after_controls_remain_diagnostic_only test {
+    sources [10][]u8 :: [
+        "main proc() int {\n for 0..0 |i| { return unknown }\n return 42\n}\n",
+        "main proc() int {\n for 3..2 |i| { i = 1 }\n return 42\n}\n",
+        "main proc() int {\n i :: 0\n for 0..0 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n continue\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n break\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |i| {\n return 42\n break\n continue\n missing\n }\n return 0\n}\n",
+        "unused proc() int {\n for 0..1 |i| { return unknown }\n return 0\n}\nmain proc() int { return 42 }\n",
+        "main proc() int {\n if false { for true..1 |i| {} }\n return 42\n}\n",
+        "main proc() int {\n for 0..0 |int| {}\n return 42\n}\n",
+        "unsupported :: 0..1\nmain proc() int {\n for 0..0 |_| { local :: 0..1 }\n return 42\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        count :: diagnostics.count(&diagnostic_store)
+        try testing.expect(count > 0)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+        try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
+    }
+}
+
+demanded_range_header_capture_and_body_errors_keep_original_diagnostic_identity test {
+    sources [10][]u8 :: [
+        "main proc() int {\n for true..1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |i| { i = 1 }\n return 42\n}\n",
+        "main proc() int {\n i :: 0\n for 0..1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |i| {\n missing\n continue\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |i| {\n missing\n break\n }\n return 42\n}\n",
+        "main proc() int {\n for 1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n 0..1\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |@i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |i, _| {}\n return 42\n}\n",
+        "main proc() int {\n local :: 0..1\n return 42\n}\n",
+    ]
+    codes [10]diagnostics.Code :: [
+        .invalid_range_bound, .invalid_assignment_target, .duplicate_name,
+        .unknown_name, .unknown_name, .invalid_for_iterable, .range_value_not_supported,
+        .range_pointer_capture, .range_index_capture, .range_value_not_supported,
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        try testing.expect_equal(codes[index], original.code)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+range_bounds_evaluate_left_to_right_before_header_errors_and_body_overflow_keeps_span test {
+    sources [4][]u8 :: [
+        "first :: fail()\nsecond :: absent\nfail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for first..second |i| {}\n return 42\n}\n",
+        "fail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for fail()..1 |@i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |i| { return 9223372036854775807 + i + 1 }\n return 0\n}\n",
+        "main proc() int {\n for first_absent..second_absent |i| {}\n return 42\n}\n",
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        before :: diagnostics.count(&diagnostic_store)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        code diagnostics.Code :: if (index == 3) .unknown_name else .integer_overflow
+        try expect_trap(outcome, &diagnostic_store, code)
+        diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+        span []u8 :: match index {
+            0, 1: "9223372036854775807 + 1"
+            2: "9223372036854775807 + i + 1"
+            3: "first_absent"
+            else: unreachable
+        }
+        try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], span))
+        if (index == 3) try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+        else try testing.expect_equal(diagnostics.DiagnosticId(before), outcome.trap?)
+    }
+}
+
+range_runtime_allocations_do_not_grow_with_iterations test {
+    sources [2][]u8 :: [
+        "main proc() int {\n count := 0\n for 0..1 |i| {\n local :: i\n count = count + 1\n if (count > 1) break\n if (local >= 0) continue\n later :: 0\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 0..10000 |i| {\n local :: i\n count = count + 1\n if (count > 10000) break\n if (local >= 0) continue\n later :: 0\n }\n return count\n}\n",
+    ]
+    expected [2]i64 :: [1, 10000]
+    allocations := usize(0)
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        state := AllocationState{ remaining = 64 }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(expected[index], outcome.value.data.integer)
+        try testing.expect_equal(usize(0), state.live)
+        if (index == 0) allocations = usize(64) - state.remaining
+        else try testing.expect_equal(allocations, usize(64) - state.remaining)
     }
 }

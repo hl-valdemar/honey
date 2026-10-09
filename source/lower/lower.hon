@@ -18,7 +18,7 @@ Storage :: struct {
 
 @hide:file
 LoopTargets :: struct {
-    guard ir.BlockId
+    continue_target ir.BlockId
     exit ir.BlockId
 }
 
@@ -104,7 +104,7 @@ lower_type proc(type typecheck.Type) ir.Type {
         .string: .string
         .void: .void
         .function: .function
-        .none, .invalid: .invalid
+        .none, .invalid, .range: .invalid
     }
 }
 
@@ -267,6 +267,19 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError
                 if (conditional.else_block) |alternative| try predeclare_locals(state, alternative)
             }
             .while_stmt: try predeclare_locals(state, ast.while_stmt(state.tree, statement).body)
+            .for_stmt: {
+                loop :: ast.for_stmt(state.tree, statement)
+                function := &state.module.functions.items[state.function]
+                slot :: u32(function.locals.items.len)
+                try arraylist.append(&function.locals, ir.Type.int)
+                state.storage[usize(statement)] = Storage{ kind = .local, index = slot }
+                if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
+                if (loop.index) |index| {
+                    state.storage[usize(index)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
+                    try arraylist.append(&function.locals, ir.Type.int)
+                }
+                try predeclare_locals(state, loop.body)
+            }
             else: {}
         }
     }
@@ -365,7 +378,7 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
         span = ast.node_span(state.tree, loop.condition),
     }
     previous_loop :: state.loop
-    state.loop = LoopTargets{ guard = guard, exit = exit }
+    state.loop = LoopTargets{ continue_target = guard, exit = exit }
     defer state.loop = previous_loop
     state.block = body
     try lower_block(state, loop.body, true)
@@ -379,17 +392,79 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
 }
 
 @hide:file
+lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    loop :: ast.for_stmt(state.tree, id)
+    if (ast.expr_kind(state.tree, loop.iterable) != .range) {
+        _ = try lower_expression(state, loop.iterable)
+        if (!state.terminated) _ = trap_type(state, id)
+        return
+    }
+    interval :: ast.range_expr(state.tree, loop.iterable)
+    start :: try lower_expression(state, interval.start)
+    if (state.terminated) return
+    end :: try lower_expression(state, interval.end)
+    if (state.terminated or trap_type(state, loop.iterable) or trap_type(state, id)) return
+    slot :: state.storage[usize(id)].index
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = .int, left = start, slot = slot, span = interval.span })
+    origin :: state.block
+    condition :: try add_block(state)
+    body :: try add_block(state)
+    update :: try add_block(state)
+    increment :: try add_block(state)
+    exit :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+        kind = .jump, target = condition, span = loop.span,
+    }
+    state.block = condition
+    current :: try emit(state, ir.Instruction{ op = .load_local, type = .int, slot = slot, span = interval.span })
+    comparison ir.Op :: if (interval.inclusive) .less_equal else .less
+    condition_value :: try emit(state, ir.Instruction{ op = comparison, type = .bool, left = current, right = end, span = interval.span })
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = condition_value, target = body, alternative = exit, span = interval.span,
+    }
+    previous_loop :: state.loop
+    state.loop = LoopTargets{ continue_target = update, exit = exit }
+    defer state.loop = previous_loop
+    state.block = body
+    if (loop.capture) |capture| _ = trap_binding(state, capture)
+    if (!state.terminated) try lower_block(state, loop.body, true)
+    if (!state.terminated) {
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = update, span = loop.span,
+        }
+    }
+    state.block = update
+    state.terminated = false
+    last :: try emit(state, ir.Instruction{ op = .load_local, type = .int, slot = slot, span = interval.span })
+    finished :: try emit(state, ir.Instruction{ op = .equal, type = .bool, left = last, right = end, span = interval.span })
+    # continue reaches this guard too, so an inclusive maximum never adds one.
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = finished, target = exit, alternative = increment, span = interval.span,
+    }
+    state.block = increment
+    one :: try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } }, interval.span)
+    next :: try emit(state, ir.Instruction{ op = .add, type = .int, left = last, right = one, span = interval.span })
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = .int, left = next, slot = slot, span = interval.span })
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = condition, span = loop.span,
+    }
+    state.block = exit
+    state.terminated = false
+}
+
+@hide:file
 lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     match ast.stmt_kind(tree, id) {
         .if_stmt: try lower_if(state, id)
         .while_stmt: try lower_while(state, id)
+        .for_stmt: try lower_for(state, id)
         .break_stmt, .continue_stmt: {
             if (trap_type(state, id)) return
             if (state.loop) |targets| {
                 target := targets.exit
-                # continue restarts the whole guard, before any short-circuit branches.
-                if (ast.stmt_kind(tree, id) == .continue_stmt) target = targets.guard
+                # each loop supplies its own guard or guarded-update entry.
+                if (ast.stmt_kind(tree, id) == .continue_stmt) target = targets.continue_target
                 state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
                     kind = .jump, target = target, span = ast.node_span(tree, id),
                 }
@@ -490,6 +565,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .invalid: {
             invalid :: ast.invalid(tree, id)
             trap(state, invalid.diagnostic, invalid.span)
+        }
+        .range: {
+            # ranges have no physical value; only lower_for decomposes an iterable.
+            if (!trap_type(state, id)) unreachable
         }
         .literal_int, .literal_float: {
             if (trap_type(state, id)) return ir.no_value

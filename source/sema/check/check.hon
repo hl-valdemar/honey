@@ -5,7 +5,17 @@ import "@source/ast"
 import "@source/diagnostics"
 sema :: import "@source/sema"
 
-TypeKind :: enum { none, invalid, int, float, bool, string, void, function }
+TypeKind :: enum {
+    none,
+    invalid,
+    int,
+    float,
+    bool,
+    string,
+    void,
+    function,
+    range,
+}
 
 Type :: struct {
     kind TypeKind = .none
@@ -40,6 +50,8 @@ Role :: enum {
     if_stmt,
     assignment_stmt,
     while_stmt,
+    for_stmt,
+    loop_capture,
     loop_control,
 }
 
@@ -55,6 +67,7 @@ Cell :: struct {
     fixed bool = false
     local bool = false
     assignment_value bool = false
+    for_iterable bool = false
     first_edge usize = no_index
     return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
 }
@@ -269,6 +282,14 @@ check proc(
                 try demand(&state, ast.call_arg(tree, id, j), cells[usize(parameter)].type, .type_mismatch)
             }
         }
+        # integer range demands cannot poison an endpoint's existing float aliases.
+        for (0..count) |i| {
+            id :: ast.NodeId(i)
+            if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .range) continue
+            expression :: ast.range_expr(tree, id)
+            try range_bound_context(&state, expression.start)
+            try range_bound_context(&state, expression.end)
+        }
 
         # defaults follow ordinary program demands, then isolated assignment demands.
         for (0..count) |i| {
@@ -314,6 +335,14 @@ check proc(
         actual :: types[usize(condition)]
         if (actual.kind != .invalid and actual.kind != .bool) {
             try fail(&state, condition, .condition_not_bool, ast.node_span(tree, condition))
+        }
+    }
+    for (0..count) |i| {
+        if (cells[i].role != .for_stmt) continue
+        iterable :: ast.for_stmt(tree, ast.NodeId(i)).iterable
+        actual :: types[usize(iterable)]
+        if (actual.kind != .invalid and actual.kind != .range) {
+            try fail(&state, iterable, .invalid_for_iterable, ast.node_span(tree, iterable))
         }
     }
     propagate(&state, queue)
@@ -515,6 +544,19 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
 }
 
 @hide:file
+collect_capture proc(state @mut State, id, body ast.NodeId) void ! mem.AllocError {
+    state.cells[usize(id)].role = .loop_capture
+    state.cells[usize(id)].fixed = true
+    state.cells[usize(id)].local = true
+    state.cells[usize(id)].type = Type{ kind = .int }
+    binding :: sema.binding(state.resolution, id)
+    if (binding.kind == .invalid) {
+        state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
+    }
+    try depend(state, id, body)
+}
+
+@hide:file
 collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     state.cells[usize(id)].role = .body
@@ -574,6 +616,29 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 try collect_expression(state, loop.condition)
                 try depend(state, loop.condition, statement)
+                try collect_block(state, loop.body, return_annotation, true)
+                try depend(state, loop.body, id)
+            }
+            .for_stmt: {
+                loop :: ast.for_stmt(tree, statement)
+                state.cells[usize(statement)].role = .for_stmt
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                state.cells[usize(loop.iterable)].for_iterable = true
+                try collect_expression(state, loop.iterable)
+                try depend(state, loop.iterable, statement)
+                if (loop.pointer_capture) {
+                    state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
+                        state.diagnostics, .range_pointer_capture, loop.span,
+                    ))
+                }
+                if (loop.index_capture) {
+                    diagnostic :: try diagnostics.add(state.diagnostics, .range_index_capture, loop.span)
+                    if (state.cells[usize(statement)].type.kind != .invalid) {
+                        state.cells[usize(statement)].type = invalid_type(diagnostic)
+                    }
+                }
+                if (loop.capture) |capture| try collect_capture(state, capture, loop.body)
+                if (loop.index) |index| try collect_capture(state, index, loop.body)
                 try collect_block(state, loop.body, return_annotation, true)
                 try depend(state, loop.body, id)
             }
@@ -642,6 +707,19 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             try depend(state, expression.left, id)
             # the RHS may be skipped, so its errors do not erase the bool result.
             if (!logical(expression.operator)) try depend(state, expression.right, id)
+        }
+        .range: {
+            expression :: ast.range_expr(tree, id)
+            state.cells[usize(id)].type = Type{ kind = .range }
+            if (!state.cells[usize(id)].for_iterable) {
+                state.cells[usize(id)].type = invalid_type(try diagnostics.add(
+                    state.diagnostics, .range_value_not_supported, expression.span,
+                ))
+            }
+            try collect_expression(state, expression.start)
+            try collect_expression(state, expression.end)
+            try depend(state, expression.start, id)
+            try depend(state, expression.end, id)
         }
         .call: {
             callee :: ast.call_expr(tree, id).callee
@@ -746,6 +824,18 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
     if (!state.cells[index].numeric and state.cells[index].type.kind != .none) return
     state.cells[index].numeric = true
     try impose(state, id, expected.kind, code, ast.node_span(state.tree, id))
+}
+
+@hide:file
+range_bound_context proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.types[usize(id)].kind == .invalid) return
+    index :: root(state, usize(id))
+    if (state.cells[index].type.kind == .invalid) return
+    if (state.cells[index].demand == .float) {
+        try fail(state, id, .invalid_range_bound, ast.node_span(state.tree, id))
+        return
+    }
+    try demand(state, id, Type{ kind = .int }, .invalid_range_bound)
 }
 
 @hide:file
@@ -859,6 +949,17 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         try fail(state, id, .invalid_operand, expression.span)
                     } else if (expression.operator == .divide and left.kind == .int) {
                         try fail(state, id, .integer_division, expression.span)
+                    }
+                }
+                .range: {
+                    expression :: ast.range_expr(tree, id)
+                    start_type :: state.types[usize(expression.start)]
+                    end_type :: state.types[usize(expression.end)]
+                    if (start_type.kind != .invalid and start_type.kind != .int) {
+                        try fail(state, expression.start, .invalid_range_bound, ast.node_span(tree, expression.start))
+                    }
+                    if (end_type.kind != .invalid and end_type.kind != .int) {
+                        try fail(state, expression.end, .invalid_range_bound, ast.node_span(tree, expression.end))
                     }
                 }
                 .call: try validate_call(state, id)

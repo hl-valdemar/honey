@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/testing"
+import "@std/arraylist"
 
 import "@source/diagnostics"
 import "@source/strpool"
@@ -1082,4 +1083,120 @@ preserves_control_bodies_after_malformed_guards test {
         if (index < 2) try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, loop.condition))
     }
     try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 3)))
+}
+
+parses_range_endpoints_and_capture_shapes test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `stored :: (1 + 2)..=(limit() * 2)
+        `run proc() void {
+        `    for (-2)..1 |item| { item }
+        `    for (0..10) |_| continue
+        `    for 0..10 |@item, _| {}
+        `    for 0..10 |item, index| { index }
+        `    for
+        `        0..10
+        `        |item|
+        `        { item }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    stored :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    interval :: ast.range_expr(&tree, stored)
+    try testing.expect(interval.inclusive)
+    try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, interval.start))
+    try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, interval.end))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    try testing.expect_equal(5, ast.block_statement_count(&tree, body))
+    first :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 0))
+    if (first.capture) |capture| {
+        try testing.expect_equal(ast.ExprKind.identifier, ast.expr_kind(&tree, capture))
+        try testing.expect_equal("item", ast.source_text(&tree, ast.node_span(&tree, capture)))
+    } else return .expectation_failed
+    second :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect(second.capture == null)
+    try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(
+        &tree, ast.block_statement(&tree, second.body, 0),
+    ))
+    third :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect(third.pointer_capture and third.index_capture and third.index == null)
+    fourth :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect(fourth.index_capture and fourth.index != null)
+}
+
+rejects_bro_invalid_range_headers_without_losing_siblings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    cases [13][]u8 :: [
+        "for -2..1 |i| {}",
+        "for 0..limit+1 |i| {}",
+        "for (0..limit+1) |i| {}",
+        "for 0..10 |i| continue",
+        "for (0)..10 |i| continue",
+        "for 0..10 {}",
+        "for 0..10 || {}",
+        "for 0..10 |i int| {}",
+        "for 0..10 |i,| {}",
+        "for 0..10 |i, j, k| {}",
+        "for 0..10 |i\n| {}",
+        "for ..10 |i| {}",
+        "for 0.. |i| {}",
+    ]
+    for (cases) |header| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        source arraylist.ArrayList(u8) := arraylist.init(mem.c_allocator)
+        defer arraylist.deinit(&source)
+        for ("run proc() void {\n") |byte| try arraylist.append(&source, byte)
+        for (header) |byte| try arraylist.append(&source, byte)
+        for ("\nkept :: 7\n}\nafter :: 9\n") |byte| try arraylist.append(&source, byte)
+        scan_state := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&scan_state)
+        try lexer.scan(&scan_state, source.items, &diagnostic_store)
+        tree := try parse(mem.c_allocator, scan_state.tokens.items, source.items, &diagnostic_store)
+        defer ast.deinit(&tree)
+        try testing.expect(diagnostics.count(&diagnostic_store) > 0)
+        try testing.expect_equal(2, ast.package_decl_count(&tree))
+        try testing.expect_equal("after", ast.source_text(
+            &tree, ast.statement_decl(&tree, ast.package_decl(&tree, 1)).name,
+        ))
+        body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+        last :: ast.block_statement(&tree, body, ast.block_statement_count(&tree, body) - 1)
+        try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, last))
+        try testing.expect_equal("kept", ast.source_text(&tree, ast.statement_decl(&tree, last).name))
+    }
+}
+
+range_loop_preserves_nearest_else_and_canonical_body test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    if (true) for (0..2) |i| if (false) break else continue
+        `    for values() |item| return
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    outer :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect(outer.else_block == null)
+    loop :: ast.for_stmt(&tree, ast.block_statement(&tree, outer.then_block, 0))
+    nested :: ast.if_stmt(&tree, ast.block_statement(&tree, loop.body, 0))
+    try testing.expect(nested.else_block != null)
+    call_loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, call_loop.iterable))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, call_loop.body))
 }

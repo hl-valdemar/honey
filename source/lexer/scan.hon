@@ -134,6 +134,18 @@ scan proc(
             continue
         }
 
+        if (char == '.' and cursor + 1 < program.len and program[cursor + 1] == '.') {
+            inclusive :: cursor + 2 < program.len and program[cursor + 2] == '='
+            width :: if (inclusive) 3 else 2
+            range_kind :: if (inclusive) .range_inclusive else .range
+            try add_token(state, Token{
+                span = make_span(cursor, cursor + width),
+                kind = range_kind,
+            })
+            cursor += width
+            continue
+        }
+
         if char == ':' {
             if cursor + 1 < program.len and program[cursor + 1] == ':' {
                 try add_token(state, Token{
@@ -233,6 +245,8 @@ scan proc(
             '<': .less
             '>': .greater
             ',': .comma
+            '|': .pipe
+            '@': .at
             '(': .open_paren
             ')': .close_paren
             '[': .open_bracket
@@ -304,7 +318,10 @@ scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
     cursor := start
     has_decimal := false
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
-    if cursor < program.len and program[cursor] == '.' {
+    if (
+        cursor < program.len and program[cursor] == '.'
+        and !(cursor + 1 < program.len and program[cursor + 1] == '.')
+    ) {
         has_decimal = true
         cursor += 1
     }
