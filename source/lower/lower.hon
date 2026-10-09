@@ -24,6 +24,7 @@ State :: struct {
     diagnostics @mut diagnostics.Store
     module @mut ir.Module
     storage []mut Storage
+    arguments arraylist.ArrayList(ir.ValueId)
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
@@ -50,7 +51,9 @@ lower proc(
         diagnostics = diagnostic_store,
         module = &module,
         storage = storage,
+        arguments = arraylist.init(ir.ValueId, allocator),
     }
+    defer arraylist.deinit(&state.arguments)
 
     # allocate every package identity before lowering any initializer or body.
     for (0..ast.package_decl_count(tree)) |i| {
@@ -344,9 +347,10 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
     state.block = guard
     condition :: try lower_expression(state, loop.condition)
     if (state.terminated) return
+    guard_end :: state.block
     body :: try add_block(state)
     exit :: try add_block(state)
-    state.module.functions.items[state.function].blocks.items[usize(guard)].terminator = ir.Terminator{
+    state.module.functions.items[state.function].blocks.items[usize(guard_end)].terminator = ir.Terminator{
         kind = .branch,
         value = condition,
         target = body,
@@ -414,6 +418,48 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
 }
 
 @hide:file
+lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    expression :: ast.binary_expr(state.tree, id)
+    span :: ast.node_span(state.tree, id)
+    left :: try lower_expression(state, expression.left)
+    if (state.terminated) return ir.no_value
+    origin :: state.block
+    slot :: u32(state.module.functions.items[state.function].locals.items.len)
+    try arraylist.append(&state.module.functions.items[state.function].locals, ir.Type.bool)
+    right_block :: try add_block(state)
+    skip :: try add_block(state)
+    join :: try add_block(state)
+    conjunction :: expression.operator == .logical_and
+    target :: if (conjunction) right_block else skip
+    alternative :: if (conjunction) skip else right_block
+    state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+        kind = .branch,
+        value = left,
+        target = target,
+        alternative = alternative,
+        span = ast.node_span(state.tree, expression.left),
+    }
+    state.block = skip
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = .bool, left = left, slot = slot, span = span })
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = join, span = span,
+    }
+    state.block = right_block
+    right :: try lower_expression(state, expression.right)
+    if (!state.terminated) {
+        _ = try emit(state, ir.Instruction{ op = .store_local, type = .bool, left = right, slot = slot, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = span,
+        }
+    }
+    # the skip edge reaches the join even when the demanded right edge traps.
+    state.block = join
+    state.terminated = false
+    if (trap_type(state, id)) return ir.no_value
+    return try emit(state, ir.Instruction{ op = .load_local, type = .bool, slot = slot, span = span })
+}
+
+@hide:file
 lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     span :: ast.node_span(tree, id)
@@ -454,7 +500,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .unary: {
             expression :: ast.unary_expr(tree, id)
-            if (type == .int and ast.expr_kind(tree, expression.operand) == .literal_int) {
+            if (expression.operator == .negate and type == .int and ast.expr_kind(tree, expression.operand) == .literal_int) {
                 text :: ast.source_text(tree, ast.node_span(tree, expression.operand))
                 if (integer_magnitude(text, u64(maxval!(i64)) + 1)) |magnitude| {
                     if (magnitude == u64(maxval!(i64)) + 1) {
@@ -464,10 +510,17 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             }
             operand :: try lower_expression(state, expression.operand)
             if (state.terminated or trap_type(state, id)) return ir.no_value
-            return try emit(state, ir.Instruction{ op = .negate, type = type, left = operand, span = span })
+            op ir.Op :: match expression.operator {
+                .negate: .negate
+                .logical_not: .logical_not
+            }
+            return try emit(state, ir.Instruction{ op = op, type = type, left = operand, span = span })
         }
         .binary: {
             expression :: ast.binary_expr(tree, id)
+            if (expression.operator == .logical_and or expression.operator == .logical_or) {
+                return try lower_logical(state, id)
+            }
             left :: try lower_expression(state, expression.left)
             if (state.terminated) return ir.no_value
             right :: try lower_expression(state, expression.right)
@@ -483,23 +536,30 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 .less_equal: .less_equal
                 .greater: .greater
                 .greater_equal: .greater_equal
+                .logical_and, .logical_or: unreachable
             }
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
         .call: {
             callee :: try lower_expression(state, ast.call_expr(tree, id).callee)
             if (state.terminated) return ir.no_value
-            # reserve this call's packed slice before nested calls append theirs.
-            block := &state.module.functions.items[state.function].blocks.items[usize(state.block)]
-            start :: block.arguments.items.len
+            # recursion borrows later scratch slots; no items pointer survives a child.
+            scratch_start :: state.arguments.items.len
+            defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
             count :: ast.call_arg_count(tree, id)
-            for (0..count) |_| try arraylist.append(&block.arguments, ir.no_value)
+            try arraylist.reserve(&state.arguments, scratch_start + count)
+            for (0..count) |_| try arraylist.append(&state.arguments, ir.no_value)
             for (0..count) |i| {
                 argument :: try lower_expression(state, ast.call_arg(tree, id, i))
                 if (state.terminated) return ir.no_value
-                block.arguments.items[start + i] = argument
+                state.arguments.items[scratch_start + i] = argument
             }
             if (trap_type(state, id)) return ir.no_value
+            # branchful arguments end in a different block from the callee.
+            block := &state.module.functions.items[state.function].blocks.items[usize(state.block)]
+            start :: block.arguments.items.len
+            try arraylist.reserve(&block.arguments, start + count)
+            for (0..count) |i| try arraylist.append(&block.arguments, state.arguments.items[scratch_start + i])
             return try emit(state, ir.Instruction{
                 op = .call,
                 type = type,

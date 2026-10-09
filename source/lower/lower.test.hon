@@ -422,6 +422,13 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
     source ::
         `text :: "owned\nstring"
         `factor float :: 3.5
+        `enabled :: true or false and false
+        `compose proc(left bool, right bool) bool {
+        `    return left and right
+        `}
+        `broken proc() bool {
+        `    return compose(true and absent, false or true)
+        `}
         `identity proc(value string) string {
         `    if false {
         `        return value
@@ -432,12 +439,12 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `main proc() string {
         `    computed float :: factor * 2
         `    remaining := 2
-        `    while remaining > 0 {
+        `    while compose(remaining > 0 and enabled, compose(!false, compose(true or false, compose(true, compose(true, true))))) {
         `        pass :: identity(text)
         `        identity(pass)
         `        remaining = remaining - 1
         `    }
-        `    if computed > 0 {
+        `    if computed > 0 and (enabled or false) {
         `        saved :: identity(text)
         `        if computed < 10 {
         `            return saved
@@ -459,7 +466,7 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
     defer typecheck.deinit(&checked)
     succeeded := false
     failures := usize(0)
-    for (usize(0)..usize(128)) |limit| {
+    for (usize(0)..usize(512)) |limit| {
         state := AllocationState{ remaining = limit }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
         module := lower(allocator, &tree, &resolution, &checked, &diagnostic_store) catch |error| {
@@ -856,8 +863,8 @@ loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_over
 
 bounded_pure_loops_do_not_allocate_per_iteration_and_release_runtime_storage test {
     sources [2][]u8 :: [
-        "main proc() int {\n n := 0\n while n < 1 {\n local :: n\n n = local + 1\n }\n return n\n}\n",
-        "main proc() int {\n n := 0\n while n < 10000 {\n local :: n\n n = local + 1\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 1 and !(n == 1)) or false {\n local :: n\n n = local + 1\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 10000 and !(n == 10000)) or false {\n local :: n\n n = local + 1\n }\n return n\n}\n",
     ]
     expected [2]i64 :: [1, 10000]
     allocations := usize(0)
@@ -875,5 +882,265 @@ bounded_pure_loops_do_not_allocate_per_iteration_and_release_runtime_storage tes
         try testing.expect_equal(usize(0), state.live)
         if (index == 0) allocations = usize(64) - state.remaining
         else try testing.expect_equal(allocations, usize(64) - state.remaining)
+    }
+}
+
+boolean_truth_tables_nesting_negation_and_precedence_execute test {
+    sources [18][]u8 :: [
+        "main proc() bool { return false and false }\n",
+        "main proc() bool { return false and true }\n",
+        "main proc() bool { return true and false }\n",
+        "main proc() bool { return true and true }\n",
+        "main proc() bool { return false or false }\n",
+        "main proc() bool { return false or true }\n",
+        "main proc() bool { return true or false }\n",
+        "main proc() bool { return true or true }\n",
+        "main proc() bool { return !false }\n",
+        "main proc() bool { return !true }\n",
+        "main proc() bool { return !!true }\n",
+        "main proc() bool { return !!!true }\n",
+        "main proc() bool { return true or false and false }\n",
+        "main proc() bool { return (true or false) and false }\n",
+        "main proc() bool { return !(1 + 2 < 3) and 4 == 4 or false }\n",
+        "main proc() bool { return false or (true and (false or !false)) }\n",
+        "main proc() bool { return true and false or true and true }\n",
+        "main proc() bool { return !(-9223372036854775808 < 0) }\n",
+    ]
+    expected [18]bool :: [
+        false, false, false, true, false, true, true, true,
+        true, false, true, false, true, false, true, true, true, false,
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.bool, outcome.value.type)
+        try testing.expect_equal(expected[index], outcome.value.data.boolean)
+    }
+}
+
+branchful_calls_preserve_earlier_temps_nested_arguments_and_function_callees test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `integer proc(value int) int { return value }
+        `boolean proc(value bool) bool { return value }
+        `score proc(first int, left bool, right bool, last int) int {
+        `    if left and right { return first + last }
+        `    return 0
+        `}
+        `invoke :: score
+        `main proc() int {
+        `    local :: invoke
+        `    return local(integer(20), boolean(false or true), boolean(true and (false or true)), local(integer(0), false or boolean(true), true and !false, local(integer(5), true or false, true and true, integer(17))))
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
+short_circuit_source_errors_remain_checked_but_skipped_in_every_consumer test {
+    sources [10][]u8 :: [
+        "main proc() bool { return false and absent or true }\n",
+        "main proc() bool { return true or 1 }\n",
+        "main proc() bool { return !(false and absent) }\n",
+        "main proc() bool { return (false and absent) == false }\n",
+        "flag :: true or absent\nmain proc() bool { return flag }\n",
+        "main proc() bool {\n flag :: true or absent\n return flag\n}\n",
+        "main proc() bool {\n flag := false\n flag = true or absent\n return flag\n}\n",
+        "identity proc(value bool) bool { return value }\nmain proc() bool { return identity(true or absent) }\n",
+        "main proc() bool {\n if true or absent { return true }\n return false\n}\n",
+        "main proc() bool {\n true or absent\n while false and absent {}\n return true\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        count :: diagnostics.count(&diagnostic_store)
+        try testing.expect(count > 0)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.bool, outcome.value.type)
+        try testing.expect(outcome.value.data.boolean)
+        try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
+    }
+}
+
+demanded_boolean_source_errors_keep_the_original_diagnostic_and_operand_span test {
+    sources [8][]u8 :: [
+        "main proc() bool { return true and absent }\n",
+        "main proc() bool { return false or absent }\n",
+        "main proc() bool { return true and 1 }\n",
+        "main proc() bool { return false or 1 }\n",
+        "main proc() bool { return !1 }\n",
+        "main proc() bool { return !absent }\n",
+        "main proc() bool { return absent and false }\n",
+        "main proc() bool { return absent or true }\n",
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        code diagnostics.Code :: if (index >= 2 and index <= 4) .invalid_operand else .unknown_name
+        operand []u8 :: if (index >= 2 and index <= 4) "1" else "absent"
+        try testing.expect_equal(code, original.code)
+        try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], operand))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+branchful_call_arguments_evaluate_left_to_right_before_later_errors test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `both proc(left bool, right bool) bool { return left and right }
+        `main proc() bool {
+        `    return both(false or (true and first_absent), true and second_absent)
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    original :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+    try testing.expect_equal(diagnostics.Code.unknown_name, original.code)
+    try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], "first_absent"))
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+}
+
+short_circuit_protects_uninitialized_reads_global_cycles_and_overflow test {
+    sources [6][]u8 :: [
+        "main proc() bool {\n before :: false and later\n later :: true\n return !before\n}\n",
+        "main proc() bool {\n before :: true or later\n later :: false\n return before\n}\n",
+        "flag bool :: true or flag\nmain proc() bool { return flag }\n",
+        "left bool :: false and right\nright bool :: left\nmain proc() bool { return !left }\n",
+        "main proc() bool { return !(false and 9223372036854775807 + 1 == 0) }\n",
+        "main proc() bool { return true or -(-9223372036854775808) == 0 }\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect(outcome.value.data.boolean)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    }
+}
+
+demanded_boolean_runtime_errors_keep_the_instruction_span test {
+    sources [4][]u8 :: [
+        "main proc() bool {\n before :: true and later\n later :: true\n return before\n}\n",
+        "flag bool :: false or flag\nmain proc() bool { return flag }\n",
+        "main proc() bool { return true and 9223372036854775807 + 1 == 0 }\n",
+        "main proc() bool {\n minimum :: -9223372036854775808\n return false or -minimum == 0\n}\n",
+    ]
+    codes [4]diagnostics.Code :: [.read_before_initialization, .initialization_cycle, .integer_overflow, .integer_overflow]
+    spans [4][]u8 :: ["later", "flag", "9223372036854775807 + 1", "-minimum"]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try expect_trap(outcome, &diagnostic_store, codes[index])
+        diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+        try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], spans[index]))
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+composed_loop_guards_recompute_and_overwrite_synthetic_results test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `enabled :: false or true and !false
+        `positive proc(n int) bool { return n > 0 }
+        `main proc() int {
+        `    n := 4
+        `    total := 0
+        `    while (enabled and positive(n)) or n > 4 {
+        `        if (n == 4 or n == 2) and !(n == 3) {
+        `            total = total + 21
+        `        }
+        `        n = n - 1
+        `    }
+        `    return total + n
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
+lazy_branchful_global_initializers_and_calls_release_every_runtime_allocation test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `first :: true and later
+        `later :: false or !false
+        `both proc(left bool, right bool) bool { return left and right }
+        `main proc() bool {
+        `    return both(first and first, both(false or later, !false and later))
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    failures := usize(0)
+    succeeded := false
+    for (usize(0)..usize(64)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome :: interpreter.run(allocator, &module, &diagnostic_store) catch |error| {
+            try testing.expect(error == .out_of_memory)
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        try testing.expect(outcome.trap == null)
+        try testing.expect(outcome.value.data.boolean)
+        try testing.expect_equal(usize(0), state.live)
+        succeeded = true
+        break
+    }
+    try testing.expect(succeeded)
+    try testing.expect(failures > 0)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+skipped_rhs_does_not_hide_a_demanded_outer_type_mismatch test {
+    sources [3][]u8 :: [
+        "main proc() int { return true or absent }\n",
+        "main proc() void {\n number := 0\n number = true or absent\n}\n",
+        "integer proc(value int) int { return value }\nmain proc() int { return integer(true or absent) }\n",
+    ]
+    codes [3]diagnostics.Code :: [.return_type_mismatch, .type_mismatch, .type_mismatch]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        count :: diagnostics.count(&diagnostic_store)
+        try testing.expect_equal(2, count)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try expect_trap(outcome, &diagnostic_store, codes[index])
+        try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
     }
 }

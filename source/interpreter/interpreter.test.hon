@@ -779,3 +779,34 @@ assignment_diagnostic_allocation_failure_releases_runtime_storage test {
     }
     return .expectation_failed
 }
+
+logical_not_inverts_boolean_payload_and_composes_in_typed_ir test {
+    operands [2]bool :: [false, true]
+    expected [2]bool :: [true, false]
+    for (operands) |operand, index| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+        module.entry = main
+        try emit(&module, main, ir.Instruction{
+            op = .constant,
+            type = .bool,
+            destination = ir.ValueId(0),
+            constant = ir.Value{ type = .bool, data = ir.ValueData{ boolean = operand } },
+        })
+        try emit(&module, main, ir.Instruction{ op = .logical_not, type = .bool, destination = ir.ValueId(1), left = ir.ValueId(0) })
+        try emit(&module, main, ir.Instruction{ op = .logical_not, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(1) })
+        return_value(&module, main, ir.ValueId(1))
+        inverted :: try run(mem.c_allocator, &module, &store)
+        try testing.expect(inverted.trap == null)
+        try testing.expect_equal(ir.Type.bool, inverted.value.type)
+        try testing.expect_equal(expected[index], inverted.value.data.boolean)
+        return_value(&module, main, ir.ValueId(2))
+        composed :: try run(mem.c_allocator, &module, &store)
+        try testing.expect(composed.trap == null)
+        try testing.expect_equal(operand, composed.value.data.boolean)
+        try testing.expect_equal(usize(0), diagnostics.count(&store))
+    }
+}

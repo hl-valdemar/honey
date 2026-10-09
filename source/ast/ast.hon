@@ -2,13 +2,15 @@
 #! * type ..... -> identifier
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
-#! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>='
-#! * expr ..... -> identifier | literal | '(' expr ')' | '-' expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
+#! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
+#! * expr ..... -> identifier | literal | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
 #! * decl ..... -> identifier [type] binding expr
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'if' expr arm ['else' arm] | 'while' expr arm
 #! braceless guards require parentheses unless the condition is a call; else binds to the nearest if.
+#! precedence (tightest first): calls, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or.
+#! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
 import "@std/mem"
@@ -58,7 +60,7 @@ Mutability :: enum {
     constant, variable
 }
 
-UnaryOperator :: enum { negate }
+UnaryOperator :: enum { negate, logical_not }
 
 BinaryOperator :: enum {
     add, subtract,
@@ -66,6 +68,7 @@ BinaryOperator :: enum {
     equal, not_equal,
     less, less_equal,
     greater, greater_equal
+    logical_and, logical_or
 }
 
 @hide:file

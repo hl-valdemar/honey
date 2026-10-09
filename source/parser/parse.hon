@@ -185,7 +185,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .if: return try parse_if(state)
         .while: return try parse_while(state, allow_else)
         .return: return try parse_return(state, allow_else)
-        .ident, .int, .float, .string, .true, .false, .minus, .open_paren: {
+        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren: {
             expression :: try parse_expr(state)
             return try ast.add_expression_stmt(&state.builder, expression)
         }
@@ -418,10 +418,11 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
         operand_span :: ast.builder_span(&state.builder, operand)
+        operator ast.UnaryOperator :: if (token.kind == .bang) .logical_not else .negate
         yield try ast.add_unary(
             &state.builder,
             ast.Span{ start = token.span.start, end = operand_span.end },
-            .negate,
+            operator,
             operand,
         )
     } else {
@@ -525,7 +526,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 
-            if token.kind != .comma and !is_expression_boundary(token.kind) {
+            if !is_expression_recovery_boundary(token.kind) {
                 state.next_token += 1
             }
 
@@ -540,6 +541,16 @@ is_expression_boundary proc(kind lexer.TokenKind) bool {
         .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .eof: true
         else: false
     }
+}
+
+@hide:file
+is_expression_recovery_boundary proc(kind lexer.TokenKind) bool {
+    return (
+        kind == .comma
+        or kind == .and
+        or kind == .or
+        or is_expression_boundary(kind)
+    )
 }
 
 @hide:file
@@ -625,7 +636,7 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 @hide:file
 prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
     return match kind {
-        .minus: BindingPowerScalar(50)
+        .minus, .bang: BindingPowerScalar(50)
         else: null
     }
 }
@@ -633,6 +644,8 @@ prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
 @hide:file
 infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
     return match kind {
+        .or: BindingPower{ left = BindingPowerScalar(2), right = BindingPowerScalar(3) }
+        .and: BindingPower{ left = BindingPowerScalar(4), right = BindingPowerScalar(5) }
         .equal_equal, .not_equal: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
         .less, .less_equal, .greater, .greater_equal: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
         .plus, .minus: BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) }
@@ -644,6 +657,8 @@ infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
 @hide:file
 binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
     return match kind {
+        .and: .logical_and
+        .or: .logical_or
         .plus: .add
         .minus: .subtract
         .star: .multiply

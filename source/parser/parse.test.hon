@@ -739,3 +739,163 @@ recovers_nested_braces_in_malformed_loop_body_and_assignment test {
     tail :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
     try testing.expect_equal("tail", ast.source_text(&tree, tail.name))
 }
+
+parses_logical_precedence_and_associativity test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "value :: !probe() == a + b * c < d and e and f or g or h\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    value :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+    outer_or :: ast.binary_expr(&tree, value.initializer)
+    try testing.expect_equal(ast.BinaryOperator.logical_or, outer_or.operator)
+    try testing.expect_equal("h", ast.source_text(&tree, ast.node_span(&tree, outer_or.right)))
+    inner_or :: ast.binary_expr(&tree, outer_or.left)
+    try testing.expect_equal(ast.BinaryOperator.logical_or, inner_or.operator)
+    outer_and :: ast.binary_expr(&tree, inner_or.left)
+    try testing.expect_equal(ast.BinaryOperator.logical_and, outer_and.operator)
+    try testing.expect_equal("f", ast.source_text(&tree, ast.node_span(&tree, outer_and.right)))
+    inner_and :: ast.binary_expr(&tree, outer_and.left)
+    try testing.expect_equal(ast.BinaryOperator.logical_and, inner_and.operator)
+    equality :: ast.binary_expr(&tree, inner_and.left)
+    try testing.expect_equal(ast.BinaryOperator.equal, equality.operator)
+    logical_not :: ast.unary_expr(&tree, equality.left)
+    try testing.expect_equal(ast.UnaryOperator.logical_not, logical_not.operator)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, logical_not.operand))
+    try testing.expect_equal("!probe()", ast.source_text(&tree, logical_not.span))
+    comparison :: ast.binary_expr(&tree, equality.right)
+    try testing.expect_equal(ast.BinaryOperator.less, comparison.operator)
+    addition :: ast.binary_expr(&tree, comparison.left)
+    try testing.expect_equal(ast.BinaryOperator.add, addition.operator)
+    multiply :: ast.binary_expr(&tree, addition.right)
+    try testing.expect_equal(ast.BinaryOperator.multiply, multiply.operator)
+}
+
+parses_right_associative_mixed_prefix_operators test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "value :: !-!probe()\nother :: -!false\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    value :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+    first :: ast.unary_expr(&tree, value.initializer)
+    second :: ast.unary_expr(&tree, first.operand)
+    third :: ast.unary_expr(&tree, second.operand)
+    try testing.expect_equal(ast.UnaryOperator.logical_not, first.operator)
+    try testing.expect_equal(ast.UnaryOperator.negate, second.operator)
+    try testing.expect_equal(ast.UnaryOperator.logical_not, third.operator)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, third.operand))
+    try testing.expect_equal("!-!probe()", ast.source_text(&tree, first.span))
+    try testing.expect_equal("-!probe()", ast.source_text(&tree, second.span))
+    other :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    negate :: ast.unary_expr(&tree, other.initializer)
+    try testing.expect_equal(ast.UnaryOperator.negate, negate.operator)
+    try testing.expect_equal(ast.UnaryOperator.logical_not, ast.unary_expr(&tree, negate.operand).operator)
+}
+
+parses_logical_expressions_in_all_expression_positions test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `global :: false and absent
+        `main proc() bool {
+        `    value := true or absent
+        `    value = !value and ready()
+        `    !value
+        `    if !value or ready() { value = false }
+        `    while value and !done() { value = false }
+        `    return choose(value or false, nested(!value and true))
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    global :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+    global_and :: ast.binary_expr(&tree, global.initializer)
+    try testing.expect_equal(ast.BinaryOperator.logical_and, global_and.operator)
+    try testing.expect_equal("absent", ast.source_text(&tree, ast.node_span(&tree, global_and.right)))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal(6, ast.block_statement_count(&tree, function.body))
+    local :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0))
+    try testing.expect_equal(ast.BinaryOperator.logical_or, ast.binary_expr(&tree, local.initializer).operator)
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, function.body, 1))
+    try testing.expect_equal(ast.BinaryOperator.logical_and, ast.binary_expr(&tree, assignment.value).operator)
+    expression :: ast.statement_expr(&tree, ast.block_statement(&tree, function.body, 2))
+    try testing.expect_equal(ast.UnaryOperator.logical_not, ast.unary_expr(&tree, expression).operator)
+    conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, function.body, 3))
+    try testing.expect_equal(ast.BinaryOperator.logical_or, ast.binary_expr(&tree, conditional.condition).operator)
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, function.body, 4))
+    try testing.expect_equal(ast.BinaryOperator.logical_and, ast.binary_expr(&tree, loop.condition).operator)
+    returned :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 5)).value?
+    try testing.expect_equal(2, ast.call_arg_count(&tree, returned))
+    first_argument :: ast.call_arg(&tree, returned, 0)
+    try testing.expect_equal(ast.BinaryOperator.logical_or, ast.binary_expr(&tree, first_argument).operator)
+    nested :: ast.call_arg(&tree, returned, 1)
+    nested_argument :: ast.call_arg(&tree, nested, 0)
+    try testing.expect_equal(ast.BinaryOperator.logical_and, ast.binary_expr(&tree, nested_argument).operator)
+}
+
+recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() bool {
+        `    first :: true and
+        `    second :: true and or false
+        `    third :: choose(!, false or)
+        `    if ! { return false }
+        `    return true or }
+        `after :: true
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(6, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    try testing.expect_equal(5, ast.block_statement_count(&tree, function.body))
+    first :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0))
+    first_and :: ast.binary_expr(&tree, first.initializer)
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, first_and.right))
+    second :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1))
+    second_or :: ast.binary_expr(&tree, second.initializer)
+    try testing.expect_equal(ast.BinaryOperator.logical_or, second_or.operator)
+    second_and :: ast.binary_expr(&tree, second_or.left)
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, second_and.right))
+    try testing.expect_equal(ast.ExprKind.literal_bool, ast.expr_kind(&tree, second_or.right))
+    third :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 2))
+    try testing.expect_equal(2, ast.call_arg_count(&tree, third.initializer))
+    missing_prefix :: ast.unary_expr(&tree, ast.call_arg(&tree, third.initializer, 0))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, missing_prefix.operand))
+    missing_rhs :: ast.binary_expr(&tree, ast.call_arg(&tree, third.initializer, 1))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, missing_rhs.right))
+    conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, function.body, 3))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, conditional.then_block))
+    returned :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 4)).value?
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, ast.binary_expr(&tree, returned).right))
+    after :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal("after", ast.source_text(&tree, after.name))
+}

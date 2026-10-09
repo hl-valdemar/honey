@@ -199,10 +199,13 @@ check proc(
             id :: ast.NodeId(i)
             if (cells[i].role != .expression or cells[i].assignment_value != assignment_values) continue
             match ast.expr_kind(tree, id) {
-                .unary: try require_numeric(&state, id, ast.unary_expr(tree, id).operand)
+                .unary: {
+                    expression :: ast.unary_expr(tree, id)
+                    if (expression.operator == .negate) try require_numeric(&state, id, expression.operand)
+                }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
-                    if (bool_equality(&state, id)) continue
+                    if (logical(expression.operator) or bool_equality(&state, id)) continue
                     try require_numeric(&state, id, expression.left)
                     try require_numeric(&state, id, expression.right)
                 }
@@ -216,9 +219,13 @@ check proc(
             id :: ast.NodeId(i)
             if (cells[i].role != .expression or cells[i].assignment_value != assignment_values) continue
             match ast.expr_kind(tree, id) {
-                .unary: try numeric_operand(&state, id, ast.unary_expr(tree, id).operand)
+                .unary: {
+                    expression :: ast.unary_expr(tree, id)
+                    if (expression.operator == .negate) try numeric_operand(&state, id, expression.operand)
+                }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
+                    if (logical(expression.operator)) continue
                     if (comparison(expression.operator)) {
                         if (!bool_equality(&state, id)) try comparison_operands(&state, id)
                     } else {
@@ -599,14 +606,19 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             }
         }
         .unary: {
-            state.cells[usize(id)].numeric = true
-            operand :: ast.unary_expr(tree, id).operand
+            expression :: ast.unary_expr(tree, id)
+            if (expression.operator == .logical_not) {
+                state.cells[usize(id)].type = Type{ kind = .bool }
+            } else {
+                state.cells[usize(id)].numeric = true
+            }
+            operand :: expression.operand
             try collect_expression(state, operand)
             try depend(state, operand, id)
         }
         .binary: {
             expression :: ast.binary_expr(tree, id)
-            if (comparison(expression.operator)) {
+            if (comparison(expression.operator) or logical(expression.operator)) {
                 state.cells[usize(id)].type = Type{ kind = .bool }
             } else {
                 state.cells[usize(id)].numeric = true
@@ -614,7 +626,8 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             try collect_expression(state, expression.left)
             try collect_expression(state, expression.right)
             try depend(state, expression.left, id)
-            try depend(state, expression.right, id)
+            # the RHS may be skipped, so its errors do not erase the bool result.
+            if (!logical(expression.operator)) try depend(state, expression.right, id)
         }
         .call: {
             callee :: ast.call_expr(tree, id).callee
@@ -641,6 +654,11 @@ comparison proc(operator ast.BinaryOperator) bool {
         operator == .equal or operator == .not_equal or operator == .less
         or operator == .less_equal or operator == .greater or operator == .greater_equal
     )
+}
+
+@hide:file
+logical proc(operator ast.BinaryOperator) bool {
+    return operator == .logical_and or operator == .logical_or
 }
 
 @hide:file
@@ -723,6 +741,14 @@ fail proc(state @mut State, id ast.NodeId, code diagnostics.Code, span ast.Span)
 }
 
 @hide:file
+require_bool proc(state @mut State, operand ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    type :: state.types[usize(operand)]
+    if (type.kind != .invalid and type.kind != .bool) {
+        try fail(state, operand, .invalid_operand, ast.node_span(state.tree, operand))
+    }
+}
+
+@hide:file
 mutable_target proc(state @State, id ast.NodeId) bool {
     binding :: sema.binding(state.resolution, id)
     if (binding.kind != .declaration) return false
@@ -793,13 +819,23 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
         .expression: {
             match ast.expr_kind(tree, id) {
                 .unary: {
-                    operand :: state.types[usize(ast.unary_expr(tree, id).operand)]
+                    expression :: ast.unary_expr(tree, id)
+                    if (expression.operator == .logical_not) {
+                        try require_bool(state, expression.operand)
+                        return
+                    }
+                    operand :: state.types[usize(expression.operand)]
                     if (operand.kind != .invalid and !numeric_kind(operand.kind)) {
                         try fail(state, id, .invalid_operand, ast.node_span(tree, id))
                     }
                 }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
+                    if (logical(expression.operator)) {
+                        try require_bool(state, expression.left)
+                        try require_bool(state, expression.right)
+                        return
+                    }
                     left :: state.types[usize(expression.left)]
                     right :: state.types[usize(expression.right)]
                     if (left.kind == .invalid or right.kind == .invalid) return
