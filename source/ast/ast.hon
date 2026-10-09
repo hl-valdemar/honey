@@ -1,11 +1,14 @@
 #! grammar:
 #! * type ..... -> identifier
 #! * assignment -> :: | :=
-#! * literal .. -> int | float | string
-#! * op ....... -> '+' | '-' | '*' | '/'
+#! * literal .. -> int | float | string | 'true' | 'false'
+#! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>='
 #! * expr ..... -> identifier | literal | '(' expr ')' | '-' expr | expr op expr | expr '(' [expr {',' expr} [',']] ')'
 #! * decl ..... -> identifier [type] assignment expr
-#! * stmt ..... -> decl | expr | 'return' [expr]
+#! * block .... -> '{' {stmt} '}'
+#! * arm ...... -> block | stmt (single statements become canonical blocks)
+#! * stmt ..... -> decl | expr | 'return' [expr] | 'if' expr arm ['else' arm]
+#! braceless guards require parentheses unless the condition is a call; else binds to the nearest if.
 
 import "@std/debug"
 import "@std/mem"
@@ -22,13 +25,14 @@ NodeId :: distinct u32
 no_node :: maxval!(NodeId)
 
 LiteralKind :: enum {
-    int, float, string
+    int, float, string, bool
 }
 
 ExprKind :: enum {
     literal_int
     literal_float
     literal_string
+    literal_bool
     identifier
     unary
     binary
@@ -41,7 +45,9 @@ DeclKind :: enum {
 }
 
 StmtKind :: enum {
-    declaration, expression, return_stmt, invalid
+    declaration,
+    expression,
+    return_stmt, if_stmt, invalid
 }
 
 Mutability :: enum {
@@ -51,7 +57,11 @@ Mutability :: enum {
 UnaryOperator :: enum { negate }
 
 BinaryOperator :: enum {
-    add, subtract, multiply, divide
+    add, subtract,
+    multiply, divide
+    equal, not_equal,
+    less, less_equal,
+    greater, greater_equal
 }
 
 @hide:file
@@ -59,6 +69,7 @@ NodeKind :: enum {
     literal_int,
     literal_float,
     literal_string,
+    literal_bool,
     expr_identifier,
     expr_unary,
     expr_binary,
@@ -66,6 +77,7 @@ NodeKind :: enum {
     stmt_expr,
     stmt_decl,
     stmt_return,
+    stmt_if,
     func_decl,
     param_decl,
     block,
@@ -157,6 +169,13 @@ ReturnView :: struct {
     value ?NodeId
 }
 
+IfView :: struct {
+    span Span
+    condition NodeId
+    then_block NodeId
+    else_block ?NodeId
+}
+
 InvalidView :: struct {
     span Span
     diagnostic DiagnosticId
@@ -206,6 +225,7 @@ add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem
         .int: .literal_int
         .float: .literal_float
         .string: .literal_string
+        .bool: .literal_bool
     }
     return try add_node(builder, Node{ kind = node_kind }, span)
 }
@@ -270,6 +290,22 @@ add_return_stmt proc(builder @mut Builder, span Span, value ?NodeId) NodeId ! me
     return try add_node(builder, Node{
         kind = .stmt_return,
         main = NodeData{ node_id = raw_value },
+    }, span)
+}
+
+add_if_stmt proc(
+    builder @mut Builder,
+    span Span,
+    condition NodeId,
+    then_block NodeId,
+    else_block ?NodeId,
+) NodeId ! mem.AllocError {
+    alternative :: if (else_block) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .stmt_if,
+        main = NodeData{ node_id = condition },
+        data0 = NodeData{ node_id = then_block },
+        data1 = NodeData{ node_id = alternative },
     }, span)
 }
 
@@ -408,6 +444,7 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_decl: .declaration
         .stmt_expr: .expression
         .stmt_return: .return_stmt
+        .stmt_if: .if_stmt
         .invalid_stmt: .invalid
         else: unreachable
     }
@@ -425,6 +462,17 @@ return_stmt proc(tree @Tree, id NodeId) ReturnView {
     return ReturnView{
         span = get_span(&tree.storage, id),
         value = maybe_node_id(u32(node.main.node_id)),
+    }
+}
+
+if_stmt proc(tree @Tree, id NodeId) IfView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_if)
+    return IfView{
+        span = get_span(&tree.storage, id),
+        condition = node.main.node_id,
+        then_block = node.data0.node_id,
+        else_block = maybe_node_id(u32(node.data1.node_id)),
     }
 }
 
@@ -491,10 +539,20 @@ block_statement proc(tree @Tree, id NodeId, index usize) NodeId {
 }
 
 expr_kind proc(tree @Tree, id NodeId) ExprKind {
-    return match get_node(&tree.storage, id).kind {
+    return expression_kind(get_node(&tree.storage, id).kind)
+}
+
+builder_expr_kind proc(builder @Builder, id NodeId) ExprKind {
+    return expression_kind(get_node(&builder.storage, id).kind)
+}
+
+@hide:file
+expression_kind proc(kind NodeKind) ExprKind {
+    return match kind {
         .literal_int: .literal_int
         .literal_float: .literal_float
         .literal_string: .literal_string
+        .literal_bool: .literal_bool
         .expr_identifier: .identifier
         .expr_unary: .unary
         .expr_binary: .binary

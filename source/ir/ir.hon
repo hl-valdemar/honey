@@ -9,10 +9,20 @@ ValueId :: distinct u32
 BlockId :: distinct u32
 no_value :: maxval!(ValueId)
 
-Type :: enum { invalid, int, float, string, void, function }
+Type :: enum {
+    invalid,
+    int,
+    float,
+    bool,
+    string,
+    void,
+    function,
+}
+
 ValueData :: union {
     integer i64
     real f64
+    boolean bool
     string []u8
     function FunctionId
 }
@@ -32,6 +42,12 @@ Op :: enum {
     multiply
     divide
     call
+    equal
+    not_equal
+    less
+    less_equal
+    greater
+    greater_equal
 }
 
 Instruction :: struct {
@@ -47,10 +63,18 @@ Instruction :: struct {
     arguments_count usize = 0
 }
 
-TerminatorKind :: enum { return_value, trap }
+TerminatorKind :: enum {
+    return_value,
+    trap,
+    jump,
+    branch,
+}
+
 Terminator :: struct {
     kind TerminatorKind = .return_value
     value ValueId = no_value
+    target BlockId = BlockId(0)
+    alternative BlockId = BlockId(0)
     diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
     span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
 }

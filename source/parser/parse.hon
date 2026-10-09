@@ -143,7 +143,7 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
     skip_newlines(state)
     while !next_is(state, .close_curly) and !next_is(state, .eof) {
         start :: state.next_token
-        statement :: parse_statement(state) catch |err| {
+        statement :: parse_statement(state, false) catch |err| {
             match err {
                 .unexpected_token: {
                     recovered :: try recover_statement(state, start)
@@ -167,7 +167,7 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-parse_statement proc(state @mut State) ast.NodeId ! ParseError {
+parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     if (
         next_is(state, .ident)
         and (
@@ -179,8 +179,9 @@ parse_statement proc(state @mut State) ast.NodeId ! ParseError {
         return try parse_statement_decl(state)
     }
     match current(state).kind {
-        .return: return try parse_return(state)
-        .ident, .int, .float, .string, .minus, .open_paren: {
+        .if: return try parse_if(state)
+        .return: return try parse_return(state, allow_else)
+        .ident, .int, .float, .string, .true, .false, .minus, .open_paren: {
             expression :: try parse_expr(state)
             return try ast.add_expression_stmt(&state.builder, expression)
         }
@@ -189,13 +190,19 @@ parse_statement proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-parse_return proc(state @mut State) ast.NodeId ! ParseError {
+parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     keyword :: try consume(state, .return)
-    if (next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)) {
+    if (
+        next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)
+        or (allow_else and next_is(state, .else))
+    ) {
         return try ast.add_return_stmt(&state.builder, keyword.span, null)
     }
     value :: try parse_expr(state)
-    if (!next_is(state, .newline) and !next_is(state, .close_curly) and !next_is(state, .eof)) {
+    if (
+        !next_is(state, .newline) and !next_is(state, .close_curly) and !next_is(state, .eof)
+        and !(allow_else and next_is(state, .else))
+    ) {
         return .unexpected_token
     }
     # include consumed grouping punctuation, which has no separate expression node.
@@ -205,6 +212,116 @@ parse_return proc(state @mut State) ast.NodeId ! ParseError {
         ast.Span{ start = keyword.span.start, end = end },
         value,
     )
+}
+
+@hide:file
+parse_if proc(state @mut State) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .if)
+    condition_start :: state.next_token
+    condition := parse_expr(state) catch |err| {
+        match err {
+            .unexpected_token: {}
+            else: return err
+        }
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        yield try ast.add_invalid_expr(&state.builder, current(state).span, diagnostic)
+    }
+    if (ast.builder_expr_kind(&state.builder, condition) == .invalid) {
+        # discard a malformed guard's tail, but leave its arm and enclosing block intact.
+        while (
+            !next_is(state, .open_curly) and !next_is(state, .close_curly)
+            and !next_is(state, .newline) and !next_is(state, .eof)
+            and !next_is(state, .else) and !next_is(state, .return) and !next_is(state, .if)
+        ) {
+            state.next_token += 1
+        }
+    }
+    if (
+        !next_is(state, .open_curly)
+        and !parenthesized_guard(state, condition_start)
+        and ast.builder_expr_kind(&state.builder, condition) != .call
+        and ast.builder_expr_kind(&state.builder, condition) != .invalid
+    ) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        condition = try ast.add_invalid_expr(
+            &state.builder,
+            ast.builder_span(&state.builder, condition),
+            diagnostic,
+        )
+    }
+    braced :: next_is(state, .open_curly)
+    then_block :: try parse_arm(state)
+    # only a braced arm permits its else on a later line.
+    after_then :: state.next_token
+    if (braced) skip_newlines(state)
+    alternative ?ast.NodeId := null
+    if next_is(state, .else) {
+        state.next_token += 1
+        alternative = try parse_arm(state)
+    } else {
+        state.next_token = after_then
+    }
+    end :: if (alternative) |block|
+        ast.builder_span(&state.builder, block).end
+    else
+        ast.builder_span(&state.builder, then_block).end
+    return try ast.add_if_stmt(
+        &state.builder,
+        ast.Span{ start = keyword.span.start, end = end },
+        condition,
+        then_block,
+        alternative,
+    )
+}
+
+@hide:file
+parenthesized_guard proc(state @State, start usize) bool {
+    if (state.tokens[start].kind != .open_paren) return false
+    depth usize := 0
+    for start..state.next_token |index| {
+        kind :: state.tokens[index].kind
+        if (kind == .open_paren) depth += 1
+        if (kind == .close_paren) {
+            depth -= 1
+            if (depth == 0) return index + 1 == state.next_token
+        }
+    }
+    return false
+}
+
+@hide:file
+parse_arm proc(state @mut State) ast.NodeId ! ParseError {
+    if next_is(state, .open_curly) return try parse_block(state)
+    start :: state.next_token
+    statement :: parse_statement(state, true) catch |err| {
+        match err {
+            .unexpected_token: {}
+            else: return err
+        }
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        span :: synchronize_arm(state, start)
+        yield try ast.add_invalid_stmt(&state.builder, span, diagnostic)
+    }
+    statements [1]ast.NodeId :: [statement]
+    return try ast.add_block(
+        &state.builder,
+        ast.builder_span(&state.builder, statement),
+        statements[..],
+    )
+}
+
+@hide:file
+synchronize_arm proc(state @mut State, start usize) ast.Span {
+    first :: state.tokens[start].span
+    end := first.end
+    while (
+        !next_is(state, .eof) and !next_is(state, .newline)
+        and !next_is(state, .close_curly) and !next_is(state, .else)
+    ) {
+        end = current(state).span.end
+        state.next_token += 1
+    }
+    return ast.Span{ start = first.start, end = end }
 }
 
 @hide:file
@@ -295,6 +412,10 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
         !next_is(state, .close_paren)
         and !next_is(state, .newline)
         and !next_is(state, .close_curly)
+        and !next_is(state, .open_curly)
+        and !next_is(state, .else)
+        and !next_is(state, .return)
+        and !next_is(state, .if)
         and !next_is(state, .eof)
     ) {
         argument :: try parse_expr(state)
@@ -347,6 +468,10 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             state.next_token += 1
             return try ast.add_literal(&state.builder, .string, token.span)
         }
+        .true, .false: {
+            state.next_token += 1
+            return try ast.add_literal(&state.builder, .bool, token.span)
+        }
         .ident: {
             state.next_token += 1
             return try ast.add_identifier(&state.builder, token.span)
@@ -362,6 +487,10 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
                 and token.kind != .comma
                 and token.kind != .close_paren
                 and token.kind != .close_curly
+                and token.kind != .open_curly
+                and token.kind != .else
+                and token.kind != .return
+                and token.kind != .if
                 and token.kind != .eof
             ) {
                 state.next_token += 1
@@ -451,7 +580,7 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 @hide:file
 prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
     return match kind {
-        .minus: BindingPowerScalar(30)
+        .minus: BindingPowerScalar(50)
         else: null
     }
 }
@@ -459,8 +588,10 @@ prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
 @hide:file
 infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
     return match kind {
-        .plus, .minus: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
-        .star, .slash: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
+        .equal_equal, .not_equal: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
+        .less, .less_equal, .greater, .greater_equal: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
+        .plus, .minus: BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) }
+        .star, .slash: BindingPower{ left = BindingPowerScalar(40), right = BindingPowerScalar(41) }
         else: null
     }
 }
@@ -472,6 +603,12 @@ binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
         .minus: .subtract
         .star: .multiply
         .slash: .divide
+        .equal_equal: .equal
+        .not_equal: .not_equal
+        .less: .less
+        .less_equal: .less_equal
+        .greater: .greater
+        .greater_equal: .greater_equal
         else: unreachable
     }
 }

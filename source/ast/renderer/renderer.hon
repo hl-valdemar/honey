@@ -41,25 +41,43 @@ render_function proc(
     try append_text(renderer, "  function ")
     try append_text(renderer, ast.source_text(tree, function.name))
     try append_text(renderer, "\n")
-    for 0..ast.block_statement_count(tree, function.body) |index| {
-        statement :: ast.block_statement(tree, function.body, index)
+    try render_block(renderer, tree, function.body, 2)
+}
+
+@hide:file
+render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, depth usize) void ! mem.AllocError {
+    for 0..ast.block_statement_count(tree, block) |index| {
+        statement :: ast.block_statement(tree, block, index)
+        for 0..depth |_| try append_text(renderer, "  ")
         match ast.stmt_kind(tree, statement) {
-            .declaration: try render_statement(renderer, tree, statement, "    ")
+            .declaration: try render_statement(renderer, tree, statement, "")
             .expression: {
                 expression :: ast.statement_expr(tree, statement)
-                try append_text(renderer, "    expression ")
+                try append_text(renderer, "expression ")
                 try append_text(renderer, ast.source_text(tree, ast.node_span(tree, expression)))
                 try append_text(renderer, "\n")
             }
             .return_stmt: {
-                try append_text(renderer, "    return")
+                try append_text(renderer, "return")
                 if (ast.return_stmt(tree, statement).value) |value| {
                     try append_text(renderer, " ")
                     try append_text(renderer, ast.source_text(tree, ast.node_span(tree, value)))
                 }
                 try append_text(renderer, "\n")
             }
-            .invalid: try append_text(renderer, "    invalid statement\n")
+            .if_stmt: {
+                conditional :: ast.if_stmt(tree, statement)
+                try append_text(renderer, "if ")
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, conditional.condition)))
+                try append_text(renderer, "\n")
+                try render_block(renderer, tree, conditional.then_block, depth + 1)
+                if (conditional.else_block) |alternative| {
+                    for 0..depth |_| try append_text(renderer, "  ")
+                    try append_text(renderer, "else\n")
+                    try render_block(renderer, tree, alternative, depth + 1)
+                }
+            }
+            .invalid: try append_text(renderer, "invalid statement\n")
         }
     }
 }

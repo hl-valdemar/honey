@@ -26,6 +26,8 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "for", .for },
     { "else", .else },
     { "while", .while },
+    { "true", .true },
+    { "false", .false },
 ])
 
 #! owns token storage and retains its allocator; release with deinit.
@@ -203,8 +205,28 @@ scan proc(
             continue
         }
 
+        if (cursor + 1 < program.len and program[cursor + 1] == '=') {
+            comparison ?TokenKind :: match char {
+                '=': .equal_equal
+                '!': .not_equal
+                '<': .less_equal
+                '>': .greater_equal
+                else: null
+            }
+            if (comparison) |value| {
+                try add_token(state, Token{
+                    span = make_span(cursor, cursor + 2),
+                    kind = value,
+                 })
+                cursor += 2
+                continue
+            }
+        }
+
         kind ?TokenKind :: match char {
             '=': .equal
+            '<': .less
+            '>': .greater
             ',': .comma
             '(': .open_paren
             ')': .close_paren

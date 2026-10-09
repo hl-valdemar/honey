@@ -26,6 +26,7 @@ GlobalState :: struct {
 @hide:file
 Frame :: struct {
     function ir.FunctionId
+    block ir.BlockId
     next_instruction usize = 0
     destination ir.ValueId = ir.no_value
     global ?usize = null
@@ -60,11 +61,21 @@ run proc(
     while frames.items.len != 0 {
         frame_index :: frames.items.len - 1
         function :: &module.functions.items[usize(frames.items[frame_index].function)]
-        block :: &function.blocks.items[usize(function.entry)]
+        block :: &function.blocks.items[usize(frames.items[frame_index].block)]
         instruction_index :: frames.items[frame_index].next_instruction
         if instruction_index == block.instructions.items.len {
             terminator :: block.terminator
             if (terminator.kind == .trap) return Outcome{ trap = terminator.diagnostic }
+            if (terminator.kind == .jump or terminator.kind == .branch) {
+                target := terminator.target
+                if (terminator.kind == .branch) {
+                    condition :: frames.items[frame_index].values[usize(terminator.value)]
+                    if (!condition.data.boolean) target = terminator.alternative
+                }
+                frames.items[frame_index].block = target
+                frames.items[frame_index].next_instruction = 0
+                continue
+            }
             value := ir.Value{}
             if terminator.value != ir.no_value {
                 value = frames.items[frame_index].values[usize(terminator.value)]
@@ -169,6 +180,38 @@ run proc(
                     }
                 }
             }
+            .equal, .not_equal, .less, .less_equal, .greater, .greater_equal: {
+                left :: frames.items[frame_index].values[usize(instruction.left)]
+                right :: frames.items[frame_index].values[usize(instruction.right)]
+                result := false
+                match left.type {
+                    .int: result = match instruction.op {
+                        .equal: left.data.integer == right.data.integer
+                        .not_equal: left.data.integer != right.data.integer
+                        .less: left.data.integer < right.data.integer
+                        .less_equal: left.data.integer <= right.data.integer
+                        .greater: left.data.integer > right.data.integer
+                        .greater_equal: left.data.integer >= right.data.integer
+                        else: unreachable
+                    }
+                    .float: result = match instruction.op {
+                        .equal: left.data.real == right.data.real
+                        .not_equal: left.data.real != right.data.real
+                        .less: left.data.real < right.data.real
+                        .less_equal: left.data.real <= right.data.real
+                        .greater: left.data.real > right.data.real
+                        .greater_equal: left.data.real >= right.data.real
+                        else: unreachable
+                    }
+                    .bool: result = match instruction.op {
+                        .equal: left.data.boolean == right.data.boolean
+                        .not_equal: left.data.boolean != right.data.boolean
+                        else: unreachable
+                    }
+                    else: unreachable
+                }
+                value = ir.Value{ type = .bool, data = ir.ValueData{ boolean = result } }
+            }
         }
         if instruction.destination != ir.no_value {
             frames.items[frame_index].values[usize(instruction.destination)] = value
@@ -195,6 +238,7 @@ push_frame proc(
     # typed IR assigns each temporary before use; only local slots need initialization flags.
     try arraylist.append(frames, Frame{
         function = function,
+        block = signature.entry,
         destination = destination,
         global = global,
         locals = locals,

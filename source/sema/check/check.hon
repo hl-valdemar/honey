@@ -5,7 +5,7 @@ import "@source/ast"
 import "@source/diagnostics"
 sema :: import "@source/sema"
 
-TypeKind :: enum { none, invalid, int, float, string, void, function }
+TypeKind :: enum { none, invalid, int, float, bool, string, void, function }
 
 Type :: struct {
     kind TypeKind = .none
@@ -27,7 +27,7 @@ Result :: struct { storage Storage }
 no_index :: maxval!(usize)
 
 @hide:file
-Role :: enum { none, expression, declaration, parameter, function, annotation, invalid, body, return_stmt }
+Role :: enum { none, expression, declaration, parameter, function, annotation, invalid, body, return_stmt, if_stmt }
 
 @hide:file
 Cell :: struct {
@@ -161,6 +161,7 @@ check proc(
             .unary: try require_numeric(&state, id, ast.unary_expr(tree, id).operand)
             .binary: {
                 expression :: ast.binary_expr(tree, id)
+                if (bool_equality(&state, id)) continue
                 try require_numeric(&state, id, expression.left)
                 try require_numeric(&state, id, expression.right)
             }
@@ -178,10 +179,14 @@ check proc(
             .unary: try numeric_operand(&state, id, ast.unary_expr(tree, id).operand)
             .binary: {
                 expression :: ast.binary_expr(tree, id)
-                try numeric_operand(&state, id, expression.left)
-                try numeric_operand(&state, id, expression.right)
-                if (expression.operator == .divide) {
-                    try impose(&state, id, .float, .integer_division, expression.span)
+                if (comparison(expression.operator)) {
+                    if (!bool_equality(&state, id)) try comparison_operands(&state, id)
+                } else {
+                    try numeric_operand(&state, id, expression.left)
+                    try numeric_operand(&state, id, expression.right)
+                    if (expression.operator == .divide) {
+                        try impose(&state, id, .float, .integer_division, expression.span)
+                    }
                 }
             }
             else: {}
@@ -246,6 +251,28 @@ check proc(
     # errors travel only from dependencies to users. A rejected use never poisons
     # an explicitly typed declaration, and body errors do not erase signatures.
     propagate(&state, queue)
+    # validate conditions after operand errors have reached their users.
+    for (0..count) |i| {
+        if (cells[i].role != .if_stmt) continue
+        condition :: ast.if_stmt(tree, ast.NodeId(i)).condition
+        actual :: types[usize(condition)]
+        if (actual.kind != .invalid and actual.kind != .bool) {
+            try fail(&state, condition, .condition_not_bool, ast.node_span(tree, condition))
+        }
+    }
+    propagate(&state, queue)
+    for (0..ast.package_decl_count(tree)) |i| {
+        id :: ast.package_decl(tree, i)
+        if (ast.decl_kind(tree, id) != .function) continue
+        function :: ast.function_decl(tree, id)
+        result :: types[usize(function.return_type)]
+        if (result.kind == .void or result.kind == .invalid or types[usize(id)].kind == .invalid) continue
+        if (block_falls_through(&state, function.body)) {
+            # lowering must find this diagnostic even when another arm failed.
+            diagnostic :: try diagnostics.add(diagnostic_store, .missing_return, ast.node_span(tree, function.body))
+            types[usize(function.body)] = invalid_type(diagnostic)
+        }
+    }
     return Result{ storage = Storage{ types = types, allocator = allocator } }
 }
 
@@ -371,6 +398,7 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
             type.kind = match binding.data.builtin {
                 .int: .int
                 .float: .float
+                .bool: .bool
                 .string: .string
                 .void: .void
             }
@@ -427,25 +455,44 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
         state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
         state.cells[usize(id)].type.function = id
     }
-    state.cells[usize(function.body)].role = .body
-    for (0..ast.block_statement_count(tree, function.body)) |i| {
-        statement :: ast.block_statement(tree, function.body, i)
+    try collect_block(state, function.body, function.return_type)
+}
+
+@hide:file
+collect_block proc(state @mut State, id, return_annotation ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    state.cells[usize(id)].role = .body
+    for (0..ast.block_statement_count(tree, id)) |i| {
+        statement :: ast.block_statement(tree, id, i)
         match ast.stmt_kind(tree, statement) {
             .declaration: try collect_declaration(state, statement)
             .expression: try collect_expression(state, ast.statement_expr(tree, statement))
             .return_stmt: {
                 state.cells[usize(statement)].role = .return_stmt
                 state.cells[usize(statement)].type = Type{ kind = .void }
-                state.cells[usize(statement)].return_annotation = function.return_type
+                state.cells[usize(statement)].return_annotation = return_annotation
                 if (ast.return_stmt(tree, statement).value) |value| {
                     try collect_expression(state, value)
                     try depend(state, value, statement)
                 }
             }
+            .if_stmt: {
+                conditional :: ast.if_stmt(tree, statement)
+                state.cells[usize(statement)].role = .if_stmt
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                try collect_expression(state, conditional.condition)
+                try depend(state, conditional.condition, statement)
+                try collect_block(state, conditional.then_block, return_annotation)
+                try depend(state, conditional.then_block, id)
+                if (conditional.else_block) |other| {
+                    try collect_block(state, other, return_annotation)
+                    try depend(state, other, id)
+                }
+            }
             .invalid: collect_invalid(state, statement)
         }
         source :: if (ast.stmt_kind(tree, statement) == .expression) ast.statement_expr(tree, statement) else statement
-        try depend(state, source, function.body)
+        try depend(state, source, id)
     }
 }
 
@@ -460,6 +507,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             state.cells[usize(id)].anchored = true
         }
         .literal_float: state.cells[usize(id)].type = Type{ kind = .float }
+        .literal_bool: state.cells[usize(id)].type = Type{ kind = .bool }
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
         .identifier: {
             binding :: sema.binding(state.resolution, id)
@@ -476,8 +524,12 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             try depend(state, operand, id)
         }
         .binary: {
-            state.cells[usize(id)].numeric = true
             expression :: ast.binary_expr(tree, id)
+            if (comparison(expression.operator)) {
+                state.cells[usize(id)].type = Type{ kind = .bool }
+            } else {
+                state.cells[usize(id)].numeric = true
+            }
             try collect_expression(state, expression.left)
             try collect_expression(state, expression.right)
             try depend(state, expression.left, id)
@@ -503,6 +555,40 @@ numeric_kind proc(kind TypeKind) bool {
 }
 
 @hide:file
+comparison proc(operator ast.BinaryOperator) bool {
+    return (
+        operator == .equal or operator == .not_equal or operator == .less
+        or operator == .less_equal or operator == .greater or operator == .greater_equal
+    )
+}
+
+@hide:file
+bool_equality proc(state @mut State, id ast.NodeId) bool {
+    expression :: ast.binary_expr(state.tree, id)
+    return (
+        (expression.operator == .equal or expression.operator == .not_equal)
+        and group_type(state, expression.left).kind == .bool
+        and group_type(state, expression.right).kind == .bool
+    )
+}
+
+@hide:file
+comparison_operands proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.types[usize(id)].kind == .invalid) return
+    expression :: ast.binary_expr(state.tree, id)
+    left :: root(state, usize(expression.left))
+    right :: root(state, usize(expression.right))
+    # only operand groups receive numeric demands; the result stays bool.
+    if (state.cells[left].numeric or state.cells[left].type.kind == .none) {
+        state.cells[left].numeric = true
+        try numeric_constraint(state, expression.left, expression.right, id)
+    } else if (state.cells[right].numeric or state.cells[right].type.kind == .none) {
+        state.cells[right].numeric = true
+        try numeric_constraint(state, expression.right, expression.left, id)
+    }
+}
+
+@hide:file
 impose proc(state @mut State, id ast.NodeId, kind TypeKind, code diagnostics.Code, span ast.Span) void ! (mem.AllocError | diagnostics.CapacityError) {
     index :: root(state, usize(id))
     if (state.cells[index].type.kind == .invalid) return
@@ -516,6 +602,11 @@ impose proc(state @mut State, id ast.NodeId, kind TypeKind, code diagnostics.Cod
 
 @hide:file
 numeric_operand proc(state @mut State, expression, operand ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    try numeric_constraint(state, expression, operand, expression)
+}
+
+@hide:file
+numeric_constraint proc(state @mut State, expression, operand, operation ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     index :: root(state, usize(operand))
     type :: state.cells[index].type
     if (state.types[usize(expression)].kind == .invalid or state.types[usize(operand)].kind == .invalid) return
@@ -525,13 +616,13 @@ numeric_operand proc(state @mut State, expression, operand ast.NodeId) void ! (m
         operand_demand :: state.cells[index].demand
         join(state, expression, operand)
         if (expression_demand != .none) {
-            try impose(state, expression, expression_demand, .invalid_operand, ast.node_span(state.tree, expression))
+            try impose(state, expression, expression_demand, .invalid_operand, ast.node_span(state.tree, operation))
         }
         if (operand_demand != .none) {
-            try impose(state, expression, operand_demand, .invalid_operand, ast.node_span(state.tree, expression))
+            try impose(state, expression, operand_demand, .invalid_operand, ast.node_span(state.tree, operation))
         }
     } else if (numeric_kind(type.kind)) {
-        try impose(state, expression, type.kind, .invalid_operand, ast.node_span(state.tree, expression))
+        try impose(state, expression, type.kind, .invalid_operand, ast.node_span(state.tree, operation))
     }
 }
 
@@ -568,20 +659,6 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
             }
             if (declaration.type) |type| try compatible(state, declaration.initializer, state.types[usize(type)])
         }
-        .function: {
-            function :: ast.function_decl(tree, id)
-            result :: state.types[usize(function.return_type)]
-            if (result.kind == .void or result.kind == .invalid or state.types[usize(id)].kind == .invalid) return
-            for (0..ast.block_statement_count(tree, function.body)) |i| {
-                if (ast.stmt_kind(tree, ast.block_statement(tree, function.body, i)) == .return_stmt) return
-            }
-            if (syntactically_valid_body(tree, function.body)) {
-                diagnostic :: try diagnostics.add(state.diagnostics, .missing_return, ast.node_span(tree, function.body))
-                if (state.types[usize(function.body)].kind != .invalid) {
-                    state.types[usize(function.body)] = invalid_type(diagnostic)
-                }
-            }
-        }
         .return_stmt: {
             statement :: ast.return_stmt(tree, id)
             expected :: state.types[usize(state.cells[usize(id)].return_annotation)]
@@ -611,6 +688,8 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     left :: state.types[usize(expression.left)]
                     right :: state.types[usize(expression.right)]
                     if (left.kind == .invalid or right.kind == .invalid) return
+                    if ((expression.operator == .equal or expression.operator == .not_equal)
+                        and left.kind == .bool and right.kind == .bool) return
                     if (!numeric_kind(left.kind) or !numeric_kind(right.kind) or left.kind != right.kind) {
                         try fail(state, id, .invalid_operand, expression.span)
                     } else if (expression.operator == .divide and left.kind == .int) {
@@ -649,43 +728,25 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
     }
 }
 
-@hide:file
-syntactically_valid_expression proc(tree @ast.Tree, id ast.NodeId) bool {
-    match ast.expr_kind(tree, id) {
-        .invalid: return false
-        .unary: return syntactically_valid_expression(tree, ast.unary_expr(tree, id).operand)
-        .binary: {
-            expression :: ast.binary_expr(tree, id)
-            return syntactically_valid_expression(tree, expression.left) and syntactically_valid_expression(tree, expression.right)
-        }
-        .call: {
-            if (!syntactically_valid_expression(tree, ast.call_expr(tree, id).callee)) return false
-            for (0..ast.call_arg_count(tree, id)) |i| {
-                if (!syntactically_valid_expression(tree, ast.call_arg(tree, id, i))) return false
-            }
-        }
-        else: {}
-    }
-    return true
-}
 
 @hide:file
-syntactically_valid_body proc(tree @ast.Tree, id ast.NodeId) bool {
+block_falls_through proc(state @State, id ast.NodeId) bool {
+    tree :: state.tree
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
-        match ast.stmt_kind(tree, statement) {
-            .invalid: return false
-            .expression: {
-                if (!syntactically_valid_expression(tree, ast.statement_expr(tree, statement))) return false
-            }
-            .return_stmt: {
-                if (ast.return_stmt(tree, statement).value) |value| {
-                    if (!syntactically_valid_expression(tree, value)) return false
+        kind :: ast.stmt_kind(tree, statement)
+        source :: if (kind == .expression) ast.statement_expr(tree, statement) else statement
+        if (state.types[usize(source)].kind == .invalid) return false
+        match kind {
+            .return_stmt, .invalid: return false
+            .if_stmt: {
+                conditional :: ast.if_stmt(tree, statement)
+                then_falls :: block_falls_through(state, conditional.then_block)
+                if (conditional.else_block) |other| {
+                    if (!then_falls and !block_falls_through(state, other)) return false
                 }
             }
-            .declaration: {
-                if (!syntactically_valid_expression(tree, ast.statement_decl(tree, statement).initializer)) return false
-            }
+            else: {}
         }
     }
     return true

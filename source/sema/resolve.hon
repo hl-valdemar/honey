@@ -6,12 +6,13 @@ import "@std/strmap"
 import "@source/ast"
 import "@source/diagnostics"
 
-BuiltinType :: enum { int, float, string, void }
+BuiltinType :: enum { int, float, bool, string, void }
 
 @hide:file
 builtins strmap.StaticStringMap(BuiltinType) :: strmap.init([
     { "int", .int },
     { "float", .float },
+    { "bool", .bool },
     { "string", .string },
     { "void", .void },
 ])
@@ -175,20 +176,38 @@ resolve_function proc(
         parameter :: ast.function_param(tree, id, i)
         try predeclare(state, &scope, parameter, ast.param(tree, parameter).name)
     }
-    for (0..ast.block_statement_count(tree, function.body)) |i| {
-        statement :: ast.block_statement(tree, function.body, i)
+    try resolve_block(state, &scope, function.body)
+}
+
+@hide:file
+resolve_arm proc(state @mut State, parent @Scope, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    scope := Scope{ names = hashmap.init(state.allocator), parent = parent }
+    defer hashmap.deinit(&scope.names)
+    try resolve_block(state, &scope, id)
+}
+
+@hide:file
+resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    for (0..ast.block_statement_count(tree, id)) |i| {
+        statement :: ast.block_statement(tree, id, i)
         if ast.stmt_kind(tree, statement) == .declaration {
-            try predeclare(state, &scope, statement, ast.statement_decl(tree, statement).name)
+            try predeclare(state, scope, statement, ast.statement_decl(tree, statement).name)
         }
     }
-
-    for (0..ast.block_statement_count(tree, function.body)) |i| {
-        statement :: ast.block_statement(tree, function.body, i)
+    for (0..ast.block_statement_count(tree, id)) |i| {
+        statement :: ast.block_statement(tree, id, i)
         match ast.stmt_kind(tree, statement) {
-            .declaration: try resolve_statement_decl(state, &scope, statement)
-            .expression: try resolve_expr(state, &scope, ast.statement_expr(tree, statement))
+            .declaration: try resolve_statement_decl(state, scope, statement)
+            .expression: try resolve_expr(state, scope, ast.statement_expr(tree, statement))
             .return_stmt: {
-                if (ast.return_stmt(tree, statement).value) |value| try resolve_expr(state, &scope, value)
+                if (ast.return_stmt(tree, statement).value) |value| try resolve_expr(state, scope, value)
+            }
+            .if_stmt: {
+                conditional :: ast.if_stmt(tree, statement)
+                try resolve_expr(state, scope, conditional.condition)
+                try resolve_arm(state, scope, conditional.then_block)
+                if (conditional.else_block) |other| try resolve_arm(state, scope, other)
             }
             .invalid: resolve_invalid(state, statement)
         }
@@ -225,7 +244,7 @@ resolve_expr proc(
     if (state.bindings[usize(id)].kind != .none) return
     tree :: state.tree
     match ast.expr_kind(tree, id) {
-        .literal_int, .literal_float, .literal_string: {}
+        .literal_int, .literal_float, .literal_bool, .literal_string: {}
         .identifier: {
             span :: ast.node_span(tree, id)
             name :: ast.source_text(tree, span)

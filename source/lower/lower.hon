@@ -25,6 +25,7 @@ State :: struct {
     module @mut ir.Module
     storage []mut Storage
     function usize = 0
+    block ir.BlockId = ir.BlockId(0)
     terminated bool = false
 }
 
@@ -89,6 +90,7 @@ lower_type proc(type typecheck.Type) ir.Type {
     return match type.kind {
         .int: .int
         .float: .float
+        .bool: .bool
         .string: .string
         .void: .void
         .function: .function
@@ -136,7 +138,7 @@ find_entry proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityE
 
 @hide:file
 trap proc(state @mut State, diagnostic diagnostics.DiagnosticId, span diagnostics.Span) void {
-    state.module.functions.items[state.function].blocks.items[0].terminator = ir.Terminator{
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
         kind = .trap,
         diagnostic = diagnostic,
         span = span,
@@ -162,7 +164,7 @@ trap_binding proc(state @mut State, id ast.NodeId) bool {
 
 @hide:file
 finish proc(state @mut State, value ir.ValueId, span diagnostics.Span) void {
-    state.module.functions.items[state.function].blocks.items[0].terminator = ir.Terminator{
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
         value = value,
         span = span,
     }
@@ -177,7 +179,7 @@ emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! mem.AllocEr
         operation.destination = ir.ValueId(function.value_count)
         function.value_count += 1
     }
-    try arraylist.append(&function.blocks.items[0].instructions, operation)
+    try arraylist.append(&function.blocks.items[usize(state.block)].instructions, operation)
     return operation.destination
 }
 
@@ -190,6 +192,7 @@ constant proc(state @mut State, value ir.Value, span diagnostics.Span) ir.ValueI
 lower_global proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     global :: state.module.globals.items[usize(state.storage[usize(id)].index)]
     state.function = usize(global.initializer)
+    state.block = ir.BlockId(0)
     state.terminated = false
     state.module.functions.items[state.function].result = global.type
     if (trap_binding(state, id)) return
@@ -205,6 +208,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     tree :: state.tree
     declaration :: ast.function_decl(tree, id)
     state.function = usize(state.storage[usize(id)].index)
+    state.block = ir.BlockId(0)
     state.terminated = false
     function := &state.module.functions.items[state.function]
     function.result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
@@ -215,30 +219,112 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
         try arraylist.append(&function.parameters, type)
         try arraylist.append(&function.locals, type)
     }
-    for (0..ast.block_statement_count(tree, declaration.body)) |i| {
-        statement :: ast.block_statement(tree, declaration.body, i)
-        if (ast.stmt_kind(tree, statement) != .declaration) continue
-        state.storage[usize(statement)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
-        try arraylist.append(&function.locals, lower_type(typecheck.type_of(state.checked, statement)))
-    }
+    try predeclare_locals(state, declaration.body)
     # signature errors are entry traps; body errors are reached in statement order.
     if (trap_binding(state, id) or trap_type(state, declaration.return_type)) return
     for (0..ast.function_param_count(tree, id)) |i| {
         if (trap_type(state, ast.function_param(tree, id, i))) return
     }
     if (trap_type(state, id)) return
-    for (0..ast.block_statement_count(tree, declaration.body)) |i| {
-        if (state.terminated) return
-        try lower_statement(state, ast.block_statement(tree, declaration.body, i))
+    try lower_block(state, declaration.body)
+    if (state.terminated) return
+    # aggregate arm errors are not demanded by fallthrough; only missing_return is.
+    body_type :: typecheck.type_of(state.checked, declaration.body)
+    if (function.result != .void and body_type.kind == .invalid) {
+        if (diagnostics.get(state.diagnostics, body_type.diagnostic)) |diagnostic| {
+            if (diagnostic.code == .missing_return) {
+                trap(state, body_type.diagnostic, ast.node_span(tree, declaration.body))
+                return
+            }
+        }
     }
-    if (state.terminated or trap_type(state, declaration.body)) return
     finish(state, ir.no_value, ast.node_span(tree, declaration.body))
+}
+
+@hide:file
+predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError {
+    for (0..ast.block_statement_count(state.tree, block)) |i| {
+        statement :: ast.block_statement(state.tree, block, i)
+        match ast.stmt_kind(state.tree, statement) {
+            .declaration: {
+                function := &state.module.functions.items[state.function]
+                state.storage[usize(statement)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
+                try arraylist.append(&function.locals, lower_type(typecheck.type_of(state.checked, statement)))
+            }
+            .if_stmt: {
+                conditional :: ast.if_stmt(state.tree, statement)
+                try predeclare_locals(state, conditional.then_block)
+                if (conditional.else_block) |alternative| try predeclare_locals(state, alternative)
+            }
+            else: {}
+        }
+    }
+}
+
+@hide:file
+lower_block proc(state @mut State, block ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    for (0..ast.block_statement_count(state.tree, block)) |i| {
+        if (state.terminated) return
+        try lower_statement(state, ast.block_statement(state.tree, block, i))
+    }
+}
+
+@hide:file
+add_block proc(state @mut State) ir.BlockId ! mem.AllocError {
+    function := &state.module.functions.items[state.function]
+    id :: ir.BlockId(function.blocks.items.len)
+    try arraylist.append(&function.blocks, ir.init_block(state.module.allocator))
+    return id
+}
+
+@hide:file
+lower_if proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    conditional :: ast.if_stmt(state.tree, id)
+    condition :: try lower_expression(state, conditional.condition)
+    if (state.terminated) return
+    origin :: state.block
+    consequent :: try add_block(state)
+    alternative :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+        kind = .branch,
+        value = condition,
+        target = consequent,
+        alternative = alternative,
+        span = ast.node_span(state.tree, conditional.condition),
+    }
+    state.block = consequent
+    try lower_block(state, conditional.then_block)
+    consequent_end :: state.block
+    consequent_falls :: !state.terminated
+    state.block = alternative
+    state.terminated = false
+    if (conditional.else_block) |block| try lower_block(state, block)
+    alternative_end :: state.block
+    alternative_falls :: !state.terminated
+    if (!consequent_falls and !alternative_falls) {
+        state.terminated = true
+        return
+    }
+    join :: try add_block(state)
+    if (consequent_falls) {
+        state.module.functions.items[state.function].blocks.items[usize(consequent_end)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = conditional.span,
+        }
+    }
+    if (alternative_falls) {
+        state.module.functions.items[state.function].blocks.items[usize(alternative_end)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = conditional.span,
+        }
+    }
+    state.block = join
+    state.terminated = false
 }
 
 @hide:file
 lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     match ast.stmt_kind(tree, id) {
+        .if_stmt: try lower_if(state, id)
         .invalid: {
             invalid :: ast.invalid(tree, id)
             trap(state, invalid.diagnostic, invalid.span)
@@ -281,6 +367,13 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .literal_int, .literal_float: {
             if (trap_type(state, id)) return ir.no_value
             return try lower_number(state, id)
+        }
+        .literal_bool: {
+            if (trap_type(state, id)) return ir.no_value
+            return try constant(state, ir.Value{
+                type = .bool,
+                data = ir.ValueData{ boolean = mem.eql(ast.source_text(tree, span), "true") },
+            }, span)
         }
         .literal_string: {
             if (trap_type(state, id)) return ir.no_value
@@ -325,6 +418,12 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 .subtract: .subtract
                 .multiply: .multiply
                 .divide: .divide
+                .equal: .equal
+                .not_equal: .not_equal
+                .less: .less
+                .less_equal: .less_equal
+                .greater: .greater
+                .greater_equal: .greater_equal
             }
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
@@ -332,7 +431,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             callee :: try lower_expression(state, ast.call_expr(tree, id).callee)
             if (state.terminated) return ir.no_value
             # reserve this call's packed slice before nested calls append theirs.
-            block := &state.module.functions.items[state.function].blocks.items[0]
+            block := &state.module.functions.items[state.function].blocks.items[usize(state.block)]
             start :: block.arguments.items.len
             count :: ast.call_arg_count(tree, id)
             for (0..count) |_| try arraylist.append(&block.arguments, ir.no_value)

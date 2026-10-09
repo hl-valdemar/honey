@@ -330,3 +330,183 @@ parses_return_boundaries_and_recovers_trailing_tokens test {
     try testing.expect_equal("return", ast.source_text(&tree, last.span))
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
 }
+
+parses_boolean_comparison_precedence_and_associativity test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `value :: -f() * 2 + 3 < 4 <= 5 > 6 >= 7 == true != false
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    different :: ast.binary_expr(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer)
+    try testing.expect_equal(ast.BinaryOperator.not_equal, different.operator)
+    try testing.expect_equal(ast.ExprKind.literal_bool, ast.expr_kind(&tree, different.right))
+    try testing.expect_equal("false", ast.source_text(&tree, ast.node_span(&tree, different.right)))
+    equal :: ast.binary_expr(&tree, different.left)
+    try testing.expect_equal(ast.BinaryOperator.equal, equal.operator)
+    try testing.expect_equal(ast.ExprKind.literal_bool, ast.expr_kind(&tree, equal.right))
+    relation := equal.left
+    operators [4]ast.BinaryOperator :: [.greater_equal, .greater, .less_equal, .less]
+    for (operators) |operator| {
+        binary :: ast.binary_expr(&tree, relation)
+        try testing.expect_equal(operator, binary.operator)
+        relation = binary.left
+    }
+    addition :: ast.binary_expr(&tree, relation)
+    try testing.expect_equal(ast.BinaryOperator.add, addition.operator)
+    product :: ast.binary_expr(&tree, addition.left)
+    try testing.expect_equal(ast.BinaryOperator.multiply, product.operator)
+    negate :: ast.unary_expr(&tree, product.left)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, negate.operand))
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+parses_factorial_and_canonical_conditional_arms test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `factorial proc(n int) int {
+        `    if (n <= 1) return 1 else return n * factorial(n - 1)
+        `}
+        `main proc() int {
+        `    if true {
+        `        local :: factorial(5)
+        `        if (false) return 0 else return local
+        `    }
+        `    else if ready() return 2 else { return 3 }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    factorial :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, factorial.body))
+    guard :: ast.if_stmt(&tree, ast.block_statement(&tree, factorial.body, 0))
+    try testing.expect_equal("n <= 1", ast.source_text(&tree, ast.node_span(&tree, guard.condition)))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, guard.then_block))
+    try testing.expect_equal("return 1", ast.source_text(&tree, ast.return_stmt(&tree, ast.block_statement(&tree, guard.then_block, 0)).span))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, guard.else_block?))
+    try testing.expect_equal(ast.StmtKind.return_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, guard.else_block?, 0)))
+    main :: ast.function_decl(&tree, ast.package_decl(&tree, 1))
+    outer :: ast.if_stmt(&tree, ast.block_statement(&tree, main.body, 0))
+    try testing.expect_equal(2, ast.block_statement_count(&tree, outer.then_block))
+    try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, outer.then_block, 0)))
+    nested :: ast.if_stmt(&tree, ast.block_statement(&tree, outer.then_block, 1))
+    try testing.expect(nested.else_block != null)
+    try testing.expect_equal(1, ast.block_statement_count(&tree, outer.else_block?))
+    chain :: ast.if_stmt(&tree, ast.block_statement(&tree, outer.else_block?, 0))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, chain.condition))
+    try testing.expect(chain.else_block != null)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+attaches_dangling_else_to_nearest_if test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "main proc() int { if (true) if (false) return 1 else return 2 else return 3 }"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    outer :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    inner :: ast.if_stmt(&tree, ast.block_statement(&tree, outer.then_block, 0))
+    inner_return :: ast.return_stmt(&tree, ast.block_statement(&tree, inner.else_block?, 0))
+    outer_return :: ast.return_stmt(&tree, ast.block_statement(&tree, outer.else_block?, 0))
+    try testing.expect_equal("2", ast.source_text(&tree, ast.node_span(&tree, inner_return.value?)))
+    try testing.expect_equal("3", ast.source_text(&tree, ast.node_span(&tree, outer_return.value?)))
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+recovers_conditional_conditions_and_arms_without_losing_siblings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    if { good() } else { other() }
+        `    if (true) else return
+        `    if broken( { kept() }
+        `    after :: 7
+        `    return 1 else return 2
+        `    final :: 8
+        `}
+        `tail :: 9
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(6, ast.block_statement_count(&tree, body))
+    first :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, first.condition))
+    condition_diagnostic :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, first.condition).diagnostic)?
+    try testing.expect_equal("{", ast.source_text(&tree, condition_diagnostic.span))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, first.then_block))
+    second :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 1))
+    bad_arm :: ast.block_statement(&tree, second.then_block, 0)
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, bad_arm))
+    arm_diagnostic :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, bad_arm).diagnostic)?
+    try testing.expect_equal("else", ast.source_text(&tree, arm_diagnostic.span))
+    try testing.expect(second.else_block != null)
+    third :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, third.then_block))
+    after :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal("after", ast.source_text(&tree, after.name))
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 4)))
+    final :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 5))
+    try testing.expect_equal("final", ast.source_text(&tree, final.name))
+    try testing.expect_equal(4, diagnostics.count(&diagnostic_store))
+}
+
+recovers_invalid_guard_syntax_and_missing_arm_at_enclosing_brace test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() int {
+        `    if true return 1 else return 2
+        `    if (true junk) { kept() } else { other() }
+        `    sibling :: 3
+        `    if (false) }
+        `tail :: 4
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(4, ast.block_statement_count(&tree, body))
+    first :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, first.condition))
+    guard_error :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, first.condition).diagnostic)?
+    try testing.expect_equal("return", ast.source_text(&tree, guard_error.span))
+    try testing.expect(first.else_block != null)
+    second :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, second.then_block))
+    try testing.expect(second.else_block != null)
+    sibling :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal("sibling", ast.source_text(&tree, sibling.name))
+    last :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 3))
+    missing :: ast.block_statement(&tree, last.then_block, 0)
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, missing))
+    arm_error :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, missing).diagnostic)?
+    try testing.expect_equal("}", ast.source_text(&tree, arm_error.span))
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+}

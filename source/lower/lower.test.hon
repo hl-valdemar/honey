@@ -410,11 +410,23 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `text :: "owned\nstring"
         `factor float :: 3.5
         `identity proc(value string) string {
+        `    if false {
+        `        return value
+        `    }
         `    local :: value
         `    return local
         `}
         `main proc() string {
         `    computed float :: factor * 2
+        `    if computed > 0 {
+        `        saved :: identity(text)
+        `        if computed < 10 {
+        `            return saved
+        `        }
+        `    } else {
+        `        fallback :: "fallback"
+        `        identity(fallback)
+        `    }
         `    return identity(text)
         `}
     scan_state := lexer.init(mem.c_allocator)
@@ -449,4 +461,183 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
     }
     try testing.expect(succeeded)
     try testing.expect(failures > 0)
+}
+
+recursive_factorial_and_conditional_returns_execute_after_frontend_cleanup test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `factorial proc(n int) int {
+        `    if n <= 1 {
+        `        return 1
+        `    } else {
+        `        return n * factorial(n - 1)
+        `    }
+        `}
+        `main proc() int {
+        `    return factorial(5)
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(120), outcome.value.data.integer)
+}
+
+nested_branches_joins_calls_and_lazy_globals_preserve_execution_position test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `seed :: classify(2)
+        `enabled bool :: true
+        `identity proc(value int) int { return value }
+        `classify proc(n int) int {
+        `    if n < 0 {
+        `        return 3
+        `    } else if n == 0 {
+        `        return 5
+        `    } else {
+        `        if n > 1 {
+        `            local :: identity(7)
+        `            identity(local)
+        `        } else {
+        `            local :: identity(9)
+        `            identity(local)
+        `        }
+        `        return identity(11)
+        `    }
+        `}
+        `choose proc(flag bool) int {
+        `    if flag {
+        `        local :: identity(seed)
+        `        identity(local)
+        `    } else {
+        `        local :: identity(13)
+        `        identity(local)
+        `    }
+        `    return identity(seed) + classify(0) + classify(-1)
+        `}
+        `main proc() int {
+        `    return choose(enabled) + choose(false) + classify(1) - 7
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
+bool_storage_results_and_numeric_comparisons_execute test {
+    sources [16][]u8 :: [
+        "main proc() bool { return 2 == 2 }\n",
+        "main proc() bool { return 2 != 3 }\n",
+        "main proc() bool { return -2 < 1 }\n",
+        "main proc() bool { return 2 <= 2 }\n",
+        "main proc() bool { return 3 > 2 }\n",
+        "main proc() bool { return 2 >= 2 }\n",
+        "main proc() bool { return 2 == 2.0 }\n",
+        "main proc() bool { return 2 != 3.0 }\n",
+        "main proc() bool { return 2 < 2.5 }\n",
+        "main proc() bool { return 2 <= 2.0 }\n",
+        "main proc() bool { return 3 > 2.5 }\n",
+        "main proc() bool { return 2 >= 2.0 }\n",
+        "main proc() bool { return true == true }\n",
+        "main proc() bool { return false != true }\n",
+        "flag bool :: false\nidentity proc(value bool) bool { return value }\nmain proc() bool {\n local bool :: identity(flag)\n return identity(local == false)\n}\n",
+        "main proc() bool {\n local :: 2\n return local < 2.5\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.bool, outcome.value.type)
+        try testing.expect(outcome.value.data.boolean)
+    }
+}
+
+conditional_errors_trap_only_when_demanded_and_preserve_original_identity test {
+    sources [7][]u8 :: [
+        "main proc() int {\n if true {\n return 42\n } else {\n return unknown\n }\n}\n",
+        "main proc() int {\n if false {\n return 42\n } else {\n return unknown\n }\n}\n",
+        "main proc() int {\n if true {\n return 42\n }\n}\n",
+        "main proc() int {\n if false {\n return 42\n }\n}\n",
+        "main proc() void {\n if false {\n unknown\n }\n}\n",
+        "main proc() int {\n if 1 {\n return 42\n } else {\n return 0\n }\n}\n",
+        "main proc() int {\n if unknown {\n return 42\n }\n}\n",
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        if (index == 0 or index == 2 or index == 4) {
+            try testing.expect(outcome.trap == null)
+            if (index == 4) try testing.expect_equal(ir.Type.void, outcome.value.type)
+            else try testing.expect_equal(i64(42), outcome.value.data.integer)
+        } else {
+            try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
+            code := diagnostics.Code.unknown_name
+            if (index == 3) code = .missing_return
+            if (index == 5) code = .condition_not_bool
+            try testing.expect_equal(code, original.code)
+            if (index == 5) try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], "1"))
+        }
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    }
+}
+
+missing_return_does_not_replace_reached_arm_error test {
+    sources [3][]u8 :: [
+        "main proc() int {\n if true {\n return unknown\n }\n}\n",
+        "main proc() int {\n if false {\n return unknown\n }\n}\n",
+        "main proc() int {\n if false {\n return unknown\n }\n return 42\n}\n",
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        if (index == 2) {
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(i64(42), outcome.value.data.integer)
+        } else {
+            code diagnostics.Code :: if (index == 0) .unknown_name else .missing_return
+            try expect_trap(outcome, &diagnostic_store, code)
+            for (0..diagnostics.count(&diagnostic_store)) |i| {
+                diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(i))?
+                if (diagnostic.code == code) try testing.expect_equal(diagnostics.DiagnosticId(i), outcome.trap?)
+            }
+        }
+    }
+}
+
+nested_locals_are_predeclared_before_any_arm_executes test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() int {
+        `    if true {
+        `        if true {
+        `            before :: later
+        `            later :: 42
+        `            return before
+        `        }
+        `    }
+        `    return 0
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try expect_trap(outcome, &diagnostic_store, .read_before_initialization)
 }

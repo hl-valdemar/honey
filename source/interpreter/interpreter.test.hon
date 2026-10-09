@@ -391,8 +391,10 @@ recursive_invocations_use_heap_frames_and_free_on_allocation_failure test {
     defer diagnostics.deinit(&store)
     main :: try add_function(&module, mem.empty(ir.Type), 0, .void, 2)
     module.entry = main
-    try emit(&module, main, function_value(0, main))
-    try emit(&module, main, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    recursive_block :: try add_block(&module, main)
+    module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = recursive_block }
+    try emit_at(&module, main, recursive_block, function_value(0, main))
+    try emit_at(&module, main, recursive_block, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(1), left = ir.ValueId(0) })
     state := AllocationState{ remaining = 2048 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
     _ = run(allocator, &module, &store) catch |error| {
@@ -414,13 +416,17 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
     defer diagnostics.deinit(&store)
     types [1]ir.Type :: [.int]
     initializer :: try add_function(&module, types[..], 0, .int, 1)
-    try emit(&module, initializer, integer(0, 42))
-    return_value(&module, initializer, ir.ValueId(0))
+    init_block :: try add_block(&module, initializer)
+    module.functions.items[usize(initializer)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = init_block }
+    try emit_at(&module, initializer, init_block, integer(0, 42))
+    module.functions.items[usize(initializer)].blocks.items[usize(init_block)].terminator = ir.Terminator{ value = ir.ValueId(0) }
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
     main :: try add_function(&module, types[..], 0, .int, 1)
     module.entry = main
-    try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
-    return_value(&module, main, ir.ValueId(0))
+    work :: try add_block(&module, main)
+    module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = work }
+    try emit_at(&module, main, work, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
+    module.functions.items[usize(main)].blocks.items[usize(work)].terminator = ir.Terminator{ value = ir.ValueId(0) }
     succeeded := false
     failures usize := 0
     for (usize(0)..usize(16)) |limit| {
@@ -443,7 +449,7 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
     try testing.expect(succeeded)
     try testing.expect(failures > 0)
     trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
-    module.functions.items[usize(initializer)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    module.functions.items[usize(initializer)].blocks.items[usize(init_block)].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
     state := AllocationState{ remaining = 64 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
     trapped :: try run(allocator, &module, &store)
@@ -476,4 +482,186 @@ runtime_diagnostic_allocation_failure_is_infrastructure_error_and_frees_frames t
         return
     }
     return .expectation_failed
+}
+
+@hide:file
+add_block proc(module @mut ir.Module, function ir.FunctionId) ir.BlockId ! mem.AllocError {
+    body := &module.functions.items[usize(function)]
+    id :: ir.BlockId(body.blocks.items.len)
+    try arraylist.append(&body.blocks, ir.init_block(module.allocator))
+    return id
+}
+
+@hide:file
+emit_at proc(module @mut ir.Module, function ir.FunctionId, block ir.BlockId, instruction ir.Instruction) void ! mem.AllocError {
+    try arraylist.append(&module.functions.items[usize(function)].blocks.items[usize(block)].instructions, instruction)
+}
+
+branching_recursive_calls_and_lazy_initializers_resume_the_current_block test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [1]ir.Type :: [.int]
+    count :: try add_function(&module, types[..], 1, .int, 9)
+    done :: try add_block(&module, count)
+    recurse :: try add_block(&module, count)
+    try emit(&module, count, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0 })
+    try emit(&module, count, integer(1, 0))
+    try emit(&module, count, ir.Instruction{ op = .less_equal, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+    module.functions.items[usize(count)].blocks.items[0].terminator = ir.Terminator{
+        kind = .branch, value = ir.ValueId(2), target = done, alternative = recurse,
+    }
+    module.functions.items[usize(count)].blocks.items[usize(done)].terminator = ir.Terminator{ value = ir.ValueId(1) }
+    try emit_at(&module, count, recurse, function_value(3, count))
+    try emit_at(&module, count, recurse, integer(4, 1))
+    try emit_at(&module, count, recurse, ir.Instruction{ op = .subtract, type = .int, destination = ir.ValueId(5), left = ir.ValueId(0), right = ir.ValueId(4) })
+    try arraylist.append(&module.functions.items[usize(count)].blocks.items[usize(recurse)].arguments, ir.ValueId(5))
+    try emit_at(&module, count, recurse, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(6), left = ir.ValueId(3), arguments_count = 1 })
+    try emit_at(&module, count, recurse, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(7), left = ir.ValueId(6), right = ir.ValueId(4) })
+    module.functions.items[usize(count)].blocks.items[usize(recurse)].terminator = ir.Terminator{ value = ir.ValueId(7) }
+
+    initializer :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    init_entry :: try add_block(&module, initializer)
+    init_exit :: try add_block(&module, initializer)
+    trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
+    module.functions.items[usize(initializer)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    module.functions.items[usize(initializer)].entry = init_entry
+    try emit_at(&module, initializer, init_entry, function_value(0, count))
+    try emit_at(&module, initializer, init_entry, integer(1, 128))
+    try arraylist.append(&module.functions.items[usize(initializer)].blocks.items[usize(init_entry)].arguments, ir.ValueId(1))
+    try emit_at(&module, initializer, init_entry, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), arguments_count = 1 })
+    module.functions.items[usize(initializer)].blocks.items[usize(init_entry)].terminator = ir.Terminator{ kind = .jump, target = init_exit }
+    module.functions.items[usize(initializer)].blocks.items[usize(init_exit)].terminator = ir.Terminator{ value = ir.ValueId(2) }
+    try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
+
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 5)
+    main_entry :: try add_block(&module, main)
+    main_exit :: try add_block(&module, main)
+    module.entry = main
+    module.functions.items[usize(main)].entry = main_entry
+    module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    try emit_at(&module, main, main_entry, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
+    try emit_at(&module, main, main_entry, function_value(1, count))
+    try emit_at(&module, main, main_entry, integer(2, 2))
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[usize(main_entry)].arguments, ir.ValueId(2))
+    try emit_at(&module, main, main_entry, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(3), left = ir.ValueId(1), arguments_count = 1 })
+    module.functions.items[usize(main)].blocks.items[usize(main_entry)].terminator = ir.Terminator{ kind = .jump, target = main_exit }
+    try emit_at(&module, main, main_exit, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(4), left = ir.ValueId(0), right = ir.ValueId(3) })
+    module.functions.items[usize(main)].blocks.items[usize(main_exit)].terminator = ir.Terminator{ value = ir.ValueId(4) }
+    state := AllocationState{ remaining = 2048 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    outcome :: try run(allocator, &module, &store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(130), outcome.value.data.integer)
+    try testing.expect_equal(usize(0), state.live)
+    try testing.expect_equal(usize(1), diagnostics.count(&store))
+    # trapping after returning through many heap frames also releases every live frame.
+    module.functions.items[usize(main)].blocks.items[usize(main_exit)].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    trapped :: try run(allocator, &module, &store)
+    try testing.expect_equal(trap_id, trapped.trap?)
+    try testing.expect_equal(usize(0), state.live)
+}
+
+all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
+    operations [6]ir.Op :: [.equal, .not_equal, .less, .less_equal, .greater, .greater_equal]
+    lefts [3]i64 :: [-2, 2, 3]
+    rights [3]i64 :: [3, 2, -2]
+    operand_types [2]ir.Type :: [.int, .float]
+    for (operand_types) |type| {
+        for (lefts) |left, pair| {
+            right :: rights[pair]
+            for (operations) |op| {
+                module := ir.init(mem.c_allocator)
+                defer ir.deinit(&module)
+                store := diagnostics.init(mem.c_allocator)
+                defer diagnostics.deinit(&store)
+                main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+                module.entry = main
+                left_value := ir.Value{ type = type, data = ir.ValueData{ integer = left } }
+                right_value := ir.Value{ type = type, data = ir.ValueData{ integer = right } }
+                if (type == .float) {
+                    left_value.data = ir.ValueData{ real = f64(left) }
+                    right_value.data = ir.ValueData{ real = f64(right) }
+                }
+                try emit(&module, main, ir.Instruction{ op = .constant, type = type, destination = ir.ValueId(0), constant = left_value })
+                try emit(&module, main, ir.Instruction{ op = .constant, type = type, destination = ir.ValueId(1), constant = right_value })
+                try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+                return_value(&module, main, ir.ValueId(2))
+                expected :: match op {
+                    .equal: left == right
+                    .not_equal: left != right
+                    .less: left < right
+                    .less_equal: left <= right
+                    .greater: left > right
+                    .greater_equal: left >= right
+                    else: unreachable
+                }
+                outcome :: try run(mem.c_allocator, &module, &store)
+                try testing.expect(outcome.trap == null)
+                try testing.expect_equal(ir.Type.bool, outcome.value.type)
+                try testing.expect_equal(expected, outcome.value.data.boolean)
+            }
+        }
+    }
+}
+
+nan_comparisons_obey_ieee_rules_in_either_operand_position test {
+    operations [6]ir.Op :: [.equal, .not_equal, .less, .less_equal, .greater, .greater_equal]
+    for (operations) |op| {
+        for (usize(0)..usize(3)) |position| {
+            module := ir.init(mem.c_allocator)
+            defer ir.deinit(&module)
+            store := diagnostics.init(mem.c_allocator)
+            defer diagnostics.deinit(&store)
+            main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+            module.entry = main
+            try emit(&module, main, ir.Instruction{
+                op = .constant, type = .float, destination = ir.ValueId(0),
+                constant = ir.Value{ type = .float, data = ir.ValueData{ real = 0 } },
+            })
+            try emit(&module, main, ir.Instruction{ op = .divide, type = .float, destination = ir.ValueId(1), left = ir.ValueId(0), right = ir.ValueId(0) })
+            left ir.ValueId :: if (position == 1) ir.ValueId(0) else ir.ValueId(1)
+            right ir.ValueId :: if (position == 0) ir.ValueId(0) else ir.ValueId(1)
+            try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = left, right = right })
+            return_value(&module, main, ir.ValueId(2))
+            outcome :: try run(mem.c_allocator, &module, &store)
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(ir.Type.bool, outcome.value.type)
+            try testing.expect_equal(op == .not_equal, outcome.value.data.boolean)
+        }
+    }
+}
+
+boolean_equality_and_branching_use_boolean_payloads test {
+    booleans [2]bool :: [false, true]
+    operations [2]ir.Op :: [.equal, .not_equal]
+    for (booleans) |left| {
+        for (booleans) |right| {
+            for (operations) |op| {
+                module := ir.init(mem.c_allocator)
+                defer ir.deinit(&module)
+                store := diagnostics.init(mem.c_allocator)
+                defer diagnostics.deinit(&store)
+                main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 5)
+                module.entry = main
+                yes :: try add_block(&module, main)
+                no :: try add_block(&module, main)
+                try emit(&module, main, ir.Instruction{ op = .constant, type = .bool, destination = ir.ValueId(0), constant = ir.Value{ type = .bool, data = ir.ValueData{ boolean = left } } })
+                try emit(&module, main, ir.Instruction{ op = .constant, type = .bool, destination = ir.ValueId(1), constant = ir.Value{ type = .bool, data = ir.ValueData{ boolean = right } } })
+                try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+                module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .branch, value = ir.ValueId(2), target = yes, alternative = no }
+                try emit_at(&module, main, yes, integer(3, 42))
+                module.functions.items[usize(main)].blocks.items[usize(yes)].terminator = ir.Terminator{ value = ir.ValueId(3) }
+                try emit_at(&module, main, no, integer(4, 7))
+                module.functions.items[usize(main)].blocks.items[usize(no)].terminator = ir.Terminator{ value = ir.ValueId(4) }
+                equal :: left == right
+                expected_true :: if (op == .equal) equal else !equal
+                expected i64 :: if (expected_true) 42 else 7
+                outcome :: try run(mem.c_allocator, &module, &store)
+                try testing.expect(outcome.trap == null)
+                try testing.expect_equal(expected, outcome.value.data.integer)
+            }
+        }
+    }
 }

@@ -298,3 +298,71 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
     try testing.expect_equal(later, binding(&resolution, valid_ref).data.declaration)
     try testing.expect_equal(syntax_count + 3, diagnostics.count(&diagnostic_store))
 }
+
+resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `choose proc(flag bool, value int) void {
+        `    if flag {
+        `        before :: later
+        `        later :: value
+        `        if before == value { nested :: later }
+        `    } else {
+        `        later :: value
+        `    }
+        `    later
+        `    if later { later :: 1 }
+        `    if flag {
+        `        value :: 2
+        `        bool :: false
+        `        if flag { value }
+        `    }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+
+    function :: ast.package_decl(&tree, 0)
+    view :: ast.function_decl(&tree, function)
+    flag :: ast.function_param(&tree, function, 0)
+    value :: ast.function_param(&tree, function, 1)
+    try testing.expect_equal(BuiltinType.bool, binding(&resolution, ast.param(&tree, flag).type).data.builtin)
+    first :: ast.if_stmt(&tree, ast.block_statement(&tree, view.body, 0))
+    try testing.expect_equal(flag, binding(&resolution, first.condition).data.declaration)
+    before :: ast.block_statement(&tree, first.then_block, 0)
+    later :: ast.block_statement(&tree, first.then_block, 1)
+    try testing.expect_equal(later, binding(&resolution, ast.statement_decl(&tree, before).initializer).data.declaration)
+    try testing.expect_equal(value, binding(&resolution, ast.statement_decl(&tree, later).initializer).data.declaration)
+    nested :: ast.if_stmt(&tree, ast.block_statement(&tree, first.then_block, 2))
+    nested_decl :: ast.block_statement(&tree, nested.then_block, 0)
+    try testing.expect_equal(later, binding(&resolution, ast.statement_decl(&tree, nested_decl).initializer).data.declaration)
+    if (first.else_block) |other| {
+        sibling :: ast.block_statement(&tree, other, 0)
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, sibling).kind)
+        try testing.expect_equal(sibling, binding(&resolution, sibling).data.declaration)
+    } else {
+        return .expectation_failed
+    }
+    outside :: ast.statement_expr(&tree, ast.block_statement(&tree, view.body, 1))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, outside).kind)
+    independent :: ast.if_stmt(&tree, ast.block_statement(&tree, view.body, 2))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, independent.condition).kind)
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, ast.block_statement(&tree, independent.then_block, 0)).kind)
+    forbidden :: ast.if_stmt(&tree, ast.block_statement(&tree, view.body, 3))
+    shadow :: ast.block_statement(&tree, forbidden.then_block, 0)
+    builtin :: ast.block_statement(&tree, forbidden.then_block, 1)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, shadow).kind)
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, builtin).kind)
+    poisoned :: ast.if_stmt(&tree, ast.block_statement(&tree, forbidden.then_block, 2))
+    use :: ast.statement_expr(&tree, ast.block_statement(&tree, poisoned.then_block, 0))
+    try testing.expect_equal(binding(&resolution, shadow).data.diagnostic, binding(&resolution, use).data.diagnostic)
+    try testing.expect_equal(4, diagnostics.count(&diagnostic_store))
+}
