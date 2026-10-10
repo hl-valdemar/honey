@@ -13,6 +13,7 @@ import "@source/sema"
 import "@source/ir"
 import "@source/lower"
 import "@source/interpreter"
+
 typecheck :: import "@source/sema/check"
 
 test import "@std/mem"
@@ -65,6 +66,7 @@ infrastructure_message proc(error DriverError) []u8 {
     return match error {
         .out_of_memory: "out of memory"
         .diagnostic_limit_reached: "diagnostic limit reached"
+        .storage_limit_reached: "aggregate storage limit reached"
         .source_too_large: "source file is too large"
         .out_of_space: "identifier storage is full"
         .open_failed: "cannot open source file"
@@ -133,7 +135,8 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
     defer diagnostics.deinit(&diagnostic_store)
     module := try compile(allocator, source.items, &diagnostic_store)
     defer ir.deinit(&module)
-    outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     if (outcome.trap == null) try print_result(io.stdout(runtime), &module, outcome.value)
     try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, outcome.trap)
     if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
@@ -142,12 +145,43 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
 
 @hide:file
 print_result proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
+    if (value.type == .void) return
+    try print_value(output, module, value)
+    try io.print("\n", output, {})
+}
+
+@hide:file
+print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
     match value.type {
-        .int: try io.print("{}\n", output, {value.data.integer})
-        .float: try io.print("{d}\n", output, {value.data.real})
-        .bool: try io.print("{}\n", output, {value.data.boolean})
-        .string: try io.print("{s}\n", output, {ir.string_bytes(module, value.data.string)})
-        .void: {}
+        .int: try io.print("{}", output, {value.data.integer})
+        .usize: try io.print("{}", output, {value.data.unsigned})
+        .float: try io.print("{d}", output, {value.data.real})
+        .bool: try io.print("{}", output, {value.data.boolean})
+        .string: try io.print("{s}", output, {ir.string_bytes(module, value.data.string)})
+        .array: {
+            shape :: module.arrays.items[usize(value.array_type)]
+            stride usize :: if (shape.element == .array)
+                module.arrays.items[usize(shape.element_array)].cells
+            else
+                1
+            try io.print("[", output, {})
+            for 0..(shape.len) |index| {
+                if (index != 0) try io.print(", ", output, {})
+                element := ir.Value{}
+                if shape.element == .array {
+                    start :: index * stride
+                    element = ir.Value{
+                        type = .array,
+                        array_type = shape.element_array,
+                        data = ir.ValueData{ elements = value.data.elements[start..(start + stride)] },
+                    }
+                } else {
+                    element = value.data.elements[index]
+                }
+                try print_value(output, module, element)
+            }
+            try io.print("]", output, {})
+        }
         else: unreachable
     }
 }

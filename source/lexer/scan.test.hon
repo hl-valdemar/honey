@@ -122,3 +122,22 @@ scans_ranges_without_consuming_float_dots test {
     try testing.expect_equal(u32(10), state.tokens.items[4].span.end)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
 }
+
+scans_array_delimiters_and_mut_keyword test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "[_]mut [2]i64 [1,2] [] mutable mut_1", &diagnostic_store)
+    expected [18]TokenKind :: [
+        .open_bracket, .ident, .close_bracket, .mut,
+        .open_bracket, .int, .close_bracket, .ident,
+        .open_bracket, .int, .comma, .int, .close_bracket,
+        .open_bracket, .close_bracket, .ident, .ident, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}

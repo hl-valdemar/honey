@@ -6,6 +6,17 @@ import "@source/diagnostics"
 Outcome :: struct {
     value ir.Value = ir.Value{}
     trap ?diagnostics.DiagnosticId = null
+    allocator ?mem.Allocator = null
+    owned_elements ?[]mut ir.Value = null
+}
+
+#! release an escaped aggregate with its retained allocator; scalar and trap outcomes need no allocation.
+#! strings and array descriptors borrow the module, which must outlive this outcome.
+deinit proc(outcome @mut Outcome) void {
+    if (outcome.owned_elements) |elements| mem.free(outcome.allocator?, elements)
+    outcome.owned_elements = null
+    outcome.allocator = null
+    outcome.value = ir.Value{}
 }
 
 @hide:file
@@ -24,6 +35,15 @@ GlobalState :: struct {
 }
 
 @hide:file
+Address :: struct {
+    type ir.Type
+    array_type ir.ArrayId = ir.no_array
+    cells []mut ir.Value
+    scalar ?@mut ir.Value = null
+    initialized ?@mut bool = null
+}
+
+@hide:file
 Frame :: struct {
     function ir.FunctionId
     block ir.BlockId
@@ -32,10 +52,12 @@ Frame :: struct {
     global ?usize = null
     locals []mut Slot
     values []mut ir.Value
+    aggregate []mut ir.Value
+    addresses []mut Address
 }
 
-#! executes only typed IR; invocation and global state are temporary and released on every exit.
-#! returned string IDs resolve through `module`; runtime source errors are traps, not infrastructure errors.
+#! executes typed IR with invocation/global storage released on every exit.
+#! array results own flat storage released by `deinit`; string IDs and shapes resolve through `module`.
 run proc(
     allocator mem.Allocator,
     module @ir.Module,
@@ -51,6 +73,22 @@ run proc(
     globals :: try mem.alloc(GlobalState, allocator, module.globals.items.len)
     defer mem.free(allocator, globals)
     mem.set(globals, GlobalState{})
+    global_cells usize := 0
+    for (module.globals.items) |global| {
+        if (global.type != .array) continue
+        cells :: module.arrays.items[usize(global.array_type)].cells
+        if (cells > maxval!(usize) - global_cells) return .storage_limit_reached
+        global_cells += cells
+    }
+    aggregate_globals :: try mem.alloc(ir.Value, allocator, global_cells)
+    defer mem.free(allocator, aggregate_globals)
+    global_offset usize := 0
+    for (module.globals.items) |global, i| {
+        if (global.type != .array) continue
+        cells :: module.arrays.items[usize(global.array_type)].cells
+        globals[i].value = array_view(global.array_type, aggregate_globals[global_offset..global_offset + cells])
+        global_offset += cells
+    }
     frames := arraylist.init(Frame, allocator)
     defer {
         for (frames.items) |frame| free_frame(allocator, frame)
@@ -81,16 +119,25 @@ run proc(
                 value = frames.items[frame_index].values[usize(terminator.value)]
             }
             completed :: frames.items[frame_index]
-            _ = arraylist.pop(&frames)
-            free_frame(allocator, completed)
+            # transfer leaves while the completed frame still owns its backing.
             if completed.global |global_index| {
-                globals[global_index].value = value
+                copy_value(&globals[global_index].value, value)
                 globals[global_index].status = .ready
             }
-            if (frames.items.len == 0) return Outcome{ value = value }
-            if completed.destination != ir.no_value {
-                frames.items[frames.items.len - 1].values[usize(completed.destination)] = value
+            if (frames.items.len == 1) {
+                if (value.type == .array) {
+                    escaped :: try mem.alloc(ir.Value, allocator, value.data.elements.len)
+                    memcopy!(escaped, value.data.elements)
+                    value.data.elements = escaped
+                    return Outcome{ value = value, allocator = allocator, owned_elements = escaped }
+                }
+                return Outcome{ value = value }
             }
+            if completed.destination != ir.no_value {
+                copy_value(&frames.items[frame_index - 1].values[usize(completed.destination)], value)
+            }
+            _ = arraylist.pop(&frames)
+            free_frame(allocator, completed)
             continue
         }
 
@@ -107,10 +154,9 @@ run proc(
                 value = local.value
             }
             .store_local: {
-                frames.items[frame_index].locals[usize(instruction.slot)] = Slot{
-                    initialized = true,
-                    value = frames.items[frame_index].values[usize(instruction.left)],
-                }
+                local :: &frames.items[frame_index].locals[usize(instruction.slot)]
+                copy_value(&local.value, frames.items[frame_index].values[usize(instruction.left)])
+                local.initialized = true
                 continue
             }
             .assign_local: {
@@ -118,7 +164,7 @@ run proc(
                 if (!local.initialized) {
                     return try runtime_trap(diagnostic_store, .write_before_initialization, instruction.span)
                 }
-                local.value = frames.items[frame_index].values[usize(instruction.left)]
+                copy_value(&local.value, frames.items[frame_index].values[usize(instruction.left)])
                 continue
             }
             .reset_local: {
@@ -152,12 +198,106 @@ run proc(
                 # frame indices survive stack growth; pointers into frames.items do not.
                 for (0..instruction.arguments_count) |argument_index| {
                     argument :: block.arguments.items[instruction.arguments_start + argument_index]
-                    frames.items[frame_index + 1].locals[argument_index] = Slot{
-                        initialized = true,
-                        value = frames.items[frame_index].values[usize(argument)],
+                    local :: &frames.items[frame_index + 1].locals[argument_index]
+                    copy_value(&local.value, frames.items[frame_index].values[usize(argument)])
+                    local.initialized = true
+                }
+                continue
+            }
+            .array_literal: {
+                destination :: &frames.items[frame_index].values[usize(instruction.destination)]
+                offset usize := 0
+                for (0..instruction.arguments_count) |i| {
+                    operand :: block.arguments.items[instruction.arguments_start + i]
+                    element :: frames.items[frame_index].values[usize(operand)]
+                    if (element.type == .array) {
+                        count :: element.data.elements.len
+                        memcopy!(destination.data.elements[offset..offset + count], element.data.elements)
+                        offset += count
+                    } else {
+                        destination.data.elements[offset] = element
+                        offset += 1
                     }
                 }
                 continue
+            }
+            .index: {
+                base :: frames.items[frame_index].values[usize(instruction.left)]
+                index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                shape :: module.arrays.items[usize(base.array_type)]
+                if (index >= u64(shape.len)) {
+                    return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
+                }
+                value = indexed_value(module, base.array_type, base.data.elements, usize(index))
+            }
+            .address_local: {
+                local :: &frames.items[frame_index].locals[usize(instruction.slot)]
+                address := Address{
+                    type = instruction.pointee, array_type = instruction.array_type,
+                    cells = mem.empty(ir.Value), initialized = &local.initialized,
+                }
+                if (address.type == .array) address.cells = local.value.data.elements
+                else address.scalar = &local.value
+                frames.items[frame_index].addresses[usize(instruction.destination)] = address
+                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+            }
+            .address_global: {
+                global_index :: usize(instruction.slot)
+                match globals[global_index].status {
+                    .initializing: return try runtime_trap(diagnostic_store, .initialization_cycle, instruction.span)
+                    .uninitialized: {
+                        frames.items[frame_index].next_instruction -= 1
+                        try push_frame(allocator, module, &frames, module.globals.items[global_index].initializer, ir.no_value, global_index)
+                        globals[global_index].status = .initializing
+                        continue
+                    }
+                    .ready: {}
+                }
+                global :: &globals[global_index]
+                address := Address{
+                    type = instruction.pointee, array_type = instruction.array_type,
+                    cells = mem.empty(ir.Value),
+                }
+                if (address.type == .array) address.cells = global.value.data.elements
+                else address.scalar = &global.value
+                frames.items[frame_index].addresses[usize(instruction.destination)] = address
+                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+            }
+            .index_address: {
+                base_id :: frames.items[frame_index].values[usize(instruction.left)].data.address
+                base :: frames.items[frame_index].addresses[usize(base_id)]
+                index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                shape :: module.arrays.items[usize(base.array_type)]
+                if (index >= u64(shape.len)) {
+                    return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
+                }
+                width :: element_cells(module, shape)
+                start :: usize(index) * width
+                address := Address{
+                    type = instruction.pointee, array_type = instruction.array_type,
+                    cells = base.cells[start..start + width], initialized = base.initialized,
+                }
+                if (address.type != .array) address.scalar = &address.cells[0]
+                frames.items[frame_index].addresses[usize(instruction.destination)] = address
+                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+            }
+            .load_address, .store_address: {
+                id :: frames.items[frame_index].values[usize(instruction.left)].data.address
+                address :: frames.items[frame_index].addresses[usize(id)]
+                if address.initialized |initialized| {
+                    if (!initialized^) {
+                        code :: if (instruction.op == .load_address) diagnostics.Code.read_before_initialization else diagnostics.Code.write_before_initialization
+                        return try runtime_trap(diagnostic_store, code, instruction.span)
+                    }
+                }
+                if (instruction.op == .load_address) {
+                    value = if (address.type == .array) array_view(address.array_type, address.cells) else address.scalar?^
+                } else {
+                    source :: frames.items[frame_index].values[usize(instruction.right)]
+                    if (address.type == .array) memcopy!(address.cells, source.data.elements)
+                    else address.scalar?^ = source
+                    continue
+                }
             }
             .negate: {
                 operand :: frames.items[frame_index].values[usize(instruction.left)]
@@ -187,6 +327,13 @@ run proc(
                         else: unreachable
                     }
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = result } }
+                } else if instruction.type == .usize {
+                    result :: checked_unsigned(instruction.op, left.data.unsigned, right.data.unsigned)
+                    if result |unsigned| {
+                        value = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = unsigned } }
+                    } else {
+                        return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                    }
                 } else {
                     result :: checked_integer(instruction.op, left.data.integer, right.data.integer)
                     if result |result_integer| {
@@ -210,6 +357,15 @@ run proc(
                         .greater_equal: left.data.integer >= right.data.integer
                         else: unreachable
                     }
+                    .usize: result = match instruction.op {
+                        .equal: left.data.unsigned == right.data.unsigned
+                        .not_equal: left.data.unsigned != right.data.unsigned
+                        .less: left.data.unsigned < right.data.unsigned
+                        .less_equal: left.data.unsigned <= right.data.unsigned
+                        .greater: left.data.unsigned > right.data.unsigned
+                        .greater_equal: left.data.unsigned >= right.data.unsigned
+                        else: unreachable
+                    }
                     .float: result = match instruction.op {
                         .equal: left.data.real == right.data.real
                         .not_equal: left.data.real != right.data.real
@@ -230,7 +386,7 @@ run proc(
             }
         }
         if instruction.destination != ir.no_value {
-            frames.items[frame_index].values[usize(instruction.destination)] = value
+            copy_value(&frames.items[frame_index].values[usize(instruction.destination)], value)
         }
     }
     unreachable
@@ -251,6 +407,17 @@ push_frame proc(
     mem.set(locals, Slot{})
     values :: try mem.alloc(ir.Value, allocator, signature.value_count)
     errdefer mem.free(allocator, values)
+    aggregate :: try mem.alloc(ir.Value, allocator, signature.aggregate_cells)
+    errdefer mem.free(allocator, aggregate)
+    address_count usize :: if (signature.has_addresses) signature.value_count else 0
+    addresses :: try mem.alloc(Address, allocator, address_count)
+    errdefer mem.free(allocator, addresses)
+    for (signature.array_storage.items) |storage| {
+        cells :: module.arrays.items[usize(storage.array_type)].cells
+        value :: array_view(storage.array_type, aggregate[storage.offset..storage.offset + cells])
+        if (storage.local) locals[usize(storage.index)].value = value
+        else values[usize(storage.index)] = value
+    }
     # typed IR assigns each temporary before use; only local slots need initialization flags.
     try arraylist.append(frames, Frame{
         function = function,
@@ -259,6 +426,8 @@ push_frame proc(
         global = global,
         locals = locals,
         values = values,
+        aggregate = aggregate,
+        addresses = addresses,
     })
 }
 
@@ -266,6 +435,8 @@ push_frame proc(
 free_frame proc(allocator mem.Allocator, frame Frame) void {
     mem.free(allocator, frame.locals)
     mem.free(allocator, frame.values)
+    mem.free(allocator, frame.aggregate)
+    mem.free(allocator, frame.addresses)
 }
 
 @hide:file
@@ -300,6 +471,54 @@ checked_integer proc(op ir.Op, left i64, right i64) ?i64 {
                 if (right > 0 and left < divtrunc!(minimum, right)) return null
                 if (right < 0 and left < divtrunc!(maximum, right)) return null
             }
+            return left * right
+        }
+        else: unreachable
+    }
+}
+
+@hide:file
+array_view proc(shape ir.ArrayId, cells []mut ir.Value) ir.Value {
+    return ir.Value{ type = .array, array_type = shape, data = ir.ValueData{ elements = cells } }
+}
+
+@hide:file
+copy_value proc(destination @mut ir.Value, source ir.Value) void {
+    if (source.type == .array) {
+        # aggregate destinations already own disjoint fixed segments; never install an alias.
+        memcopy!(destination.data.elements, source.data.elements)
+    } else {
+        destination^ = source
+    }
+}
+
+@hide:file
+element_cells proc(module @ir.Module, shape ir.ArrayType) usize {
+    return if (shape.element == .array) module.arrays.items[usize(shape.element_array)].cells else 1
+}
+
+@hide:file
+indexed_value proc(module @ir.Module, shape_id ir.ArrayId, cells []mut ir.Value, index usize) ir.Value {
+    shape :: module.arrays.items[usize(shape_id)]
+    if (shape.element != .array) return cells[index]
+    width :: element_cells(module, shape)
+    start :: index * width
+    return array_view(shape.element_array, cells[start..start + width])
+}
+
+@hide:file
+checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {
+    match op {
+        .add: {
+            if (left > maxval!(u64) - right) return null
+            return left + right
+        }
+        .subtract: {
+            if (left < right) return null
+            return left - right
+        }
+        .multiply: {
+            if (right != 0 and left > divtrunc!(maxval!(u64), right)) return null
             return left * right
         }
         else: unreachable

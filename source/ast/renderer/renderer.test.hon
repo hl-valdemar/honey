@@ -1,0 +1,33 @@
+import "@std/mem"
+import "@std/testing"
+import "@source/diagnostics"
+import "@source/strpool"
+import "@source/lexer"
+import "@source/parser"
+import "@source/ast"
+
+renders_array_annotations_literals_and_indexed_assignments test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `data [2]mut i64 := [1, 2]
+        `main proc() i64 {
+        `    (data)[0] = 9
+        `    return data[0]
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    renderer := init(mem.c_allocator)
+    defer deinit(&renderer)
+    try render(&renderer, &tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(
+        "package\n  declaration data [2]mut i64 := [1, 2]\n  function main\n    assignment (data)[0] = 9\n    return data[0]\n",
+        renderer.bytes.items,
+    )
+}

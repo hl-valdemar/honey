@@ -2129,3 +2129,474 @@ invalid_range_capture_bindings_keep_resolver_diagnostic_ids_without_erasing_head
     try expect_kind(&result, ast.block_statement(&tree, sibling_loop.body, 0), .int)
     try testing.expect_equal(previous_count, diagnostics.count(&diagnostic_store))
 }
+
+@hide:file
+ArrayFixture :: struct {
+    tree ast.Tree
+    resolution sema.Resolution
+    diagnostics diagnostics.Store
+    result Result
+}
+
+@hide:file
+array_fixture proc(source []u8) ArrayFixture ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError | lexer.SourceError) {
+    store := diagnostics.init(mem.c_allocator)
+    errdefer diagnostics.deinit(&store)
+    scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan)
+    try lexer.scan(&scan, source, &store)
+    tree := try parser.parse(mem.c_allocator, scan.tokens.items, source, &store)
+    errdefer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &store)
+    errdefer sema.deinit(&resolution)
+    result :: try check(mem.c_allocator, &tree, &resolution, &store)
+    return ArrayFixture{ tree = tree, resolution = resolution, diagnostics = store, result = result }
+}
+
+@hide:file
+deinit_array_fixture proc(fixture @mut ArrayFixture) void {
+    deinit(&fixture.result)
+    sema.deinit(&fixture.resolution)
+    ast.deinit(&fixture.tree)
+    diagnostics.deinit(&fixture.diagnostics)
+}
+
+@hide:file
+expect_array proc(result @Result, id ast.NodeId, len usize, mutable bool, element TypeKind) ArrayType ! testing.Error {
+    try expect_kind(result, id, .array)
+    actual :: array_type(result, type_of(result, id).array_type)
+    try testing.expect_equal(len, actual.len)
+    try testing.expect_equal(mutable, actual.mutable)
+    try testing.expect_equal(element, actual.element.kind)
+    return actual
+}
+
+fixed_arrays_contextualize_forward_aliases_counts_nested_literals_and_signatures test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `context [2]f64 :: alias
+        `alias :: seed
+        `seed := [1, 2]
+        `count :: later * 2 - 1
+        `later :: 2
+        `nested [_]mut [2]mut i64 := [[1, 2], [3, 4]]
+        `empty [_]bool :: []
+        `plain :: []
+        `copy :: nested
+        `index usize :: 0
+        `child float :: seed[index]
+        `produce proc(value [2]f64) [2]f64 { return value }
+        `called :: produce([5, 6])
+        `from_result [_]f64 :: called
+        `counted [count]i64 :: [1, 2, 3]
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for (0..usize(3)) |i| _ = try expect_array(result, ast.package_decl(tree, i), 2, false, .float)
+    seed :: ast.statement_decl(tree, ast.package_decl(tree, 2)).initializer
+    for (0..ast.array_element_count(tree, seed)) |i| try expect_kind(result, ast.array_element(tree, seed, i), .float)
+    nested :: ast.package_decl(tree, 5)
+    shape :: try expect_array(result, nested, 2, true, .array)
+    row :: array_type(result, shape.element.array_type)
+    try testing.expect_equal(2, row.len)
+    try testing.expect(row.mutable)
+    try testing.expect_equal(TypeKind.int, row.element.kind)
+    annotation :: ast.statement_decl(tree, nested).type?
+    _ = try expect_array(result, annotation, 2, true, .array)
+    _ = try expect_array(result, ast.package_decl(tree, 6), 0, false, .bool)
+    _ = try expect_array(result, ast.package_decl(tree, 7), 0, false, .int)
+    try testing.expect_equal(type_of(result, nested).array_type, type_of(result, ast.package_decl(tree, 8)).array_type)
+    indexed :: ast.index_expr(tree, ast.statement_decl(tree, ast.package_decl(tree, 10)).initializer)
+    try expect_kind(result, indexed.index, .usize)
+    try expect_kind(result, ast.statement_decl(tree, ast.package_decl(tree, 10)).initializer, .float)
+    function :: ast.package_decl(tree, 11)
+    _ = try expect_array(result, ast.function_param(tree, function, 0), 2, false, .float)
+    _ = try expect_array(result, ast.function_decl(tree, function).return_type, 2, false, .float)
+    call :: ast.statement_decl(tree, ast.package_decl(tree, 12)).initializer
+    argument :: ast.call_arg(tree, call, 0)
+    _ = try expect_array(result, argument, 2, false, .float)
+    try expect_kind(result, ast.array_element(tree, argument, 0), .float)
+    _ = try expect_array(result, ast.package_decl(tree, 13), 2, false, .float)
+    _ = try expect_array(result, ast.package_decl(tree, 14), 3, false, .int)
+    try testing.expect(array_type_count(result) > 0)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+nested_array_numeric_context_flows_through_index_children_before_defaults test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `first float :: later[0][0]
+        `later := [[1, 2], [3, 4]]
+        `row :: later[0]
+        `mixed :: [[1, 2], [3.5, 4]]
+        `identity proc(value int) int { return value }
+        `another proc(value int) int { return value + 1 }
+        `functions :: [identity, another]
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for usize(1)..usize(4) |i| {
+        element_kind TypeKind :: if (i == 2) .float else .array
+        type :: try expect_array(result, ast.package_decl(tree, i), 2, false, element_kind)
+        if (type.element.kind == .array) {
+            try testing.expect_equal(TypeKind.float, array_type(result, type.element.array_type).element.kind)
+        }
+    }
+    matrix :: ast.statement_decl(tree, ast.package_decl(tree, 1)).initializer
+    for 0..ast.array_element_count(tree, matrix) |i| {
+        row :: ast.array_element(tree, matrix, i)
+        for (0..ast.array_element_count(tree, row)) |j| try expect_kind(result, ast.array_element(tree, row, j), .float)
+    }
+    outer :: ast.statement_decl(tree, ast.package_decl(tree, 0)).initializer
+    inner :: ast.index_expr(tree, outer).base
+    _ = try expect_array(result, inner, 2, false, .float)
+    try expect_kind(result, outer, .float)
+    try expect_kind(result, ast.index_expr(tree, outer).index, .usize)
+    try expect_kind(result, ast.index_expr(tree, inner).index, .usize)
+    _ = try expect_array(result, ast.package_decl(tree, 6), 2, false, .function)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+fixed_index_errors_are_occurrence_local_and_preserve_sources_and_siblings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `fixed i64 :: 0
+        `inferred := 0
+        `source [2]i64 :: [10, 20]
+        `bad :: source[fixed]
+        `good :: source[inferred]
+        `boolean :: source[true]
+        `missing :: source[unknown]
+        `tail :: source[1]
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    try expect_kind(result, ast.package_decl(tree, 0), .int)
+    try expect_kind(result, ast.package_decl(tree, 1), .usize)
+    _ = try expect_array(result, ast.package_decl(tree, 2), 2, false, .int)
+    bad_id :: ast.statement_decl(tree, ast.package_decl(tree, 3)).initializer
+    bad :: ast.index_expr(tree, bad_id)
+    original :: try expect_error(result, &fixture.diagnostics, bad.index, .invalid_index_type, ast.node_span(tree, bad.index))
+    try testing.expect_equal(original, type_of(result, bad_id).diagnostic)
+    try testing.expect_equal(original, type_of(result, ast.package_decl(tree, 3)).diagnostic)
+    _ = try expect_array(result, bad.base, 2, false, .int)
+    try expect_kind(result, ast.package_decl(tree, 4), .int)
+    boolean :: ast.index_expr(tree, ast.statement_decl(tree, ast.package_decl(tree, 5)).initializer).index
+    _ = try expect_error(result, &fixture.diagnostics, boolean, .invalid_index_type, ast.node_span(tree, boolean))
+    missing :: ast.index_expr(tree, ast.statement_decl(tree, ast.package_decl(tree, 6)).initializer).index
+    try testing.expect_equal(sema.binding(&fixture.resolution, missing).data.diagnostic, type_of(result, missing).diagnostic)
+    try expect_kind(result, ast.package_decl(tree, 7), .int)
+    try testing.expect_equal(2, code_count(&fixture.diagnostics, .invalid_index_type))
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .unknown_name))
+    try testing.expect_equal(3, diagnostics.count(&fixture.diagnostics))
+}
+
+array_lengths_require_supported_constexpr_and_finalize_nested_inferred_counts test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `two :: tail
+        `tail :: 2
+        `valid [two * 3 - 4]i64 :: [1, 2]
+        `zero [3 - 3]i64 :: []
+        `nested [_]mut [_]mut i64 := [[1, 2], [3, 4]]
+        `negative [-1]i64 :: []
+        `fraction [1.5]i64 :: []
+        `runtime_count := 2
+        `runtime_array [runtime_count]i64 :: [1, 2]
+        `count proc() int { return 2 }
+        `called [count()]i64 :: [1, 2]
+        `a :: b
+        `b :: a
+        `cycle [a]i64 :: []
+        `overflow [18446744073709551615 + 1]i64 :: []
+        `wrong [2]i64 :: [1]
+        `constraints [2]mut int := [1, 2]
+        `floats [0]float :: []
+        `voids [0]void :: []
+        `missing [absent]i64 :: []
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    _ = try expect_array(result, ast.package_decl(tree, 2), 2, false, .int)
+    _ = try expect_array(result, ast.package_decl(tree, 3), 0, false, .int)
+    nested :: ast.statement_decl(tree, ast.package_decl(tree, 4))
+    shape :: try expect_array(result, nested.type?, 2, true, .array)
+    child :: array_type(result, shape.element.array_type)
+    try testing.expect_equal(2, child.len)
+    try testing.expect(child.mutable)
+    _ = try expect_array(result, ast.array_type(tree, nested.type?).element, 2, true, .int)
+    invalid_lengths [6]usize :: [5, 6, 8, 10, 13, 14]
+    for invalid_lengths |i| {
+        annotation :: ast.statement_decl(tree, ast.package_decl(tree, i)).type?
+        count :: ast.array_type(tree, annotation).count?
+        _ = try expect_error(result, &fixture.diagnostics, annotation, .invalid_array_length, ast.node_span(tree, count))
+    }
+    wrong :: ast.statement_decl(tree, ast.package_decl(tree, 15)).initializer
+    _ = try expect_error(result, &fixture.diagnostics, wrong, .array_length_mismatch, ast.node_span(tree, wrong))
+    for usize(16)..usize(19) |i| {
+        annotation :: ast.statement_decl(tree, ast.package_decl(tree, i)).type?
+        child_id :: ast.array_type(tree, annotation).element
+        _ = try expect_error(result, &fixture.diagnostics, annotation, .invalid_array_element_type, ast.node_span(tree, child_id))
+    }
+    missing :: ast.statement_decl(tree, ast.package_decl(tree, 19)).type?
+    count :: ast.array_type(tree, missing).count?
+    try testing.expect_equal(sema.binding(&fixture.resolution, count).data.diagnostic, type_of(result, missing).diagnostic)
+    try testing.expect_equal(6, code_count(&fixture.diagnostics, .invalid_array_length))
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .array_length_mismatch))
+    try testing.expect_equal(3, code_count(&fixture.diagnostics, .invalid_array_element_type))
+}
+
+indexed_writes_require_mutable_local_root_and_each_array_level_but_copies_are_values test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `global [1]mut i64 := [1]
+        `main proc(parameter [1]mut i64) void {
+        `    mutable [1]mut i64 := [1]
+        `    mutable[0] = 2
+        `    copied := mutable
+        `    copied[0] = 3
+        `    inferred := [1]
+        `    inferred[0] = 4
+        `    inferred = [5]
+        `    constant [1]mut i64 :: [1]
+        `    constant[0] = 6
+        `    parameter[0] = 7
+        `    global[0] = 8
+        `    outer_readonly [1][1]mut i64 := [[1]]
+        `    (outer_readonly[0])[0] = 9
+        `    inner_readonly [1]mut [1]i64 := [[1]]
+        `    (inner_readonly[0])[0] = 10
+        `    both [1]mut [1]mut i64 := [[1]]
+        `    (both[0])[0] = 11
+        `    both[0] = [12]
+        `    mismatch [1]mut i64 := inner_readonly[0]
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    body :: ast.function_decl(tree, ast.package_decl(tree, 1)).body
+    valid [6]usize :: [1, 3, 6, 16, 17, 2]
+    for valid |i| {
+        id :: ast.block_statement(tree, body, i)
+        kind TypeKind :: if (i == 2) .array else .void
+        try expect_kind(result, id, kind)
+    }
+    invalid [6]usize :: [5, 8, 9, 10, 12, 14]
+    for invalid |i| {
+        id :: ast.block_statement(tree, body, i)
+        target :: ast.assignment_stmt(tree, id).target
+        _ = try expect_error(result, &fixture.diagnostics, id, .invalid_index_assignment, ast.node_span(tree, target))
+        try expect_kind(result, target, .int)
+        try expect_kind(result, ast.index_expr(tree, target).index, .usize)
+    }
+    mismatch :: ast.statement_decl(tree, ast.block_statement(tree, body, 18)).initializer
+    _ = try expect_error(result, &fixture.diagnostics, mismatch, .type_mismatch, ast.node_span(tree, mismatch))
+    _ = try expect_array(result, ast.block_statement(tree, body, 4), 1, false, .int)
+    _ = try expect_array(result, ast.function_param(tree, ast.package_decl(tree, 1), 0), 1, true, .int)
+    try testing.expect_equal(6, code_count(&fixture.diagnostics, .invalid_index_assignment))
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .type_mismatch))
+}
+
+usize_arithmetic_ranges_and_readonly_captures_keep_the_bound_family test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `limit usize :: 18446744073709551615
+        `arithmetic usize :: (limit - 2) * 1 + 1
+        `ordered :: 0 < limit
+        `equal :: limit == 18446744073709551615
+        `negated :: -limit
+        `divided :: limit / 2
+        `fixed i64 :: 1
+        `mixed :: fixed + limit
+        `main proc() void {
+        `    source [2]i64 :: [1, 2]
+        `    for 0..limit |index| {
+        `        source[index]
+        `        index = 1
+        `    }
+        `    for 0..2 |index| { source[index] }
+        `    for limit..=limit |_| {}
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    try expect_kind(result, ast.package_decl(tree, 0), .usize)
+    try expect_kind(result, ast.package_decl(tree, 1), .usize)
+    try expect_kind(result, ast.package_decl(tree, 2), .bool)
+    try expect_kind(result, ast.package_decl(tree, 3), .bool)
+    for usize(4)..usize(8) |i| {
+        if (i == 6) continue
+        value :: ast.statement_decl(tree, ast.package_decl(tree, i)).initializer
+        code diagnostics.Code :: if (i == 5) .integer_division else .invalid_operand
+        _ = try expect_error(result, &fixture.diagnostics, value, code, ast.node_span(tree, value))
+    }
+    body :: ast.function_decl(tree, ast.package_decl(tree, 8)).body
+    unsigned_loop :: ast.for_stmt(tree, ast.block_statement(tree, body, 1))
+    try expect_kind(result, unsigned_loop.capture?, .usize)
+    try testing.expect_equal(TypeKind.usize, type_of(result, unsigned_loop.iterable).range_element)
+    interval :: ast.range_expr(tree, unsigned_loop.iterable)
+    try expect_kind(result, interval.start, .usize)
+    try expect_kind(result, interval.end, .usize)
+    read :: ast.statement_expr(tree, ast.block_statement(tree, unsigned_loop.body, 0))
+    try expect_kind(result, read, .int)
+    try expect_kind(result, ast.index_expr(tree, read).index, .usize)
+    readonly :: ast.block_statement(tree, unsigned_loop.body, 1)
+    target :: ast.assignment_stmt(tree, readonly).target
+    _ = try expect_error(result, &fixture.diagnostics, readonly, .invalid_assignment_target, ast.node_span(tree, target))
+    try expect_kind(result, target, .usize)
+    signed_loop :: ast.for_stmt(tree, ast.block_statement(tree, body, 2))
+    try expect_kind(result, signed_loop.capture?, .int)
+    signed_read :: ast.statement_expr(tree, ast.block_statement(tree, signed_loop.body, 0))
+    bad_index :: ast.index_expr(tree, signed_read).index
+    _ = try expect_error(result, &fixture.diagnostics, bad_index, .invalid_index_type, ast.node_span(tree, bad_index))
+    try testing.expect_equal(TypeKind.int, type_of(result, signed_loop.iterable).range_element)
+    _ = try expect_array(result, ast.block_statement(tree, body, 0), 2, false, .int)
+    ignored :: ast.for_stmt(tree, ast.block_statement(tree, body, 3))
+    try testing.expect_equal(TypeKind.usize, type_of(result, ignored.iterable).range_element)
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .invalid_index_type))
+    try testing.expect_equal(0, code_count(&fixture.diagnostics, .invalid_range_bound))
+}
+
+array_assignment_rhs_is_contextual_but_does_not_retarget_established_sources test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `main proc() void {
+        `    target [2]mut f64 := [1, 2]
+        `    seed := 3
+        `    source [2]i64 :: [4, 5]
+        `    target = [seed, 6]
+        `    target = source
+        `    target = [1]
+        `    matrix [1]mut [2]mut i64 := [[1, 2]]
+        `    matrix[0] = [7, 8]
+        `    matrix[0] = [true, false]
+        `    unknown [1]mut i64 := [absent]
+        `    unknown[0] = 9
+        `    good := 10
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    body :: ast.function_decl(tree, ast.package_decl(tree, 0)).body
+    _ = try expect_array(result, ast.block_statement(tree, body, 0), 2, true, .float)
+    try expect_kind(result, ast.block_statement(tree, body, 1), .int)
+    _ = try expect_array(result, ast.block_statement(tree, body, 2), 2, false, .int)
+    contextual :: ast.assignment_stmt(tree, ast.block_statement(tree, body, 3)).value
+    _ = try expect_error(result, &fixture.diagnostics, ast.array_element(tree, contextual, 0), .type_mismatch, ast.node_span(tree, ast.array_element(tree, contextual, 0)))
+    try expect_kind(result, ast.array_element(tree, contextual, 1), .float)
+    copied :: ast.assignment_stmt(tree, ast.block_statement(tree, body, 4)).value
+    _ = try expect_error(result, &fixture.diagnostics, copied, .type_mismatch, ast.node_span(tree, copied))
+    wrong_len :: ast.assignment_stmt(tree, ast.block_statement(tree, body, 5)).value
+    _ = try expect_error(result, &fixture.diagnostics, wrong_len, .array_length_mismatch, ast.node_span(tree, wrong_len))
+    try expect_kind(result, ast.block_statement(tree, body, 7), .void)
+    literal :: ast.statement_decl(tree, ast.block_statement(tree, body, 9)).initializer
+    missing :: ast.array_element(tree, literal, 0)
+    original :: sema.binding(&fixture.resolution, missing).data.diagnostic
+    try testing.expect_equal(original, type_of(result, literal).diagnostic)
+    try testing.expect_equal(original, type_of(result, ast.block_statement(tree, body, 9)).diagnostic)
+    try testing.expect_equal(original, type_of(result, ast.block_statement(tree, body, 10)).diagnostic)
+    try expect_kind(result, ast.block_statement(tree, body, 11), .int)
+}
+
+array_signature_identity_includes_recursive_counts_and_mutability test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `accept proc(value [1]mut i64) [1]mut i64 { return value }
+        `different_count proc(value [2]mut i64) [1]mut i64 { return [1] }
+        `different_mutability proc(value [1]i64) [1]mut i64 { return [1] }
+        `functions :: [accept, different_count, different_mutability]
+        `wrong_return proc() [1]mut i64 {
+        `    value [1]i64 :: [1]
+        `    return value
+        `}
+        `take proc(value [2]i64) void {}
+        `caller proc() void {
+        `    take([1])
+        `    take([true, false])
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    functions :: ast.statement_decl(tree, ast.package_decl(tree, 3)).initializer
+    for usize(1)..usize(3) |i| {
+        value :: ast.array_element(tree, functions, i)
+        _ = try expect_error(result, &fixture.diagnostics, value, .type_mismatch, ast.node_span(tree, value))
+        try expect_kind(result, ast.package_decl(tree, i), .function)
+    }
+    wrong :: ast.package_decl(tree, 4)
+    wrong_body :: ast.function_decl(tree, wrong).body
+    value :: ast.return_stmt(tree, ast.block_statement(tree, wrong_body, 1)).value?
+    _ = try expect_error(result, &fixture.diagnostics, value, .return_type_mismatch, ast.node_span(tree, value))
+    _ = try expect_array(result, ast.block_statement(tree, wrong_body, 0), 1, false, .int)
+    try expect_kind(result, wrong, .function)
+    caller :: ast.function_decl(tree, ast.package_decl(tree, 6)).body
+    call :: ast.statement_expr(tree, ast.block_statement(tree, caller, 0))
+    argument :: ast.call_arg(tree, call, 0)
+    _ = try expect_error(result, &fixture.diagnostics, argument, .array_length_mismatch, ast.node_span(tree, argument))
+    second :: ast.statement_expr(tree, ast.block_statement(tree, caller, 1))
+    literal :: ast.call_arg(tree, second, 0)
+    for 0..ast.array_element_count(tree, literal) |i| {
+        child :: ast.array_element(tree, literal, i)
+        _ = try expect_error(result, &fixture.diagnostics, child, .type_mismatch, ast.node_span(tree, child))
+    }
+    try expect_kind(result, ast.package_decl(tree, 5), .function)
+}
+
+inferred_counts_follow_forward_fixed_aliases_empty_shapes_and_reject_local_counts test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    source ::
+        `forward [_]i64 :: later
+        `later [_]i64 :: [1, 2]
+        `zero [_]mut bool := []
+        `nested [_][_]bool :: [[], []]
+        `unsigned usize :: 5
+        `main proc() void {
+        `    local_count :: 2
+        `    unsupported [local_count]i64 :: [1, 2]
+        `    values [2]i64 :: [1, 2]
+        `    for 0..(unsigned + 1) |index| { values[index] }
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for 0..usize(2) |i| {
+        declaration :: ast.statement_decl(tree, ast.package_decl(tree, i))
+        _ = try expect_array(result, declaration.type?, 2, false, .int)
+        _ = try expect_array(result, ast.package_decl(tree, i), 2, false, .int)
+    }
+    _ = try expect_array(result, ast.package_decl(tree, 2), 0, true, .bool)
+    shape :: try expect_array(result, ast.package_decl(tree, 3), 2, false, .array)
+    child :: array_type(result, shape.element.array_type)
+    try testing.expect_equal(0, child.len)
+    try testing.expect_equal(TypeKind.bool, child.element.kind)
+    body :: ast.function_decl(tree, ast.package_decl(tree, 5)).body
+    unsupported :: ast.statement_decl(tree, ast.block_statement(tree, body, 1)).type?
+    count :: ast.array_type(tree, unsupported).count?
+    _ = try expect_error(result, &fixture.diagnostics, unsupported, .invalid_array_length, ast.node_span(tree, count))
+    try expect_kind(result, ast.block_statement(tree, body, 0), .int)
+    loop :: ast.for_stmt(tree, ast.block_statement(tree, body, 3))
+    try expect_kind(result, loop.capture?, .usize)
+    try testing.expect_equal(TypeKind.usize, type_of(result, loop.iterable).range_element)
+    read :: ast.statement_expr(tree, ast.block_statement(tree, loop.body, 0))
+    try expect_kind(result, read, .int)
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .invalid_array_length))
+    try testing.expect_equal(1, diagnostics.count(&fixture.diagnostics))
+}

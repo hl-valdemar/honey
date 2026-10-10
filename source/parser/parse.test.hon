@@ -1200,3 +1200,201 @@ range_loop_preserves_nearest_else_and_canonical_body test {
     try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, call_loop.iterable))
     try testing.expect_equal(1, ast.block_statement_count(&tree, call_loop.body))
 }
+
+parses_recursive_array_annotations_literals_and_grouped_parameters test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `matrix [2]mut [width]mut i64 := [
+        `    [1, 2,],
+        `    [3, 4],
+        `]
+        `inferred [_]f64 :: [1.0,]
+        `empty :: []
+        `width usize :: 2
+        `choose proc(a, b [width]mut [2]i64, index usize) [_]f64 {
+        `    return []
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(5, ast.package_decl_count(&tree))
+    declaration :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+    outer :: ast.array_type(&tree, declaration.type?)
+    try testing.expect(outer.mutable)
+    try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, outer.count?))
+    inner :: ast.array_type(&tree, outer.element)
+    try testing.expect(inner.mutable)
+    try testing.expect_equal(ast.ExprKind.identifier, ast.expr_kind(&tree, inner.count?))
+    try testing.expect_equal("i64", ast.source_text(&tree, ast.node_span(&tree, inner.element)))
+    try testing.expect_equal(2, ast.array_element_count(&tree, declaration.initializer))
+    for (0..ast.array_element_count(&tree, declaration.initializer)) |i| {
+        try testing.expect_equal(2, ast.array_element_count(
+            &tree, ast.array_element(&tree, declaration.initializer, i),
+        ))
+    }
+    inferred :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal(null, ast.array_type(&tree, inferred.type?).count)
+    try testing.expect_equal(1, ast.array_element_count(&tree, inferred.initializer))
+    empty :: ast.statement_decl(&tree, ast.package_decl(&tree, 2))
+    try testing.expect_equal(0, ast.array_element_count(&tree, empty.initializer))
+    function :: ast.package_decl(&tree, 4)
+    try testing.expect_equal(3, ast.function_param_count(&tree, function))
+    first :: ast.param(&tree, ast.function_param(&tree, function, 0))
+    second :: ast.param(&tree, ast.function_param(&tree, function, 1))
+    try testing.expect_equal(first.type, second.type)
+    try testing.expect_equal(ast.ExprKind.array_type, ast.expr_kind(&tree, first.type))
+    try testing.expect_equal(null, ast.array_type(&tree, ast.function_decl(&tree, function).return_type).count)
+}
+
+parses_postfix_indices_and_general_assignment_targets test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `value :: -factory()[position()][0] + ([1, 2])[0]
+        `main proc() void {
+        `    (matrix[1])[0] = rhs()[0]
+        `    (matrix) = [[1]]
+        `    1 = 2
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    expression :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    add :: ast.binary_expr(&tree, expression)
+    negative :: ast.unary_expr(&tree, add.left)
+    outer :: ast.index_expr(&tree, negative.operand)
+    inner :: ast.index_expr(&tree, outer.base)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, inner.base))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, inner.index))
+    try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, outer.index))
+    literal_index :: ast.index_expr(&tree, add.right)
+    try testing.expect_equal(ast.ExprKind.array_literal, ast.expr_kind(&tree, literal_index.base))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    try testing.expect_equal(3, ast.block_statement_count(&tree, body))
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 0))
+    target :: ast.index_expr(&tree, assignment.target)
+    try testing.expect_equal(ast.ExprKind.index, ast.expr_kind(&tree, target.base))
+    try testing.expect_equal(ast.ExprKind.index, ast.expr_kind(&tree, assignment.value))
+    grouped :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal(ast.ExprKind.identifier, ast.expr_kind(&tree, grouped.target))
+    invalid_target :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, invalid_target.target))
+}
+
+mirrors_array_type_and_leading_declaration_ambiguities test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `ambiguous :: [1, 2][0]
+        `shape :: [1]mut [2]i64
+        `main proc() void {
+        `    matrix[1][0] = 9
+        `    (matrix[1])[0] = 9
+        `    result :: matrix[1][0]
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(3, ast.package_decl_count(&tree))
+    try testing.expect_equal(ast.DeclKind.invalid, ast.decl_kind(&tree, ast.package_decl(&tree, 0)))
+    shape :: ast.statement_decl(&tree, ast.package_decl(&tree, 1)).initializer
+    try testing.expect_equal(ast.ExprKind.array_type, ast.expr_kind(&tree, shape))
+    try testing.expect_equal(ast.ExprKind.array_type, ast.expr_kind(&tree, ast.array_type(&tree, shape).element))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
+    try testing.expect_equal(3, ast.block_statement_count(&tree, body))
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 0)))
+    try testing.expect_equal(ast.StmtKind.assignment_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 1)))
+    result :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 2)).initializer
+    try testing.expect_equal(ast.ExprKind.index, ast.expr_kind(&tree, result))
+}
+
+preserves_array_error_ids_control_bodies_and_following_siblings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    bad [$]i64 :: [$, 2]
+        `    while (items[0) { break }
+        `    for items[0 |i| { continue }
+        `    unfinished :: [1,
+        `    kept :: []
+        `}
+        `tail :: 4
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(5, ast.block_statement_count(&tree, body))
+    bad :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 0))
+    count :: ast.array_type(&tree, bad.type?).count?
+    element :: ast.array_element(&tree, bad.initializer, 0)
+    try testing.expect_equal(diagnostics.DiagnosticId(0), ast.invalid(&tree, count).diagnostic)
+    try testing.expect_equal(diagnostics.DiagnosticId(1), ast.invalid(&tree, element).diagnostic)
+    while_loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, while_loop.condition))
+    try testing.expect_equal(ast.StmtKind.break_stmt, ast.stmt_kind(
+        &tree, ast.block_statement(&tree, while_loop.body, 0),
+    ))
+    for_loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, for_loop.iterable))
+    try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(
+        &tree, ast.block_statement(&tree, for_loop.body, 0),
+    ))
+    unfinished :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, unfinished.initializer))
+    kept :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 4))
+    try testing.expect_equal("kept", ast.source_text(&tree, kept.name))
+    try testing.expect_equal(0, ast.array_element_count(&tree, kept.initializer))
+}
+
+recovers_nested_square_and_parenthesis_delimiters_without_consuming_siblings test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    bad [call(1,
+        `        2)]i64 = [3]
+        `    kept :: []
+        `    missing [2
+        `    sibling :: [4]
+        `}
+        `tail :: 5
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect(diagnostics.count(&diagnostic_store) > 0)
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(4, ast.block_statement_count(&tree, body))
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 0)))
+    kept :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 1))
+    sibling :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal(0, ast.array_element_count(&tree, kept.initializer))
+    try testing.expect_equal(1, ast.array_element_count(&tree, sibling.initializer))
+}

@@ -16,6 +16,7 @@ add_function proc(
     errdefer {
         arraylist.deinit(&function.parameters)
         arraylist.deinit(&function.locals)
+        arraylist.deinit(&function.array_storage)
         for (function.blocks.items) |block| {
             owned := block
             arraylist.deinit(&owned.instructions)
@@ -37,6 +38,7 @@ add_function proc(
 
 @hide:file
 emit proc(module @mut ir.Module, function ir.FunctionId, instruction ir.Instruction) void ! mem.AllocError {
+    if (instruction.type == .address) module.functions.items[usize(function)].has_addresses = true
     try arraylist.append(&module.functions.items[usize(function)].blocks.items[0].instructions, instruction)
 }
 
@@ -110,7 +112,8 @@ repeated_calls_have_fresh_parameters_locals_and_temporaries test {
     try emit(&module, main, function_value(6, noop))
     try emit(&module, main, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(7), left = ir.ValueId(6) })
     return_value(&module, main, ir.ValueId(5))
-    outcome :: try run(mem.c_allocator, &module, &store)
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.int, outcome.value.type)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -138,11 +141,13 @@ lazy_globals_follow_forward_dependencies_and_reset_between_runs test {
     try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(1), slot = 0 })
     try emit(&module, main, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
     return_value(&module, main, ir.ValueId(2))
-    initial :: try run(mem.c_allocator, &module, &store)
+    initial := try run(mem.c_allocator, &module, &store)
+    defer deinit(&initial)
     try testing.expect(initial.trap == null)
     try testing.expect_equal(i64(42), initial.value.data.integer)
     module.functions.items[usize(second)].blocks.items[0].instructions.items[0] = integer(0, 30)
-    repeated :: try run(mem.c_allocator, &module, &store)
+    repeated := try run(mem.c_allocator, &module, &store)
+    defer deinit(&repeated)
     try testing.expect(repeated.trap == null)
     try testing.expect_equal(i64(62), repeated.value.data.integer)
 }
@@ -176,7 +181,8 @@ function_aliases_and_borrowed_string_values_execute test {
     try emit(&module, main, ir.Instruction{ op = .load_global, type = .function, destination = ir.ValueId(0), slot = 0 })
     try emit(&module, main, ir.Instruction{ op = .call, type = .string, destination = ir.ValueId(1), left = ir.ValueId(0) })
     return_value(&module, main, ir.ValueId(1))
-    outcome :: try run(mem.c_allocator, &module, &store)
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.string, outcome.value.type)
     try testing.expect_equal([]u8, text, ir.string_bytes(&module, outcome.value.data.string))
@@ -193,7 +199,8 @@ premature_local_reads_and_global_cycles_report_instruction_spans test {
     module.entry = main
     try emit(&module, main, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0, span = span })
     return_value(&module, main, ir.ValueId(0))
-    premature :: try run(mem.c_allocator, &module, &store)
+    premature := try run(mem.c_allocator, &module, &store)
+    defer deinit(&premature)
     try expect_trap(premature, &store, .read_before_initialization, span)
 
     first :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
@@ -206,9 +213,11 @@ premature_local_reads_and_global_cycles_report_instruction_spans test {
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = first, span = diagnostics.Span{ start = 0, end = 0 } })
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = second, span = diagnostics.Span{ start = 0, end = 0 } })
     module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 }
-    cycle :: try run(mem.c_allocator, &module, &store)
+    cycle := try run(mem.c_allocator, &module, &store)
+    defer deinit(&cycle)
     try expect_trap(cycle, &store, .initialization_cycle, cycle_span)
-    retry :: try run(mem.c_allocator, &module, &store)
+    retry := try run(mem.c_allocator, &module, &store)
+    defer deinit(&retry)
     try expect_trap(retry, &store, .initialization_cycle, cycle_span)
 }
 
@@ -219,7 +228,8 @@ existing_trap_identity_entry_failures_and_unused_errors_survive test {
     defer diagnostics.deinit(&store)
     entry_id :: try diagnostics.add(&store, .missing_entry, diagnostics.Span{ start = 0, end = 0 })
     module.entry_diagnostic = entry_id
-    absent :: try run(mem.c_allocator, &module, &store)
+    absent := try run(mem.c_allocator, &module, &store)
+    defer deinit(&absent)
     try testing.expect_equal(entry_id, absent.trap?)
     invalid_id :: try diagnostics.add(&store, .unknown_name, diagnostics.Span{ start = 12, end = 17 })
     bad :: try add_function(&module, mem.empty(ir.Type), 0, .invalid, 0)
@@ -228,12 +238,14 @@ existing_trap_identity_entry_failures_and_unused_errors_survive test {
     module.entry = main
     try emit(&module, main, integer(0, 42))
     return_value(&module, main, ir.ValueId(0))
-    success :: try run(mem.c_allocator, &module, &store)
+    success := try run(mem.c_allocator, &module, &store)
+    defer deinit(&success)
     try testing.expect(success.trap == null)
     try testing.expect_equal(i64(42), success.value.data.integer)
     module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = function_value(0, bad)
     try emit(&module, main, ir.Instruction{ op = .call, type = .invalid, destination = ir.ValueId(1), left = ir.ValueId(0) })
-    trapped :: try run(mem.c_allocator, &module, &store)
+    trapped := try run(mem.c_allocator, &module, &store)
+    defer deinit(&trapped)
     try testing.expect_equal(invalid_id, trapped.trap?)
     try testing.expect_equal(usize(2), diagnostics.count(&store))
 }
@@ -280,7 +292,8 @@ integer_arithmetic_checks_boundaries_before_host_operations test {
         try emit(&module, main, integer(1, case.right))
         try emit(&module, main, ir.Instruction{ op = case.op, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1), span = span })
         return_value(&module, main, ir.ValueId(2))
-        outcome :: try run(mem.c_allocator, &module, &store)
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
         if case.expected |expected| {
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(expected, outcome.value.data.integer)
@@ -301,10 +314,12 @@ integer_negation_traps_only_at_minimum test {
     try emit(&module, main, integer(0, minval!(i64)))
     try emit(&module, main, ir.Instruction{ op = .negate, type = .int, destination = ir.ValueId(1), left = ir.ValueId(0), span = span })
     return_value(&module, main, ir.ValueId(1))
-    trapped :: try run(mem.c_allocator, &module, &store)
+    trapped := try run(mem.c_allocator, &module, &store)
+    defer deinit(&trapped)
     try expect_trap(trapped, &store, .integer_overflow, span)
     module.functions.items[usize(main)].blocks.items[0].instructions.items[0] = integer(0, maxval!(i64))
-    success :: try run(mem.c_allocator, &module, &store)
+    success := try run(mem.c_allocator, &module, &store)
+    defer deinit(&success)
     try testing.expect(success.trap == null)
     try testing.expect_equal(-maxval!(i64), success.value.data.integer)
 }
@@ -324,18 +339,21 @@ float_arithmetic_and_ieee_zero_division_execute test {
     try emit(&module, main, ir.Instruction{ op = .divide, type = .float, destination = ir.ValueId(5), left = ir.ValueId(4), right = ir.ValueId(1) })
     try emit(&module, main, ir.Instruction{ op = .negate, type = .float, destination = ir.ValueId(6), left = ir.ValueId(5) })
     return_value(&module, main, ir.ValueId(6))
-    result :: try run(mem.c_allocator, &module, &store)
+    result := try run(mem.c_allocator, &module, &store)
+    defer deinit(&result)
     try testing.expect(result.trap == null)
     try testing.expect_equal(ir.Type.float, result.value.type)
     try testing.expect_equal(f64(-10.5), result.value.data.real)
     module.functions.items[usize(main)].blocks.items[0].instructions.items[0].constant.data.real = 0
     module.functions.items[usize(main)].blocks.items[0].instructions.items[1].constant.data.real = 0
-    nan :: try run(mem.c_allocator, &module, &store)
+    nan := try run(mem.c_allocator, &module, &store)
+    defer deinit(&nan)
     try testing.expect(nan.trap == null)
     try testing.expect(nan.value.data.real != nan.value.data.real)
     module.functions.items[usize(main)].blocks.items[0].instructions.items[0].constant.data.real = 1
     module.functions.items[usize(main)].blocks.items[0].instructions.items[2].op = .add
-    infinite :: try run(mem.c_allocator, &module, &store)
+    infinite := try run(mem.c_allocator, &module, &store)
+    defer deinit(&infinite)
     try testing.expect(infinite.trap == null)
     try testing.expect(infinite.value.data.real < f64(-1000000000))
     try testing.expect_equal(infinite.value.data.real, infinite.value.data.real * f64(2))
@@ -403,7 +421,7 @@ recursive_invocations_use_heap_frames_and_free_on_allocation_failure test {
     try emit_at(&module, main, recursive_block, ir.Instruction{ op = .call, type = .void, destination = ir.ValueId(1), left = ir.ValueId(0) })
     state := AllocationState{ remaining = 2048 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-    _ = run(allocator, &module, &store) catch |error| {
+    unexpected := run(allocator, &module, &store) catch |error| {
         match error {
             .out_of_memory: {}
             else: return .expectation_failed
@@ -412,6 +430,7 @@ recursive_invocations_use_heap_frames_and_free_on_allocation_failure test {
         try testing.expect_equal(usize(0), diagnostics.count(&store))
         return
     }
+    deinit(&unexpected)
     return .expectation_failed
 }
 
@@ -438,7 +457,7 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
     for (usize(0)..usize(16)) |limit| {
         state := AllocationState{ remaining = limit }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-        outcome :: run(allocator, &module, &store) catch |error| {
+        outcome := run(allocator, &module, &store) catch |error| {
             match error {
                 .out_of_memory: {}
                 else: return .expectation_failed
@@ -447,9 +466,11 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
             try testing.expect_equal(usize(0), state.live)
             continue
         }
+        defer deinit(&outcome)
         succeeded = true
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
+        deinit(&outcome)
         try testing.expect_equal(usize(0), state.live)
     }
     try testing.expect(succeeded)
@@ -458,8 +479,10 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
     module.functions.items[usize(initializer)].blocks.items[usize(init_block)].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
     state := AllocationState{ remaining = 64 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-    trapped :: try run(allocator, &module, &store)
+    trapped := try run(allocator, &module, &store)
+    defer deinit(&trapped)
     try testing.expect_equal(trap_id, trapped.trap?)
+    deinit(&trapped)
     try testing.expect_equal(usize(0), state.live)
 }
 
@@ -477,7 +500,7 @@ runtime_diagnostic_allocation_failure_is_infrastructure_error_and_frees_frames t
     defer diagnostics.deinit(&store)
     state := AllocationState{ remaining = 64 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-    _ = run(allocator, &module, &store) catch |error| {
+    unexpected := run(allocator, &module, &store) catch |error| {
         match error {
             .out_of_memory: {}
             else: return .expectation_failed
@@ -487,6 +510,7 @@ runtime_diagnostic_allocation_failure_is_infrastructure_error_and_frees_frames t
         try testing.expect_equal(usize(0), diagnostics.count(&store))
         return
     }
+    deinit(&unexpected)
     return .expectation_failed
 }
 
@@ -500,6 +524,7 @@ add_block proc(module @mut ir.Module, function ir.FunctionId) ir.BlockId ! mem.A
 
 @hide:file
 emit_at proc(module @mut ir.Module, function ir.FunctionId, block ir.BlockId, instruction ir.Instruction) void ! mem.AllocError {
+    if (instruction.type == .address) module.functions.items[usize(function)].has_addresses = true
     try arraylist.append(&module.functions.items[usize(function)].blocks.items[usize(block)].instructions, instruction)
 }
 
@@ -557,15 +582,19 @@ branching_recursive_calls_and_lazy_initializers_resume_the_current_block test {
     module.functions.items[usize(main)].blocks.items[usize(main_exit)].terminator = ir.Terminator{ value = ir.ValueId(4) }
     state := AllocationState{ remaining = 2048 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-    outcome :: try run(allocator, &module, &store)
+    outcome := try run(allocator, &module, &store)
+    defer deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(130), outcome.value.data.integer)
+    deinit(&outcome)
     try testing.expect_equal(usize(0), state.live)
     try testing.expect_equal(usize(1), diagnostics.count(&store))
     # trapping after returning through many heap frames also releases every live frame.
     module.functions.items[usize(main)].blocks.items[usize(main_exit)].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
-    trapped :: try run(allocator, &module, &store)
+    trapped := try run(allocator, &module, &store)
+    defer deinit(&trapped)
     try testing.expect_equal(trap_id, trapped.trap?)
+    deinit(&trapped)
     try testing.expect_equal(usize(0), state.live)
 }
 
@@ -603,7 +632,8 @@ all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
                     .greater_equal: left >= right
                     else: unreachable
                 }
-                outcome :: try run(mem.c_allocator, &module, &store)
+                outcome := try run(mem.c_allocator, &module, &store)
+                defer deinit(&outcome)
                 try testing.expect(outcome.trap == null)
                 try testing.expect_equal(ir.Type.bool, outcome.value.type)
                 try testing.expect_equal(expected, outcome.value.data.boolean)
@@ -631,7 +661,8 @@ nan_comparisons_obey_ieee_rules_in_either_operand_position test {
             right ir.ValueId :: if (position == 0) ir.ValueId(0) else ir.ValueId(1)
             try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = left, right = right })
             return_value(&module, main, ir.ValueId(2))
-            outcome :: try run(mem.c_allocator, &module, &store)
+            outcome := try run(mem.c_allocator, &module, &store)
+            defer deinit(&outcome)
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(ir.Type.bool, outcome.value.type)
             try testing.expect_equal(op == .not_equal, outcome.value.data.boolean)
@@ -664,7 +695,8 @@ boolean_equality_and_branching_use_boolean_payloads test {
                 equal :: left == right
                 expected_true :: if (op == .equal) equal else !equal
                 expected i64 :: if (expected_true) 42 else 7
-                outcome :: try run(mem.c_allocator, &module, &store)
+                outcome := try run(mem.c_allocator, &module, &store)
+                defer deinit(&outcome)
                 try testing.expect(outcome.trap == null)
                 try testing.expect_equal(expected, outcome.value.data.integer)
             }
@@ -686,7 +718,8 @@ assign_local_replaces_initialized_values_without_producing_a_result test {
     try emit(&module, main, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(1) })
     try emit(&module, main, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(2), slot = 0 })
     return_value(&module, main, ir.ValueId(2))
-    outcome :: try run(mem.c_allocator, &module, &store)
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.int, outcome.value.type)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -712,7 +745,8 @@ reset_local_invalidates_reads_and_assignments_at_the_instruction_span test {
         try emit(&module, main, ir.Instruction{
             op = op, type = .int, destination = destination, slot = 0, left = ir.ValueId(0), span = span,
         })
-        outcome :: try run(mem.c_allocator, &module, &store)
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
         try expect_trap(outcome, &store, codes[index], span)
         try testing.expect_equal(usize(1), diagnostics.count(&store))
     }
@@ -736,7 +770,7 @@ premature_assignment_and_reset_traps_release_frames_at_all_allocation_boundaries
     for (usize(0)..usize(16)) |limit| {
         state := AllocationState{ remaining = limit }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-        outcome :: run(allocator, &module, &store) catch |error| {
+        outcome := run(allocator, &module, &store) catch |error| {
             match error {
                 .out_of_memory: {}
                 else: return .expectation_failed
@@ -745,8 +779,10 @@ premature_assignment_and_reset_traps_release_frames_at_all_allocation_boundaries
             try testing.expect_equal(usize(0), state.live)
             continue
         }
+        defer deinit(&outcome)
         succeeded = true
         try expect_trap(outcome, &store, .write_before_initialization, span)
+        deinit(&outcome)
         try testing.expect_equal(usize(0), state.live)
     }
     try testing.expect(succeeded)
@@ -767,7 +803,7 @@ assignment_diagnostic_allocation_failure_releases_runtime_storage test {
     defer diagnostics.deinit(&store)
     state := AllocationState{ remaining = 64 }
     allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-    _ = run(allocator, &module, &store) catch |error| {
+    unexpected := run(allocator, &module, &store) catch |error| {
         match error {
             .out_of_memory: {}
             else: return .expectation_failed
@@ -777,6 +813,7 @@ assignment_diagnostic_allocation_failure_releases_runtime_storage test {
         try testing.expect_equal(usize(0), diagnostics.count(&store))
         return
     }
+    deinit(&unexpected)
     return .expectation_failed
 }
 
@@ -799,14 +836,630 @@ logical_not_inverts_boolean_payload_and_composes_in_typed_ir test {
         try emit(&module, main, ir.Instruction{ op = .logical_not, type = .bool, destination = ir.ValueId(1), left = ir.ValueId(0) })
         try emit(&module, main, ir.Instruction{ op = .logical_not, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(1) })
         return_value(&module, main, ir.ValueId(1))
-        inverted :: try run(mem.c_allocator, &module, &store)
+        inverted := try run(mem.c_allocator, &module, &store)
+        defer deinit(&inverted)
         try testing.expect(inverted.trap == null)
         try testing.expect_equal(ir.Type.bool, inverted.value.type)
         try testing.expect_equal(expected[index], inverted.value.data.boolean)
         return_value(&module, main, ir.ValueId(2))
-        composed :: try run(mem.c_allocator, &module, &store)
+        composed := try run(mem.c_allocator, &module, &store)
+        defer deinit(&composed)
         try testing.expect(composed.trap == null)
         try testing.expect_equal(operand, composed.value.data.boolean)
         try testing.expect_equal(usize(0), diagnostics.count(&store))
     }
+}
+
+@hide:file
+unsigned proc(destination u32, value u64) ir.Instruction {
+    return ir.Instruction{
+        op = .constant, type = .usize, destination = ir.ValueId(destination),
+        constant = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = value } },
+    }
+}
+
+@hide:file
+add_array proc(module @mut ir.Module, element ir.Type, child ir.ArrayId, len usize) ir.ArrayId ! mem.AllocError {
+    width :: if (element == .array) module.arrays.items[usize(child)].cells else 1
+    id :: ir.ArrayId(module.arrays.items.len)
+    try arraylist.append(&module.arrays, ir.ArrayType{
+        element = element, element_array = child, len = len, cells = len * width, mutable = true,
+    })
+    return id
+}
+
+@hide:file
+array_storage proc(module @mut ir.Module, function ir.FunctionId, index u32, shape ir.ArrayId, local bool) void ! mem.AllocError {
+    body :: &module.functions.items[usize(function)]
+    try arraylist.append(&body.array_storage, ir.ArrayStorage{
+        index = index, array_type = shape, offset = body.aggregate_cells, local = local,
+    })
+    body.aggregate_cells += module.arrays.items[usize(shape)].cells
+}
+
+@hide:file
+literal proc(module @mut ir.Module, function ir.FunctionId, destination u32, shape ir.ArrayId, elements []u32) void ! mem.AllocError {
+    try array_storage(module, function, destination, shape, false)
+    block :: &module.functions.items[usize(function)].blocks.items[0]
+    start :: block.arguments.items.len
+    for (elements) |element| try arraylist.append(&block.arguments, ir.ValueId(element))
+    try emit(module, function, ir.Instruction{
+        op = .array_literal, type = .array, array_type = shape, destination = ir.ValueId(destination),
+        arguments_start = start, arguments_count = elements.len,
+    })
+}
+
+nested_array_places_and_rvalues_copy_only_their_typed_leaf_segments test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    row :: try add_array(&module, .int, ir.no_array, 2)
+    matrix :: try add_array(&module, .array, row, 2)
+    types [2]ir.Type :: [.array, .array]
+    main :: try add_function(&module, types[..], 0, .array, 15)
+    module.entry = main
+    module.functions.items[usize(main)].result_array_type = matrix
+    try array_storage(&module, main, 0, matrix, true)
+    try array_storage(&module, main, 1, matrix, true)
+    try emit(&module, main, integer(0, 1))
+    try emit(&module, main, integer(1, 2))
+    pair [2]u32 :: [0, 1]
+    try literal(&module, main, 2, row, pair[..])
+    rows [2]u32 :: [2, 2]
+    try literal(&module, main, 3, matrix, rows[..])
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(3) })
+    try array_storage(&module, main, 4, matrix, false)
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .array, array_type = matrix, destination = ir.ValueId(4), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 1, left = ir.ValueId(4) })
+    try emit(&module, main, unsigned(5, 0))
+    try emit(&module, main, unsigned(6, 1))
+    try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = matrix, destination = ir.ValueId(7), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .index_address, type = .address, pointee = .array, array_type = row, destination = ir.ValueId(8), left = ir.ValueId(7), right = ir.ValueId(5) })
+    try array_storage(&module, main, 9, row, false)
+    try emit(&module, main, ir.Instruction{ op = .load_address, type = .array, array_type = row, destination = ir.ValueId(9), left = ir.ValueId(8) })
+    try emit(&module, main, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(10), left = ir.ValueId(8), right = ir.ValueId(6) })
+    try emit(&module, main, integer(11, 9))
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(10), right = ir.ValueId(11) })
+    # a row load is a private copy, not a view of the subsequently mutated matrix.
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(8), right = ir.ValueId(9) })
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(10), right = ir.ValueId(11) })
+    try emit(&module, main, ir.Instruction{ op = .index_address, type = .address, pointee = .array, array_type = row, destination = ir.ValueId(8), left = ir.ValueId(7), right = ir.ValueId(6) })
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(8), right = ir.ValueId(9) })
+    try array_storage(&module, main, 12, matrix, false)
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .array, array_type = matrix, destination = ir.ValueId(12), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .assign_local, slot = 1, left = ir.ValueId(12) })
+    try emit(&module, main, integer(13, 7))
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(10), right = ir.ValueId(13) })
+    try array_storage(&module, main, 14, matrix, false)
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .array, array_type = matrix, destination = ir.ValueId(14), slot = 1 })
+    return_value(&module, main, ir.ValueId(14))
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(matrix, outcome.value.array_type)
+    expected [4]i64 :: [1, 9, 1, 2]
+    for (expected) |value, i| try testing.expect_equal(value, outcome.value.data.elements[i].data.integer)
+}
+
+array_arguments_and_returns_are_private_values_before_frame_release test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    shape :: try add_array(&module, .int, ir.no_array, 1)
+    pair_shape :: try add_array(&module, .int, ir.no_array, 2)
+    types [2]ir.Type :: [.array, .array]
+    callee :: try add_function(&module, types[..], 1, .array, 6)
+    module.functions.items[usize(callee)].result_array_type = shape
+    try array_storage(&module, callee, 0, shape, true)
+    try array_storage(&module, callee, 1, shape, true)
+    try array_storage(&module, callee, 0, shape, false)
+    try array_storage(&module, callee, 5, shape, false)
+    try emit(&module, callee, ir.Instruction{ op = .load_local, type = .array, array_type = shape, destination = ir.ValueId(0), slot = 0 })
+    try emit(&module, callee, ir.Instruction{ op = .store_local, left = ir.ValueId(0), slot = 1 })
+    try emit(&module, callee, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(1), slot = 1 })
+    try emit(&module, callee, unsigned(2, 0))
+    try emit(&module, callee, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(3), left = ir.ValueId(1), right = ir.ValueId(2) })
+    try emit(&module, callee, integer(4, 99))
+    try emit(&module, callee, ir.Instruction{ op = .store_address, left = ir.ValueId(3), right = ir.ValueId(4) })
+    try emit(&module, callee, ir.Instruction{ op = .load_local, type = .array, array_type = shape, destination = ir.ValueId(5), slot = 1 })
+    # typed IR can address a parameter; even this mutation must not escape into the caller.
+    try emit(&module, callee, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(1), slot = 0 })
+    try emit(&module, callee, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(3), left = ir.ValueId(1), right = ir.ValueId(2) })
+    try emit(&module, callee, integer(4, 7))
+    try emit(&module, callee, ir.Instruction{ op = .store_address, left = ir.ValueId(3), right = ir.ValueId(4) })
+    return_value(&module, callee, ir.ValueId(5))
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 8)
+    module.entry = main
+    module.functions.items[usize(main)].result_array_type = pair_shape
+    try emit(&module, main, integer(0, 42))
+    element [1]u32 :: [0]
+    try literal(&module, main, 1, shape, element[..])
+    try emit(&module, main, function_value(2, callee))
+    try array_storage(&module, main, 3, shape, false)
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[0].arguments, ir.ValueId(1))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .array, array_type = shape, destination = ir.ValueId(3), left = ir.ValueId(2), arguments_start = 1, arguments_count = 1 })
+    try emit(&module, main, unsigned(4, 0))
+    try emit(&module, main, ir.Instruction{ op = .index, type = .int, destination = ir.ValueId(5), left = ir.ValueId(1), right = ir.ValueId(4) })
+    try emit(&module, main, ir.Instruction{ op = .index, type = .int, destination = ir.ValueId(6), left = ir.ValueId(3), right = ir.ValueId(4) })
+    pair [2]u32 :: [5, 6]
+    try literal(&module, main, 7, pair_shape, pair[..])
+    return_value(&module, main, ir.ValueId(7))
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.elements[0].data.integer)
+    try testing.expect_equal(i64(99), outcome.value.data.elements[1].data.integer)
+}
+
+lazy_aggregate_globals_escape_with_owned_results_and_release_at_every_boundary test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    shape :: try add_array(&module, .int, ir.no_array, 1)
+    first :: try add_function(&module, mem.empty(ir.Type), 0, .array, 1)
+    second :: try add_function(&module, mem.empty(ir.Type), 0, .array, 2)
+    module.functions.items[usize(first)].result_array_type = shape
+    module.functions.items[usize(second)].result_array_type = shape
+    try array_storage(&module, first, 0, shape, false)
+    try emit(&module, first, ir.Instruction{ op = .load_global, type = .array, array_type = shape, destination = ir.ValueId(0), slot = 1 })
+    return_value(&module, first, ir.ValueId(0))
+    try emit(&module, second, integer(0, 42))
+    operand [1]u32 :: [0]
+    try literal(&module, second, 1, shape, operand[..])
+    return_value(&module, second, ir.ValueId(1))
+    initializers [2]ir.FunctionId :: [first, second]
+    for (initializers) |initializer| {
+        try arraylist.append(&module.globals, ir.Global{
+            type = .array, array_type = shape, initializer = initializer,
+            span = diagnostics.Span{ start = 0, end = 0 },
+        })
+    }
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 2)
+    module.entry = main
+    module.functions.items[usize(main)].result_array_type = shape
+    try emit(&module, main, ir.Instruction{ op = .address_global, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(0), slot = 0 })
+    try array_storage(&module, main, 1, shape, false)
+    try emit(&module, main, ir.Instruction{ op = .load_address, type = .array, array_type = shape, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    return_value(&module, main, ir.ValueId(1))
+    succeeded := false
+    failures usize := 0
+    for (usize(0)..usize(40)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome := run(allocator, &module, &store) catch |error| {
+            if (error != .out_of_memory) return .expectation_failed
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        defer deinit(&outcome)
+        succeeded = true
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.elements[0].data.integer)
+        try testing.expect_equal(usize(1), state.live)
+        deinit(&outcome)
+        try testing.expect_equal(ir.Type.void, outcome.value.type)
+        try testing.expect(outcome.owned_elements == null)
+        try testing.expect_equal(usize(0), state.live)
+    }
+    try testing.expect(succeeded)
+    try testing.expect(failures > 0)
+    # restarting a run clears global readiness, including address-triggered initialization cycles.
+    cycle_span :: diagnostics.Span{ start = 51, end = 59 }
+    module.functions.items[usize(second)].has_addresses = true
+    module.functions.items[usize(second)].blocks.items[0].instructions.items[0] = ir.Instruction{
+        op = .address_global, type = .address, pointee = .array, array_type = shape,
+        destination = ir.ValueId(0), slot = 0, span = cycle_span,
+    }
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    cycle := try run(allocator, &module, &store)
+    defer deinit(&cycle)
+    try expect_trap(cycle, &store, .initialization_cycle, cycle_span)
+    deinit(&cycle)
+    try testing.expect_equal(usize(0), state.live)
+    trap_id :: try diagnostics.add(&store, .invalid_escape, cycle_span)
+    module.functions.items[usize(second)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+    module.functions.items[usize(second)].blocks.items[0].instructions.items[0] = integer(0, 42)
+    trapped := try run(allocator, &module, &store)
+    defer deinit(&trapped)
+    try testing.expect_equal(trap_id, trapped.trap?)
+    deinit(&trapped)
+    try testing.expect_equal(usize(0), state.live)
+}
+
+array_bounds_check_zero_lengths_and_the_full_unsigned_word_before_addressing test {
+    lengths [2]usize :: [0, 1]
+    indices [3]u64 :: [0, 1, maxval!(u64)]
+    operations [2]ir.Op :: [.index, .index_address]
+    for (lengths) |length| {
+        for (indices) |index| {
+            for (operations) |op| {
+                module := ir.init(mem.c_allocator)
+                defer ir.deinit(&module)
+                store := diagnostics.init(mem.c_allocator)
+                defer diagnostics.deinit(&store)
+                shape :: try add_array(&module, .int, ir.no_array, length)
+                types [1]ir.Type :: [.array]
+                main :: try add_function(&module, types[..], 0, .int, 5)
+                module.entry = main
+                try array_storage(&module, main, 0, shape, true)
+                try emit(&module, main, integer(0, 42))
+                operands [1]u32 :: [0]
+                try literal(&module, main, 1, shape, operands[..length])
+                try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(1) })
+                try emit(&module, main, unsigned(2, index))
+                span :: diagnostics.Span{ start = 17, end = 29 }
+                base := ir.ValueId(1)
+                if (op == .index_address) {
+                    try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(3), slot = 0 })
+                    base = ir.ValueId(3)
+                }
+                result_type ir.Type :: if (op == .index) .int else .address
+                try emit(&module, main, ir.Instruction{
+                    op = op, type = result_type,
+                    pointee = .int, destination = ir.ValueId(4), left = base, right = ir.ValueId(2), span = span,
+                })
+                if (op == .index_address) {
+                    try emit(&module, main, ir.Instruction{ op = .load_address, type = .int, destination = ir.ValueId(0), left = ir.ValueId(4) })
+                    return_value(&module, main, ir.ValueId(0))
+                } else return_value(&module, main, ir.ValueId(4))
+                state := AllocationState{ remaining = 64 }
+                allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+                outcome := try run(allocator, &module, &store)
+                defer deinit(&outcome)
+                if (length == 1 and index == 0) {
+                    try testing.expect(outcome.trap == null)
+                    try testing.expect_equal(i64(42), outcome.value.data.integer)
+                } else try expect_trap(outcome, &store, .index_out_of_bounds, span)
+                deinit(&outcome)
+                try testing.expect_equal(usize(0), state.live)
+            }
+        }
+    }
+}
+
+zero_leaf_nested_arrays_return_a_shape_without_an_owned_allocation test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    empty :: try add_array(&module, .bool, ir.no_array, 0)
+    rows :: try add_array(&module, .array, empty, 3)
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 4)
+    module.entry = main
+    module.functions.items[usize(main)].result_array_type = rows
+    try literal(&module, main, 0, empty, mem.empty(u32))
+    operands [3]u32 :: [0, 0, 0]
+    try literal(&module, main, 1, rows, operands[..])
+    return_value(&module, main, ir.ValueId(1))
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    outcome := try run(allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(rows, outcome.value.array_type)
+    try testing.expect_equal(usize(0), outcome.value.data.elements.len)
+    try testing.expect_equal(usize(0), state.live)
+    deinit(&outcome)
+    deinit(&outcome)
+    try testing.expect_equal(usize(0), state.live)
+    try emit(&module, main, unsigned(2, 2))
+    try array_storage(&module, main, 3, empty, false)
+    try emit(&module, main, ir.Instruction{ op = .index, type = .array, array_type = empty, destination = ir.ValueId(3), left = ir.ValueId(1), right = ir.ValueId(2) })
+    return_value(&module, main, ir.ValueId(3))
+    module.functions.items[usize(main)].result_array_type = empty
+    indexed := try run(allocator, &module, &store)
+    defer deinit(&indexed)
+    try testing.expect(indexed.trap == null)
+    try testing.expect_equal(empty, indexed.value.array_type)
+    try testing.expect_equal(usize(0), indexed.value.data.elements.len)
+    deinit(&indexed)
+    try testing.expect_equal(usize(0), state.live)
+}
+
+@hide:file
+UnsignedCase :: struct {
+    op ir.Op
+    left u64
+    right u64
+    expected ?u64
+}
+
+unsigned_arithmetic_and_comparisons_preserve_all_sixty_four_bits test {
+    wide_sum u64 :: 9223372036854775815
+    almost_maximum u64 :: 18446744073709551614
+    cases [10]UnsignedCase :: [
+        UnsignedCase{ op = .add, left = maxval!(u64), right = 0, expected = maxval!(u64) },
+        UnsignedCase{ op = .add, left = maxval!(u64), right = 1, expected = null },
+        UnsignedCase{ op = .add, left = 9223372036854775808, right = 7, expected = wide_sum },
+        UnsignedCase{ op = .subtract, left = 0, right = 1, expected = null },
+        UnsignedCase{ op = .subtract, left = maxval!(u64), right = 1, expected = almost_maximum },
+        UnsignedCase{ op = .multiply, left = maxval!(u64), right = 1, expected = maxval!(u64) },
+        UnsignedCase{ op = .multiply, left = 9223372036854775808, right = 2, expected = null },
+        UnsignedCase{ op = .multiply, left = maxval!(u64), right = 0, expected = u64(0) },
+        UnsignedCase{ op = .multiply, left = 0, right = maxval!(u64), expected = u64(0) },
+        UnsignedCase{ op = .multiply, left = 3, right = 14, expected = u64(42) },
+    ]
+    for (cases) |case| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        main :: try add_function(&module, mem.empty(ir.Type), 0, .usize, 3)
+        module.entry = main
+        span :: diagnostics.Span{ start = 7, end = 12 }
+        try emit(&module, main, unsigned(0, case.left))
+        try emit(&module, main, unsigned(1, case.right))
+        try emit(&module, main, ir.Instruction{ op = case.op, type = .usize, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1), span = span })
+        return_value(&module, main, ir.ValueId(2))
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        if case.expected |expected| {
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(ir.Type.usize, outcome.value.type)
+            try testing.expect_equal(expected, outcome.value.data.unsigned)
+        } else try expect_trap(outcome, &store, .integer_overflow, span)
+    }
+    operations [6]ir.Op :: [.equal, .not_equal, .less, .less_equal, .greater, .greater_equal]
+    expected [6]bool :: [false, true, false, false, true, true]
+    for (operations) |op, i| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+        module.entry = main
+        try emit(&module, main, unsigned(0, maxval!(u64)))
+        try emit(&module, main, unsigned(1, 1))
+        try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+        return_value(&module, main, ir.ValueId(2))
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(expected[i], outcome.value.data.boolean)
+    }
+}
+
+all_scalar_leaf_families_survive_aggregate_return_and_function_extraction test {
+    values [5]ir.Value :: [
+        ir.Value{ type = .bool, data = ir.ValueData{ boolean = true } },
+        ir.Value{ type = .float, data = ir.ValueData{ real = 3.25 } },
+        ir.Value{ type = .string, data = ir.ValueData{ string = ir.StringId(0) } },
+        ir.Value{ type = .usize, data = ir.ValueData{ unsigned = maxval!(u64) } },
+        ir.Value{ type = .function, data = ir.ValueData{ function = ir.FunctionId(0) } },
+    ]
+    for (values) |scalar| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        if (scalar.type == .string) {
+            text :: "borrowed\x00text"
+            owned :: try mem.alloc(u8, module.allocator, text.len)
+            errdefer mem.free(module.allocator, owned)
+            memcopy!(owned, text)
+            try arraylist.append(&module.strings, ir.StringStorage{ allocation = owned, len = text.len })
+        }
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        target :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+        try emit(&module, target, integer(0, 42))
+        return_value(&module, target, ir.ValueId(0))
+        shape :: try add_array(&module, scalar.type, ir.no_array, 1)
+        main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 5)
+        module.entry = main
+        module.functions.items[usize(main)].result_array_type = shape
+        try emit(&module, main, ir.Instruction{ op = .constant, type = scalar.type, destination = ir.ValueId(0), constant = scalar })
+        operand [1]u32 :: [0]
+        try literal(&module, main, 1, shape, operand[..])
+        return_value(&module, main, ir.ValueId(1))
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        leaf :: outcome.value.data.elements[0]
+        try testing.expect_equal(scalar.type, leaf.type)
+        match scalar.type {
+            .bool: try testing.expect(leaf.data.boolean)
+            .float: try testing.expect_equal(f64(3.25), leaf.data.real)
+            .string: try testing.expect_equal([]u8, "borrowed\x00text", ir.string_bytes(&module, leaf.data.string))
+            .usize: try testing.expect_equal(maxval!(u64), leaf.data.unsigned)
+            .function: {
+                try testing.expect_equal(target, leaf.data.function)
+                try emit(&module, main, unsigned(2, 0))
+                try emit(&module, main, ir.Instruction{ op = .index, type = .function, destination = ir.ValueId(3), left = ir.ValueId(1), right = ir.ValueId(2) })
+                try emit(&module, main, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(4), left = ir.ValueId(3) })
+                return_value(&module, main, ir.ValueId(4))
+                called := try run(mem.c_allocator, &module, &store)
+                defer deinit(&called)
+                try testing.expect(called.trap == null)
+                try testing.expect_equal(i64(42), called.value.data.integer)
+            }
+            else: unreachable
+        }
+    }
+}
+
+array_address_initialization_flags_survive_reset_and_diagnostic_allocation_failure test {
+    operations [2]ir.Op :: [.load_address, .store_address]
+    codes [2]diagnostics.Code :: [.read_before_initialization, .write_before_initialization]
+    for (operations) |op, i| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        shape :: try add_array(&module, .int, ir.no_array, 1)
+        types [1]ir.Type :: [.array]
+        main :: try add_function(&module, types[..], 0, .int, 5)
+        module.entry = main
+        try array_storage(&module, main, 0, shape, true)
+        try emit(&module, main, integer(0, 42))
+        operand [1]u32 :: [0]
+        try literal(&module, main, 1, shape, operand[..])
+        try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(1) })
+        try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(2), slot = 0 })
+        try emit(&module, main, unsigned(3, 0))
+        try emit(&module, main, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(4), left = ir.ValueId(2), right = ir.ValueId(3) })
+        try emit(&module, main, ir.Instruction{ op = .reset_local, slot = 0 })
+        span :: diagnostics.Span{ start = 23, end = 37 }
+        try emit(&module, main, ir.Instruction{ op = op, type = .int, destination = ir.ValueId(0), left = ir.ValueId(4), right = ir.ValueId(0), span = span })
+        for (usize(0)..usize(2)) |attempt| {
+            state := AllocationState{ remaining = 64 }
+            allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+            remaining usize :: if (attempt == 0) 0 else 64
+            diagnostic_state := AllocationState{ remaining = remaining }
+            diagnostic_allocator :: mem.Allocator{ context = &diagnostic_state, vtable = &limited_vtable }
+            store := diagnostics.init(diagnostic_allocator)
+            defer diagnostics.deinit(&store)
+            outcome := run(allocator, &module, &store) catch |error| {
+                if (error != .out_of_memory) return .expectation_failed
+                try testing.expect_equal(usize(0), attempt)
+                try testing.expect_equal(usize(0), state.live)
+                try testing.expect_equal(usize(0), diagnostic_state.live)
+                continue
+            }
+            defer deinit(&outcome)
+            try testing.expect_equal(usize(1), attempt)
+            try expect_trap(outcome, &store, codes[i], span)
+            deinit(&outcome)
+            try testing.expect_equal(usize(0), state.live)
+        }
+    }
+}
+
+aggregate_loop_places_reuse_storage_without_allocation_per_iteration test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    shape :: try add_array(&module, .int, ir.no_array, 1)
+    types [2]ir.Type :: [.array, .usize]
+    main :: try add_function(&module, types[..], 0, .int, 14)
+    module.entry = main
+    try array_storage(&module, main, 0, shape, true)
+    try emit(&module, main, integer(0, 0))
+    operand [1]u32 :: [0]
+    try literal(&module, main, 1, shape, operand[..])
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(1) })
+    try emit(&module, main, unsigned(2, 0))
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 1, left = ir.ValueId(2) })
+    try emit(&module, main, unsigned(3, 1))
+    header :: try add_block(&module, main)
+    body :: try add_block(&module, main)
+    done :: try add_block(&module, main)
+    module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = header }
+    try emit_at(&module, main, header, ir.Instruction{ op = .load_local, type = .usize, destination = ir.ValueId(4), slot = 1 })
+    try emit_at(&module, main, header, ir.Instruction{ op = .less, type = .bool, destination = ir.ValueId(5), left = ir.ValueId(4), right = ir.ValueId(3) })
+    module.functions.items[usize(main)].blocks.items[usize(header)].terminator = ir.Terminator{ kind = .branch, value = ir.ValueId(5), target = body, alternative = done }
+    try emit_at(&module, main, body, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(6), slot = 0 })
+    try emit_at(&module, main, body, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(7), left = ir.ValueId(6), right = ir.ValueId(2) })
+    try emit_at(&module, main, body, ir.Instruction{ op = .load_address, type = .int, destination = ir.ValueId(8), left = ir.ValueId(7) })
+    try emit_at(&module, main, body, integer(9, 1))
+    try emit_at(&module, main, body, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(10), left = ir.ValueId(8), right = ir.ValueId(9) })
+    try emit_at(&module, main, body, ir.Instruction{ op = .store_address, left = ir.ValueId(7), right = ir.ValueId(10) })
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[usize(body)].arguments, ir.ValueId(10))
+    try emit_at(&module, main, body, ir.Instruction{ op = .array_literal, type = .array, array_type = shape, destination = ir.ValueId(1), arguments_count = 1 })
+    try emit_at(&module, main, body, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(1) })
+    try emit_at(&module, main, body, unsigned(11, 1))
+    try emit_at(&module, main, body, ir.Instruction{ op = .add, type = .usize, destination = ir.ValueId(12), left = ir.ValueId(4), right = ir.ValueId(11) })
+    try emit_at(&module, main, body, ir.Instruction{ op = .assign_local, slot = 1, left = ir.ValueId(12) })
+    module.functions.items[usize(main)].blocks.items[usize(body)].terminator = ir.Terminator{ kind = .jump, target = header }
+    try emit_at(&module, main, done, ir.Instruction{ op = .load_address, type = .int, destination = ir.ValueId(13), left = ir.ValueId(7) })
+    module.functions.items[usize(main)].blocks.items[usize(done)].terminator = ir.Terminator{ value = ir.ValueId(13) }
+    iterations [2]u64 :: [1, 10000]
+    allocations usize := 0
+    for (iterations) |count, i| {
+        module.functions.items[usize(main)].blocks.items[0].instructions.items[5] = unsigned(3, count)
+        state := AllocationState{ remaining = 64 }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome := try run(allocator, &module, &store)
+        defer deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(count), outcome.value.data.integer)
+        deinit(&outcome)
+        try testing.expect_equal(usize(0), state.live)
+        consumed :: usize(64) - state.remaining
+        if (i == 0) allocations = consumed
+        else try testing.expect_equal(allocations, consumed)
+    }
+}
+
+recursive_array_backings_and_addresses_remain_fresh_across_stack_growth test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    shape :: try add_array(&module, .int, ir.no_array, 1)
+    types [2]ir.Type :: [.int, .array]
+    recursive :: try add_function(&module, types[..], 1, .int, 12)
+    try array_storage(&module, recursive, 1, shape, true)
+    try emit(&module, recursive, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(0), slot = 0 })
+    operand [1]u32 :: [0]
+    try literal(&module, recursive, 1, shape, operand[..])
+    try emit(&module, recursive, ir.Instruction{ op = .store_local, slot = 1, left = ir.ValueId(1) })
+    try emit(&module, recursive, ir.Instruction{ op = .address_local, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(2), slot = 1 })
+    try emit(&module, recursive, unsigned(3, 0))
+    try emit(&module, recursive, ir.Instruction{ op = .index_address, type = .address, pointee = .int, destination = ir.ValueId(4), left = ir.ValueId(2), right = ir.ValueId(3) })
+    try emit(&module, recursive, integer(5, 0))
+    try emit(&module, recursive, ir.Instruction{ op = .equal, type = .bool, destination = ir.ValueId(6), left = ir.ValueId(0), right = ir.ValueId(5) })
+    done :: try add_block(&module, recursive)
+    recurse :: try add_block(&module, recursive)
+    module.functions.items[usize(recursive)].blocks.items[0].terminator = ir.Terminator{ kind = .branch, value = ir.ValueId(6), target = done, alternative = recurse }
+    module.functions.items[usize(recursive)].blocks.items[usize(done)].terminator = ir.Terminator{ value = ir.ValueId(5) }
+    try emit_at(&module, recursive, recurse, integer(5, 1))
+    try emit_at(&module, recursive, recurse, ir.Instruction{ op = .subtract, type = .int, destination = ir.ValueId(7), left = ir.ValueId(0), right = ir.ValueId(5) })
+    try emit_at(&module, recursive, recurse, function_value(8, recursive))
+    try arraylist.append(&module.functions.items[usize(recursive)].blocks.items[usize(recurse)].arguments, ir.ValueId(7))
+    try emit_at(&module, recursive, recurse, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(9), left = ir.ValueId(8), arguments_count = 1 })
+    try emit_at(&module, recursive, recurse, ir.Instruction{ op = .load_address, type = .int, destination = ir.ValueId(10), left = ir.ValueId(4) })
+    try emit_at(&module, recursive, recurse, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(11), left = ir.ValueId(9), right = ir.ValueId(10) })
+    module.functions.items[usize(recursive)].blocks.items[usize(recurse)].terminator = ir.Terminator{ value = ir.ValueId(11) }
+    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    module.entry = main
+    try emit(&module, main, function_value(0, recursive))
+    try emit(&module, main, integer(1, 64))
+    try arraylist.append(&module.functions.items[usize(main)].blocks.items[0].arguments, ir.ValueId(1))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), arguments_count = 1 })
+    return_value(&module, main, ir.ValueId(2))
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(2080), outcome.value.data.integer)
+}
+
+inclusive_unsigned_range_reaches_the_maximum_without_incrementing_past_it test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [2]ir.Type :: [.usize, .usize]
+    main :: try add_function(&module, types[..], 0, .usize, 9)
+    module.entry = main
+    try emit(&module, main, unsigned(0, maxval!(u64) - 1))
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(0) })
+    try emit(&module, main, unsigned(1, 0))
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 1, left = ir.ValueId(1) })
+    try emit(&module, main, unsigned(2, maxval!(u64)))
+    try emit(&module, main, unsigned(3, 1))
+    header :: try add_block(&module, main)
+    body :: try add_block(&module, main)
+    advance :: try add_block(&module, main)
+    done :: try add_block(&module, main)
+    module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = header }
+    try emit_at(&module, main, header, ir.Instruction{ op = .load_local, type = .usize, destination = ir.ValueId(4), slot = 0 })
+    try emit_at(&module, main, header, ir.Instruction{ op = .less_equal, type = .bool, destination = ir.ValueId(5), left = ir.ValueId(4), right = ir.ValueId(2) })
+    module.functions.items[usize(main)].blocks.items[usize(header)].terminator = ir.Terminator{ kind = .branch, value = ir.ValueId(5), target = body, alternative = done }
+    try emit_at(&module, main, body, ir.Instruction{ op = .load_local, type = .usize, destination = ir.ValueId(6), slot = 1 })
+    try emit_at(&module, main, body, ir.Instruction{ op = .add, type = .usize, destination = ir.ValueId(7), left = ir.ValueId(6), right = ir.ValueId(3) })
+    try emit_at(&module, main, body, ir.Instruction{ op = .assign_local, slot = 1, left = ir.ValueId(7) })
+    try emit_at(&module, main, body, ir.Instruction{ op = .equal, type = .bool, destination = ir.ValueId(8), left = ir.ValueId(4), right = ir.ValueId(2) })
+    module.functions.items[usize(main)].blocks.items[usize(body)].terminator = ir.Terminator{ kind = .branch, value = ir.ValueId(8), target = done, alternative = advance }
+    try emit_at(&module, main, advance, ir.Instruction{ op = .add, type = .usize, destination = ir.ValueId(0), left = ir.ValueId(4), right = ir.ValueId(3) })
+    try emit_at(&module, main, advance, ir.Instruction{ op = .assign_local, slot = 0, left = ir.ValueId(0) })
+    module.functions.items[usize(main)].blocks.items[usize(advance)].terminator = ir.Terminator{ kind = .jump, target = header }
+    try emit_at(&module, main, done, ir.Instruction{ op = .load_local, type = .usize, destination = ir.ValueId(1), slot = 1 })
+    module.functions.items[usize(main)].blocks.items[usize(done)].terminator = ir.Terminator{ value = ir.ValueId(1) }
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(u64(2), outcome.value.data.unsigned)
 }

@@ -32,3 +32,35 @@ exposes_typed_declaration_views test {
     try testing.expect_equal(ExprKind.literal_int, expr_kind(&tree, statement.initializer))
     try testing.expect_equal("value", source_text(&tree, statement.name))
 }
+
+exposes_array_type_literal_and_index_views test {
+    builder := init_builder(mem.c_allocator, "")
+    defer deinit_builder(&builder)
+    span :: Span{ start = 0, end = 0 }
+    count :: try add_literal(&builder, .int, span)
+    element :: try add_identifier(&builder, span)
+    row :: try add_array_type(&builder, span, count, element, false)
+    matrix :: try add_array_type(&builder, span, null, row, true)
+    elements [2]NodeId :: [count, element]
+    literal :: try add_array_literal(&builder, span, elements[..])
+    empty :: try add_array_literal(&builder, span, &[])
+    indexed :: try add_index(&builder, span, literal, count)
+    package :: try add_package(&builder, span, &[])
+    tree := finish(&builder, package)
+    defer deinit(&tree)
+    try testing.expect_equal(ExprKind.array_type, expr_kind(&tree, matrix))
+    try testing.expect_equal(null, array_type(&tree, matrix).count)
+    try testing.expect(array_type(&tree, matrix).mutable)
+    try testing.expect_equal(row, array_type(&tree, matrix).element)
+    try testing.expect_equal(count, array_type(&tree, row).count?)
+    try testing.expect(!array_type(&tree, row).mutable)
+    try testing.expect_equal(element, array_type(&tree, row).element)
+    try testing.expect_equal(ExprKind.array_literal, expr_kind(&tree, literal))
+    try testing.expect_equal(2, array_element_count(&tree, literal))
+    try testing.expect_equal(count, array_element(&tree, literal, 0))
+    try testing.expect_equal(element, array_element(&tree, literal, 1))
+    try testing.expect_equal(0, array_element_count(&tree, empty))
+    try testing.expect_equal(ExprKind.index, expr_kind(&tree, indexed))
+    try testing.expect_equal(literal, index_expr(&tree, indexed).base)
+    try testing.expect_equal(count, index_expr(&tree, indexed).index)
+}

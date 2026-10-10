@@ -6,7 +6,12 @@ import "@std/strmap"
 import "@source/ast"
 import "@source/diagnostics"
 
-BuiltinType :: enum { int, float, bool, string, void }
+BuiltinType :: enum {
+    int, float,
+    bool, string,
+    void, i64,
+    f64, usize,
+}
 
 @hide:file
 builtins strmap.StaticStringMap(BuiltinType) :: strmap.init([
@@ -15,6 +20,9 @@ builtins strmap.StaticStringMap(BuiltinType) :: strmap.init([
     { "bool", .bool },
     { "string", .string },
     { "void", .void },
+    { "i64", .i64 },
+    { "f64", .f64 },
+    { "usize", .usize },
 ])
 
 BindingKind :: enum { none, declaration, builtin, invalid }
@@ -298,6 +306,21 @@ resolve_expr proc(
             for (0..ast.call_arg_count(tree, id)) |i| {
                 try resolve_expr(state, scope, ast.call_arg(tree, id, i))
             }
+        }
+        .array_type: {
+            type :: ast.array_type(tree, id)
+            if (type.count) |count| try resolve_expr(state, scope, count)
+            try resolve_expr(state, scope, type.element)
+        }
+        .array_literal: {
+            for (0..ast.array_element_count(tree, id)) |i| {
+                try resolve_expr(state, scope, ast.array_element(tree, id, i))
+            }
+        }
+        .index: {
+            expression :: ast.index_expr(tree, id)
+            try resolve_expr(state, scope, expression.base)
+            try resolve_expr(state, scope, expression.index)
         }
         .invalid: resolve_invalid(state, id)
     }

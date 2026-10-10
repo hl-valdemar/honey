@@ -8,6 +8,8 @@ LocalId :: distinct u32
 ValueId :: distinct u32
 BlockId :: distinct u32
 StringId :: distinct u32
+ArrayId :: distinct u32
+no_array :: maxval!(ArrayId)
 no_value :: maxval!(ValueId)
 
 Type :: enum {
@@ -18,18 +20,42 @@ Type :: enum {
     string,
     void,
     function,
+    array,
+    usize,
+    address,
 }
 
 ValueData :: union {
     integer i64
+    unsigned u64
     real f64
     boolean bool
     string StringId
     function FunctionId
+    elements []mut Value
+    address u32
 }
 Value :: struct {
     type Type = .void
+    array_type ArrayId = no_array
     data ValueData = ValueData{ integer = 0 }
+}
+
+#! fixed recursive shape; `cells` counts flattened scalar leaves, including zero-sized children.
+ArrayType :: struct {
+    element Type
+    element_array ArrayId = no_array
+    len usize
+    cells usize
+    mutable bool
+}
+
+#! maps a local slot or temporary to its preallocated, by-value frame segment.
+ArrayStorage :: struct {
+    index u32
+    array_type ArrayId
+    offset usize
+    local bool
 }
 
 Op :: enum {
@@ -39,6 +65,13 @@ Op :: enum {
     assign_local
     reset_local
     load_global
+    array_literal
+    index
+    address_local
+    address_global
+    index_address
+    load_address
+    store_address
     negate
     logical_not
     add
@@ -57,6 +90,8 @@ Op :: enum {
 Instruction :: struct {
     op Op
     type Type = .void
+    array_type ArrayId = no_array
+    pointee Type = .invalid
     span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
     destination ValueId = no_value
     left ValueId = no_value
@@ -93,6 +128,10 @@ Function :: struct {
     parameters arraylist.ArrayList(Type)
     locals arraylist.ArrayList(Type)
     result Type = .void
+    result_array_type ArrayId = no_array
+    array_storage arraylist.ArrayList(ArrayStorage)
+    aggregate_cells usize = 0
+    has_addresses bool = false
     blocks arraylist.ArrayList(Block)
     entry BlockId = BlockId(0)
     value_count usize = 0
@@ -101,6 +140,7 @@ Function :: struct {
 
 Global :: struct {
     type Type
+    array_type ArrayId = no_array
     initializer FunctionId
     span diagnostics.Span
 }
@@ -118,6 +158,7 @@ Module :: struct {
     functions arraylist.ArrayList(Function)
     globals arraylist.ArrayList(Global)
     strings arraylist.ArrayList(StringStorage)
+    arrays arraylist.ArrayList(ArrayType)
     entry ?FunctionId = null
     entry_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
 }
@@ -128,6 +169,7 @@ init proc(allocator mem.Allocator) Module {
         functions = arraylist.init(allocator),
         globals = arraylist.init(allocator),
         strings = arraylist.init(allocator),
+        arrays = arraylist.init(allocator),
     }
 }
 
@@ -136,6 +178,7 @@ init_function proc(allocator mem.Allocator) Function {
         parameters = arraylist.init(allocator),
         locals = arraylist.init(allocator),
         blocks = arraylist.init(allocator),
+        array_storage = arraylist.init(allocator),
     }
 }
 
@@ -164,6 +207,7 @@ deinit proc(module @mut Module) void {
         arraylist.deinit(&function.parameters)
         arraylist.deinit(&function.locals)
         arraylist.deinit(&function.blocks)
+        arraylist.deinit(&function.array_storage)
     }
     for (module.strings.items) |string|
         mem.free(module.allocator, string.allocation)
@@ -171,4 +215,5 @@ deinit proc(module @mut Module) void {
     arraylist.deinit(&module.functions)
     arraylist.deinit(&module.globals)
     arraylist.deinit(&module.strings)
+    arraylist.deinit(&module.arrays)
 }

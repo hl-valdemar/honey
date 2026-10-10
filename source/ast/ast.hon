@@ -1,15 +1,15 @@
 #! grammar:
-#! * type ..... -> identifier
+#! * type ..... -> identifier | '[' (expr | '_') ']' ['mut'] type
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr ('..' | '..=') expr
+#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr ('..' | '..=') expr
 #! * decl ..... -> identifier [type] binding expr
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
-#! * stmt ..... -> decl | expr | identifier '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls; else binds to the nearest if.
-#! precedence (tightest first): calls, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
+#! precedence (tightest first): calls/indices, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -40,6 +40,9 @@ ExprKind :: enum {
     binary
     call
     range
+    array_type
+    array_literal
+    index
     invalid
 }
 
@@ -86,6 +89,9 @@ NodeKind :: enum {
     expr_binary,
     expr_call,
     expr_range,
+    expr_array_type,
+    expr_array_literal,
+    expr_index,
     stmt_expr,
     stmt_decl,
     stmt_return,
@@ -179,6 +185,19 @@ BinaryExprView :: struct {
 CallExprView :: struct {
     span Span
     callee NodeId
+}
+
+ArrayTypeView :: struct {
+    span Span
+    count ?NodeId
+    element NodeId
+    mutable bool
+}
+
+IndexView :: struct {
+    span Span
+    base NodeId
+    index NodeId
 }
 
 ReturnView :: struct {
@@ -333,6 +352,37 @@ add_call proc(
         main = NodeData{ node_id = callee },
         data0 = NodeData{ extra = u32(start) },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_array_type proc(
+    builder @mut Builder, span Span, count ?NodeId, element NodeId, mutable bool,
+) NodeId ! mem.AllocError {
+    raw_count :: if (count) |id| id else no_node
+    flag :: if (mutable) u32(1) else u32(0)
+    return try add_node(builder, Node{
+        kind = .expr_array_type,
+        main = NodeData{ extra = flag },
+        data0 = NodeData{ node_id = raw_count },
+        data1 = NodeData{ node_id = element },
+    }, span)
+}
+
+add_array_literal proc(builder @mut Builder, span Span, elements []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (elements) |element| _ = try add_extra(builder, u32(element))
+    return try add_node(builder, Node{
+        kind = .expr_array_literal,
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_index proc(builder @mut Builder, span Span, base, index NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_index,
+        data0 = NodeData{ node_id = base },
+        data1 = NodeData{ node_id = index },
     }, span)
 }
 
@@ -710,6 +760,9 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_binary: .binary
         .expr_call: .call
         .expr_range: .range
+        .expr_array_type: .array_type
+        .expr_array_literal: .array_literal
+        .expr_index: .index
         .invalid_expr: .invalid
         else: unreachable
     }
@@ -767,6 +820,40 @@ call_arg proc(tree @Tree, id NodeId, index usize) NodeId {
     debug.assert(node.kind == .expr_call)
     debug.assert(index < usize(node.data1.extra - node.data0.extra))
     return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+array_type proc(tree @Tree, id NodeId) ArrayTypeView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_array_type)
+    return ArrayTypeView{
+        span = get_span(&tree.storage, id),
+        count = maybe_node_id(u32(node.data0.node_id)),
+        element = node.data1.node_id,
+        mutable = node.main.extra != 0,
+    }
+}
+
+array_element_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_array_literal)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+array_element proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_array_literal)
+    debug.assert(index < usize(node.data1.extra - node.data0.extra))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+index_expr proc(tree @Tree, id NodeId) IndexView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_index)
+    return IndexView{
+        span = get_span(&tree.storage, id),
+        base = node.data0.node_id,
+        index = node.data1.node_id,
+    }
 }
 
 node_span proc(tree @Tree, id NodeId) Span {

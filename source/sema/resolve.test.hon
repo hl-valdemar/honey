@@ -603,3 +603,155 @@ range_captures_preserve_duplicate_builtin_and_discard_errors test {
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, bounds.end).kind)
     try testing.expect_equal(8, diagnostics.count(&diagnostic_store))
 }
+
+resolves_array_counts_elements_indices_and_unreachable_targets test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `size usize :: 2
+        `make proc(first, second [size]mut [2]i64) [size]i64 {
+        `    return first[0]
+        `    dead [local_size]mut [size - 1]f64 := [[later]]
+        `    local_size :: size
+        `    later f64 :: 1.0
+        `    (dead[index])[0] = later
+        `    index usize :: 0
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    size :: ast.package_decl(&tree, 0)
+    function :: ast.package_decl(&tree, 1)
+    view :: ast.function_decl(&tree, function)
+    return_type :: ast.array_type(&tree, view.return_type)
+    try testing.expect_equal(size, binding(&resolution, return_type.count?).data.declaration)
+    try testing.expect_equal(BuiltinType.i64, binding(&resolution, return_type.element).data.builtin)
+    first :: ast.function_param(&tree, function, 0)
+    second :: ast.function_param(&tree, function, 1)
+    first_type :: ast.param(&tree, first).type
+    try testing.expect_equal(first_type, ast.param(&tree, second).type)
+    parameter_array :: ast.array_type(&tree, first_type)
+    try testing.expect_equal(size, binding(&resolution, parameter_array.count?).data.declaration)
+    row :: ast.array_type(&tree, parameter_array.element)
+    try testing.expect_equal(BuiltinType.i64, binding(&resolution, row.element).data.builtin)
+    returned :: ast.return_stmt(&tree, ast.block_statement(&tree, view.body, 0)).value?
+    try testing.expect_equal(first, binding(&resolution, ast.index_expr(&tree, returned).base).data.declaration)
+    dead :: ast.block_statement(&tree, view.body, 1)
+    local_size :: ast.block_statement(&tree, view.body, 2)
+    later :: ast.block_statement(&tree, view.body, 3)
+    index :: ast.block_statement(&tree, view.body, 5)
+    declaration :: ast.statement_decl(&tree, dead)
+    array :: ast.array_type(&tree, declaration.type?)
+    try testing.expect_equal(local_size, binding(&resolution, array.count?).data.declaration)
+    inner :: ast.array_type(&tree, array.element)
+    count_expression :: ast.binary_expr(&tree, inner.count?)
+    try testing.expect_equal(size, binding(&resolution, count_expression.left).data.declaration)
+    try testing.expect_equal(BuiltinType.f64, binding(&resolution, inner.element).data.builtin)
+    literal_row :: ast.array_element(&tree, declaration.initializer, 0)
+    try testing.expect_equal(later, binding(
+        &resolution, ast.array_element(&tree, literal_row, 0),
+    ).data.declaration)
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, view.body, 4))
+    target :: ast.index_expr(&tree, ast.index_expr(&tree, assignment.target).base)
+    try testing.expect_equal(dead, binding(&resolution, target.base).data.declaration)
+    try testing.expect_equal(index, binding(&resolution, target.index).data.declaration)
+    try testing.expect_equal(later, binding(&resolution, assignment.value).data.declaration)
+    try testing.expect_equal(BuiltinType.usize, binding(
+        &resolution, ast.statement_decl(&tree, size).type?,
+    ).data.builtin)
+}
+
+array_signature_counts_use_package_scope_and_local_counts_see_parameters test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `size :: 2
+        `inspect proc(n usize, a, b [n]i64) [body_size]i64 {
+        `    body_size :: size
+        `    local [n]i64 :: []
+        `    return []
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    function :: ast.package_decl(&tree, 1)
+    view :: ast.function_decl(&tree, function)
+    parameter :: ast.function_param(&tree, function, 0)
+    grouped_type :: ast.param(&tree, ast.function_param(&tree, function, 1)).type
+    try testing.expect_equal(grouped_type, ast.param(
+        &tree, ast.function_param(&tree, function, 2),
+    ).type)
+    signature_count :: ast.array_type(&tree, grouped_type).count?
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, signature_count).kind)
+    result_count :: ast.array_type(&tree, view.return_type).count?
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, result_count).kind)
+    local :: ast.statement_decl(&tree, ast.block_statement(&tree, view.body, 1))
+    local_count :: ast.array_type(&tree, local.type?).count?
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, local_count).kind)
+    try testing.expect_equal(parameter, binding(&resolution, local_count).data.declaration)
+    try testing.expect_equal(BuiltinType.i64, binding(
+        &resolution, ast.array_type(&tree, local.type?).element,
+    ).data.builtin)
+}
+
+resolves_every_array_child_error_and_preserves_lexer_diagnostics test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    return
+        `    data [missing_count]MissingElement :: [absent, missing_element]
+        `    (missing_base[missing_index])[missing_outer] = missing_rhs
+        `    malformed [$]i64 :: [$]
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(10, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    declaration :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 1))
+    type :: ast.array_type(&tree, declaration.type?)
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 2))
+    outer :: ast.index_expr(&tree, assignment.target)
+    inner :: ast.index_expr(&tree, outer.base)
+    unknowns [8]ast.NodeId :: [
+        type.count?, type.element,
+        ast.array_element(&tree, declaration.initializer, 0),
+        ast.array_element(&tree, declaration.initializer, 1),
+        inner.base, inner.index, outer.index, assignment.value,
+    ]
+    for (unknowns) |id| {
+        result :: binding(&resolution, id)
+        try testing.expect_equal(BindingKind.invalid, result.kind)
+        try testing.expect_equal(diagnostics.Code.unknown_name, diagnostics.get(
+            &diagnostic_store, result.data.diagnostic,
+        )?.code)
+    }
+    malformed :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 3))
+    malformed_count :: ast.array_type(&tree, malformed.type?).count?
+    malformed_element :: ast.array_element(&tree, malformed.initializer, 0)
+    try testing.expect_equal(diagnostics.DiagnosticId(0), binding(&resolution, malformed_count).data.diagnostic)
+    try testing.expect_equal(diagnostics.DiagnosticId(1), binding(&resolution, malformed_element).data.diagnostic)
+}

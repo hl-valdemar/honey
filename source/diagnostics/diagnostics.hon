@@ -37,6 +37,14 @@ Code :: enum {
     range_value_not_supported,
     range_pointer_capture,
     range_index_capture,
+    invalid_array_length,
+    array_length_mismatch,
+    invalid_array_element_type,
+    array_size_overflow,
+    invalid_index_type,
+    not_indexable,
+    invalid_index_assignment,
+    index_out_of_bounds,
     missing_entry,
     invalid_entry,
     literal_out_of_range,
@@ -55,7 +63,7 @@ Diagnostic :: struct {
 #! owns diagnostic storage and retains its allocator; release with deinit.
 Store :: struct { list arraylist.ArrayList(Diagnostic) }
 
-CapacityError :: enum { diagnostic_limit_reached }
+CapacityError :: enum { diagnostic_limit_reached, storage_limit_reached }
 
 #! retains `allocator` for added diagnostics; the caller owns the returned Store.
 init proc(allocator mem.Allocator) Store {
@@ -112,6 +120,14 @@ messages :: $enummap.init(Code, []u8, {
     range_value_not_supported = "first-class range values are not implemented",
     range_pointer_capture = "range loops do not support pointer captures",
     range_index_capture = "range loops do not support index captures",
+    invalid_array_length = "array length must be a nonnegative supported compile-time integer",
+    array_length_mismatch = "array literal length does not match its type",
+    invalid_array_element_type = "array element annotations require a supported concrete value type",
+    array_size_overflow = "array storage size exceeds the supported address space",
+    invalid_index_type = "array index must have type usize",
+    not_indexable = "indexing is currently implemented for fixed arrays only",
+    invalid_index_assignment = "indexed assignment requires a writable array element",
+    index_out_of_bounds = "index out of bounds",
     missing_entry = "program requires a main function",
     invalid_entry = "main must be a function with no parameters",
     literal_out_of_range = "numeric literal is outside its runtime type's range",

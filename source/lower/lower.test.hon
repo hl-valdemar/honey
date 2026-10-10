@@ -68,7 +68,8 @@ executes_calls_locals_arithmetic_and_nested_argument_slices test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.int, outcome.value.type)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -88,7 +89,8 @@ owns_decoded_strings_after_source_and_frontend_are_freed test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.string, outcome.value.type)
     try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "a\\\"\n\r\t\x00Az"))
@@ -118,7 +120,8 @@ honors_float_context_and_float_division test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.float, outcome.value.type)
     try testing.expect_equal(f64(0.5), outcome.value.data.real)
@@ -142,10 +145,12 @@ executes_forward_lazy_globals_and_function_aliases test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
-    again :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    again := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&again)
     try testing.expect(again.trap == null)
     try testing.expect_equal(i64(42), again.value.data.integer)
 }
@@ -162,7 +167,8 @@ supports_bare_void_value_returns_and_fallthrough test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.void, outcome.value.type)
     }
@@ -185,7 +191,8 @@ preserves_demanded_diagnostic_identity_and_source_location test {
     diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
     try testing.expect_equal(diagnostics.Code.unknown_name, diagnostic.code)
     try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "unknown"))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
     try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
 }
@@ -207,7 +214,8 @@ skips_unreachable_and_unused_invalid_code test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect(diagnostics.count(&diagnostic_store) > 0)
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
 }
@@ -224,7 +232,8 @@ traps_local_forward_loads_and_global_initialization_cycles test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         code diagnostics.Code :: if (i == 0) .read_before_initialization else .initialization_cycle
         try expect_trap(outcome, &diagnostic_store, code)
     }
@@ -243,7 +252,8 @@ handles_integer_boundaries_without_host_overflow test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(expected[i], outcome.value.data.integer)
     }
@@ -265,7 +275,8 @@ traps_invalid_literals_escapes_and_checked_integer_arithmetic test {
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         code := diagnostics.Code.integer_overflow
         if (i < 2) code = .literal_out_of_range
         if (i >= 6) code = .invalid_escape
@@ -285,7 +296,8 @@ validates_main_and_preserves_first_declaration test {
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (i == 3) {
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -308,7 +320,8 @@ invalid_signatures_trap_without_poisoning_unrelated_main test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect(diagnostics.count(&diagnostic_store) > 0)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (i == 0) {
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -327,7 +340,8 @@ parses_float_context_without_integer_range_limits_and_rejects_float_overflow tes
         &diagnostic_store,
     )
     defer ir.deinit(&module)
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.float, outcome.value.type)
     try testing.expect_equal(f64(18446744073709551616.0), outcome.value.data.real)
@@ -338,7 +352,8 @@ parses_float_context_without_integer_range_limits_and_rejects_float_overflow tes
     for (".0\n}\n") |byte| try arraylist.append(&source, byte)
     oversized := try compile_owned(source.items, &diagnostic_store)
     defer ir.deinit(&oversized)
-    trapped :: try interpreter.run(mem.c_allocator, &oversized, &diagnostic_store)
+    trapped := try interpreter.run(mem.c_allocator, &oversized, &diagnostic_store)
+    defer interpreter.deinit(&trapped)
     try expect_trap(trapped, &diagnostic_store, .literal_out_of_range)
 }
 
@@ -354,7 +369,8 @@ accepts_representable_subnormals_and_rejects_underflow_to_zero test {
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source.items, &diagnostic_store)
         defer ir.deinit(&module)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (count == 307) {
             try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
             try testing.expect(outcome.trap == null)
@@ -436,8 +452,11 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `    local :: value
         `    return local
         `}
+        `rows proc(value [2][2]string) [2][2]string { return value }
         `main proc() string {
         `    computed float :: factor * 2
+        `    aggregate :: rows([[text, "second"], ["third", text]])
+        `    (aggregate[1])[1]
         `    remaining := 2
         `    for 0..=2 |item| {
         `        saved :: identity(text)
@@ -491,9 +510,11 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
             continue
         }
         errdefer ir.deinit(&module)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
-        try testing.expect(mem.eql(outcome.value.data.string, "owned\nstring"))
+        try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "owned\nstring"))
+        interpreter.deinit(&outcome)
         ir.deinit(&module)
         try testing.expect_equal(usize(0), state.live)
         succeeded = true
@@ -520,7 +541,8 @@ recursive_factorial_and_conditional_returns_execute_after_frontend_cleanup test 
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(120), outcome.value.data.integer)
 }
@@ -564,7 +586,8 @@ nested_branches_joins_calls_and_lazy_globals_preserve_execution_position test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
 }
@@ -594,7 +617,8 @@ bool_storage_results_and_numeric_comparisons_execute test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.bool, outcome.value.type)
         try testing.expect(outcome.value.data.boolean)
@@ -618,7 +642,8 @@ conditional_errors_trap_only_when_demanded_and_preserve_original_identity test {
         defer ir.deinit(&module)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (index == 0 or index == 2 or index == 4) {
             try testing.expect(outcome.trap == null)
             if (index == 4) try testing.expect_equal(ir.Type.void, outcome.value.type)
@@ -646,7 +671,8 @@ missing_return_does_not_replace_reached_arm_error test {
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (index == 2) {
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -678,7 +704,8 @@ nested_locals_are_predeclared_before_any_arm_executes test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try expect_trap(outcome, &diagnostic_store, .read_before_initialization)
 }
 
@@ -701,7 +728,8 @@ iterative_factorial_executes_from_owned_ir_after_frontend_cleanup test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.int, outcome.value.type)
     try testing.expect_equal(i64(120), outcome.value.data.integer)
@@ -722,7 +750,8 @@ zero_nested_early_return_and_predicate_call_loops_execute test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.int, outcome.value.type)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -743,7 +772,8 @@ float_bool_string_and_compatible_function_updates_execute test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(expected_types[index], outcome.value.type)
         match index {
@@ -768,7 +798,8 @@ forward_assignments_check_initialization_after_evaluating_the_rhs test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
         try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "later"))
@@ -803,7 +834,8 @@ loop_and_reentered_arm_locals_are_uninitialized_before_later_declarations test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
         try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "later"))
@@ -832,7 +864,8 @@ invalid_assignments_and_loop_conditions_preserve_original_diagnostics test {
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
         try testing.expect_equal(codes[index], original.code)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
     }
@@ -853,7 +886,8 @@ zero_iteration_body_errors_are_checked_but_not_executed test {
         defer ir.deinit(&module)
         try testing.expect(diagnostics.count(&diagnostic_store) > 0)
         count :: diagnostics.count(&diagnostic_store)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
         try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
@@ -878,7 +912,8 @@ loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_over
             diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
             try testing.expect_equal(diagnostics.Code.missing_return, diagnostic.code)
         } else try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         if (index == 0) {
             try testing.expect(outcome.trap == null)
             try testing.expect_equal(i64(42), outcome.value.data.integer)
@@ -905,9 +940,11 @@ bounded_pure_loops_do_not_allocate_per_iteration_and_release_runtime_storage tes
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
         state := AllocationState{ remaining = 64 }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-        outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(expected[index], outcome.value.data.integer)
+        interpreter.deinit(&outcome)
         try testing.expect_equal(usize(0), state.live)
         if (index == 0) allocations = usize(64) - state.remaining
         else try testing.expect_equal(allocations, usize(64) - state.remaining)
@@ -945,7 +982,8 @@ boolean_truth_tables_nesting_negation_and_precedence_execute test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.bool, outcome.value.type)
         try testing.expect_equal(expected[index], outcome.value.data.boolean)
@@ -970,7 +1008,8 @@ branchful_calls_preserve_earlier_temps_nested_arguments_and_function_callees tes
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
 }
@@ -995,7 +1034,8 @@ short_circuit_source_errors_remain_checked_but_skipped_in_every_consumer test {
         defer ir.deinit(&module)
         count :: diagnostics.count(&diagnostic_store)
         try testing.expect(count > 0)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.bool, outcome.value.type)
         try testing.expect(outcome.value.data.boolean)
@@ -1025,7 +1065,8 @@ demanded_boolean_source_errors_keep_the_original_diagnostic_and_operand_span tes
         operand []u8 :: if (index >= 2 and index <= 4) "1" else "absent"
         try testing.expect_equal(code, original.code)
         try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], operand))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
     }
@@ -1042,7 +1083,8 @@ branchful_call_arguments_evaluate_left_to_right_before_later_errors test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     original :: diagnostics.get(&diagnostic_store, outcome.trap?)?
     try testing.expect_equal(diagnostics.Code.unknown_name, original.code)
     try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], "first_absent"))
@@ -1064,7 +1106,8 @@ short_circuit_protects_uninitialized_reads_global_cycles_and_overflow test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect(outcome.value.data.boolean)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1086,7 +1129,8 @@ demanded_boolean_runtime_errors_keep_the_instruction_span test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
         try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], spans[index]))
@@ -1114,7 +1158,8 @@ composed_loop_guards_recompute_and_overwrite_synthetic_results test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
 }
@@ -1150,14 +1195,16 @@ lazy_branchful_global_initializers_and_calls_release_every_runtime_allocation te
     for (usize(0)..usize(64)) |limit| {
         state := AllocationState{ remaining = limit }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-        outcome :: interpreter.run(allocator, &module, &diagnostic_store) catch |error| {
+        outcome := interpreter.run(allocator, &module, &diagnostic_store) catch |error| {
             try testing.expect(error == .out_of_memory)
             failures += 1
             try testing.expect_equal(usize(0), state.live)
             continue
         }
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect(outcome.value.data.boolean)
+        interpreter.deinit(&outcome)
         try testing.expect_equal(usize(0), state.live)
         succeeded = true
         break
@@ -1181,7 +1228,8 @@ skipped_rhs_does_not_hide_a_demanded_outer_type_mismatch test {
         defer ir.deinit(&module)
         count :: diagnostics.count(&diagnostic_store)
         try testing.expect_equal(2, count)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
     }
@@ -1199,7 +1247,8 @@ break_and_continue_skip_iterations_exit_early_and_restore_outer_targets test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
@@ -1223,7 +1272,8 @@ continue_restarts_composed_calling_guards_after_branchful_body_calls test {
         module := try compile_owned(source.items, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
@@ -1247,7 +1297,8 @@ reached_outside_controls_preserve_diagnostic_identity_and_keyword_span test {
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
         try testing.expect_equal(codes[index], original.code)
         try testing.expect(mem.eql(source[usize(original.span.start)..usize(original.span.end)], keywords[index]))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
     }
@@ -1270,7 +1321,8 @@ untaken_outside_controls_remain_checked_without_trapping test {
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
         try testing.expect_equal(codes[index], original.code)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
@@ -1292,7 +1344,8 @@ source_errors_after_loop_transfers_stay_checked_but_unreached test {
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
         try testing.expect_equal(diagnostics.Code.unknown_name, original.code)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
@@ -1310,7 +1363,8 @@ traps_before_loop_controls_keep_the_original_error test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, .unknown_name)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
@@ -1340,7 +1394,8 @@ owned_integer_ranges_execute_exclusive_inclusive_empty_signed_and_discard_forms 
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(ir.Type.int, outcome.value.type)
         try testing.expect_equal(expected[index], outcome.value.data.integer)
@@ -1372,7 +1427,8 @@ range_bounds_calls_and_globals_are_frozen_before_branchful_body_calls test {
     module := try compile_owned(source, &diagnostic_store)
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(i64(42), outcome.value.data.integer)
 }
@@ -1389,7 +1445,8 @@ range_break_continue_and_nested_for_while_restore_lexical_targets test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
@@ -1415,7 +1472,8 @@ range_body_and_arm_locals_reset_before_continued_later_declarations test {
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, codes[index])
         diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
         try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "later"))
@@ -1443,7 +1501,8 @@ untaken_range_errors_and_errors_after_controls_remain_diagnostic_only test {
         defer ir.deinit(&module)
         count :: diagnostics.count(&diagnostic_store)
         try testing.expect(count > 0)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(i64(42), outcome.value.data.integer)
         try testing.expect_equal(count, diagnostics.count(&diagnostic_store))
@@ -1476,7 +1535,8 @@ demanded_range_header_capture_and_body_errors_keep_original_diagnostic_identity 
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
         original :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
         try testing.expect_equal(codes[index], original.code)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect_equal(diagnostics.DiagnosticId(0), outcome.trap?)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
     }
@@ -1495,7 +1555,8 @@ range_bounds_evaluate_left_to_right_before_header_errors_and_body_overflow_keeps
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
         before :: diagnostics.count(&diagnostic_store)
-        outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         code diagnostics.Code :: if (index == 3) .unknown_name else .integer_overflow
         try expect_trap(outcome, &diagnostic_store, code)
         diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
@@ -1526,11 +1587,302 @@ range_runtime_allocations_do_not_grow_with_iterations test {
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
         state := AllocationState{ remaining = 64 }
         allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
-        outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
+        outcome := try interpreter.run(allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
         try testing.expect_equal(expected[index], outcome.value.data.integer)
+        interpreter.deinit(&outcome)
         try testing.expect_equal(usize(0), state.live)
         if (index == 0) allocations = usize(64) - state.remaining
         else try testing.expect_equal(allocations, usize(64) - state.remaining)
     }
+}
+
+array_mutation_copies_rows_wholes_and_by_value_calls test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `seed :: later
+        `later [2]mut [2]mut i64 :: [[1, 2], [3, 4]]
+        `identity proc(value [2]mut [2]mut i64) [2]mut [2]mut i64 { return value }
+        `changed proc(value [2]mut [2]mut i64) [2]mut [2]mut i64 {
+        `    copy := value
+        `    (copy[0])[0] = 20
+        `    return copy
+        `}
+        `main proc() bool {
+        `    a := identity(identity(seed))
+        `    row := a[0]
+        `    row[0] = 9
+        `    b := changed(identity(a))
+        `    (b[1])[1] = 30
+        `    c := a
+        `    c = b
+        `    (b[0])[1] = 40
+        `    a[1] = row
+        `    row[1] = 50
+        `    count usize :: 2
+        `    sum := 0
+        `    for 0..count |i| {
+        `        for 0..count |j| { sum = sum + a[i][j] }
+        `    }
+        `    return sum == 14 and seed[0][0] == 1 and seed[1][1] == 4 and c[0][0] == 20 and c[0][1] == 2 and c[1][1] == 30
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect(outcome.value.data.boolean)
+}
+
+array_context_inference_empty_shapes_and_scalar_leaf_families test {
+    sources [8][]u8 :: [
+        "main proc() bool {\n a [_]mut i64 := [1, 2, 3]\n a[1] = 9\n return a[1] == 9\n}\n",
+        "main proc() bool {\n a [0]bool :: []\n b :: []\n return true\n}\n",
+        "main proc() bool {\n a [2]mut f64 := [1, 2.5]\n a[0] = 3.5\n return a[0] + a[1] == 6.0\n}\n",
+        "main proc() bool {\n a [2]mut bool := [false or true, true and false]\n a[1] = true\n return a[0] and a[1]\n}\n",
+        "main proc() string {\n a [2]mut string := [\"one\", \"two\"]\n b := a\n a[1] = \"three\"\n return b[1]\n}\n",
+        "plus proc(n int) int { return n + 1 }\nminus proc(n int) int { return n - 1 }\nmain proc() bool {\n a :: [plus, minus]\n return a[0](41) == 42 and a[1](43) == 42\n}\n",
+        "make proc() [2]i64 { return [20, 22] }\nmain proc() bool {\n return make()[0] + ([20, 22])[1] == 42\n}\n",
+        "count :: alias + 1\nalias :: 1\nmain proc() bool {\n a [count][0]bool :: [[], []]\n return true\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        if (outcome.value.type == .string) {
+            try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "two"))
+        } else {
+            try testing.expect(outcome.value.data.boolean)
+        }
+    }
+}
+
+array_literal_scratch_handles_nested_calls_and_branchful_elements test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `identity proc(value [2]bool) [2]bool { return value }
+        `pair proc(left [2]bool, right [2]bool) [2][2]bool { return [left, right] }
+        `main proc() bool {
+        `    value :: pair(identity([true or false, false and true]), identity(identity([false or true, true and !false])))
+        `    return value[0][0] and !value[0][1] and value[1][0] and value[1][1]
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect(outcome.value.data.boolean)
+}
+
+array_bounds_roots_and_mutability_trap_at_demanded_positions test {
+    sources [12][]u8 :: [
+        "main proc() int {\n a :: [1]\n return a[1]\n}\n",
+        "main proc() int {\n a [0]i64 :: []\n return a[0]\n}\n",
+        "main proc() int {\n a [1]mut i64 := [1]\n a[18446744073709551615] = 2\n return 0\n}\n",
+        "main proc() int {\n a [1]mut i64 :: [1]\n a[0] = 2\n return 0\n}\n",
+        "main proc() int {\n a := [1]\n a[0] = 2\n return 0\n}\n",
+        "a [1]mut i64 :: [1]\nmain proc() int {\n a[0] = 2\n return 0\n}\n",
+        "bad proc(a [1]mut i64) int {\n a[0] = 2\n return 0\n}\nmain proc() int {\n return bad([1])\n}\n",
+        "main proc() int {\n a [1]mut [1]i64 := [[1]]\n (a[0])[0] = 2\n return 0\n}\n",
+        "main proc() int {\n a [1][1]mut i64 := [[1]]\n (a[0])[0] = 2\n return 0\n}\n",
+        "a [1]i64 :: b\nb [1]i64 :: a\nmain proc() int {\n return a[0]\n}\n",
+        "main proc() int {\n before :: after[0]\n after [1]i64 :: [1]\n return before\n}\n",
+        "main proc() int {\n [1]i64\n return 0\n}\n",
+    ]
+    codes [12]diagnostics.Code :: [
+        .index_out_of_bounds, .index_out_of_bounds, .index_out_of_bounds,
+        .invalid_index_assignment, .invalid_index_assignment, .invalid_index_assignment,
+        .invalid_index_assignment, .invalid_index_assignment, .invalid_index_assignment,
+        .initialization_cycle, .read_before_initialization, .type_not_value,
+    ]
+    for (sources) |source, i| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, codes[i])
+    }
+}
+
+array_assignment_rhs_and_nested_bounds_preserve_error_order_and_identity test {
+    sources [5][]u8 :: [
+        "rhs proc() i64 { return absent_rhs }\nmain proc() int {\n a [0]mut i64 := []\n a[absent_index] = rhs()\n return 0\n}\n",
+        "index proc() usize { return absent_inner }\nmain proc() int {\n a [1][1]i64 :: [[1]]\n return a[2][index()]\n}\n",
+        "rhs proc() i64 { return absent_rhs }\nmain proc() int {\n a :: [1]\n a[0] = rhs()\n return 0\n}\n",
+        "main proc() int {\n a [0]mut i64 := []\n a[0] = 9223372036854775807 + 1\n return 0\n}\n",
+        "main proc() int {\n a [1]mut i64 := [1]\n a[absent_index] = absent_rhs\n return 0\n}\n",
+    ]
+    codes [5]diagnostics.Code :: [.unknown_name, .index_out_of_bounds, .unknown_name, .integer_overflow, .unknown_name]
+    for (sources) |source, i| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        before :: diagnostics.count(&diagnostic_store)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, codes[i])
+        if (i == 0 or i == 2 or i == 4) {
+            diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+            try testing.expect(mem.eql(source[usize(diagnostic.span.start)..usize(diagnostic.span.end)], "absent_rhs"))
+            try testing.expect_equal(before, diagnostics.count(&diagnostic_store))
+        }
+    }
+}
+
+usize_arithmetic_and_guarded_ranges_use_unsigned_full_width test {
+    sources [5][]u8 :: [
+        "main proc() bool {\n max usize :: 18446744073709551615\n n := 0\n for max..=max |i| {\n if (i != max) return false\n n = n + 1\n continue\n }\n return n == 1\n}\n",
+        "main proc() bool {\n max usize :: 18446744073709551615\n zero usize :: 0\n n := 0\n for max..max |_| { n = n + 1 }\n for zero..=zero |_| { n = n + 1 }\n return n == 1\n}\n",
+        "main proc() bool {\n start usize :: 18446744073709551614\n end usize :: 18446744073709551615\n n := 0\n for start..=end |i| {\n n = n + 1\n continue\n }\n return n == 2\n}\n",
+        "main proc() bool {\n a usize :: 9223372036854775808\n return a > 9223372036854775807 and a * 1 + 1 - 1 == a\n}\n",
+        "main proc() bool {\n end usize :: 3\n sum usize := 0\n for 0..end |i| { sum = sum + i }\n return sum == 3\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect(outcome.value.data.boolean)
+    }
+}
+
+aggregate_loop_frames_allocate_once_and_reset_local_freshness test {
+    sources [2][]u8 :: [
+        "main proc() int {\n end usize :: 1\n count := 0\n a [1]mut i64 := [0]\n for 0..end |i| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
+        "main proc() int {\n end usize :: 10000\n count := 0\n a [1]mut i64 := [0]\n for 0..end |i| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
+    ]
+    expected [2]i64 :: [2, 20000]
+    allocations := usize(0)
+    for (sources) |source, i| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        state := AllocationState{ remaining = 64 }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome := try interpreter.run(allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(expected[i], outcome.value.data.integer)
+        interpreter.deinit(&outcome)
+        try testing.expect_equal(usize(0), state.live)
+        if (i == 0) allocations = usize(64) - state.remaining
+        else try testing.expect_equal(allocations, usize(64) - state.remaining)
+    }
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(
+        "main proc() int {\n end usize :: 2\n for 0..end |i| {\n if (i == 1) return later[0]\n later [1]i64 :: [42]\n }\n return 0\n}\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&module)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try expect_trap(outcome, &diagnostic_store, .read_before_initialization)
+}
+
+escaped_nested_array_returns_survive_frontend_and_frames_and_release_on_oom test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `later [2][2]string :: [["owned\none", "two"], ["three", "four"]]
+        `first :: identity(later)
+        `identity proc(value [2][2]string) [2][2]string { return value }
+        `main proc() [2][2]string { return identity(identity(first)) }
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    succeeded := false
+    failures := usize(0)
+    for (usize(0)..usize(512)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome := interpreter.run(allocator, &module, &diagnostic_store) catch |error| {
+            try testing.expect(error == .out_of_memory)
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.array, outcome.value.type)
+        try testing.expect_equal(usize(4), outcome.value.data.elements.len)
+        try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.elements[0].data.string), "owned\none"))
+        try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.elements[3].data.string), "four"))
+        try testing.expect(state.live > 0)
+        interpreter.deinit(&outcome)
+        try testing.expect_equal(usize(0), state.live)
+        succeeded = true
+        break
+    }
+    try testing.expect(succeeded)
+    try testing.expect(failures > 0)
+}
+
+unsigned_arithmetic_reports_overflow_without_signed_narrowing test {
+    sources [3][]u8 :: [
+        "main proc() usize {\n return 18446744073709551615 + 1\n}\n",
+        "main proc() usize {\n return 0 - 1\n}\n",
+        "main proc() usize {\n return 9223372036854775808 * 2\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .integer_overflow)
+    }
+}
+
+array_index_write_checks_initialization_after_rhs test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(
+        "main proc() int {\n a[0] = 42\n a [1]mut i64 := [0]\n return 0\n}\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try expect_trap(outcome, &diagnostic_store, .write_before_initialization)
+}
+
+empty_array_entry_results_need_no_escaped_allocation test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned("main proc() [0]bool { return [] }\n", &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    state := AllocationState{ remaining = 64 }
+    allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+    outcome := try interpreter.run(allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.array, outcome.value.type)
+    try testing.expect_equal(usize(0), outcome.value.data.elements.len)
+    try testing.expect_equal(usize(0), state.live)
+    interpreter.deinit(&outcome)
+    try testing.expect_equal(usize(0), state.live)
 }

@@ -30,6 +30,7 @@ State :: struct {
     diagnostics @mut diagnostics.Store
     module @mut ir.Module
     storage []mut Storage
+    arrays []mut ir.ArrayId
     arguments arraylist.ArrayList(ir.ValueId)
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
@@ -51,6 +52,9 @@ lower proc(
     storage :: try mem.alloc(Storage, allocator, ast.node_count(tree))
     defer mem.free(allocator, storage)
     mem.set(storage, Storage{})
+    arrays :: try mem.alloc(ir.ArrayId, allocator, typecheck.array_type_count(checked))
+    defer mem.free(allocator, arrays)
+    mem.set(arrays, ir.no_array)
     state := State{
         tree = tree,
         resolution = resolution,
@@ -58,6 +62,7 @@ lower proc(
         diagnostics = diagnostic_store,
         module = &module,
         storage = storage,
+        arrays = arrays,
         arguments = arraylist.init(ir.ValueId, allocator),
     }
     defer arraylist.deinit(&state.arguments)
@@ -75,6 +80,7 @@ lower proc(
                 global :: u32(module.globals.items.len)
                 try arraylist.append(&module.globals, ir.Global{
                     type = lower_type(typecheck.type_of(checked, id)),
+                    array_type = try array_shape(&state, typecheck.type_of(checked, id)),
                     initializer = initializer,
                     span = ast.node_span(tree, id),
                 })
@@ -99,6 +105,8 @@ lower proc(
 lower_type proc(type typecheck.Type) ir.Type {
     return match type.kind {
         .int: .int
+        .usize: .usize
+        .array: .array
         .float: .float
         .bool: .bool
         .string: .string
@@ -106,6 +114,53 @@ lower_type proc(type typecheck.Type) ir.Type {
         .function: .function
         .none, .invalid, .range: .invalid
     }
+}
+
+@hide:file
+array_shape proc(state @mut State, type typecheck.Type) ir.ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (type.kind != .array) return ir.no_array
+    # checker history includes unresolved shapes; materialize only final used types.
+    return try prepare_array(state, type.array_type)
+}
+
+@hide:file
+prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.arrays[usize(id)] != ir.no_array) return state.arrays[usize(id)]
+    descriptor :: typecheck.array_type(state.checked, id)
+    child := ir.no_array
+    width := usize(1)
+    if (descriptor.element.kind == .array) {
+        child = try prepare_array(state, descriptor.element.array_type)
+        width = state.module.arrays.items[usize(child)].cells
+    }
+    if (width != 0 and descriptor.len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
+    if (descriptor.len * width > divtrunc!(maxval!(usize), sizeof!(ir.Value))) return .storage_limit_reached
+    if (state.module.arrays.items.len >= usize(ir.no_array)) return .storage_limit_reached
+    result :: ir.ArrayId(state.module.arrays.items.len)
+    try arraylist.append(&state.module.arrays, ir.ArrayType{
+        element = lower_type(descriptor.element),
+        element_array = child,
+        len = descriptor.len,
+        cells = descriptor.len * width,
+        mutable = descriptor.mutable,
+    })
+    state.arrays[usize(id)] = result
+    return result
+}
+
+@hide:file
+prepare_storage proc(state @mut State, index u32, shape ir.ArrayId, local bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    if (shape == ir.no_array) return
+    function := &state.module.functions.items[state.function]
+    cells :: state.module.arrays.items[usize(shape)].cells
+    if (cells > divtrunc!(maxval!(usize), sizeof!(ir.Value)) - function.aggregate_cells) return .storage_limit_reached
+    try arraylist.append(&function.array_storage, ir.ArrayStorage{
+        index = index,
+        array_type = shape,
+        offset = function.aggregate_cells,
+        local = local,
+    })
+    function.aggregate_cells += cells
 }
 
 @hide:file
@@ -182,19 +237,22 @@ finish proc(state @mut State, value ir.ValueId, span diagnostics.Span) void {
 }
 
 @hide:file
-emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! mem.AllocError {
+emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     function := &state.module.functions.items[state.function]
     operation := instruction
-    if (operation.op != .store_local and operation.op != .assign_local and operation.op != .reset_local) {
+    if (operation.op != .store_local and operation.op != .assign_local and operation.op != .reset_local and operation.op != .store_address) {
+        if (function.value_count >= usize(ir.no_value)) return .storage_limit_reached
         operation.destination = ir.ValueId(function.value_count)
         function.value_count += 1
+        if (operation.type == .array) try prepare_storage(state, u32(operation.destination), operation.array_type, false)
     }
+    if (operation.type == .address) function.has_addresses = true
     try arraylist.append(&function.blocks.items[usize(state.block)].instructions, operation)
     return operation.destination
 }
 
 @hide:file
-constant proc(state @mut State, value ir.Value, span diagnostics.Span) ir.ValueId ! mem.AllocError {
+constant proc(state @mut State, value ir.Value, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     return try emit(state, ir.Instruction{ op = .constant, type = value.type, constant = value, span = span })
 }
 
@@ -205,6 +263,7 @@ lower_global proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diag
     state.block = ir.BlockId(0)
     state.terminated = false
     state.module.functions.items[state.function].result = global.type
+    state.module.functions.items[state.function].result_array_type = global.array_type
     if (trap_binding(state, id)) return
     declaration :: ast.statement_decl(state.tree, id)
     if (declaration.type) |annotation| if (trap_type(state, annotation)) return
@@ -222,12 +281,14 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     state.terminated = false
     function := &state.module.functions.items[state.function]
     function.result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
+    function.result_array_type = try array_shape(state, typecheck.type_of(state.checked, declaration.return_type))
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
         type :: lower_type(typecheck.type_of(state.checked, parameter))
         state.storage[usize(parameter)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
         try arraylist.append(&function.parameters, type)
         try arraylist.append(&function.locals, type)
+        try prepare_storage(state, state.storage[usize(parameter)].index, try array_shape(state, typecheck.type_of(state.checked, parameter)), true)
     }
     try predeclare_locals(state, declaration.body)
     # signature errors are entry traps; body errors are reached in statement order.
@@ -252,7 +313,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
 }
 
 @hide:file
-predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError {
+predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     for (0..ast.block_statement_count(state.tree, block)) |i| {
         statement :: ast.block_statement(state.tree, block, i)
         match ast.stmt_kind(state.tree, statement) {
@@ -260,6 +321,7 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError
                 function := &state.module.functions.items[state.function]
                 state.storage[usize(statement)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
                 try arraylist.append(&function.locals, lower_type(typecheck.type_of(state.checked, statement)))
+                try prepare_storage(state, state.storage[usize(statement)].index, try array_shape(state, typecheck.type_of(state.checked, statement)), true)
             }
             .if_stmt: {
                 conditional :: ast.if_stmt(state.tree, statement)
@@ -271,7 +333,9 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! mem.AllocError
                 loop :: ast.for_stmt(state.tree, statement)
                 function := &state.module.functions.items[state.function]
                 slot :: u32(function.locals.items.len)
-                try arraylist.append(&function.locals, ir.Type.int)
+                family :: typecheck.type_of(state.checked, loop.iterable).range_element
+                type ir.Type :: if (family == .usize) .usize else .int
+                try arraylist.append(&function.locals, type)
                 state.storage[usize(statement)] = Storage{ kind = .local, index = slot }
                 if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
                 if (loop.index) |index| {
@@ -405,7 +469,8 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
     end :: try lower_expression(state, interval.end)
     if (state.terminated or trap_type(state, loop.iterable) or trap_type(state, id)) return
     slot :: state.storage[usize(id)].index
-    _ = try emit(state, ir.Instruction{ op = .store_local, type = .int, left = start, slot = slot, span = interval.span })
+    family :: lower_type(typecheck.Type{ kind = typecheck.type_of(state.checked, loop.iterable).range_element })
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = family, left = start, slot = slot, span = interval.span })
     origin :: state.block
     condition :: try add_block(state)
     body :: try add_block(state)
@@ -416,7 +481,7 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
         kind = .jump, target = condition, span = loop.span,
     }
     state.block = condition
-    current :: try emit(state, ir.Instruction{ op = .load_local, type = .int, slot = slot, span = interval.span })
+    current :: try emit(state, ir.Instruction{ op = .load_local, type = family, slot = slot, span = interval.span })
     comparison ir.Op :: if (interval.inclusive) .less_equal else .less
     condition_value :: try emit(state, ir.Instruction{ op = comparison, type = .bool, left = current, right = end, span = interval.span })
     state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
@@ -435,16 +500,18 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
     }
     state.block = update
     state.terminated = false
-    last :: try emit(state, ir.Instruction{ op = .load_local, type = .int, slot = slot, span = interval.span })
+    last :: try emit(state, ir.Instruction{ op = .load_local, type = family, slot = slot, span = interval.span })
     finished :: try emit(state, ir.Instruction{ op = .equal, type = .bool, left = last, right = end, span = interval.span })
     # continue reaches this guard too, so an inclusive maximum never adds one.
     state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
         kind = .branch, value = finished, target = exit, alternative = increment, span = interval.span,
     }
     state.block = increment
-    one :: try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } }, interval.span)
-    next :: try emit(state, ir.Instruction{ op = .add, type = .int, left = last, right = one, span = interval.span })
-    _ = try emit(state, ir.Instruction{ op = .store_local, type = .int, left = next, slot = slot, span = interval.span })
+    unit := ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } }
+    if (family == .usize) unit = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = 1 } }
+    one :: try constant(state, unit, interval.span)
+    next :: try emit(state, ir.Instruction{ op = .add, type = family, left = last, right = one, span = interval.span })
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = family, left = next, slot = slot, span = interval.span })
     state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
         kind = .jump, target = condition, span = loop.span,
     }
@@ -473,6 +540,25 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
+            if (ast.expr_kind(tree, assignment.target) == .index) {
+                value :: try lower_expression(state, assignment.value)
+                if (state.terminated) return
+                if (!is_place(state, assignment.target)) {
+                    _ = try lower_expression(state, assignment.target)
+                    if (!state.terminated) _ = trap_type(state, id)
+                    return
+                }
+                address :: try lower_place(state, assignment.target)
+                if (state.terminated or trap_type(state, id)) return
+                _ = try emit(state, ir.Instruction{
+                    op = .store_address,
+                    type = .void,
+                    left = address,
+                    right = value,
+                    span = ast.node_span(tree, assignment.target),
+                })
+                return
+            }
             if (trap_binding(state, assignment.target) or trap_type(state, id)) return
             value :: try lower_expression(state, assignment.value)
             if (state.terminated) return
@@ -480,6 +566,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             _ = try emit(state, ir.Instruction{
                 op = .assign_local,
                 type = lower_type(typecheck.type_of(state.checked, assignment.target)),
+                array_type = try array_shape(state, typecheck.type_of(state.checked, assignment.target)),
                 left = value,
                 slot = state.storage[usize(binding.data.declaration)].index,
                 span = ast.node_span(tree, assignment.target),
@@ -499,6 +586,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             _ = try emit(state, ir.Instruction{
                 op = .store_local,
                 type = lower_type(typecheck.type_of(state.checked, id)),
+                array_type = try array_shape(state, typecheck.type_of(state.checked, id)),
                 left = value,
                 slot = state.storage[usize(id)].index,
                 span = declaration.span,
@@ -557,10 +645,60 @@ lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
 }
 
 @hide:file
+is_place proc(state @State, id ast.NodeId) bool {
+    match ast.expr_kind(state.tree, id) {
+        .index: return is_place(state, ast.index_expr(state.tree, id).base)
+        .identifier: {
+            binding :: sema.binding(state.resolution, id)
+            if (binding.kind == .invalid) return true
+            if (binding.kind != .declaration) return false
+            location :: state.storage[usize(binding.data.declaration)]
+            return location.kind == .local or location.kind == .global
+        }
+        else: return false
+    }
+}
+
+@hide:file
+lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, id)
+    checked :: typecheck.type_of(state.checked, id)
+    if (ast.expr_kind(state.tree, id) == .index) {
+        expression :: ast.index_expr(state.tree, id)
+        base :: try lower_place(state, expression.base)
+        if (state.terminated) return ir.no_value
+        index :: try lower_expression(state, expression.index)
+        if (state.terminated or trap_type(state, id)) return ir.no_value
+        return try emit(state, ir.Instruction{
+            op = .index_address,
+            type = .address,
+            pointee = lower_type(checked),
+            array_type = try array_shape(state, checked),
+            left = base,
+            right = index,
+            span = span,
+        })
+    }
+    if (trap_binding(state, id) or trap_type(state, id)) return ir.no_value
+    binding :: sema.binding(state.resolution, id)
+    location :: state.storage[usize(binding.data.declaration)]
+    operation ir.Op :: if (location.kind == .global) .address_global else .address_local
+    return try emit(state, ir.Instruction{
+        op = operation,
+        type = .address,
+        pointee = lower_type(checked),
+        array_type = try array_shape(state, checked),
+        slot = location.index,
+        span = span,
+    })
+}
+
+@hide:file
 lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     span :: ast.node_span(tree, id)
     type :: lower_type(typecheck.type_of(state.checked, id))
+    shape :: try array_shape(state, typecheck.type_of(state.checked, id))
     match ast.expr_kind(tree, id) {
         .invalid: {
             invalid :: ast.invalid(tree, id)
@@ -569,6 +707,53 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .range: {
             # ranges have no physical value; only lower_for decomposes an iterable.
             if (!trap_type(state, id)) unreachable
+        }
+        .array_type: {
+            if (!trap_type(state, id)) {
+                trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
+            }
+        }
+        .array_literal: {
+            scratch_start :: state.arguments.items.len
+            defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
+            count :: ast.array_element_count(tree, id)
+            try arraylist.reserve(&state.arguments, scratch_start + count)
+            for (0..count) |_| try arraylist.append(&state.arguments, ir.no_value)
+            for (0..count) |i| {
+                element :: try lower_expression(state, ast.array_element(tree, id, i))
+                if (state.terminated) return ir.no_value
+                state.arguments.items[scratch_start + i] = element
+            }
+            if (trap_type(state, id)) return ir.no_value
+            block := &state.module.functions.items[state.function].blocks.items[usize(state.block)]
+            start :: block.arguments.items.len
+            try arraylist.reserve(&block.arguments, start + count)
+            for (0..count) |i| try arraylist.append(&block.arguments, state.arguments.items[scratch_start + i])
+            return try emit(state, ir.Instruction{
+                op = .array_literal,
+                type = .array,
+                array_type = shape,
+                arguments_start = start,
+                arguments_count = count,
+                span = span,
+            })
+        }
+        .index: {
+            if (is_place(state, id)) {
+                address :: try lower_place(state, id)
+                if (state.terminated) return ir.no_value
+                return try emit(state, ir.Instruction{
+                    op = .load_address, type = type, array_type = shape, left = address, span = span,
+                })
+            }
+            expression :: ast.index_expr(tree, id)
+            base :: try lower_expression(state, expression.base)
+            if (state.terminated) return ir.no_value
+            index :: try lower_expression(state, expression.index)
+            if (state.terminated or trap_type(state, id)) return ir.no_value
+            return try emit(state, ir.Instruction{
+                op = .index, type = type, array_type = shape, left = base, right = index, span = span,
+            })
         }
         .literal_int, .literal_float: {
             if (trap_type(state, id)) return ir.no_value
@@ -594,8 +779,8 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     type = .function,
                     data = ir.ValueData{ function = ir.FunctionId(location.index) },
                 }, span)
-                .global: return try emit(state, ir.Instruction{ op = .load_global, type = type, slot = location.index, span = span })
-                .local: return try emit(state, ir.Instruction{ op = .load_local, type = type, slot = location.index, span = span })
+                .global: return try emit(state, ir.Instruction{ op = .load_global, type = type, array_type = shape, slot = location.index, span = span })
+                .local: return try emit(state, ir.Instruction{ op = .load_local, type = type, array_type = shape, slot = location.index, span = span })
                 .none: unreachable
             }
         }
@@ -664,6 +849,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             return try emit(state, ir.Instruction{
                 op = .call,
                 type = type,
+                array_type = shape,
                 left = callee,
                 arguments_start = start,
                 arguments_count = count,
@@ -694,6 +880,10 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     if (type == .int) {
         if (integer_magnitude(text, u64(maxval!(i64)))) |magnitude| {
             return try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = i64(magnitude) } }, span)
+        }
+    } else if (type == .usize) {
+        if (integer_magnitude(text, maxval!(u64))) |magnitude| {
+            return try constant(state, ir.Value{ type = .usize, data = ir.ValueData{ unsigned = magnitude } }, span)
         }
     } else {
         buffer :: try mem.alloc(u8, state.module.allocator, text.len + 1)

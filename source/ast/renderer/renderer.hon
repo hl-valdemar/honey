@@ -132,6 +132,12 @@ render_statement proc(
     try append_text(renderer, indent)
     try append_text(renderer, "declaration ")
     try append_text(renderer, ast.source_text(tree, statement.name))
+    if (statement.type) |type| {
+        try append_text(renderer, " ")
+        try append_text(renderer, ast.source_text(tree, ast.node_span(tree, type)))
+    }
+    try append_text(renderer, if (statement.mutability == .constant) " :: " else " := ")
+    try append_text(renderer, ast.source_text(tree, ast.node_span(tree, statement.initializer)))
     try append_text(renderer, "\n")
 }
 

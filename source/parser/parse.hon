@@ -103,7 +103,7 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
         while true {
             token :: try consume(state, .ident)
             try arraylist.append(&names, token.span)
-            if next_is(state, .ident) break
+            if (next_is(state, .ident) or next_is(state, .open_bracket)) break
             _ = try consume(state, .comma)
         }
 
@@ -169,13 +169,11 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
-    if (next_is(state, .ident) and next_n_is(state, 1, .equal)) {
-        return try parse_assignment(state, allow_else)
-    }
     if (
         next_is(state, .ident)
         and (
             next_n_is(state, 1, .ident)
+            or (next_n_is(state, 1, .open_bracket) and array_starts_type(state))
             or next_n_is(state, 1, .double_colon)
             or next_n_is(state, 1, .colon_equal)
         )
@@ -188,8 +186,9 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .for: return try parse_for(state, allow_else)
         .return: return try parse_return(state, allow_else)
         .break, .continue: return try parse_loop_control(state, allow_else)
-        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren: {
+        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket: {
             expression :: try parse_expr(state)
+            if next_is(state, .equal) return try parse_assignment(state, expression, allow_else)
             return try ast.add_expression_stmt(&state.builder, expression)
         }
         else: return .unexpected_token
@@ -239,9 +238,7 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
 }
 
 @hide:file
-parse_assignment proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
-    name :: try consume(state, .ident)
-    target :: try ast.add_identifier(&state.builder, name.span)
+parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.NodeId ! ParseError {
     _ = try consume(state, .equal)
     value :: try parse_expr(state)
     if (
@@ -255,7 +252,7 @@ parse_assignment proc(state @mut State, allow_else bool) ast.NodeId ! ParseError
     end :: state.tokens[state.next_token - 1].span.end
     return try ast.add_assignment_stmt(
         &state.builder,
-        ast.Span{ start = name.span.start, end = end },
+        ast.Span{ start = ast.builder_span(&state.builder, target).start, end = end },
         target,
         value,
     )
@@ -454,8 +451,8 @@ parse_arm proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
             .unexpected_token: {}
             else: return err
         }
-        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
-        span :: synchronize_arm(state, start)
+        diagnostic :: try unexpected_diagnostic(state)
+        span :: synchronize(state, start, true, true, false)
         yield try ast.add_invalid_stmt(&state.builder, span, diagnostic)
     }
     statements [1]ast.NodeId :: [statement]
@@ -466,28 +463,11 @@ parse_arm proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     )
 }
 
-@hide:file
-synchronize_arm proc(state @mut State, start usize) ast.Span {
-    first :: state.tokens[start].span
-    end := first.end
-    depth usize := 0
-    while !next_is(state, .eof) {
-        if (
-            depth == 0
-            and (next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .else))
-        ) break
-        if next_is(state, .open_curly) depth += 1
-        if (next_is(state, .close_curly) and depth > 0) depth -= 1
-        end = current(state).span.end
-        state.next_token += 1
-    }
-    return ast.Span{ start = first.start, end = end }
-}
 
 @hide:file
 parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
     name :: try consume(state, .ident)
-    type_id ?ast.NodeId :: if next_is(state, .ident)
+    type_id ?ast.NodeId :: if (next_is(state, .ident) or next_is(state, .open_bracket))
         try parse_type(state)
     else
         null
@@ -508,9 +488,29 @@ parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_type proc(state @mut State) ast.NodeId ! ParseError {
-    if (!next_is(state, .ident)) return .unexpected_token
-    token :: current(state)
-    state.next_token += 1
+    if next_is(state, .open_bracket) {
+        open :: try consume(state, .open_bracket)
+        count ?ast.NodeId := null
+        if (
+            next_is(state, .ident)
+            and current(state).span.end == current(state).span.start + 1
+            and state.builder.source[usize(current(state).span.start)] == '_'
+        ) {
+            state.next_token += 1
+        } else {
+            count = try parse_expr(state)
+        }
+        _ = try consume(state, .close_bracket)
+        mutable :: next_is(state, .mut)
+        if (mutable) state.next_token += 1
+        element :: try parse_type(state)
+        return try ast.add_array_type(
+            &state.builder,
+            ast.Span{ start = open.span.start, end = ast.builder_span(&state.builder, element).end },
+            count, element, mutable,
+        )
+    }
+    token :: try consume(state, .ident)
     return try ast.add_identifier(&state.builder, token.span)
 }
 
@@ -544,7 +544,12 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
         skip_continuation_newlines(state)
         token = current(state)
         if (token.kind == .open_paren) {
-            left = try parse_call(state, left)
+            left = try parse_call(state, left, state.tokens[expression_start].span.start)
+            left_grouped = false
+            continue
+        }
+        if (token.kind == .open_bracket) {
+            left = try parse_index(state, left, state.tokens[expression_start].span.start)
             left_grouped = false
             continue
         }
@@ -603,7 +608,7 @@ validate_range_bound proc(
 }
 
 @hide:file
-parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
+parse_call proc(state @mut State, callee ast.NodeId, start u32) ast.NodeId ! ParseError {
     _ = try consume(state, .open_paren)
     state.paren_depth += 1
     defer state.paren_depth -= 1
@@ -622,7 +627,7 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     return try ast.add_call(
         &state.builder,
         ast.Span{
-            start = ast.builder_span(&state.builder, callee).start,
+            start = start,
             end = close.span.end,
         },
         callee,
@@ -631,9 +636,107 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
 }
 
 @hide:file
+parse_index proc(state @mut State, base ast.NodeId, start u32) ast.NodeId ! ParseError {
+    _ = try consume(state, .open_bracket)
+    index :: try parse_expr(state)
+    if !next_is(state, .close_bracket) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        return try ast.add_invalid_expr(
+            &state.builder,
+            ast.Span{
+                start = start,
+                end = ast.builder_span(&state.builder, index).end,
+            },
+            diagnostic,
+        )
+    }
+    close :: try consume(state, .close_bracket)
+    return try ast.add_index(
+        &state.builder,
+        ast.Span{ start = start, end = close.span.end },
+        base, index,
+    )
+}
+
+@hide:file
+array_starts_type proc(state @State) bool {
+    depth usize := 0
+    for (state.next_token)..(state.tokens.len) |i| {
+        kind :: state.tokens[i].kind
+        if (kind == .open_bracket) depth += 1
+        if (kind == .close_bracket) {
+            depth -= 1
+            if (depth == 0) {
+                if (i + 1 >= state.tokens.len) return false
+                next :: state.tokens[i + 1].kind
+                return next == .ident or next == .mut or next == .open_bracket
+            }
+        }
+        if (kind == .open_curly or kind == .close_curly or kind == .eof) return false
+    }
+    return false
+}
+
+@hide:file
+parse_array_literal proc(state @mut State) ast.NodeId ! ParseError {
+    open :: try consume(state, .open_bracket)
+    elements arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
+    defer arraylist.deinit(&elements)
+    after_open :: state.next_token
+    skip_newlines(state)
+    if named_binding_starts(state) {
+        state.next_token = after_open
+        return try invalid_array_literal(state, open.span.start, open.span.end)
+    }
+    while !next_is(state, .close_bracket) {
+        element :: try parse_expr(state)
+        try arraylist.append(&elements, element)
+        after_element :: state.next_token
+        skip_newlines(state)
+        if next_is(state, .close_bracket) break
+        if !next_is(state, .comma) {
+            state.next_token = after_element
+            return try invalid_array_literal(state, open.span.start, ast.builder_span(&state.builder, element).end)
+        }
+        state.next_token += 1
+        after_comma :: state.next_token
+        skip_newlines(state)
+        if named_binding_starts(state) {
+            state.next_token = after_comma
+            return try invalid_array_literal(state, open.span.start, ast.builder_span(&state.builder, element).end)
+        }
+    }
+    close :: try consume(state, .close_bracket)
+    return try ast.add_array_literal(
+        &state.builder, ast.Span{ start = open.span.start, end = close.span.end }, elements.items,
+    )
+}
+
+@hide:file
+invalid_array_literal proc(state @mut State, start, end u32) ast.NodeId ! ParseError {
+    diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+    return try ast.add_invalid_expr(&state.builder, ast.Span{ start = start, end = end }, diagnostic)
+}
+
+@hide:file
+named_binding_starts proc(state @State) bool {
+    return (
+        next_is(state, .ident)
+        and (
+            next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
+            or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc)
+        )
+    )
+}
+
+@hide:file
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
+        .open_bracket: {
+            if array_starts_type(state) return try parse_type(state)
+            return try parse_array_literal(state)
+        }
         .open_paren: {
             state.next_token += 1
             state.paren_depth += 1
@@ -709,6 +812,7 @@ is_call_boundary proc(kind lexer.TokenKind) bool {
 is_expression_recovery_boundary proc(kind lexer.TokenKind) bool {
     return (
         kind == .comma
+        or kind == .close_bracket
         or kind == .and
         or kind == .or
         or kind == .pipe
@@ -725,14 +829,8 @@ skip_operand_newlines proc(state @mut State) void {
     if (kind != .close_paren and is_expression_boundary(kind)) state.next_token = start
     # a missing operand must not consume the declaration or assignment on the next line.
     if (
-        next_is(state, .ident)
-        and (
-            next_n_is(state, 1, .double_colon)
-            or next_n_is(state, 1, .colon_equal)
-            or next_n_is(state, 1, .equal)
-            or next_n_is(state, 1, .ident)
-            or next_n_is(state, 1, .proc)
-        )
+        named_binding_starts(state)
+        or (next_is(state, .ident) and next_n_is(state, 1, .equal))
     ) state.next_token = start
 }
 
@@ -744,6 +842,8 @@ skip_continuation_newlines proc(state @mut State) void {
     kind :: current(state).kind
     if (
         kind != .close_paren and kind != .comma and kind != .open_paren
+        and kind != .close_bracket and kind != .open_bracket
+        and kind != .range and kind != .range_inclusive
         and infix_binding_power(kind) == null
     ) state.next_token = start
 }
@@ -753,8 +853,8 @@ recover_decl proc(
     state @mut State,
     start usize,
 ) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
-    diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
-    span :: synchronize(state, start, false)
+    diagnostic :: try unexpected_diagnostic(state)
+    span :: synchronize(state, start, false, false, true)
     return try ast.add_invalid_decl(&state.builder, span, diagnostic)
 }
 
@@ -763,29 +863,89 @@ recover_statement proc(
     state @mut State,
     start usize,
 ) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
-    diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
-    span :: synchronize(state, start, true)
+    diagnostic :: try unexpected_diagnostic(state)
+    span :: synchronize(state, start, true, false, true)
     return try ast.add_invalid_stmt(&state.builder, span, diagnostic)
 }
 
 @hide:file
-synchronize proc(state @mut State, start usize, stop_at_curly bool) ast.Span {
+synchronize proc(
+    state @mut State, start usize, stop_at_curly, allow_else, consume_newline bool,
+) ast.Span {
     first :: state.tokens[start].span
     end := first.end
-    depth usize := 0
+    curly usize := 0
+    paren usize := 0
+    square usize := 0
+    for (start..state.next_token) |i| {
+        kind :: state.tokens[i].kind
+        if (kind == .open_paren) paren += 1
+        if (kind == .close_paren and paren > 0) paren -= 1
+        if (kind == .open_bracket) square += 1
+        if (kind == .close_bracket and square > 0) square -= 1
+    }
     while !next_is(state, .eof) {
-        if (depth == 0 and next_is(state, .newline)) break
-        if (stop_at_curly and depth == 0 and next_is(state, .close_curly)) break
-        if (stop_at_curly and next_is(state, .open_curly)) depth += 1
-        if (stop_at_curly and next_is(state, .close_curly) and depth > 0) depth -= 1
+        if (curly == 0) {
+            if (stop_at_curly and next_is(state, .close_curly)) break
+            if (allow_else and next_is(state, .else)) break
+            if (
+                next_is(state, .newline)
+                and !recovery_closes_delimiters(state, paren, square)
+            ) break
+        }
+        kind :: current(state).kind
+        if (kind == .open_curly) curly += 1
+        if (kind == .close_curly and curly > 0) curly -= 1
+        if (kind == .open_paren) paren += 1
+        if (kind == .close_paren and paren > 0) paren -= 1
+        if (kind == .open_bracket) square += 1
+        if (kind == .close_bracket and square > 0) square -= 1
         end = current(state).span.end
         state.next_token += 1
     }
-    if next_is(state, .newline) {
+    if (consume_newline and next_is(state, .newline)) {
         end = current(state).span.end
         state.next_token += 1
     }
     return ast.Span{ start = first.start, end = end }
+}
+
+@hide:file
+recovery_closes_delimiters proc(state @State, paren_depth, square_depth usize) bool {
+    if (paren_depth == 0 and square_depth == 0) return false
+    paren := paren_depth
+    square := square_depth
+    for (state.next_token)..(state.tokens.len) |i| {
+        kind :: state.tokens[i].kind
+        match kind {
+            .open_curly, .close_curly, .eof, .if, .else, .while, .for,
+            .return, .break, .continue: return false
+            .ident: {
+                if (i + 1 < state.tokens.len) {
+                    next :: state.tokens[i + 1].kind
+                    if (next == .double_colon or next == .colon_equal or next == .ident or next == .proc) {
+                        return false
+                    }
+                }
+            }
+            else: {}
+        }
+        if (kind == .open_paren) paren += 1
+        if (kind == .close_paren and paren > 0) paren -= 1
+        if (kind == .open_bracket) square += 1
+        if (kind == .close_bracket and square > 0) square -= 1
+        if (paren == 0 and square == 0) return true
+    }
+    return false
+}
+
+@hide:file
+unexpected_diagnostic proc(state @mut State) diagnostics.DiagnosticId ! (mem.AllocError | diagnostics.CapacityError) {
+    token :: current(state)
+    if (token.kind == .invalid and token.data.diagnostic != diagnostics.no_diagnostic) {
+        return token.data.diagnostic
+    }
+    return try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 }
 
 @hide:file
