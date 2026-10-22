@@ -1,5 +1,6 @@
 import "@ffi/c"
 import "@std/mem"
+import "@std/arraylist"
 # typeinfo! requires this import even without a qualified meta reference.
 import "@std/meta"
 
@@ -7,6 +8,12 @@ ReadError :: enum {
     not_open_for_reading
     read_failed
 }
+
+ReadLimitError :: enum {
+    limit_exceeded
+}
+
+ReadAllError :: alias (mem.AllocError | ReadError | ReadLimitError)
 
 WriteError :: enum {
     not_open_for_writing
@@ -34,7 +41,7 @@ Io :: struct {
 IoVTable :: struct {
     read @proc(context ?@mut anyopaque, handle Handle, buffer []mut u8) usize ! ReadError
     write @proc(context ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteError
-    open @proc(context ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError
+    open @proc(context ?@mut anyopaque, path [*;0]u8, mode FileMode) Handle ! OpenError
     close @proc(context ?@mut anyopaque, handle Handle) void ! CloseError
     stdin @proc(context ?@mut anyopaque) Handle
     stdout @proc(context ?@mut anyopaque) Handle
@@ -62,6 +69,34 @@ read proc(input Reader, buffer []mut u8) usize ! ReadError {
     if (count > buffer.len) return .read_failed
 
     return count
+}
+
+#! read to EOF, accepting at most `maximum` bytes; the reader remains caller-owned.
+#! exceeding the limit consumes one extra byte and returns limit_exceeded.
+#! returned storage retains `allocator`; release it with arraylist.deinit.
+#! all allocated storage is released on error.
+read_all proc(allocator mem.Allocator, input Reader, maximum usize) arraylist.ArrayList(u8) ! ReadAllError {
+    bytes := arraylist.init(u8, allocator)
+    errdefer arraylist.deinit(&bytes)
+    while true {
+        length :: bytes.items.len
+        if (length == maximum) {
+            probe [1]mut u8 := undefined
+            if (try read(input, (&probe)[..]) != 0) return .limit_exceeded
+            return bytes
+        }
+        if (length == bytes.capacity) {
+            growth := usize(4096)
+            if (growth > maximum - length) growth = maximum - length
+            try arraylist.reserve(&bytes, length + growth)
+        }
+        storage :: bytes.items.ptr[..bytes.capacity]
+        end := bytes.capacity
+        if (end > maximum) end = maximum
+        count :: try read(input, storage[length..end])
+        if (count == 0) return bytes
+        bytes.items = storage[..length + count]
+    }
 }
 
 write proc(output Writer, bytes []u8) usize ! WriteError {

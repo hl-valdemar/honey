@@ -29,6 +29,8 @@ main proc() int {
 
 this prints `42`. `main` must be a top-level function with no parameters; nonvoid results are printed, not used as process exit statuses. the current macOS bootstrap obtains arguments from the native startup environment.
 
+source loading uses the supplied `io.Io` for opening, reading, and closing files. `io.open` accepts a borrowed zero-terminated pointer, including paths returned by `process.argument`. `io.read_all(allocator, reader, maximum)` reads to EOF into a caller-owned `ArrayList(u8)`; release it with `arraylist.deinit`. it frees partial storage on error and consumes one extra byte to distinguish an exact-size input from a limit violation. the driver maps `limit_exceeded` to `source_too_large` at its `u32` source-size limit.
+
 the parser supports arithmetic expressions with nested parenthesized groups, such as `a + (b - c) * 2 / 3`. groups control precedence without adding AST nodes; inner expression spans exclude the grouping parentheses. parsing accepts integer division syntax, but type checking requires float operands for `/`.
 
 function calls are postfix expressions: `f()`, `f(a, b)`, and `factory()(x)`. calls bind tighter than unary and binary arithmetic and can appear in initializers or as expression statements inside function bodies. argument lists allow a trailing comma; newlines remain statement boundaries. type checking validates callable values, argument counts and argument types.

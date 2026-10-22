@@ -1,0 +1,127 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@std/testing"
+
+@hide:file
+Input :: struct {
+    bytes []u8
+    offset usize = 0
+    chunk usize = 137
+    fail_at usize = maxval!(usize)
+    remaining usize = maxval!(usize)
+    live usize = 0
+}
+
+@hide:file
+input_state proc(context ?@mut anyopaque) @mut Input {
+    if (context) |pointer| return ptrcast!(pointer)
+    unreachable
+}
+
+@hide:file
+input_read proc(context ?@mut anyopaque, _ Handle, buffer []mut u8) usize ! ReadError {
+    state :: input_state(context)
+    if (state.offset >= state.fail_at) return .read_failed
+    count := state.bytes.len - state.offset
+    if (count > buffer.len) count = buffer.len
+    if (count > state.chunk) count = state.chunk
+    memcopy!(buffer[..count], state.bytes[state.offset..state.offset + count])
+    state.offset += count
+    return count
+}
+
+@hide:file
+input_reader proc(state @mut Input) Reader {
+    return Reader{ context = state, handle = Handle{ file_desc = -1 }, read = input_read }
+}
+
+@hide:file
+tracked_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+    state :: input_state(context)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
+    if (memory) |_| state.live += 1
+    return memory
+}
+
+@hide:file
+tracked_realloc proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+    state :: input_state(context)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    resized :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+    if (resized) |_| {
+        if (memory) |_| {} else state.live += 1
+    }
+    return resized
+}
+
+@hide:file
+tracked_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void {
+    state :: input_state(context)
+    if (memory) |_| state.live -= 1
+    mem.raw_free(mem.c_allocator, memory, size, alignment)
+}
+
+@hide:file
+tracked_vtable :: mem.AllocatorVTable{ alloc = tracked_alloc, realloc = tracked_realloc, free = tracked_free }
+
+read_all_preserves_short_reads_across_buffer_growth test {
+    source [9000]mut u8 := undefined
+    for (0..source.len) |i| source[i] = u8(rem!(i, 251))
+    state := Input{ bytes = source[..] }
+    bytes := try read_all(mem.c_allocator, input_reader(&state), maxval!(usize))
+    defer arraylist.deinit(&bytes)
+    try testing.expect_equal(source[..], bytes.items)
+}
+
+read_all_accepts_exact_limits_and_probes_for_excess test {
+    for (usize(0)..4) |maximum| {
+        state := Input{ bytes = "abc"[..maximum], chunk = 1 }
+        bytes := try read_all(mem.c_allocator, input_reader(&state), maximum)
+        defer arraylist.deinit(&bytes)
+        try testing.expect_equal(state.bytes, bytes.items)
+
+        excess := Input{ bytes = "abcd", chunk = 1 }
+        unexpected := read_all(mem.c_allocator, input_reader(&excess), maximum) catch |err| {
+            try testing.expect(err == .limit_exceeded)
+            try testing.expect_equal(maximum + 1, excess.offset)
+            continue
+        }
+        arraylist.deinit(&unexpected)
+        try testing.expect(false)
+    }
+}
+
+read_all_releases_partial_storage_on_read_failure_and_limit_excess test {
+    for (0..2) |failure| {
+        state := Input{ bytes = "abcdef", chunk = 2 }
+        if (failure == 0) state.fail_at = 2
+        allocator :: mem.Allocator{ context = &state, vtable = &tracked_vtable }
+        unexpected := read_all(allocator, input_reader(&state), 4) catch |err| {
+            expected ReadAllError :: if (failure == 0) .read_failed else .limit_exceeded
+            try testing.expect_equal(expected, err)
+            try testing.expect_equal(0, state.live)
+            continue
+        }
+        arraylist.deinit(&unexpected)
+        try testing.expect(false)
+    }
+}
+
+read_all_releases_storage_at_each_failed_growth test {
+    source [9000]mut u8 := undefined
+    mem.set(source[..], u8('x'))
+    for (usize(0)..3) |remaining| {
+        state := Input{ bytes = source[..], remaining = remaining }
+        allocator :: mem.Allocator{ context = &state, vtable = &tracked_vtable }
+        unexpected := read_all(allocator, input_reader(&state), source.len) catch |err| {
+            try testing.expect(err == .out_of_memory)
+            try testing.expect_equal(0, state.live)
+            continue
+        }
+        arraylist.deinit(&unexpected)
+        try testing.expect(false)
+    }
+}

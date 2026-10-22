@@ -1,4 +1,3 @@
-import "@ffi/c"
 import "@std/mem"
 import "@std/arraylist"
 import "@std/io"
@@ -21,6 +20,7 @@ test import "@std/arraylist"
 test import "@std/hashmap"
 test import "@std/strmap"
 test import "@std/meta"
+test import "@std/io"
 test import "@source/diagnostics"
 test import "@source/strpool"
 test import "@source/lexer"
@@ -102,41 +102,18 @@ argument_text proc(pointer [*;0]u8) []u8 {
 
 @hide:file
 read_source proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) arraylist.ArrayList(u8) ! DriverError {
-    # bootstrap cannot construct a dynamic sentinel slice from argv's sentinel pointer.
-    descriptor := c_int(-1)
-    while true {
-        descriptor = c.open(ptrcast!(path), c.O_RDONLY)
-        if (descriptor >= 0) break
-        if (c.__error()?^ != c.EINTR) return .open_failed
-    }
-    file :: io.File{ io = runtime, handle = io.Handle{ file_desc = descriptor } }
+    file :: try io.open(runtime, path, .read_only)
     closing := false
     defer {
         if (!closing) io.close(file) catch |_| {}
     }
-    bytes := arraylist.init(u8, allocator)
-    errdefer arraylist.deinit(&bytes)
-    input :: io.reader(file)
-    maximum :: usize(maxval!(u32))
-    while true {
-        length :: bytes.items.len
-        if (length == maximum) {
-            probe [1]mut u8 := undefined
-            if (try io.read(input, (&probe)[..]) != 0) return .source_too_large
-            break
+    bytes := io.read_all(allocator, io.reader(file), usize(maxval!(u32))) catch |err| {
+        match err {
+            .limit_exceeded: return .source_too_large
+            else: return err
         }
-        if (length == bytes.capacity) {
-            growth := usize(4096)
-            if (growth > maximum - length) growth = maximum - length
-            try arraylist.reserve(&bytes, length + growth)
-        }
-        storage :: bytes.items.ptr[..bytes.capacity]
-        end := bytes.capacity
-        if (end > maximum) end = maximum
-        count :: try io.read(input, storage[length..end])
-        if (count == 0) break
-        bytes.items = storage[..length + count]
     }
+    errdefer arraylist.deinit(&bytes)
     closing = true
     try io.close(file)
     return bytes
