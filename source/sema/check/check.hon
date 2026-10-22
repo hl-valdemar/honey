@@ -179,6 +179,9 @@ check proc(
                 expression :: ast.binary_expr(tree, id)
                 try numeric_operand(&state, id, expression.left)
                 try numeric_operand(&state, id, expression.right)
+                if (expression.operator == .divide) {
+                    try impose(&state, id, .float, .integer_division, expression.span)
+                }
             }
             else: {}
         }
