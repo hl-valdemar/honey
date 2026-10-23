@@ -21,6 +21,7 @@ test import "@std/hashmap"
 test import "@std/strmap"
 test import "@std/meta"
 test import "@std/io"
+test import "@std/process"
 test import "@source/diagnostics"
 test import "@source/strpool"
 test import "@source/lexer"
@@ -44,8 +45,8 @@ DriverError :: alias (
 )
 
 main proc(init process.Init) i32 {
-    return command(mem.c_allocator, init.io) catch |err| {
-        if (process.argument(2)) |path| {
+    return command(mem.c_allocator, init.io, init.args) catch |err| {
+        if (process.argument(init.args, 2)) |path| {
             io.print("{s}: infrastructure error: {s}\n", io.stderr(init.io), {
                 path, infrastructure_message(err),
             }) catch |_| {}
@@ -76,12 +77,12 @@ infrastructure_message proc(error DriverError) []u8 {
 }
 
 @hide:file
-command proc(allocator mem.Allocator, runtime io.Io) i32 ! DriverError {
-    if (process.argument_count() != 3) {
+command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {
+    if (process.argument_count(args) != 3) {
         try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
         return 2
     }
-    if (process.argument(1)) |operation| {
+    if (process.argument(args, 1)) |operation| {
         if (!mem.eql(operation, "run")) {
             try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
             return 2
@@ -89,7 +90,7 @@ command proc(allocator mem.Allocator, runtime io.Io) i32 ! DriverError {
     } else {
         return 2
     }
-    if (process.argument(2)) |path| return try run_file(allocator, runtime, path)
+    if (process.argument(args, 2)) |path| return try run_file(allocator, runtime, path)
     return 2
 }
 

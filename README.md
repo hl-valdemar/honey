@@ -27,7 +27,9 @@ main proc() int {
 }
 ```
 
-this prints `42`. `main` must be a top-level function with no parameters; nonvoid results are printed, not used as process exit statuses. the current macOS bootstrap obtains arguments from the native startup environment.
+this prints `42`. interpreted `main` must be a top-level function with no parameters; nonvoid results are printed, not used as process exit statuses.
+
+the native bootstrap accepts either a no-argument `main` or `main proc(init process.Init)`. it supplies `init.io` and `init.args` directly from native startup `argc`/`argv`. `process.Args` borrows the argument pointer array and zero-terminated strings without allocation or copying; native startup storage lasts for the process lifetime. `process.argument_count(init.args)` includes the executable name, and `process.argument(init.args, index)` returns a borrowed `[;0]u8` or `null` when out of range. callers can supply their own `process.Args { values = pointers[..] }` for testing.
 
 source loading uses the supplied `io.Io` for opening, reading, and closing files. `io.open` accepts a borrowed zero-terminated slice (`[;0]u8`), including arguments returned by `process.argument` without copying their storage. the bootstrap supports checked sentinel-slice construction with `pointer[..length;0]`. `io.read_all(allocator, reader, maximum)` reads to EOF into a caller-owned `ArrayList(u8)`; release it with `arraylist.deinit`. it frees partial storage on error and consumes one extra byte to distinguish an exact-size input from a limit violation. the driver maps `limit_exceeded` to `source_too_large` at its `u32` source-size limit.
 
