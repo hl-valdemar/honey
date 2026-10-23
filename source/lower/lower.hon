@@ -873,6 +873,17 @@ integer_magnitude proc(text []u8, limit u64) ?u64 {
 }
 
 @hide:file
+exact_float_integer proc(text []u8, value f64) bool {
+    # every finite f64 integer has at most 309 decimal digits, plus a terminator.
+    decimal [310]mut u8 := undefined
+    count :: c.snprintf(ptrcast!((&decimal).ptr), c_ulong(decimal.len), "%.0f", value)
+    if (count < 0 or usize(count) >= decimal.len) return false
+    start := usize(0)
+    while (start + 1 < text.len and text[start] == '0') start += 1
+    return mem.eql(text[start..], decimal[..usize(count)])
+}
+
+@hide:file
 lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
     text :: ast.source_text(state.tree, span)
@@ -894,6 +905,10 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
         value :: f64(c.strtod(ptrcast!(buffer.ptr), null))
         # libc reports ERANGE for representable subnormals as well as zero/infinity.
         if (c.__error()?^ != c.ERANGE or (value > 0 and value < 1)) {
+            if (ast.expr_kind(state.tree, id) == .literal_int and !exact_float_integer(text, value)) {
+                trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
+                return ir.no_value
+            }
             return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
         }
     }

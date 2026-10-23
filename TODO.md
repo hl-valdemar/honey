@@ -1,3 +1,0 @@
-- [ ] consider whether numeric conversion semantics are properly tuned.
-    - e.g. are we disallowing implicit conversion between types where loss of precission or wrapping could/would occur?
-    - should we do that or should we not?

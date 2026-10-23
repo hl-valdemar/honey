@@ -357,6 +357,44 @@ parses_float_context_without_integer_range_limits_and_rejects_float_overflow tes
     try expect_trap(trapped, &diagnostic_store, .literal_out_of_range)
 }
 
+rejects_inexact_integer_literals_in_float_context test {
+    sources [4][]u8 :: [
+        "main proc() f64 {\n return 9007199254740993\n}\n",
+        "main proc() f64 {\n value :: 9007199254740993\n return value\n}\n",
+        "main proc() f64 {\n return 9007199254740993 / 1\n}\n",
+        "main proc() f64 {\n values [1]f64 :: [9007199254740993]\n return values[0]\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .inexact_integer_literal)
+    }
+}
+
+preserves_exact_large_integers_and_explicit_float_rounding test {
+    sources [3][]u8 :: [
+        "main proc() f64 {\n return 9007199254740994 - 9007199254740992\n}\n",
+        "main proc() f64 {\n return 9007199254740993.0 - 9007199254740992\n}\n",
+        "main proc() f64 {\n return 0003\n}\n",
+    ]
+    expected [3]f64 :: [2, 0, 3]
+    for sources |source, i| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(expected[i], outcome.value.data.real)
+    }
+}
+
 accepts_representable_subnormals_and_rejects_underflow_to_zero test {
     zeros [2]usize :: [307, 400]
     for (zeros) |count| {
