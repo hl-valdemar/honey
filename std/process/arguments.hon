@@ -9,8 +9,11 @@ argument_count proc() usize {
     return usize(_NSGetArgc()^)
 }
 
-#! returns a borrowed, zero-terminated argument; storage lasts for the process lifetime.
-argument proc(index usize) ?[*;0]u8 {
+#! returns a borrowed, zero-terminated slice; storage lasts for the process lifetime.
+argument proc(index usize) ?[;0]u8 {
     if (index >= argument_count()) return null
-    return _NSGetArgv()^[index]
+    pointer :: _NSGetArgv()^[index]
+    length := usize(0)
+    while (pointer[length] != 0) length += 1
+    return pointer[..length;0]
 }

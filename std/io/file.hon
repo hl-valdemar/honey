@@ -20,7 +20,7 @@ CloseError :: enum {
 }
 
 #! open a caller-owned handle from a borrowed zero-terminated path; release it with close.
-open proc(io Io, path [*;0]u8, mode FileMode) File ! OpenError {
+open proc(io Io, path [;0]u8, mode FileMode) File ! OpenError {
     handle Handle :: try io.vtable.open(io.context, path, mode)
     return File{ io = io, handle = handle }
 }
@@ -83,7 +83,7 @@ system_write proc(_ ?@mut anyopaque, handle Handle, bytes []u8) usize ! WriteErr
 }
 
 @hide:file
-system_open proc(_ ?@mut anyopaque, path [*;0]u8, mode FileMode) Handle ! OpenError {
+system_open proc(_ ?@mut anyopaque, path [;0]u8, mode FileMode) Handle ! OpenError {
     flags := c.O_RDONLY
     match mode {
         .read_only: flags = c.O_RDONLY
@@ -91,7 +91,7 @@ system_open proc(_ ?@mut anyopaque, path [*;0]u8, mode FileMode) Handle ! OpenEr
         .read_write: flags = c.O_RDWR
     }
     while true {
-        fd c_int :: c.open(ptrcast!(path), flags)
+        fd c_int :: c.open(ptrcast!(path.ptr), flags)
         if (fd >= 0) return Handle{ file_desc = fd }
         if (c.__error()?^ != c.EINTR) return .open_failed
     }

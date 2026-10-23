@@ -47,7 +47,7 @@ main proc(init process.Init) i32 {
     return command(mem.c_allocator, init.io) catch |err| {
         if (process.argument(2)) |path| {
             io.print("{s}: infrastructure error: {s}\n", io.stderr(init.io), {
-                argument_text(path), infrastructure_message(err),
+                path, infrastructure_message(err),
             }) catch |_| {}
         } else {
             io.print("honey: infrastructure error: {s}\n", io.stderr(init.io), {
@@ -82,7 +82,7 @@ command proc(allocator mem.Allocator, runtime io.Io) i32 ! DriverError {
         return 2
     }
     if (process.argument(1)) |operation| {
-        if (!mem.eql(argument_text(operation), "run")) {
+        if (!mem.eql(operation, "run")) {
             try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
             return 2
         }
@@ -94,14 +94,7 @@ command proc(allocator mem.Allocator, runtime io.Io) i32 ! DriverError {
 }
 
 @hide:file
-argument_text proc(pointer [*;0]u8) []u8 {
-    length := usize(0)
-    while (pointer[length] != 0) length += 1
-    return pointer[..length]
-}
-
-@hide:file
-read_source proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) arraylist.ArrayList(u8) ! DriverError {
+read_source proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) arraylist.ArrayList(u8) ! DriverError {
     file :: try io.open(runtime, path, .read_only)
     closing := false
     defer {
@@ -136,7 +129,7 @@ compile proc(allocator mem.Allocator, source []u8, diagnostic_store @mut diagnos
 }
 
 @hide:file
-run_file proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) i32 ! DriverError {
+run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
     source := try read_source(allocator, runtime, path)
     defer arraylist.deinit(&source)
     diagnostic_store := diagnostics.init(allocator)
@@ -145,7 +138,7 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [*;0]u8) i32 ! Driver
     defer ir.deinit(&module)
     outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
     if (outcome.trap == null) try print_result(io.stdout(runtime), outcome.value)
-    try report_diagnostics(allocator, io.stderr(runtime), argument_text(path), source.items, &diagnostic_store, outcome.trap)
+    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, outcome.trap)
     if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return 0
 }
