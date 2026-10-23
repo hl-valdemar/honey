@@ -46,9 +46,9 @@ DriverError :: alias (
 
 main proc(init process.Init) i32 {
     return command(mem.c_allocator, init.io, init.args) catch |err| {
-        if (process.argument(init.args, 2)) |path| {
+        if (init.args.values.len > 2) {
             io.print("{s}: infrastructure error: {s}\n", io.stderr(init.io), {
-                path, infrastructure_message(err),
+                init.args.values[2], infrastructure_message(err),
             }) catch |_| {}
         } else {
             io.print("honey: infrastructure error: {s}\n", io.stderr(init.io), {
@@ -78,20 +78,15 @@ infrastructure_message proc(error DriverError) []u8 {
 
 @hide:file
 command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {
-    if (process.argument_count(args) != 3) {
+    if (args.values.len != 3) {
         try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
         return 2
     }
-    if (process.argument(args, 1)) |operation| {
-        if (!mem.eql(operation, "run")) {
-            try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
-            return 2
-        }
-    } else {
+    if (!mem.eql(args.values[1], "run")) {
+        try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
         return 2
     }
-    if (process.argument(args, 2)) |path| return try run_file(allocator, runtime, path)
-    return 2
+    return try run_file(allocator, runtime, args.values[2])
 }
 
 @hide:file
