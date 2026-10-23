@@ -133,19 +133,19 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
     module := try compile(allocator, source.items, &diagnostic_store)
     defer ir.deinit(&module)
     outcome :: try interpreter.run(allocator, &module, &diagnostic_store)
-    if (outcome.trap == null) try print_result(io.stdout(runtime), outcome.value)
+    if (outcome.trap == null) try print_result(io.stdout(runtime), &module, outcome.value)
     try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, outcome.trap)
     if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return 0
 }
 
 @hide:file
-print_result proc(output io.Writer, value ir.Value) void ! io.WriteError {
+print_result proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
     match value.type {
         .int: try io.print("{}\n", output, {value.data.integer})
         .float: try io.print("{d}\n", output, {value.data.real})
         .bool: try io.print("{}\n", output, {value.data.boolean})
-        .string: try io.print("{s}\n", output, {value.data.string})
+        .string: try io.print("{s}\n", output, {ir.string_bytes(module, value.data.string)})
         .void: {}
         else: unreachable
     }

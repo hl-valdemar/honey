@@ -7,6 +7,7 @@ GlobalId :: distinct u32
 LocalId :: distinct u32
 ValueId :: distinct u32
 BlockId :: distinct u32
+StringId :: distinct u32
 no_value :: maxval!(ValueId)
 
 Type :: enum {
@@ -23,7 +24,7 @@ ValueData :: union {
     integer i64
     real f64
     boolean bool
-    string []u8
+    string StringId
     function FunctionId
 }
 Value :: struct {
@@ -101,13 +102,19 @@ Global :: struct {
     span diagnostics.Span
 }
 
+#! retains the original allocation for freeing while exposing only decoded bytes.
+StringStorage :: struct {
+    allocation []mut u8
+    len usize
+}
+
 #! owns executable storage, including decoded strings; no AST or binding table is retained.
 #! spans and diagnostic IDs refer to the caller's source and diagnostic store.
 Module :: struct {
     allocator mem.Allocator
     functions arraylist.ArrayList(Function)
     globals arraylist.ArrayList(Global)
-    strings arraylist.ArrayList([]mut u8)
+    strings arraylist.ArrayList(StringStorage)
     entry ?FunctionId = null
     entry_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
 }
@@ -136,6 +143,12 @@ init_block proc(allocator mem.Allocator) Block {
     }
 }
 
+#! resolves a module-local ID to bytes borrowed until module deinit.
+string_bytes proc(module @Module, id StringId) []u8 {
+    string :: module.strings.items[usize(id)]
+    return string.allocation[..string.len]
+}
+
 #! releases all executable storage using the retained allocator.
 deinit proc(module @mut Module) void {
     for (0..(module.functions.items.len)) |i| {
@@ -149,7 +162,9 @@ deinit proc(module @mut Module) void {
         arraylist.deinit(&function.locals)
         arraylist.deinit(&function.blocks)
     }
-    for (module.strings.items) |string| mem.free(module.allocator, string)
+    for (module.strings.items) |string|
+        mem.free(module.allocator, string.allocation)
+
     arraylist.deinit(&module.functions)
     arraylist.deinit(&module.globals)
     arraylist.deinit(&module.strings)

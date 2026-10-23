@@ -153,12 +153,18 @@ function_aliases_and_borrowed_string_values_execute test {
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
     text :: "line\n\"quoted\"\x00"
+    owned :: try mem.alloc(u8, module.allocator, text.len)
+    transferred := false
+    defer if (!transferred) mem.free(module.allocator, owned)
+    memcopy!(owned, text)
+    try arraylist.append(&module.strings, ir.StringStorage{ allocation = owned, len = text.len })
+    transferred = true
     target :: try add_function(&module, mem.empty(ir.Type), 0, .string, 1)
     try emit(&module, target, ir.Instruction{
         op = .constant,
         type = .string,
         destination = ir.ValueId(0),
-        constant = ir.Value{ type = .string, data = ir.ValueData{ string = text } },
+        constant = ir.Value{ type = .string, data = ir.ValueData{ string = ir.StringId(0) } },
     })
     return_value(&module, target, ir.ValueId(0))
     initializer :: try add_function(&module, mem.empty(ir.Type), 0, .function, 1)
@@ -173,7 +179,7 @@ function_aliases_and_borrowed_string_values_execute test {
     outcome :: try run(mem.c_allocator, &module, &store)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.string, outcome.value.type)
-    try testing.expect_equal([]u8, text, outcome.value.data.string)
+    try testing.expect_equal([]u8, text, ir.string_bytes(&module, outcome.value.data.string))
 }
 
 premature_local_reads_and_global_cycles_report_instruction_spans test {

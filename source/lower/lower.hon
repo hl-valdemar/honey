@@ -560,8 +560,17 @@ lower_string proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
         trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
         return ir.no_value
     }
-    # retain the complete allocation for freeing, but expose only decoded bytes.
-    try arraylist.append(&state.module.strings, owned)
+    if (state.module.strings.items.len > usize(maxval!(ir.StringId)))
+        return .out_of_memory
+
+    string_id :: ir.StringId(state.module.strings.items.len)
+    try arraylist.append(&state.module.strings, ir.StringStorage{
+        allocation = owned,
+        len = length,
+    })
     transferred = true
-    return try constant(state, ir.Value{ type = .string, data = ir.ValueData{ string = owned[..length] } }, span)
+    return try constant(state, ir.Value{
+        type = .string,
+        data = ir.ValueData{ string = string_id },
+    }, span)
 }

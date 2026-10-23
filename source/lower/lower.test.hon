@@ -91,7 +91,20 @@ owns_decoded_strings_after_source_and_frontend_are_freed test {
     outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(ir.Type.string, outcome.value.type)
-    try testing.expect(mem.eql(outcome.value.data.string, "a\\\"\n\r\t\x00Az"))
+    try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "a\\\"\n\r\t\x00Az"))
+}
+
+resolves_module_local_string_ids_after_frontend_cleanup test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(
+        "first :: \"not the result\"\nidentity proc(value string) string { return value }\nmain proc() string { return identity(\"second\\n\\x00\") }\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&module)
+    outcome :: try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal([]u8, "second\n\x00", ir.string_bytes(&module, outcome.value.data.string))
 }
 
 honors_float_context_and_float_division test {

@@ -408,16 +408,7 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&arguments)
 
-    while (
-        !next_is(state, .close_paren)
-        and !next_is(state, .newline)
-        and !next_is(state, .close_curly)
-        and !next_is(state, .open_curly)
-        and !next_is(state, .else)
-        and !next_is(state, .return)
-        and !next_is(state, .if)
-        and !next_is(state, .eof)
-    ) {
+    while (!is_expression_boundary(current(state).kind)) {
         argument :: try parse_expr(state)
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
@@ -482,22 +473,20 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             else
                 try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 
-            if (
-                token.kind != .newline
-                and token.kind != .comma
-                and token.kind != .close_paren
-                and token.kind != .close_curly
-                and token.kind != .open_curly
-                and token.kind != .else
-                and token.kind != .return
-                and token.kind != .if
-                and token.kind != .eof
-            ) {
+            if token.kind != .comma and !is_expression_boundary(token.kind) {
                 state.next_token += 1
             }
 
             return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
         }
+    }
+}
+
+@hide:file
+is_expression_boundary proc(kind lexer.TokenKind) bool {
+    return match kind {
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .eof: true
+        else: false
     }
 }
 
