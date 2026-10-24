@@ -4,14 +4,14 @@ import "@source/diagnostics"
 import "@source/strpool"
 
 reports_invalid_input_and_keeps_scanning test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
 
-    try scan(&state, "if name # comment\n$1. 2 3.5 \"hi\"", &diagnostic_store)
+    try scan(&state, "if name # comment\n$1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
 
     try testing.expect_equal(8, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
@@ -25,21 +25,21 @@ reports_invalid_input_and_keeps_scanning test {
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
     try testing.expect_equal(
         "name",
-        strpool.get_str(&strpool.strings, state.tokens.items[1].data.str_id)?,
+        strpool.get_str(&pool, state.tokens.items[1].data.str_id)?,
     )
     try testing.expect_equal(u32(3), state.tokens.items[1].span.start)
     try testing.expect_equal(u32(7), state.tokens.items[1].span.end)
 }
 
 reserves_boolean_keywords_and_scans_comparisons test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
     source :: "true false bool trueish == != < <= > >="
-    try scan(&state, source, &diagnostic_store)
+    try scan(&state, source, &pool, &diagnostic_store)
     expected [11]TokenKind :: [
         TokenKind.true, .false, .ident, .ident,
         .equal_equal, .not_equal, .less, .less_equal, .greater, .greater_equal, .eof,
@@ -50,29 +50,29 @@ reserves_boolean_keywords_and_scans_comparisons test {
     try testing.expect_equal(u32(4), state.tokens.items[0].span.end)
     try testing.expect_equal(u32(5), state.tokens.items[1].span.start)
     try testing.expect_equal(u32(10), state.tokens.items[1].span.end)
-    try testing.expect_equal("bool", strpool.get_str(&strpool.strings, state.tokens.items[2].data.str_id)?)
+    try testing.expect_equal("bool", strpool.get_str(&pool, state.tokens.items[2].data.str_id)?)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
 scans_logical_operators_without_splitting_identifiers test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
     source :: "and or android orbit and_1 or2 ! != !! !true"
-    try scan(&state, source, &diagnostic_store)
+    try scan(&state, source, &pool, &diagnostic_store)
     expected [13]TokenKind :: [
         TokenKind.and, .or, .ident, .ident, .ident, .ident,
         .bang, .not_equal, .bang, .bang, .bang, .true, .eof,
     ]
     try testing.expect_equal(expected.len, state.tokens.items.len)
     for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
-    try testing.expect_equal("android", strpool.get_str(&strpool.strings, state.tokens.items[2].data.str_id)?)
-    try testing.expect_equal("orbit", strpool.get_str(&strpool.strings, state.tokens.items[3].data.str_id)?)
-    try testing.expect_equal("and_1", strpool.get_str(&strpool.strings, state.tokens.items[4].data.str_id)?)
-    try testing.expect_equal("or2", strpool.get_str(&strpool.strings, state.tokens.items[5].data.str_id)?)
+    try testing.expect_equal("android", strpool.get_str(&pool, state.tokens.items[2].data.str_id)?)
+    try testing.expect_equal("orbit", strpool.get_str(&pool, state.tokens.items[3].data.str_id)?)
+    try testing.expect_equal("and_1", strpool.get_str(&pool, state.tokens.items[4].data.str_id)?)
+    try testing.expect_equal("or2", strpool.get_str(&pool, state.tokens.items[5].data.str_id)?)
     try testing.expect_equal(u32(31), state.tokens.items[6].span.start)
     try testing.expect_equal(u32(32), state.tokens.items[6].span.end)
     try testing.expect_equal(u32(33), state.tokens.items[7].span.start)
@@ -81,14 +81,14 @@ scans_logical_operators_without_splitting_identifiers test {
 }
 
 scans_loop_controls_with_exact_keyword_boundaries test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
     source :: "break continue breakfast continued break_1 continue2"
-    try scan(&state, source, &diagnostic_store)
+    try scan(&state, source, &pool, &diagnostic_store)
     expected [7]TokenKind :: [.break, .continue, .ident, .ident, .ident, .ident, .eof]
     try testing.expect_equal(expected.len, state.tokens.items.len)
     for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
@@ -96,19 +96,19 @@ scans_loop_controls_with_exact_keyword_boundaries test {
     try testing.expect_equal(u32(5), state.tokens.items[0].span.end)
     try testing.expect_equal(u32(6), state.tokens.items[1].span.start)
     try testing.expect_equal(u32(14), state.tokens.items[1].span.end)
-    try testing.expect_equal("breakfast", strpool.get_str(&strpool.strings, state.tokens.items[2].data.str_id)?)
-    try testing.expect_equal("continued", strpool.get_str(&strpool.strings, state.tokens.items[3].data.str_id)?)
+    try testing.expect_equal("breakfast", strpool.get_str(&pool, state.tokens.items[2].data.str_id)?)
+    try testing.expect_equal("continued", strpool.get_str(&pool, state.tokens.items[3].data.str_id)?)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
 scans_ranges_without_consuming_float_dots test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
-    try scan(&state, "0..10 0..=10 1.5..2.5 |@item, _| ... 1.", &diagnostic_store)
+    try scan(&state, "0..10 0..=10 1.5..2.5 |@item, _| ... 1.", &pool, &diagnostic_store)
     expected [19]TokenKind :: [
         .int, .range, .int, .int, .range_inclusive, .int,
         .float, .range, .float, .pipe, .at, .ident, .comma, .ident, .pipe,
@@ -124,13 +124,13 @@ scans_ranges_without_consuming_float_dots test {
 }
 
 scans_array_delimiters_and_mut_keyword test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     state := init(mem.c_allocator)
     defer deinit(&state)
-    try scan(&state, "[_]mut [2]i64 [1,2] [] mutable mut_1", &diagnostic_store)
+    try scan(&state, "[_]mut [2]i64 [1,2] [] mutable mut_1", &pool, &diagnostic_store)
     expected [18]TokenKind :: [
         .open_bracket, .ident, .close_bracket, .mut,
         .open_bracket, .int, .close_bracket, .ident,
@@ -140,4 +140,81 @@ scans_array_delimiters_and_mut_keyword test {
     try testing.expect_equal(expected.len, state.tokens.items.len)
     for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+reuses_identifiers_without_interning_keywords test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "alpha beta alpha if beta", &pool, &diagnostic_store)
+    first :: state.tokens.items[0].data.str_id
+    second :: state.tokens.items[1].data.str_id
+    try testing.expect(first != second)
+    try testing.expect_equal(first, state.tokens.items[2].data.str_id)
+    try testing.expect_equal(second, state.tokens.items[4].data.str_id)
+    try testing.expect_equal(null, strpool.get_id(&pool, "if"))
+    try testing.expect_equal(usize(2), pool.strings.items.len)
+}
+
+@hide:file
+AllocationState :: struct {
+    remaining usize
+    live usize = 0
+}
+
+@hide:file
+limited_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
+    if (memory) |_| state.live += 1
+    return memory
+}
+
+@hide:file
+limited_realloc proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    resized :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+    if (resized) |_| {
+        if (memory) |_| {} else state.live += 1
+    }
+    return resized
+}
+
+@hide:file
+limited_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (memory) |_| state.live -= 1
+    mem.raw_free(mem.c_allocator, memory, size, alignment)
+}
+
+@hide:file
+limited_vtable :: mem.AllocatorVTable{ alloc = limited_alloc, realloc = limited_realloc, free = limited_free }
+
+propagates_identifier_interning_allocation_failure test {
+    for (usize(0)..usize(3)) |remaining| {
+        allocation := AllocationState{ remaining = remaining }
+        allocator :: mem.Allocator{ context = &allocation, vtable = &limited_vtable }
+        pool := strpool.init(allocator)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        state := init(mem.c_allocator)
+        defer deinit(&state)
+        failed := false
+        scan(&state, "identifier", &pool, &diagnostic_store) catch |error| {
+            failed = error == .out_of_memory
+        }
+        empty :: state.tokens.items.len == 0 and pool.strings.items.len == 0
+        absent :: strpool.get_id(&pool, "identifier") == null
+        strpool.deinit(&pool)
+        try testing.expect(failed and empty and absent)
+        try testing.expect_equal(usize(0), diagnostics.count(&diagnostic_store))
+        try testing.expect_equal(usize(0), allocation.live)
+    }
 }

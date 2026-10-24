@@ -8,8 +8,8 @@ import "@source/parser"
 import "@source/ast"
 
 resolves_forward_references_recursion_and_builtin_signatures test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -25,10 +25,10 @@ resolves_forward_references_recursion_and_builtin_signatures test {
         `later int :: 1
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
 
     first :: ast.package_decl(&tree, 0)
@@ -110,8 +110,8 @@ resolves_forward_references_recursion_and_builtin_signatures test {
 }
 
 rejects_shadowing_and_duplicates_without_cascades test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -132,11 +132,11 @@ rejects_shadowing_and_duplicates_without_cascades test {
         `same :: same
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
 
     function :: ast.package_decl(&tree, 0)
@@ -228,8 +228,8 @@ rejects_shadowing_and_duplicates_without_cascades test {
 }
 
 preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -243,7 +243,7 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     syntax_count :: diagnostics.count(&diagnostic_store)
@@ -255,7 +255,7 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
     try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, empty))
     invalid_statement :: ast.block_statement(&tree, view.body, 4)
     try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, invalid_statement))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
 
     invalid_nodes [3]ast.NodeId :: [invalid_decl, empty, invalid_statement]
@@ -300,8 +300,8 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
 }
 
 resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -323,11 +323,11 @@ resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
 
     function :: ast.package_decl(&tree, 0)
@@ -368,8 +368,8 @@ resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
 }
 
 resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -394,11 +394,11 @@ resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
 
     function :: ast.package_decl(&tree, 0)
@@ -441,8 +441,8 @@ resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
 }
 
 resolves_all_code_and_preserves_scopes_after_loop_controls test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -464,11 +464,11 @@ resolves_all_code_and_preserves_scopes_after_loop_controls test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     try testing.expect_equal(4, diagnostics.count(&diagnostic_store))
     body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
@@ -487,8 +487,8 @@ resolves_all_code_and_preserves_scopes_after_loop_controls test {
 }
 
 range_bounds_use_outer_scope_and_captures_are_body_declarations test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -506,10 +506,10 @@ range_bounds_use_outer_scope_and_captures_are_body_declarations test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
     loop :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 0))
@@ -540,8 +540,8 @@ range_bounds_use_outer_scope_and_captures_are_body_declarations test {
 }
 
 range_captures_preserve_duplicate_builtin_and_discard_errors test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -563,10 +563,10 @@ range_captures_preserve_duplicate_builtin_and_discard_errors test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
     for (usize(1)..usize(3)) |index| {
@@ -605,8 +605,8 @@ range_captures_preserve_duplicate_builtin_and_discard_errors test {
 }
 
 resolves_array_counts_elements_indices_and_unreachable_targets test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -621,10 +621,10 @@ resolves_array_counts_elements_indices_and_unreachable_targets test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     size :: ast.package_decl(&tree, 0)
@@ -669,8 +669,8 @@ resolves_array_counts_elements_indices_and_unreachable_targets test {
 }
 
 array_signature_counts_use_package_scope_and_local_counts_see_parameters test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -682,11 +682,11 @@ array_signature_counts_use_package_scope_and_local_counts_see_parameters test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
     function :: ast.package_decl(&tree, 1)
@@ -710,8 +710,8 @@ array_signature_counts_use_package_scope_and_local_counts_see_parameters test {
 }
 
 resolves_every_array_child_error_and_preserves_lexer_diagnostics test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -723,11 +723,11 @@ resolves_every_array_child_error_and_preserves_lexer_diagnostics test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
-    resolution := try resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
     defer deinit(&resolution)
     try testing.expect_equal(10, diagnostics.count(&diagnostic_store))
     body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
@@ -754,4 +754,58 @@ resolves_every_array_child_error_and_preserves_lexer_diagnostics test {
     malformed_element :: ast.array_element(&tree, malformed.initializer, 0)
     try testing.expect_equal(diagnostics.DiagnosticId(0), binding(&resolution, malformed_count).data.diagnostic)
     try testing.expect_equal(diagnostics.DiagnosticId(1), binding(&resolution, malformed_element).data.diagnostic)
+}
+
+resolves_interleaved_compilations_with_independent_identifier_orders test {
+    first_pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&first_pool)
+    second_pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&second_pool)
+    first_diagnostics := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&first_diagnostics)
+    second_diagnostics := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&second_diagnostics)
+    first_source :: "alpha :: beta\nbeta i64 :: 1\nmain proc() bool { return true }\n"
+    second_source :: "beta :: alpha\nalpha bool :: false\nmain proc() i64 { return 1 }\n"
+    first_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&first_scan)
+    second_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&second_scan)
+    try lexer.scan(&first_scan, first_source, &first_pool, &first_diagnostics)
+    first_tree := try parser.parse(mem.c_allocator, first_scan.tokens.items, first_source, &first_diagnostics)
+    defer ast.deinit(&first_tree)
+    try lexer.scan(&second_scan, second_source, &second_pool, &second_diagnostics)
+    second_tree := try parser.parse(mem.c_allocator, second_scan.tokens.items, second_source, &second_diagnostics)
+    defer ast.deinit(&second_tree)
+    first_name :: ast.name_id(&first_tree, ast.package_decl(&first_tree, 0))
+    second_name :: ast.name_id(&second_tree, ast.package_decl(&second_tree, 0))
+    try testing.expect_equal(first_name, second_name)
+    try testing.expect_equal("alpha", strpool.get_str(&first_pool, first_name)?)
+    try testing.expect_equal("beta", strpool.get_str(&second_pool, second_name)?)
+    first_resolution := try resolve(mem.c_allocator, &first_tree, &first_pool, &first_diagnostics)
+    defer deinit(&first_resolution)
+    second_resolution := try resolve(mem.c_allocator, &second_tree, &second_pool, &second_diagnostics)
+    defer deinit(&second_resolution)
+    first_decl :: ast.package_decl(&first_tree, 0)
+    second_decl :: ast.package_decl(&second_tree, 0)
+    first_target :: ast.package_decl(&first_tree, 1)
+    second_target :: ast.package_decl(&second_tree, 1)
+    first_use :: ast.statement_decl(&first_tree, first_decl).initializer
+    second_use :: ast.statement_decl(&second_tree, second_decl).initializer
+    try testing.expect_equal(BindingKind.declaration, binding(&first_resolution, first_use).kind)
+    try testing.expect_equal(first_target, binding(&first_resolution, first_use).data.declaration)
+    try testing.expect_equal(BindingKind.declaration, binding(&second_resolution, second_use).kind)
+    try testing.expect_equal(second_target, binding(&second_resolution, second_use).data.declaration)
+    first_type :: ast.statement_decl(&first_tree, first_target).type?
+    second_type :: ast.statement_decl(&second_tree, second_target).type?
+    try testing.expect_equal(BindingKind.builtin, binding(&first_resolution, first_type).kind)
+    try testing.expect_equal(BuiltinType.i64, binding(&first_resolution, first_type).data.builtin)
+    try testing.expect_equal(BindingKind.builtin, binding(&second_resolution, second_type).kind)
+    try testing.expect_equal(BuiltinType.bool, binding(&second_resolution, second_type).data.builtin)
+    first_return :: ast.function_decl(&first_tree, ast.package_decl(&first_tree, 2)).return_type
+    second_return :: ast.function_decl(&second_tree, ast.package_decl(&second_tree, 2)).return_type
+    try testing.expect_equal(BuiltinType.bool, binding(&first_resolution, first_return).data.builtin)
+    try testing.expect_equal(BuiltinType.i64, binding(&second_resolution, second_return).data.builtin)
+    try testing.expect_equal(usize(0), diagnostics.count(&first_diagnostics))
+    try testing.expect_equal(usize(0), diagnostics.count(&second_diagnostics))
 }

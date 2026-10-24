@@ -36,7 +36,7 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
 ])
 
 #! owns token storage and retains its allocator; release with deinit.
-#! identifier IDs refer to strings in the separately owned strpool.strings.
+#! identifier IDs belong to the compilation's separately owned string pool.
 State :: struct {
     tokens arraylist.ArrayList(Token)
 }
@@ -46,17 +46,17 @@ init proc(allocator mem.Allocator) State {
     return State{ tokens = arraylist.init(allocator) }
 }
 
-#! releases token storage with the retained allocator, without releasing strpool.strings.
+#! releases token storage with the retained allocator, without releasing identifier strings.
 deinit proc(state @mut State) void {
     arraylist.deinit(&state.tokens)
 }
 
-#! borrows `program` and `diagnostic_store` during scanning; tokens remain state-owned.
-#! token allocation uses the retained allocator; identifiers use strpool.strings's allocator.
-#! initialize strpool.strings before scanning and keep it alive while using identifier IDs.
+#! borrows `program`, `pool`, and `diagnostic_store`; tokens remain state-owned.
+#! identifier storage uses the pool's allocator; keep the pool alive while using their IDs.
 scan proc(
     state @mut State,
     program []u8,
+    pool @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
 ) void ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError | SourceError) {
     if (program.len > usize(maxval!(u32))) return .source_too_large
@@ -82,7 +82,7 @@ scan proc(
 
         if is_alpha(char) or char == '_' {
             start :: cursor
-            result :: scan_ident(start, program)
+            result :: try scan_ident(start, program, pool)
             try add_token(state, Token{
                 span = make_span(start, result.end),
                 kind = result.kind,
@@ -286,7 +286,11 @@ ScanIdentResult :: struct {
 }
 
 @hide:file
-scan_ident proc(start usize, program []u8) ScanIdentResult {
+scan_ident proc(
+    start usize,
+    program []u8,
+    pool @mut strpool.StringPool,
+) ScanIdentResult ! (mem.AllocError | strpool.InternError) {
     cursor := start + 1
     while (
         cursor < program.len
@@ -302,7 +306,7 @@ scan_ident proc(start usize, program []u8) ScanIdentResult {
     # don't intern keywords (already O(1) lookup via token kind)
     kind :: strmap.get(&keywords, program[start..cursor]) orelse .ident
     str_id :: if (kind == .ident)
-        strpool.intern(&strpool.strings, program[start..cursor]) catch strpool.no_str
+        try strpool.intern(pool, program[start..cursor])
     else
         strpool.no_str
     return ScanIdentResult{ end = cursor, kind = kind, str_id = str_id }

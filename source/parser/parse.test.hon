@@ -8,14 +8,14 @@ import "@source/lexer"
 import "@source/ast"
 
 parses_expression_precedence_through_tree_views test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: 1 + 2 * 3\n"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
 
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -24,6 +24,7 @@ parses_expression_precedence_through_tree_views test {
     declaration :: ast.package_decl(&tree, 0)
     statement :: ast.statement_decl(&tree, declaration)
     try testing.expect_equal("value", ast.source_text(&tree, statement.name))
+    try testing.expect_equal("value", strpool.get_str(&strings, ast.name_id(&tree, declaration))?)
     try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, statement.initializer))
     add :: ast.binary_expr(&tree, statement.initializer)
     try testing.expect_equal(ast.BinaryOperator.add, add.operator)
@@ -35,14 +36,14 @@ parses_expression_precedence_through_tree_views test {
 }
 
 parses_grouped_expression_precedence test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: a + ((b - c)) * 2 / 3\n"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
 
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -66,8 +67,8 @@ parses_grouped_expression_precedence test {
 }
 
 parses_function_structure_through_tree_views test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -76,7 +77,7 @@ parses_function_structure_through_tree_views test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
 
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -85,6 +86,7 @@ parses_function_structure_through_tree_views test {
     try testing.expect_equal(ast.DeclKind.function, ast.decl_kind(&tree, declaration))
     function :: ast.function_decl(&tree, declaration)
     try testing.expect_equal("grouped", ast.source_text(&tree, function.name))
+    try testing.expect_equal("grouped", strpool.get_str(&strings, ast.name_id(&tree, declaration))?)
     try testing.expect_equal(3, ast.function_param_count(&tree, declaration))
     first :: ast.param(&tree, ast.function_param(&tree, declaration, 0))
     second :: ast.param(&tree, ast.function_param(&tree, declaration, 1))
@@ -92,6 +94,17 @@ parses_function_structure_through_tree_views test {
     try testing.expect_equal("a", ast.source_text(&tree, first.name))
     try testing.expect_equal("b", ast.source_text(&tree, second.name))
     try testing.expect_equal("c", ast.source_text(&tree, third.name))
+    try testing.expect_equal(
+        "a", strpool.get_str(&strings, ast.name_id(&tree, ast.function_param(&tree, declaration, 0)))?,
+    )
+    try testing.expect_equal(
+        "b", strpool.get_str(&strings, ast.name_id(&tree, ast.function_param(&tree, declaration, 1)))?,
+    )
+    try testing.expect_equal(
+        "c", strpool.get_str(&strings, ast.name_id(&tree, ast.function_param(&tree, declaration, 2)))?,
+    )
+    try testing.expect_equal("T", strpool.get_str(&strings, ast.name_id(&tree, first.type))?)
+    try testing.expect_equal("U", strpool.get_str(&strings, ast.name_id(&tree, third.type))?)
     try testing.expect_equal(first.type, second.type)
     try testing.expect(first.type != third.type)
     try testing.expect_equal(1, ast.block_statement_count(&tree, function.body))
@@ -99,14 +112,14 @@ parses_function_structure_through_tree_views test {
 }
 
 recovers_invalid_declaration_and_preserves_sibling test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "@ broken\nvalid :: 1\n"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
 
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -123,8 +136,8 @@ recovers_invalid_declaration_and_preserves_sibling test {
 }
 
 recovers_malformed_groups_and_preserves_following_statements test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -137,7 +150,7 @@ recovers_malformed_groups_and_preserves_following_statements test {
         `after :: 4
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
 
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -162,8 +175,8 @@ recovers_malformed_groups_and_preserves_following_statements test {
 }
 
 parses_call_statements_and_postfix_precedence test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -174,7 +187,7 @@ parses_call_statements_and_postfix_precedence test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -238,8 +251,8 @@ parses_call_statements_and_postfix_precedence test {
 }
 
 recovers_malformed_calls_and_preserves_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -253,7 +266,7 @@ recovers_malformed_calls_and_preserves_siblings test {
         `tail :: f()
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -288,8 +301,8 @@ recovers_malformed_calls_and_preserves_siblings test {
 }
 
 parses_return_boundaries_and_recovers_trailing_tokens test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -303,7 +316,7 @@ parses_return_boundaries_and_recovers_trailing_tokens test {
         `    return }
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -333,15 +346,15 @@ parses_return_boundaries_and_recovers_trailing_tokens test {
 }
 
 parses_boolean_comparison_precedence_and_associativity test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `value :: -f() * 2 + 3 < 4 <= 5 > 6 >= 7 == true != false
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     different :: ast.binary_expr(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer)
@@ -368,8 +381,8 @@ parses_boolean_comparison_precedence_and_associativity test {
 }
 
 parses_factorial_and_canonical_conditional_arms test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -385,7 +398,7 @@ parses_factorial_and_canonical_conditional_arms test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     factorial :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
@@ -410,14 +423,14 @@ parses_factorial_and_canonical_conditional_arms test {
 }
 
 attaches_dangling_else_to_nearest_if test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "main proc() int { if (true) if (false) return 1 else return 2 else return 3 }"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
@@ -431,8 +444,8 @@ attaches_dangling_else_to_nearest_if test {
 }
 
 recovers_conditional_conditions_and_arms_without_losing_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -447,7 +460,7 @@ recovers_conditional_conditions_and_arms_without_losing_siblings test {
         `tail :: 9
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(2, ast.package_decl_count(&tree))
@@ -475,8 +488,8 @@ recovers_conditional_conditions_and_arms_without_losing_siblings test {
 }
 
 recovers_invalid_guard_syntax_and_missing_arm_at_enclosing_brace test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -488,7 +501,7 @@ recovers_invalid_guard_syntax_and_missing_arm_at_enclosing_brace test {
         `tail :: 4
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(2, ast.package_decl_count(&tree))
@@ -513,8 +526,8 @@ recovers_invalid_guard_syntax_and_missing_arm_at_enclosing_brace test {
 }
 
 parses_iterative_factorial_assignments_and_loop test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -529,7 +542,7 @@ parses_iterative_factorial_assignments_and_loop test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -552,8 +565,8 @@ parses_iterative_factorial_assignments_and_loop test {
 }
 
 parses_assignment_precedence_grouped_span_and_rhs_boundaries test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -564,7 +577,7 @@ parses_assignment_precedence_grouped_span_and_rhs_boundaries test {
         `    value = 6 }
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -590,8 +603,8 @@ parses_assignment_precedence_grouped_span_and_rhs_boundaries test {
 }
 
 parses_nested_loops_and_preserves_nearest_if_else test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -604,7 +617,7 @@ parses_nested_loops_and_preserves_nearest_if_else test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -628,8 +641,8 @@ parses_nested_loops_and_preserves_nearest_if_else test {
 }
 
 recovers_loop_guards_bodies_and_assignments_without_losing_braces test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -645,7 +658,7 @@ recovers_loop_guards_bodies_and_assignments_without_losing_braces test {
         `tail :: 8
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -675,8 +688,8 @@ recovers_loop_guards_bodies_and_assignments_without_losing_braces test {
 }
 
 rejects_top_level_assignment_loop_else_and_assignment_expressions test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -689,7 +702,7 @@ rejects_top_level_assignment_loop_else_and_assignment_expressions test {
         `tail :: 6
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -707,8 +720,8 @@ rejects_top_level_assignment_loop_else_and_assignment_expressions test {
 }
 
 recovers_nested_braces_in_malformed_loop_body_and_assignment test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -724,7 +737,7 @@ recovers_nested_braces_in_malformed_loop_body_and_assignment test {
         `tail :: 8
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -742,14 +755,14 @@ recovers_nested_braces_in_malformed_loop_body_and_assignment test {
 }
 
 parses_logical_precedence_and_associativity test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: !probe() == a + b * c < d and e and f or g or h\n"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -780,14 +793,14 @@ parses_logical_precedence_and_associativity test {
 }
 
 parses_right_associative_mixed_prefix_operators test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source :: "value :: !-!probe()\nother :: -!false\n"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -809,8 +822,8 @@ parses_right_associative_mixed_prefix_operators test {
 }
 
 parses_logical_expressions_in_all_expression_positions test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -853,7 +866,7 @@ parses_logical_expressions_in_all_expression_positions test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -884,8 +897,8 @@ parses_logical_expressions_in_all_expression_positions test {
 }
 
 multiline_group_errors_preserve_statement_boundaries test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -900,7 +913,7 @@ multiline_group_errors_preserve_statement_boundaries test {
         `tail :: 9
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -918,8 +931,8 @@ multiline_group_errors_preserve_statement_boundaries test {
 }
 
 recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -932,7 +945,7 @@ recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
         `after :: true
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
 
@@ -964,8 +977,8 @@ recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
 }
 
 parses_leaf_loop_controls_and_nearest_else test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -979,7 +992,7 @@ parses_leaf_loop_controls_and_nearest_else test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1006,8 +1019,8 @@ parses_leaf_loop_controls_and_nearest_else test {
 }
 
 rejects_control_tails_and_preserves_following_declarations test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1029,7 +1042,7 @@ rejects_control_tails_and_preserves_following_declarations test {
         `last :: 4
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(9, diagnostics.count(&diagnostic_store))
@@ -1057,8 +1070,8 @@ rejects_control_tails_and_preserves_following_declarations test {
 }
 
 preserves_control_bodies_after_malformed_guards test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1070,7 +1083,7 @@ preserves_control_bodies_after_malformed_guards test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
@@ -1086,8 +1099,8 @@ preserves_control_bodies_after_malformed_guards test {
 }
 
 parses_range_endpoints_and_capture_shapes test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1104,7 +1117,7 @@ parses_range_endpoints_and_capture_shapes test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1119,6 +1132,9 @@ parses_range_endpoints_and_capture_shapes test {
     if (first.capture) |capture| {
         try testing.expect_equal(ast.ExprKind.identifier, ast.expr_kind(&tree, capture))
         try testing.expect_equal("item", ast.source_text(&tree, ast.node_span(&tree, capture)))
+        try testing.expect_equal("item", strpool.get_str(&strings, ast.name_id(&tree, capture))?)
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, first.body, 0))
+        try testing.expect_equal(ast.name_id(&tree, capture), ast.name_id(&tree, reference))
     } else return .expectation_failed
     second :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
     try testing.expect(second.capture == null)
@@ -1129,11 +1145,16 @@ parses_range_endpoints_and_capture_shapes test {
     try testing.expect(third.pointer_capture and third.index_capture and third.index == null)
     fourth :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 3))
     try testing.expect(fourth.index_capture and fourth.index != null)
+    try testing.expect_equal(ast.name_id(&tree, first.capture?), ast.name_id(&tree, third.capture?))
+    try testing.expect_equal(ast.name_id(&tree, first.capture?), ast.name_id(&tree, fourth.capture?))
+    try testing.expect_equal("index", strpool.get_str(&strings, ast.name_id(&tree, fourth.index?))?)
+    index_reference :: ast.statement_expr(&tree, ast.block_statement(&tree, fourth.body, 0))
+    try testing.expect_equal(ast.name_id(&tree, fourth.index?), ast.name_id(&tree, index_reference))
 }
 
 rejects_bro_invalid_range_headers_without_losing_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     cases [13][]u8 :: [
         "for -2..1 |i| {}",
         "for 0..limit+1 |i| {}",
@@ -1159,7 +1180,7 @@ rejects_bro_invalid_range_headers_without_losing_siblings test {
         for ("\nkept :: 7\n}\nafter :: 9\n") |byte| try arraylist.append(&source, byte)
         scan_state := lexer.init(mem.c_allocator)
         defer lexer.deinit(&scan_state)
-        try lexer.scan(&scan_state, source.items, &diagnostic_store)
+        try lexer.scan(&scan_state, source.items, &strings, &diagnostic_store)
         tree := try parse(mem.c_allocator, scan_state.tokens.items, source.items, &diagnostic_store)
         defer ast.deinit(&tree)
         try testing.expect(diagnostics.count(&diagnostic_store) > 0)
@@ -1175,8 +1196,8 @@ rejects_bro_invalid_range_headers_without_losing_siblings test {
 }
 
 range_loop_preserves_nearest_else_and_canonical_body test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1186,7 +1207,7 @@ range_loop_preserves_nearest_else_and_canonical_body test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1202,8 +1223,8 @@ range_loop_preserves_nearest_else_and_canonical_body test {
 }
 
 parses_recursive_array_annotations_literals_and_grouped_parameters test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1219,7 +1240,7 @@ parses_recursive_array_annotations_literals_and_grouped_parameters test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1232,6 +1253,10 @@ parses_recursive_array_annotations_literals_and_grouped_parameters test {
     try testing.expect(inner.mutable)
     try testing.expect_equal(ast.ExprKind.identifier, ast.expr_kind(&tree, inner.count?))
     try testing.expect_equal("i64", ast.source_text(&tree, ast.node_span(&tree, inner.element)))
+    try testing.expect_equal(
+        ast.name_id(&tree, ast.package_decl(&tree, 3)), ast.name_id(&tree, inner.count?),
+    )
+    try testing.expect_equal("i64", strpool.get_str(&strings, ast.name_id(&tree, inner.element))?)
     try testing.expect_equal(2, ast.array_element_count(&tree, declaration.initializer))
     for (0..ast.array_element_count(&tree, declaration.initializer)) |i| {
         try testing.expect_equal(2, ast.array_element_count(
@@ -1253,8 +1278,8 @@ parses_recursive_array_annotations_literals_and_grouped_parameters test {
 }
 
 parses_postfix_indices_and_general_assignment_targets test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1266,7 +1291,7 @@ parses_postfix_indices_and_general_assignment_targets test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -1293,8 +1318,8 @@ parses_postfix_indices_and_general_assignment_targets test {
 }
 
 mirrors_array_type_and_leading_declaration_ambiguities test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1307,7 +1332,7 @@ mirrors_array_type_and_leading_declaration_ambiguities test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
@@ -1325,8 +1350,8 @@ mirrors_array_type_and_leading_declaration_ambiguities test {
 }
 
 preserves_array_error_ids_control_bodies_and_following_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1340,7 +1365,7 @@ preserves_array_error_ids_control_bodies_and_following_siblings test {
         `tail :: 4
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
@@ -1370,8 +1395,8 @@ preserves_array_error_ids_control_bodies_and_following_siblings test {
 }
 
 recovers_nested_square_and_parenthesis_delimiters_without_consuming_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1385,7 +1410,7 @@ recovers_nested_square_and_parenthesis_delimiters_without_consuming_siblings tes
         `tail :: 5
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
     try testing.expect(diagnostics.count(&diagnostic_store) > 0)

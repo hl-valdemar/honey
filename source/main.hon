@@ -112,14 +112,14 @@ read_source proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) arraylist.
 
 @hide:file
 compile proc(allocator mem.Allocator, source []u8, diagnostic_store @mut diagnostics.Store) ir.Module ! DriverError {
-    strpool.strings = strpool.init(allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(allocator)
+    defer strpool.deinit(&strings)
     scan_state := lexer.init(allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, diagnostic_store)
     tree := try parser.parse(allocator, scan_state.tokens.items, source, diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(allocator, &tree, diagnostic_store)
+    resolution := try sema.resolve(allocator, &tree, &strings, diagnostic_store)
     defer sema.deinit(&resolution)
     checked := try typecheck.check(allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)

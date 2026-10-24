@@ -1,7 +1,11 @@
 import "@std/mem"
 import "@std/testing"
+import "@source/strpool"
 
 exposes_typed_declaration_views test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    value_id :: try strpool.intern(&strings, "value")
     builder := init_builder(mem.c_allocator, "value :: 42")
     defer deinit_builder(&builder)
 
@@ -11,6 +15,7 @@ exposes_typed_declaration_views test {
         &builder,
         Span{ start = 0, end = 11 },
         value_name,
+        value_id,
         null,
         .constant,
         value,
@@ -23,6 +28,7 @@ exposes_typed_declaration_views test {
     try testing.expect_equal(1, package_decl_count(&tree))
     decl :: package_decl(&tree, 0)
     try testing.expect_equal(DeclKind.statement, decl_kind(&tree, decl))
+    try testing.expect_equal(value_id, name_id(&tree, decl))
 
     statement :: statement_decl(&tree, decl)
     try testing.expect_equal(value_name.start, statement.name.start)
@@ -34,11 +40,14 @@ exposes_typed_declaration_views test {
 }
 
 exposes_array_type_literal_and_index_views test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    element_id :: try strpool.intern(&strings, "int")
     builder := init_builder(mem.c_allocator, "")
     defer deinit_builder(&builder)
     span :: Span{ start = 0, end = 0 }
     count :: try add_literal(&builder, .int, span)
-    element :: try add_identifier(&builder, span)
+    element :: try add_identifier(&builder, span, element_id)
     row :: try add_array_type(&builder, span, count, element, false)
     matrix :: try add_array_type(&builder, span, null, row, true)
     elements [2]NodeId :: [count, element]
@@ -55,6 +64,7 @@ exposes_array_type_literal_and_index_views test {
     try testing.expect_equal(count, array_type(&tree, row).count?)
     try testing.expect(!array_type(&tree, row).mutable)
     try testing.expect_equal(element, array_type(&tree, row).element)
+    try testing.expect_equal(element_id, name_id(&tree, element))
     try testing.expect_equal(ExprKind.array_literal, expr_kind(&tree, literal))
     try testing.expect_equal(2, array_element_count(&tree, literal))
     try testing.expect_equal(count, array_element(&tree, literal, 0))

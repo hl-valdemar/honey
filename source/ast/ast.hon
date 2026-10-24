@@ -16,6 +16,7 @@ import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
 import "@source/diagnostics"
+import "@source/strpool"
 
 Span :: alias diagnostics.Span
 DiagnosticId :: alias diagnostics.DiagnosticId
@@ -114,6 +115,7 @@ NodeKind :: enum {
 NodeData :: union {
     node_id NodeId
     extra u32
+    name_id strpool.StringId
     diagnostic DiagnosticId
     mutability Mutability
     unary_operator UnaryOperator
@@ -295,8 +297,15 @@ add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem
     return try add_node(builder, Node{ kind = node_kind }, span)
 }
 
-add_identifier proc(builder @mut Builder, span Span) NodeId ! mem.AllocError {
-    return try add_node(builder, Node{ kind = .expr_identifier }, span)
+add_identifier proc(
+    builder @mut Builder,
+    span Span,
+    interned_name strpool.StringId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_identifier,
+        main = NodeData{ name_id = interned_name },
+    }, span)
 }
 
 add_unary proc(
@@ -475,6 +484,7 @@ add_statement_decl proc(
     builder @mut Builder,
     span Span,
     name Span,
+    interned_name strpool.StringId,
     type ?NodeId,
     mutability Mutability,
     initializer NodeId,
@@ -488,16 +498,23 @@ add_statement_decl proc(
         kind = .stmt_decl,
         main = NodeData{ extra = extra },
         data0 = NodeData{ mutability = mutability },
+        data1 = NodeData{ name_id = interned_name },
     }, span)
 }
 
-add_param proc(builder @mut Builder, span, name Span, type NodeId) NodeId ! mem.AllocError {
+add_param proc(
+    builder @mut Builder,
+    span, name Span,
+    interned_name strpool.StringId,
+    type NodeId,
+) NodeId ! mem.AllocError {
     extra :: try add_extra(builder, name.start)
     _ = try add_extra(builder, name.end)
     return try add_node(builder, Node{
         kind = .param_decl,
         main = NodeData{ extra = extra },
         data0 = NodeData{ node_id = type },
+        data1 = NodeData{ name_id = interned_name },
     }, span)
 }
 
@@ -505,6 +522,7 @@ add_function_decl proc(
     builder @mut Builder,
     span Span,
     name Span,
+    interned_name strpool.StringId,
     return_type NodeId,
     params []NodeId,
     body NodeId,
@@ -513,6 +531,7 @@ add_function_decl proc(
     _ = try add_extra(builder, name.start)
     _ = try add_extra(builder, name.end)
     _ = try add_extra(builder, u32(return_type))
+    _ = try add_extra(builder, u32(interned_name))
     for (params) |parameter| _ = try add_extra(builder, u32(parameter))
     return try add_node(builder, Node{
         kind = .func_decl,
@@ -577,6 +596,18 @@ add_invalid_decl proc(
 
 node_count proc(tree @Tree) usize {
     return tree.storage.nodes.items.len
+}
+
+#! returns the identifier's identity in the compilation-owned string pool.
+#! accepts identifiers, declarations, and parameters; source spans remain available in typed views.
+name_id proc(tree @Tree, id NodeId) strpool.StringId {
+    node :: get_node(&tree.storage, id)
+    return match node.kind {
+        .expr_identifier: node.main.name_id
+        .stmt_decl, .param_decl: node.data1.name_id
+        .func_decl: strpool.StringId(tree.storage.extra.items[usize(node.main.extra) + 3])
+        else: unreachable
+    }
 }
 
 package_decl_count proc(tree @Tree) usize {
@@ -707,14 +738,14 @@ function_decl proc(tree @Tree, id NodeId) FunctionDeclView {
 function_param_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .func_decl)
-    return usize(node.data1.extra - node.main.extra - 3)
+    return usize(node.data1.extra - node.main.extra - 4)
 }
 
 function_param proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .func_decl)
-    debug.assert(index < usize(node.data1.extra - node.main.extra - 3))
-    return NodeId(tree.storage.extra.items[usize(node.main.extra) + 3 + index])
+    debug.assert(index < usize(node.data1.extra - node.main.extra - 4))
+    return NodeId(tree.storage.extra.items[usize(node.main.extra) + 4 + index])
 }
 
 param proc(tree @Tree, id NodeId) ParamView {

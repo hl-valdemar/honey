@@ -1,7 +1,7 @@
 import "@std/debug"
 import "@std/mem"
 import "@std/hashmap"
-import "@std/strmap"
+import "@source/strpool"
 
 import "@source/ast"
 import "@source/diagnostics"
@@ -14,16 +14,22 @@ BuiltinType :: enum {
 }
 
 @hide:file
-builtins strmap.StaticStringMap(BuiltinType) :: strmap.init([
-    { "int", .int },
-    { "float", .float },
-    { "bool", .bool },
-    { "string", .string },
-    { "void", .void },
-    { "i64", .i64 },
-    { "f64", .f64 },
-    { "usize", .usize },
-])
+Builtin :: struct {
+    name []u8
+    type BuiltinType
+}
+
+@hide:file
+builtins [8]Builtin :: [
+    { name = "int", type = .int },
+    { name = "float", type = .float },
+    { name = "bool", type = .bool },
+    { name = "string", type = .string },
+    { name = "void", type = .void },
+    { name = "i64", type = .i64 },
+    { name = "f64", type = .f64 },
+    { name = "usize", type = .usize },
+]
 
 BindingKind :: enum { none, declaration, builtin, invalid }
 
@@ -50,7 +56,7 @@ Resolution :: struct { storage Storage }
 
 @hide:file
 Scope :: struct {
-    names hashmap.StringHashMap(Binding)
+    names hashmap.HashMap(strpool.StringId, Binding, name_hash, names_equal)
     parent ?@Scope
 }
 
@@ -59,17 +65,19 @@ State :: struct {
     tree @ast.Tree
     diagnostics @mut diagnostics.Store
     bindings []mut Binding
+    builtin_ids [8]mut strpool.StringId = [0, 0, 0, 0, 0, 0, 0, 0]
     allocator mem.Allocator
 }
 
-#! borrows `tree` and `diagnostic_store` during resolution, without retaining their storage.
+#! borrows `tree`, its identifier `pool`, and `diagnostic_store` during resolution.
 #! `allocator` supplies caller-owned bindings and temporary scopes released before return.
 #! release the returned Resolution with deinit, which uses the retained allocator.
 resolve proc(
     allocator mem.Allocator,
     tree @ast.Tree,
+    pool @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
-) Resolution ! (mem.AllocError | diagnostics.CapacityError) {
+) Resolution ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError) {
     bindings :: try mem.alloc(Binding, allocator, ast.node_count(tree))
     errdefer mem.free(allocator, bindings)
     mem.set(bindings, Binding{})
@@ -81,7 +89,13 @@ resolve proc(
         allocator = allocator,
     }
 
-    package_scope := Scope{ names = hashmap.init(allocator), parent = null }
+    for (builtins) |builtin, index| {
+        state.builtin_ids[index] = try strpool.intern(pool, builtin.name)
+    }
+    package_scope := Scope{
+        names = hashmap.init(strpool.StringId, Binding, name_hash, names_equal, allocator),
+        parent = null,
+    }
     defer hashmap.deinit(&package_scope.names)
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
@@ -115,19 +129,22 @@ binding proc(resolution @Resolution, id ast.NodeId) Binding {
 }
 
 @hide:file
-lookup proc(scope ?@Scope, name []u8) ?Binding {
+lookup proc(state @State, scope ?@Scope, name strpool.StringId) ?Binding {
     if scope |current| {
         if hashmap.get(&current.names, name) |found| return found
-        return lookup(current.parent, name)
+        return lookup(state, current.parent, name)
     }
-    if strmap.get(&builtins, name) |type| {
-        return Binding{ kind = .builtin, data = BindingData{ builtin = type } }
+    for (state.builtin_ids) |id, index| {
+        if (id == name) return Binding{
+            kind = .builtin,
+            data = BindingData{ builtin = builtins[index].type },
+        }
     }
     return null
 }
 
 @hide:file
-put_name proc(scope @mut Scope, name []u8, value Binding) void ! mem.AllocError {
+put_name proc(scope @mut Scope, name strpool.StringId, value Binding) void ! mem.AllocError {
     hashmap.put(&scope.names, name, value) catch |err| {
         match err {
             .key_exists: unreachable
@@ -143,7 +160,7 @@ predeclare proc(
     id ast.NodeId,
     name_span ast.Span,
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
-    name :: ast.source_text(state.tree, name_span)
+    name :: ast.name_id(state.tree, id)
     if hashmap.get(&scope.names, name) |_| {
         diagnostic :: try diagnostics.add(state.diagnostics, .duplicate_name, name_span)
         state.bindings[usize(id)] = Binding{
@@ -154,7 +171,7 @@ predeclare proc(
     }
 
     value := Binding{ kind = .declaration, data = BindingData{ declaration = id } }
-    if lookup(scope.parent, name) |_| {
+    if lookup(state, scope.parent, name) |_| {
         diagnostic :: try diagnostics.add(state.diagnostics, .duplicate_name, name_span)
         # poison the inner name rather than silently binding uses to its ancestor.
         value = Binding{ kind = .invalid, data = BindingData{ diagnostic = diagnostic } }
@@ -178,7 +195,10 @@ resolve_function proc(
         try resolve_expr(state, package_scope, ast.param(tree, parameter).type)
     }
 
-    scope := Scope{ names = hashmap.init(state.allocator), parent = package_scope }
+    scope := Scope{
+        names = hashmap.init(strpool.StringId, Binding, name_hash, names_equal, state.allocator),
+        parent = package_scope,
+    }
     defer hashmap.deinit(&scope.names)
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
@@ -189,7 +209,10 @@ resolve_function proc(
 
 @hide:file
 resolve_arm proc(state @mut State, parent @Scope, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
-    scope := Scope{ names = hashmap.init(state.allocator), parent = parent }
+    scope := Scope{
+        names = hashmap.init(strpool.StringId, Binding, name_hash, names_equal, state.allocator),
+        parent = parent,
+    }
     defer hashmap.deinit(&scope.names)
     try resolve_block(state, &scope, id)
 }
@@ -231,7 +254,10 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .for_stmt: {
                 loop :: ast.for_stmt(tree, statement)
                 try resolve_expr(state, scope, loop.iterable)
-                body_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+                body_scope := Scope{
+                    names = hashmap.init(strpool.StringId, Binding, name_hash, names_equal, state.allocator),
+                    parent = scope,
+                }
                 defer hashmap.deinit(&body_scope.names)
                 if (loop.capture) |capture| {
                     try predeclare(state, &body_scope, capture, ast.node_span(tree, capture))
@@ -279,8 +305,8 @@ resolve_expr proc(
         .literal_int, .literal_float, .literal_bool, .literal_string: {}
         .identifier: {
             span :: ast.node_span(tree, id)
-            name :: ast.source_text(tree, span)
-            if lookup(scope, name) |found| {
+            name :: ast.name_id(tree, id)
+            if lookup(state, scope, name) |found| {
                 state.bindings[usize(id)] = found
             } else {
                 diagnostic :: try diagnostics.add(state.diagnostics, .unknown_name, span)
@@ -324,4 +350,14 @@ resolve_expr proc(
         }
         .invalid: resolve_invalid(state, id)
     }
+}
+
+@hide:file
+name_hash proc(name strpool.StringId) usize {
+    return usize(name)
+}
+
+@hide:file
+names_equal proc(left, right strpool.StringId) bool {
+    return left == right
 }

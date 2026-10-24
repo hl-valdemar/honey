@@ -69,16 +69,10 @@ TokenKind :: enum {
 
 render_token proc(token Token, program []u8) void {
     match token.kind {
-        .ident: {
-            if (strpool.get_str(&strpool.strings, token.data.str_id)) |str| {
-                debug.print("{}({})\n", {token.kind, str})
-            } else {
-                debug.print("{}({})\n", {token.kind, program[token.span.start..token.span.end]})
-            }
-        }
-        .string, .int, .float:
+        .ident, .string, .int, .float:
             debug.print("{}({})\n", {token.kind, program[token.span.start..token.span.end]})
-        else: debug.print("{}\n", {token.kind})
+        else:
+            debug.print("{}\n", {token.kind})
     }
 }
 

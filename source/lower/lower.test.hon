@@ -20,14 +20,14 @@ compile_owned proc(text []u8, diagnostic_store @mut diagnostics.Store) ir.Module
     source :: try mem.alloc(u8, mem.c_allocator, text.len)
     defer mem.free(mem.c_allocator, source)
     for (text) |byte, i| source[i] = byte
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, diagnostic_store)
     defer sema.deinit(&resolution)
     checked := try typecheck.check(mem.c_allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)
@@ -469,8 +469,8 @@ limited_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignmen
 limited_vtable :: mem.AllocatorVTable{ alloc = limited_alloc, realloc = limited_realloc, free = limited_free }
 
 releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -529,10 +529,10 @@ releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     checked := try typecheck.check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer typecheck.deinit(&checked)

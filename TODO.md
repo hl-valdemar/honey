@@ -1,0 +1,1 @@
+- [ ] stdlib: add an auto-hashmap implementation (inspired by zig)

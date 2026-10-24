@@ -22,3 +22,19 @@ handles_interning test {
     try testing.expect_equal(null, invalid_str)
     try testing.expect_equal("hello", hello_str?)
 }
+
+keeps_independent_pool_ids_local test {
+    first := init(mem.c_allocator)
+    defer deinit(&first)
+    second := init(mem.c_allocator)
+    defer deinit(&second)
+    hello :: try intern(&first, "hello")
+    world :: try intern(&second, "world")
+    try testing.expect_equal(hello, world)
+    try testing.expect_equal("hello", get_str(&first, hello)?)
+    try testing.expect_equal("world", get_str(&second, world)?)
+    different :: try intern(&first, "world")
+    try testing.expect(different != hello)
+    try testing.expect_equal(hello, try intern(&first, "hello"))
+    try testing.expect_equal(world, try intern(&second, "world"))
+}

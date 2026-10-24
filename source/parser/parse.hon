@@ -95,25 +95,26 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
 
     params arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&params)
-    names arraylist.ArrayList(ast.Span) := arraylist.init(state.allocator)
+    names arraylist.ArrayList(lexer.Token) := arraylist.init(state.allocator)
     defer arraylist.deinit(&names)
 
     while !next_is(state, .close_paren) {
         arraylist.clear(&names)
         while true {
             token :: try consume(state, .ident)
-            try arraylist.append(&names, token.span)
+            try arraylist.append(&names, token)
             if (next_is(state, .ident) or next_is(state, .open_bracket)) break
             _ = try consume(state, .comma)
         }
 
         type_id :: try parse_type(state)
         type_span :: ast.builder_span(&state.builder, type_id)
-        for (names.items) |name_span| {
+        for (names.items) |parameter_name| {
             param_id :: try ast.add_param(
                 &state.builder,
-                ast.Span{ start = name_span.start, end = type_span.end },
-                name_span,
+                ast.Span{ start = parameter_name.span.start, end = type_span.end },
+                parameter_name.span,
+                parameter_name.data.str_id,
                 type_id,
             )
             try arraylist.append(&params, param_id)
@@ -129,6 +130,7 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
         &state.builder,
         ast.Span{ start = name.span.start, end = body_span.end },
         name.span,
+        name.data.str_id,
         return_type,
         params.items,
         body,
@@ -315,7 +317,7 @@ parse_capture_name proc(state @mut State) ?ast.NodeId ! ParseError {
     if (
         name.span.end != name.span.start + 1
         or state.builder.source[usize(name.span.start)] != '_'
-    ) capture = try ast.add_identifier(&state.builder, name.span)
+    ) capture = try ast.add_identifier(&state.builder, name.span, name.data.str_id)
     return capture
 }
 
@@ -480,6 +482,7 @@ parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
         &state.builder,
         ast.Span{ start = name.span.start, end = end },
         name.span,
+        name.data.str_id,
         type_id,
         mutability,
         initializer,
@@ -511,7 +514,7 @@ parse_type proc(state @mut State) ast.NodeId ! ParseError {
         )
     }
     token :: try consume(state, .ident)
-    return try ast.add_identifier(&state.builder, token.span)
+    return try ast.add_identifier(&state.builder, token.span, token.data.str_id)
 }
 
 @hide:file
@@ -774,7 +777,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         }
         .ident: {
             state.next_token += 1
-            return try ast.add_identifier(&state.builder, token.span)
+            return try ast.add_identifier(&state.builder, token.span, token.data.str_id)
         }
         else: {
             diagnostic :: if (token.data.diagnostic != diagnostics.no_diagnostic)

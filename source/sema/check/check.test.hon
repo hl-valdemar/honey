@@ -46,8 +46,8 @@ code_count proc(diagnostic_store @diagnostics.Store, code diagnostics.Code) usiz
 }
 
 propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -66,10 +66,10 @@ propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
         `nested float :: quotient / (alias + 1)
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -102,8 +102,8 @@ propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
 }
 
 rejects_fixed_family_conversion_integer_division_and_conflicting_demands test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -124,10 +124,10 @@ rejects_fixed_family_conversion_integer_division_and_conflicting_demands test {
         `good :: 9
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -169,8 +169,8 @@ rejects_fixed_family_conversion_integer_division_and_conflicting_demands test {
 }
 
 checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -189,10 +189,10 @@ checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -244,8 +244,8 @@ checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
 }
 
 separates_type_annotations_from_values_and_restricts_void_storage test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -266,10 +266,10 @@ separates_type_annotations_from_values_and_restricts_void_storage test {
         `good string :: "ok"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -336,8 +336,8 @@ separates_type_annotations_from_values_and_restricts_void_storage test {
 }
 
 reports_nonvoid_fallthrough_without_poisoning_signatures_and_checks_unused_bodies test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -353,10 +353,10 @@ reports_nonvoid_fallthrough_without_poisoning_signatures_and_checks_unused_bodie
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -391,8 +391,8 @@ reports_nonvoid_fallthrough_without_poisoning_signatures_and_checks_unused_bodie
 }
 
 checks_arguments_even_for_wrong_arity_noncallable_and_chained_callees test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -410,10 +410,10 @@ checks_arguments_even_for_wrong_arity_noncallable_and_chained_callees test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -455,8 +455,8 @@ checks_arguments_even_for_wrong_arity_noncallable_and_chained_callees test {
 }
 
 terminates_unanchored_cycles_and_keeps_grounded_cycles_typed test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -474,10 +474,10 @@ terminates_unanchored_cycles_and_keeps_grounded_cycles_typed test {
         `contextual_b :: contextual_a
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -530,8 +530,8 @@ terminates_unanchored_cycles_and_keeps_grounded_cycles_typed test {
 }
 
 preserves_existing_syntax_name_and_duplicate_ids_while_checking_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -548,10 +548,10 @@ preserves_existing_syntax_name_and_duplicate_ids_while_checking_siblings test {
         `same :: -"initializer"
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     previous_count :: diagnostics.count(&diagnostic_store)
     function :: ast.package_decl(&tree, 1)
@@ -608,8 +608,8 @@ preserves_existing_syntax_name_and_duplicate_ids_while_checking_siblings test {
 }
 
 returns_supply_numeric_context_and_resolve_forward_local_and_parameter_names test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -624,10 +624,10 @@ returns_supply_numeric_context_and_resolve_forward_local_and_parameter_names tes
         `seed :: 3
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -666,8 +666,8 @@ returns_supply_numeric_context_and_resolve_forward_local_and_parameter_names tes
 }
 
 return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_return_cascades test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -687,10 +687,10 @@ return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_retu
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -733,8 +733,8 @@ return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_retu
 }
 
 checks_bool_comparisons_recursive_returns_and_nested_numeric_context test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -769,10 +769,10 @@ checks_bool_comparisons_recursive_returns_and_nested_numeric_context test {
         `main proc() bool { return identity(flag) }
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -815,8 +815,8 @@ checks_bool_comparisons_recursive_returns_and_nested_numeric_context test {
 }
 
 rejects_bool_numeric_mixing_and_preserves_invalid_condition_identity test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -835,10 +835,10 @@ rejects_bool_numeric_mixing_and_preserves_invalid_condition_identity test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -882,8 +882,8 @@ rejects_bool_numeric_mixing_and_preserves_invalid_condition_identity test {
 }
 
 analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -918,10 +918,10 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -970,8 +970,8 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
 }
 
 assignments_preserve_established_types_and_contextualize_numeric_values test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -996,10 +996,10 @@ assignments_preserve_established_types_and_contextualize_numeric_values test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -1065,8 +1065,8 @@ assignments_preserve_established_types_and_contextualize_numeric_values test {
 }
 
 assignment_target_errors_preserve_bindings_and_independent_rhs_diagnostics test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1084,10 +1084,10 @@ assignment_target_errors_preserve_bindings_and_independent_rhs_diagnostics test 
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1124,8 +1124,8 @@ assignment_target_errors_preserve_bindings_and_independent_rhs_diagnostics test 
 }
 
 function_assignment_checks_complete_signatures_without_retargeting_calls test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1145,10 +1145,10 @@ function_assignment_checks_complete_signatures_without_retargeting_calls test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -1178,8 +1178,8 @@ function_assignment_checks_complete_signatures_without_retargeting_calls test {
 }
 
 while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1203,10 +1203,10 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1251,8 +1251,8 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
 }
 
 logical_types_preserve_comparison_context_and_assignment_isolation test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1270,10 +1270,10 @@ logical_types_preserve_comparison_context_and_assignment_isolation test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1316,8 +1316,8 @@ logical_types_preserve_comparison_context_and_assignment_isolation test {
 }
 
 logical_operand_errors_are_independent_and_skipped_rhs_preserves_bool test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1342,10 +1342,10 @@ logical_operand_errors_are_independent_and_skipped_rhs_preserves_bool test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1412,8 +1412,8 @@ logical_operand_errors_are_independent_and_skipped_rhs_preserves_bool test {
 }
 
 logical_external_mismatches_and_always_demanded_not_preserve_errors test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1435,10 +1435,10 @@ logical_external_mismatches_and_always_demanded_not_preserve_errors test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1491,8 +1491,8 @@ logical_external_mismatches_and_always_demanded_not_preserve_errors test {
 }
 
 short_circuit_skip_paths_do_not_guarantee_a_return test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1514,10 +1514,10 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
         `take proc(value bool) void {}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1550,8 +1550,8 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
 }
 
 loop_controls_follow_lexical_bodies_and_check_unreachable_code test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1583,10 +1583,10 @@ loop_controls_follow_lexical_bodies_and_check_unreachable_code test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1639,8 +1639,8 @@ loop_controls_follow_lexical_bodies_and_check_unreachable_code test {
 }
 
 loop_controls_do_not_guarantee_function_returns test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1661,10 +1661,10 @@ loop_controls_do_not_guarantee_function_returns test {
         `invalid proc() int { break }
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1694,8 +1694,8 @@ loop_controls_do_not_guarantee_function_returns test {
 }
 
 range_bounds_receive_integer_context_without_joining_the_range_or_capture test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1714,10 +1714,10 @@ range_bounds_receive_integer_context_without_joining_the_range_or_capture test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1753,8 +1753,8 @@ range_bounds_receive_integer_context_without_joining_the_range_or_capture test {
 }
 
 range_checks_both_bounds_and_preserves_fixed_declarations_and_source_errors test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1776,10 +1776,10 @@ range_checks_both_bounds_and_preserves_fixed_declarations_and_source_errors test
         `flexible := 3
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1826,8 +1826,8 @@ range_checks_both_bounds_and_preserves_fixed_declarations_and_source_errors test
 }
 
 range_values_nonrange_iterables_and_capture_modes_have_explicit_errors test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1851,10 +1851,10 @@ range_values_nonrange_iterables_and_capture_modes_have_explicit_errors test {
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1901,8 +1901,8 @@ range_values_nonrange_iterables_and_capture_modes_have_explicit_errors test {
 }
 
 range_captures_are_fixed_readonly_and_assignment_values_do_not_retarget_bounds test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -1927,10 +1927,10 @@ range_captures_are_fixed_readonly_and_assignment_values_do_not_retarget_bounds t
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -1986,8 +1986,8 @@ range_captures_are_fixed_readonly_and_assignment_values_do_not_retarget_bounds t
 }
 
 range_loop_return_flow_and_controls_are_lexical_and_body_errors_are_isolated test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -2025,10 +2025,10 @@ range_loop_return_flow_and_controls_are_lexical_and_body_errors_are_isolated tes
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
@@ -2080,8 +2080,8 @@ range_loop_return_flow_and_controls_are_lexical_and_body_errors_are_isolated tes
 }
 
 invalid_range_capture_bindings_keep_resolver_diagnostic_ids_without_erasing_headers test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
@@ -2094,10 +2094,10 @@ invalid_range_capture_bindings_keep_resolver_diagnostic_ids_without_erasing_head
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &diagnostic_store)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
     tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
     defer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &diagnostic_store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
     defer sema.deinit(&resolution)
     previous_count :: diagnostics.count(&diagnostic_store)
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
@@ -2132,6 +2132,7 @@ invalid_range_capture_bindings_keep_resolver_diagnostic_ids_without_erasing_head
 
 @hide:file
 ArrayFixture :: struct {
+    strings strpool.StringPool
     tree ast.Tree
     resolution sema.Resolution
     diagnostics diagnostics.Store
@@ -2140,17 +2141,19 @@ ArrayFixture :: struct {
 
 @hide:file
 array_fixture proc(source []u8) ArrayFixture ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError | lexer.SourceError) {
+    strings := strpool.init(mem.c_allocator)
+    errdefer strpool.deinit(&strings)
     store := diagnostics.init(mem.c_allocator)
     errdefer diagnostics.deinit(&store)
     scan := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan)
-    try lexer.scan(&scan, source, &store)
+    try lexer.scan(&scan, source, &strings, &store)
     tree := try parser.parse(mem.c_allocator, scan.tokens.items, source, &store)
     errdefer ast.deinit(&tree)
-    resolution := try sema.resolve(mem.c_allocator, &tree, &store)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &store)
     errdefer sema.deinit(&resolution)
     result :: try check(mem.c_allocator, &tree, &resolution, &store)
-    return ArrayFixture{ tree = tree, resolution = resolution, diagnostics = store, result = result }
+    return ArrayFixture{ strings = strings, tree = tree, resolution = resolution, diagnostics = store, result = result }
 }
 
 @hide:file
@@ -2159,6 +2162,7 @@ deinit_array_fixture proc(fixture @mut ArrayFixture) void {
     sema.deinit(&fixture.resolution)
     ast.deinit(&fixture.tree)
     diagnostics.deinit(&fixture.diagnostics)
+    strpool.deinit(&fixture.strings)
 }
 
 @hide:file
@@ -2172,8 +2176,6 @@ expect_array proc(result @Result, id ast.NodeId, len usize, mutable bool, elemen
 }
 
 fixed_arrays_contextualize_forward_aliases_counts_nested_literals_and_signatures test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `context [2]f64 :: alias
         `alias :: seed
@@ -2225,8 +2227,6 @@ fixed_arrays_contextualize_forward_aliases_counts_nested_literals_and_signatures
 }
 
 nested_array_numeric_context_flows_through_index_children_before_defaults test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `first float :: later[0][0]
         `later := [[1, 2], [3, 4]]
@@ -2262,8 +2262,6 @@ nested_array_numeric_context_flows_through_index_children_before_defaults test {
 }
 
 fixed_index_errors_are_occurrence_local_and_preserve_sources_and_siblings test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `fixed i64 :: 0
         `inferred := 0
@@ -2298,8 +2296,6 @@ fixed_index_errors_are_occurrence_local_and_preserve_sources_and_siblings test {
 }
 
 array_lengths_require_supported_constexpr_and_finalize_nested_inferred_counts test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `two :: tail
         `tail :: 2
@@ -2355,8 +2351,6 @@ array_lengths_require_supported_constexpr_and_finalize_nested_inferred_counts te
 }
 
 indexed_writes_require_mutable_local_root_and_each_array_level_but_copies_are_values test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `global [1]mut i64 := [1]
         `main proc(parameter [1]mut i64) void {
@@ -2408,8 +2402,6 @@ indexed_writes_require_mutable_local_root_and_each_array_level_but_copies_are_va
 }
 
 usize_arithmetic_ranges_and_readonly_captures_keep_the_bound_family test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `limit usize :: 18446744073709551615
         `arithmetic usize :: (limit - 2) * 1 + 1
@@ -2470,8 +2462,6 @@ usize_arithmetic_ranges_and_readonly_captures_keep_the_bound_family test {
 }
 
 array_assignment_rhs_is_contextual_but_does_not_retarget_established_sources test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `main proc() void {
         `    target [2]mut f64 := [1, 2]
@@ -2513,8 +2503,6 @@ array_assignment_rhs_is_contextual_but_does_not_retarget_established_sources tes
 }
 
 array_signature_identity_includes_recursive_counts_and_mutability test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `accept proc(value [1]mut i64) [1]mut i64 { return value }
         `different_count proc(value [2]mut i64) [1]mut i64 { return [1] }
@@ -2559,8 +2547,6 @@ array_signature_identity_includes_recursive_counts_and_mutability test {
 }
 
 inferred_counts_follow_forward_fixed_aliases_empty_shapes_and_reject_local_counts test {
-    strpool.strings = strpool.init(mem.c_allocator)
-    defer strpool.deinit(&strpool.strings)
     source ::
         `forward [_]i64 :: later
         `later [_]i64 :: [1, 2]
