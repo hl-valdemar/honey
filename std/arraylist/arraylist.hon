@@ -13,7 +13,7 @@ ArrayList proc($T type) type {
 #! retain `allocator` for later growth and cleanup; this call does not allocate.
 init proc($T type, allocator mem.Allocator) ArrayList(T) {
     return ArrayList(T) {
-        items = mem.empty(T),
+        items = &[],
         capacity = 0,
         allocator = allocator,
     }
@@ -23,7 +23,7 @@ init proc($T type, allocator mem.Allocator) ArrayList(T) {
 deinit proc($T type, list @mut ArrayList(T)) void {
     allocation :: list.items.ptr[..list.capacity]
     mem.free(list.allocator, allocation)
-    list.items = mem.empty(T)
+    list.items = &[]
     list.capacity = 0
 }
 

@@ -62,7 +62,7 @@ set proc($T type, destination []mut T, value T) void {
 #! allocate memory for a slice of type `T` with `count` elements.
 #! returned storage belongs to the caller; release it with free using the same allocator.
 alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
-    if (count == 0) return empty_slice(T, 0)
+    if (count == 0) return &[]
 
     element_size :: sizeof!(T)
     if (element_size == 0) return empty_slice(T, count)
@@ -95,7 +95,7 @@ realloc proc(
 
     if new_count == 0 {
         free(allocator, memory)
-        return empty_slice(T, 0)
+        return &[]
     }
 
     element_size :: sizeof!(T)
@@ -137,19 +137,12 @@ free proc($T type, allocator Allocator, memory []T) void {
     )
 }
 
-#! create a slice backed by `empty_storage` without allocating.
-#! precondition: `count` must be 0 or `sizeof!(T)` must be 0; otherwise the slice
-#! exceeds its backing storage.
+#! create a logically nonempty slice of zero-sized elements without allocating.
+#! precondition: sizeof!(T) must be 0; no element storage is accessed.
 @hide:file
 empty_slice proc($T type, count usize) []mut T {
     pointer *mut T :: ptrcast!((&empty_storage).ptr)
     return pointer[..count]
-}
-
-#! get an empty slice of type `T` with 0 elements.
-#! the view borrows shared empty storage and requires no cleanup.
-empty proc($T type) []mut T {
-    return empty_slice(T, 0)
 }
 
 @hide:file

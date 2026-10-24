@@ -98,8 +98,8 @@ repeated_calls_have_fresh_parameters_locals_and_temporaries test {
     try emit(&module, bump, ir.Instruction{ op = .store_local, left = ir.ValueId(2), slot = 1 })
     try emit(&module, bump, ir.Instruction{ op = .load_local, type = .int, destination = ir.ValueId(3), slot = 1 })
     return_value(&module, bump, ir.ValueId(3))
-    noop :: try add_function(&module, mem.empty(ir.Type), 0, .void, 0)
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 8)
+    noop :: try add_function(&module, &[], 0, .void, 0)
+    main :: try add_function(&module, &[], 0, .int, 8)
     module.entry = main
     try emit(&module, main, function_value(0, bump))
     try emit(&module, main, integer(1, 19))
@@ -125,8 +125,8 @@ lazy_globals_follow_forward_dependencies_and_reset_between_runs test {
     defer ir.deinit(&module)
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
-    first :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
-    second :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+    first :: try add_function(&module, &[], 0, .int, 3)
+    second :: try add_function(&module, &[], 0, .int, 1)
     try emit(&module, first, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 1 })
     try emit(&module, first, integer(1, 1))
     try emit(&module, first, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
@@ -135,7 +135,7 @@ lazy_globals_follow_forward_dependencies_and_reset_between_runs test {
     return_value(&module, second, ir.ValueId(0))
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = first, span = diagnostics.Span{ start = 0, end = 0 } })
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = second, span = diagnostics.Span{ start = 0, end = 0 } })
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    main :: try add_function(&module, &[], 0, .int, 3)
     module.entry = main
     try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0 })
     try emit(&module, main, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(1), slot = 0 })
@@ -164,7 +164,7 @@ function_aliases_and_borrowed_string_values_execute test {
     memcopy!(owned, text)
     try arraylist.append(&module.strings, ir.StringStorage{ allocation = owned, len = text.len })
     transferred = true
-    target :: try add_function(&module, mem.empty(ir.Type), 0, .string, 1)
+    target :: try add_function(&module, &[], 0, .string, 1)
     try emit(&module, target, ir.Instruction{
         op = .constant,
         type = .string,
@@ -172,11 +172,11 @@ function_aliases_and_borrowed_string_values_execute test {
         constant = ir.Value{ type = .string, data = ir.ValueData{ string = ir.StringId(0) } },
     })
     return_value(&module, target, ir.ValueId(0))
-    initializer :: try add_function(&module, mem.empty(ir.Type), 0, .function, 1)
+    initializer :: try add_function(&module, &[], 0, .function, 1)
     try emit(&module, initializer, function_value(0, target))
     return_value(&module, initializer, ir.ValueId(0))
     try arraylist.append(&module.globals, ir.Global{ type = .function, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .string, 2)
+    main :: try add_function(&module, &[], 0, .string, 2)
     module.entry = main
     try emit(&module, main, ir.Instruction{ op = .load_global, type = .function, destination = ir.ValueId(0), slot = 0 })
     try emit(&module, main, ir.Instruction{ op = .call, type = .string, destination = ir.ValueId(1), left = ir.ValueId(0) })
@@ -203,8 +203,8 @@ premature_local_reads_and_global_cycles_report_instruction_spans test {
     defer deinit(&premature)
     try expect_trap(premature, &store, .read_before_initialization, span)
 
-    first :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
-    second :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+    first :: try add_function(&module, &[], 0, .int, 1)
+    second :: try add_function(&module, &[], 0, .int, 1)
     cycle_span :: diagnostics.Span{ start = 40, end = 44 }
     try emit(&module, first, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 1 })
     try emit(&module, second, ir.Instruction{ op = .load_global, type = .int, destination = ir.ValueId(0), slot = 0, span = cycle_span })
@@ -232,9 +232,9 @@ existing_trap_identity_entry_failures_and_unused_errors_survive test {
     defer deinit(&absent)
     try testing.expect_equal(entry_id, absent.trap?)
     invalid_id :: try diagnostics.add(&store, .unknown_name, diagnostics.Span{ start = 12, end = 17 })
-    bad :: try add_function(&module, mem.empty(ir.Type), 0, .invalid, 0)
+    bad :: try add_function(&module, &[], 0, .invalid, 0)
     module.functions.items[usize(bad)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = invalid_id }
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 2)
+    main :: try add_function(&module, &[], 0, .int, 2)
     module.entry = main
     try emit(&module, main, integer(0, 42))
     return_value(&module, main, ir.ValueId(0))
@@ -286,7 +286,7 @@ integer_arithmetic_checks_boundaries_before_host_operations test {
         store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&store)
         span :: diagnostics.Span{ start = 8, end = 16 }
-        main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+        main :: try add_function(&module, &[], 0, .int, 3)
         module.entry = main
         try emit(&module, main, integer(0, case.left))
         try emit(&module, main, integer(1, case.right))
@@ -309,7 +309,7 @@ integer_negation_traps_only_at_minimum test {
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
     span :: diagnostics.Span{ start = 21, end = 27 }
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 2)
+    main :: try add_function(&module, &[], 0, .int, 2)
     module.entry = main
     try emit(&module, main, integer(0, minval!(i64)))
     try emit(&module, main, ir.Instruction{ op = .negate, type = .int, destination = ir.ValueId(1), left = ir.ValueId(0), span = span })
@@ -329,7 +329,7 @@ float_arithmetic_and_ieee_zero_division_execute test {
     defer ir.deinit(&module)
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .float, 7)
+    main :: try add_function(&module, &[], 0, .float, 7)
     module.entry = main
     try emit(&module, main, ir.Instruction{ op = .constant, type = .float, destination = ir.ValueId(0), constant = ir.Value{ type = .float, data = ir.ValueData{ real = 10.5 } } })
     try emit(&module, main, ir.Instruction{ op = .constant, type = .float, destination = ir.ValueId(1), constant = ir.Value{ type = .float, data = ir.ValueData{ real = 2.0 } } })
@@ -413,7 +413,7 @@ recursive_invocations_use_heap_frames_and_free_on_allocation_failure test {
     defer ir.deinit(&module)
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .void, 2)
+    main :: try add_function(&module, &[], 0, .void, 2)
     module.entry = main
     recursive_block :: try add_block(&module, main)
     module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .jump, target = recursive_block }
@@ -552,7 +552,7 @@ branching_recursive_calls_and_lazy_initializers_resume_the_current_block test {
     try emit_at(&module, count, recurse, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(7), left = ir.ValueId(6), right = ir.ValueId(4) })
     module.functions.items[usize(count)].blocks.items[usize(recurse)].terminator = ir.Terminator{ value = ir.ValueId(7) }
 
-    initializer :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    initializer :: try add_function(&module, &[], 0, .int, 3)
     init_entry :: try add_block(&module, initializer)
     init_exit :: try add_block(&module, initializer)
     trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
@@ -566,7 +566,7 @@ branching_recursive_calls_and_lazy_initializers_resume_the_current_block test {
     module.functions.items[usize(initializer)].blocks.items[usize(init_exit)].terminator = ir.Terminator{ value = ir.ValueId(2) }
     try arraylist.append(&module.globals, ir.Global{ type = .int, initializer = initializer, span = diagnostics.Span{ start = 0, end = 0 } })
 
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 5)
+    main :: try add_function(&module, &[], 0, .int, 5)
     main_entry :: try add_block(&module, main)
     main_exit :: try add_block(&module, main)
     module.entry = main
@@ -611,7 +611,7 @@ all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
                 defer ir.deinit(&module)
                 store := diagnostics.init(mem.c_allocator)
                 defer diagnostics.deinit(&store)
-                main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+                main :: try add_function(&module, &[], 0, .bool, 3)
                 module.entry = main
                 left_value := ir.Value{ type = type, data = ir.ValueData{ integer = left } }
                 right_value := ir.Value{ type = type, data = ir.ValueData{ integer = right } }
@@ -650,7 +650,7 @@ nan_comparisons_obey_ieee_rules_in_either_operand_position test {
             defer ir.deinit(&module)
             store := diagnostics.init(mem.c_allocator)
             defer diagnostics.deinit(&store)
-            main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+            main :: try add_function(&module, &[], 0, .bool, 3)
             module.entry = main
             try emit(&module, main, ir.Instruction{
                 op = .constant, type = .float, destination = ir.ValueId(0),
@@ -680,7 +680,7 @@ boolean_equality_and_branching_use_boolean_payloads test {
                 defer ir.deinit(&module)
                 store := diagnostics.init(mem.c_allocator)
                 defer diagnostics.deinit(&store)
-                main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 5)
+                main :: try add_function(&module, &[], 0, .int, 5)
                 module.entry = main
                 yes :: try add_block(&module, main)
                 no :: try add_block(&module, main)
@@ -825,7 +825,7 @@ logical_not_inverts_boolean_payload_and_composes_in_typed_ir test {
         defer ir.deinit(&module)
         store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&store)
-        main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+        main :: try add_function(&module, &[], 0, .bool, 3)
         module.entry = main
         try emit(&module, main, ir.Instruction{
             op = .constant,
@@ -970,7 +970,7 @@ array_arguments_and_returns_are_private_values_before_frame_release test {
     try emit(&module, callee, integer(4, 7))
     try emit(&module, callee, ir.Instruction{ op = .store_address, left = ir.ValueId(3), right = ir.ValueId(4) })
     return_value(&module, callee, ir.ValueId(5))
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 8)
+    main :: try add_function(&module, &[], 0, .array, 8)
     module.entry = main
     module.functions.items[usize(main)].result_array_type = pair_shape
     try emit(&module, main, integer(0, 42))
@@ -999,8 +999,8 @@ lazy_aggregate_globals_escape_with_owned_results_and_release_at_every_boundary t
     store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&store)
     shape :: try add_array(&module, .int, ir.no_array, 1)
-    first :: try add_function(&module, mem.empty(ir.Type), 0, .array, 1)
-    second :: try add_function(&module, mem.empty(ir.Type), 0, .array, 2)
+    first :: try add_function(&module, &[], 0, .array, 1)
+    second :: try add_function(&module, &[], 0, .array, 2)
     module.functions.items[usize(first)].result_array_type = shape
     module.functions.items[usize(second)].result_array_type = shape
     try array_storage(&module, first, 0, shape, false)
@@ -1017,7 +1017,7 @@ lazy_aggregate_globals_escape_with_owned_results_and_release_at_every_boundary t
             span = diagnostics.Span{ start = 0, end = 0 },
         })
     }
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 2)
+    main :: try add_function(&module, &[], 0, .array, 2)
     module.entry = main
     module.functions.items[usize(main)].result_array_type = shape
     try emit(&module, main, ir.Instruction{ op = .address_global, type = .address, pointee = .array, array_type = shape, destination = ir.ValueId(0), slot = 0 })
@@ -1129,10 +1129,10 @@ zero_leaf_nested_arrays_return_a_shape_without_an_owned_allocation test {
     defer diagnostics.deinit(&store)
     empty :: try add_array(&module, .bool, ir.no_array, 0)
     rows :: try add_array(&module, .array, empty, 3)
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 4)
+    main :: try add_function(&module, &[], 0, .array, 4)
     module.entry = main
     module.functions.items[usize(main)].result_array_type = rows
-    try literal(&module, main, 0, empty, mem.empty(u32))
+    try literal(&module, main, 0, empty, &[])
     operands [3]u32 :: [0, 0, 0]
     try literal(&module, main, 1, rows, operands[..])
     return_value(&module, main, ir.ValueId(1))
@@ -1189,7 +1189,7 @@ unsigned_arithmetic_and_comparisons_preserve_all_sixty_four_bits test {
         defer ir.deinit(&module)
         store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&store)
-        main :: try add_function(&module, mem.empty(ir.Type), 0, .usize, 3)
+        main :: try add_function(&module, &[], 0, .usize, 3)
         module.entry = main
         span :: diagnostics.Span{ start = 7, end = 12 }
         try emit(&module, main, unsigned(0, case.left))
@@ -1211,7 +1211,7 @@ unsigned_arithmetic_and_comparisons_preserve_all_sixty_four_bits test {
         defer ir.deinit(&module)
         store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&store)
-        main :: try add_function(&module, mem.empty(ir.Type), 0, .bool, 3)
+        main :: try add_function(&module, &[], 0, .bool, 3)
         module.entry = main
         try emit(&module, main, unsigned(0, maxval!(u64)))
         try emit(&module, main, unsigned(1, 1))
@@ -1244,11 +1244,11 @@ all_scalar_leaf_families_survive_aggregate_return_and_function_extraction test {
         }
         store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&store)
-        target :: try add_function(&module, mem.empty(ir.Type), 0, .int, 1)
+        target :: try add_function(&module, &[], 0, .int, 1)
         try emit(&module, target, integer(0, 42))
         return_value(&module, target, ir.ValueId(0))
         shape :: try add_array(&module, scalar.type, ir.no_array, 1)
-        main :: try add_function(&module, mem.empty(ir.Type), 0, .array, 5)
+        main :: try add_function(&module, &[], 0, .array, 5)
         module.entry = main
         module.functions.items[usize(main)].result_array_type = shape
         try emit(&module, main, ir.Instruction{ op = .constant, type = scalar.type, destination = ir.ValueId(0), constant = scalar })
@@ -1413,7 +1413,7 @@ recursive_array_backings_and_addresses_remain_fresh_across_stack_growth test {
     try emit_at(&module, recursive, recurse, ir.Instruction{ op = .load_address, type = .int, destination = ir.ValueId(10), left = ir.ValueId(4) })
     try emit_at(&module, recursive, recurse, ir.Instruction{ op = .add, type = .int, destination = ir.ValueId(11), left = ir.ValueId(9), right = ir.ValueId(10) })
     module.functions.items[usize(recursive)].blocks.items[usize(recurse)].terminator = ir.Terminator{ value = ir.ValueId(11) }
-    main :: try add_function(&module, mem.empty(ir.Type), 0, .int, 3)
+    main :: try add_function(&module, &[], 0, .int, 3)
     module.entry = main
     try emit(&module, main, function_value(0, recursive))
     try emit(&module, main, integer(1, 64))

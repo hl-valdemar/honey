@@ -233,13 +233,18 @@ run proc(
             .address_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
                 address := Address{
-                    type = instruction.pointee, array_type = instruction.array_type,
-                    cells = mem.empty(ir.Value), initialized = &local.initialized,
+                    type = instruction.pointee,
+                    array_type = instruction.array_type,
+                    cells = &[],
+                    initialized = &local.initialized,
                 }
                 if (address.type == .array) address.cells = local.value.data.elements
                 else address.scalar = &local.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
-                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+                value = ir.Value{
+                    type = .address,
+                    data = ir.ValueData{ address = u32(instruction.destination) },
+                }
             }
             .address_global: {
                 global_index :: usize(instruction.slot)
@@ -255,13 +260,17 @@ run proc(
                 }
                 global :: &globals[global_index]
                 address := Address{
-                    type = instruction.pointee, array_type = instruction.array_type,
-                    cells = mem.empty(ir.Value),
+                    type = instruction.pointee,
+                    array_type = instruction.array_type,
+                    cells = &[],
                 }
                 if (address.type == .array) address.cells = global.value.data.elements
                 else address.scalar = &global.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
-                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+                value = ir.Value{
+                    type = .address,
+                    data = ir.ValueData{ address = u32(instruction.destination) },
+                }
             }
             .index_address: {
                 base_id :: frames.items[frame_index].values[usize(instruction.left)].data.address
