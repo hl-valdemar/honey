@@ -27,6 +27,7 @@ State :: struct {
     tokens []lexer.Token
     allocator mem.Allocator
     next_token usize
+    paren_depth usize = 0
 }
 
 #! borrows `tokens` and `source` while parsing; the returned Tree borrows `source` until ast.deinit.
@@ -413,6 +414,7 @@ parse_expr proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! ParseError {
+    skip_operand_newlines(state)
     token := current(state)
     left := if (prefix_binding_power(token.kind)) |right_bp| {
         state.next_token += 1
@@ -430,6 +432,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     }
 
     while true {
+        skip_continuation_newlines(state)
         token = current(state)
         if (token.kind == .open_paren) {
             left = try parse_call(state, left)
@@ -458,6 +461,9 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
 @hide:file
 parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
     _ = try consume(state, .open_paren)
+    state.paren_depth += 1
+    defer state.paren_depth -= 1
+    skip_operand_newlines(state)
     arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&arguments)
 
@@ -466,6 +472,7 @@ parse_call proc(state @mut State, callee ast.NodeId) ast.NodeId ! ParseError {
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
         state.next_token += 1
+        skip_operand_newlines(state)
     }
     close :: try consume(state, .close_paren)
     return try ast.add_call(
@@ -485,6 +492,8 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     match token.kind {
         .open_paren: {
             state.next_token += 1
+            state.paren_depth += 1
+            defer state.paren_depth -= 1
             expression :: try parse_expr(state)
             if next_is(state, .close_paren) {
                 state.next_token += 1
@@ -551,6 +560,38 @@ is_expression_recovery_boundary proc(kind lexer.TokenKind) bool {
         or kind == .or
         or is_expression_boundary(kind)
     )
+}
+
+@hide:file
+skip_operand_newlines proc(state @mut State) void {
+    if (state.paren_depth == 0 or !next_is(state, .newline)) return
+    start :: state.next_token
+    skip_newlines(state)
+    kind :: current(state).kind
+    if (kind != .close_paren and is_expression_boundary(kind)) state.next_token = start
+    # a missing operand must not consume the declaration or assignment on the next line.
+    if (
+        next_is(state, .ident)
+        and (
+            next_n_is(state, 1, .double_colon)
+            or next_n_is(state, 1, .colon_equal)
+            or next_n_is(state, 1, .equal)
+            or next_n_is(state, 1, .ident)
+            or next_n_is(state, 1, .proc)
+        )
+    ) state.next_token = start
+}
+
+@hide:file
+skip_continuation_newlines proc(state @mut State) void {
+    if (state.paren_depth == 0 or !next_is(state, .newline)) return
+    start :: state.next_token
+    skip_newlines(state)
+    kind :: current(state).kind
+    if (
+        kind != .close_paren and kind != .comma and kind != .open_paren
+        and infix_binding_power(kind) == null
+    ) state.next_token = start
 }
 
 @hide:file

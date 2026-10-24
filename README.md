@@ -37,9 +37,9 @@ a recursive example is in [programs/factorial.hon](programs/factorial.hon); `./b
 
 an iterative example is in [programs/iterative_factorial.hon](programs/iterative_factorial.hon); `./build/honey run programs/iterative_factorial.hon` also prints `120`.
 
-the parser supports arithmetic expressions with nested parenthesized groups, such as `a + (b - c) * 2 / 3`. groups control precedence without adding AST nodes; inner expression spans exclude the grouping parentheses. parsing accepts integer division syntax, but type checking requires float operands for `/`.
+the parser supports arithmetic expressions with nested parenthesized groups, such as `a + (b - c) * 2 / 3`. groups control precedence without adding AST nodes; inner expression spans exclude the grouping parentheses. groups may span lines in any expression position, including returns, initializers, arguments and guards. parsing accepts integer division syntax, but type checking requires float operands for `/`.
 
-function calls are postfix expressions: `f()`, `f(a, b)`, and `factory()(x)`. calls bind tighter than unary and binary arithmetic and can appear in initializers or as expression statements inside function bodies. argument lists allow a trailing comma; newlines remain statement boundaries. type checking validates callable values, argument counts and argument types.
+function calls are postfix expressions: `f()`, `f(a, b)`, and `factory()(x)`. calls bind tighter than unary and binary arithmetic and can appear in initializers or as expression statements inside function bodies. argument lists allow newlines and a trailing comma; outside parentheses, newlines remain statement boundaries. type checking validates callable values, argument counts and argument types.
 
 `true` and `false` are boolean literals; `bool` is available for parameters, storage and results. `==`, `!=`, `<`, `<=`, `>` and `>=` compare compatible numeric operands and produce `bool`; `==` and `!=` also accept boolean operands. comparisons preserve contextual numeric inference without making their operands boolean. arithmetic binds tighter than relational comparisons, which bind tighter than equality; comparisons associate left to right. boolean arithmetic/ordering and string/function/void comparisons are invalid; there is no implicit numeric-to-boolean conversion.
 

@@ -813,14 +813,42 @@ parses_logical_expressions_in_all_expression_positions test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `global :: false and absent
+        `global :: (
+        `    false
+        `    and absent
+        `)
         `main proc() bool {
-        `    value := true or absent
-        `    value = !value and ready()
+        `    value := (
+        `        true
+        `        or absent
+        `    )
+        `    value = (
+        `        !
+        `        value
+        `        and ready(
+        `        )
+        `    )
         `    !value
-        `    if !value or ready() { value = false }
-        `    while value and !done() { value = false }
-        `    return choose(value or false, nested(!value and true))
+        `    if (
+        `        !value
+        `        or ready()
+        `    ) { value = false }
+        `    while (
+        `        value
+        `        and !done()
+        `    ) { value = false }
+        `    return (
+        `        choose(
+        `            (
+        `                value
+        `                or false
+        `            ),
+        `            nested(
+        `                !value
+        `                and true
+        `            ),
+        `        )
+        `    )
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -852,6 +880,40 @@ parses_logical_expressions_in_all_expression_positions test {
     nested :: ast.call_arg(&tree, returned, 1)
     nested_argument :: ast.call_arg(&tree, nested, 0)
     try testing.expect_equal(ast.BinaryOperator.logical_and, ast.binary_expr(&tree, nested_argument).operator)
+}
+
+multiline_group_errors_preserve_statement_boundaries test {
+    strpool.strings = strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strpool.strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() void {
+        `    value := (
+        `        1 +
+        `    next int :: 2
+        `    value = 3
+        `    return (
+        `        true
+        `}
+        `tail :: 9
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(4, ast.block_statement_count(&tree, body))
+    next :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect_equal("next", ast.source_text(&tree, next.name))
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect_equal("3", ast.source_text(&tree, ast.node_span(&tree, assignment.value)))
+    try testing.expect_equal(ast.StmtKind.return_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 3)))
+    tail :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
+    try testing.expect_equal("tail", ast.source_text(&tree, tail.name))
 }
 
 recovers_missing_logical_operands_and_preserves_enclosing_nodes test {
