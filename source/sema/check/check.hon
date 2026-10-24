@@ -1,6 +1,7 @@
 import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
+import "@std/hashmap"
 import "@source/ast"
 import "@source/diagnostics"
 sema :: import "@source/sema"
@@ -40,11 +41,12 @@ Type :: struct {
 Storage :: struct {
     types []mut Type
     arrays arraylist.ArrayList(ArrayType)
+    fallthroughs hashmap.AutoHashMap(ast.NodeId, diagnostics.DiagnosticId)
     allocator mem.Allocator
 }
 
-#! owns node-indexed types and interned array descriptors; release with deinit.
-#! function IDs refer to the caller-owned AST, not checker-owned signatures.
+#! owns node-indexed types, interned array descriptors, and function fallthrough obligations; release with deinit.
+#! function IDs refer to the caller-owned AST; diagnostic IDs refer to the caller-owned store.
 Result :: struct { storage Storage }
 
 @hide:file
@@ -118,7 +120,7 @@ State :: struct {
 }
 
 #! borrows the AST, resolution, and diagnostic store only during checking.
-#! temporary constraints are freed on every exit; Result owns types and array descriptors.
+#! temporary constraints are freed on every exit; Result owns types, array descriptors, and fallthrough obligations.
 check proc(
     allocator mem.Allocator,
     tree @ast.Tree,
@@ -360,6 +362,8 @@ check proc(
         }
     }
     propagate(&state, queue)
+    fallthroughs hashmap.AutoHashMap(ast.NodeId, diagnostics.DiagnosticId) := hashmap.init(allocator)
+    errdefer hashmap.deinit(&fallthroughs)
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
         if (ast.decl_kind(tree, id) != .function) continue
@@ -367,18 +371,34 @@ check proc(
         result :: types[usize(function.return_type)]
         if (result.kind == .void or result.kind == .invalid or types[usize(id)].kind == .invalid) continue
         if (block_falls_through(&state, function.body)) {
-            # lowering must find this diagnostic even when another arm failed.
+            # fallthrough is independent of errors in paths that may not execute.
             diagnostic :: try diagnostics.add(diagnostic_store, .missing_return, ast.node_span(tree, function.body))
-            types[usize(function.body)] = invalid_type(diagnostic)
+            hashmap.put(&fallthroughs, id, diagnostic) catch |err| {
+                match err {
+                    .key_exists: unreachable
+                    else: return err
+                }
+            }
         }
     }
-    return Result{ storage = Storage{ types = types, arrays = state.arrays, allocator = allocator } }
+    return Result{ storage = Storage{
+        types = types,
+        arrays = state.arrays,
+        fallthroughs = fallthroughs,
+        allocator = allocator,
+    } }
 }
 
 #! returns a type without retaining a reference to checker temporaries.
 type_of proc(result @Result, id ast.NodeId) Type {
     debug.assert(usize(id) < result.storage.types.len)
     return result.storage.types[usize(id)]
+}
+
+#! returns the original diagnostic for a function's nonvoid fallthrough, independent of body errors.
+#! null means the function has no fallthrough obligation; lowering still owns trap placement.
+fallthrough_diagnostic proc(result @Result, function ast.NodeId) ?diagnostics.DiagnosticId {
+    return hashmap.get(&result.storage.fallthroughs, function)
 }
 
 array_type_count proc(result @Result) usize {
@@ -390,10 +410,11 @@ array_type proc(result @Result, id ArrayId) ArrayType {
     return result.storage.arrays.items[usize(id)]
 }
 
-#! releases type and descriptor storage using the allocator retained by check.
+#! releases type, descriptor, and fallthrough storage using the allocator retained by check.
 deinit proc(result @mut Result) void {
     mem.free(result.storage.allocator, result.storage.types)
     arraylist.deinit(&result.storage.arrays)
+    hashmap.deinit(&result.storage.fallthroughs)
 }
 
 @hide:file

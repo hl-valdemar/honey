@@ -35,6 +35,24 @@ expect_error proc(
 }
 
 @hide:file
+expect_fallthrough proc(
+    result @Result,
+    diagnostic_store @diagnostics.Store,
+    function ast.NodeId,
+    span ast.Span,
+) diagnostics.DiagnosticId ! testing.Error {
+    if (fallthrough_diagnostic(result, function)) |id| {
+        if (diagnostics.get(diagnostic_store, id)) |diagnostic| {
+            try testing.expect_equal(diagnostics.Code.missing_return, diagnostic.code)
+            try testing.expect_equal(span.start, diagnostic.span.start)
+            try testing.expect_equal(span.end, diagnostic.span.end)
+            return id
+        }
+    }
+    return .expectation_failed
+}
+
+@hide:file
 code_count proc(diagnostic_store @diagnostics.Store, code diagnostics.Code) usize {
     count := usize(0)
     for 0..diagnostics.count(diagnostic_store) |index| {
@@ -376,14 +394,16 @@ reports_nonvoid_fallthrough_without_poisoning_signatures_and_checks_unused_bodie
         try expect_kind(&result, function, .function)
         try testing.expect_equal(function, type_of(&result, function).function)
         try expect_kind(&result, view.return_type, returns[index])
-        _ = try expect_error(&result, &diagnostic_store, view.body, .missing_return, ast.node_span(&tree, view.body))
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, view.body))
     }
     broken :: ast.package_decl(&tree, 4)
     try expect_kind(&result, broken, .function)
+    try testing.expect_equal(null, fallthrough_diagnostic(&result, broken))
     broken_body :: ast.function_decl(&tree, broken).body
     bad_operand :: ast.statement_expr(&tree, ast.block_statement(&tree, broken_body, 0))
     _ = try expect_error(&result, &diagnostic_store, bad_operand, .invalid_operand, ast.node_span(&tree, bad_operand))
     main_body :: ast.function_decl(&tree, ast.package_decl(&tree, 5)).body
+    try testing.expect_equal(null, fallthrough_diagnostic(&result, ast.package_decl(&tree, 5)))
     call :: ast.statement_expr(&tree, ast.block_statement(&tree, main_body, 0))
     try expect_kind(&result, call, .int)
     try testing.expect_equal(2, code_count(&diagnostic_store, .missing_return))
@@ -721,8 +741,9 @@ return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_retu
     try expect_kind(&result, ast.block_statement(&tree, unreachable_body, 0), .void)
     bad :: ast.statement_expr(&tree, ast.block_statement(&tree, unreachable_body, 1))
     _ = try expect_error(&result, &diagnostic_store, bad, .invalid_operand, ast.node_span(&tree, bad))
-    missing_body :: ast.function_decl(&tree, ast.package_decl(&tree, 6)).body
-    _ = try expect_error(&result, &diagnostic_store, missing_body, .missing_return, ast.node_span(&tree, missing_body))
+    missing :: ast.package_decl(&tree, 6)
+    missing_body :: ast.function_decl(&tree, missing).body
+    _ = try expect_fallthrough(&result, &diagnostic_store, missing, ast.node_span(&tree, missing_body))
     recovered_body :: ast.function_decl(&tree, ast.package_decl(&tree, 7)).body
     try expect_kind(&result, ast.block_statement(&tree, recovered_body, 1), .int)
     try testing.expect_equal(3, code_count(&diagnostic_store, .return_type_mismatch))
@@ -928,8 +949,9 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
 
     for (0..usize(11)) |i| try expect_kind(&result, ast.package_decl(&tree, i), .function)
     for (usize(1)..usize(3)) |i| {
-        body :: ast.function_decl(&tree, ast.package_decl(&tree, i)).body
-        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        function :: ast.package_decl(&tree, i)
+        body :: ast.function_decl(&tree, function).body
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
     }
     bad_body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
     conditional :: ast.block_statement(&tree, bad_body, 0)
@@ -938,7 +960,7 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
     operand :: ast.statement_expr(&tree, ast.block_statement(&tree, arm, 0))
     original :: try expect_error(&result, &diagnostic_store, operand, .invalid_operand, ast.node_span(&tree, operand))
     try testing.expect_equal(original, type_of(&result, arm).diagnostic)
-    try testing.expect(type_of(&result, bad_body).diagnostic != original)
+    try testing.expect(fallthrough_diagnostic(&result, ast.package_decl(&tree, 2))? != original)
     condition_body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body
     condition :: ast.if_stmt(&tree, ast.block_statement(&tree, condition_body, 0)).condition
     condition_diag :: try expect_error(&result, &diagnostic_store, condition, .condition_not_bool, ast.node_span(&tree, condition))
@@ -963,6 +985,11 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
         try testing.expect_equal(mismatch, type_of(&result, wrong_body).diagnostic)
     } else {
         return .expectation_failed
+    }
+    for 0..ast.package_decl_count(&tree) |i| {
+        function :: ast.package_decl(&tree, i)
+        if (i == 1 or i == 2 or ast.decl_kind(&tree, function) != .function) continue
+        try testing.expect_equal(null, fallthrough_diagnostic(&result, function))
     }
     try testing.expect_equal(1, code_count(&diagnostic_store, .return_type_mismatch))
     try testing.expect_equal(2, code_count(&diagnostic_store, .missing_return))
@@ -1212,8 +1239,9 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
     defer deinit(&result)
 
     for usize(0)..usize(2) |index| {
-        body :: ast.function_decl(&tree, ast.package_decl(&tree, index)).body
-        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        function :: ast.package_decl(&tree, index)
+        body :: ast.function_decl(&tree, function).body
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
         try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
     }
     continues_body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
@@ -1526,7 +1554,7 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
         function :: ast.package_decl(&tree, index)
         try expect_kind(&result, function, .function)
         body :: ast.function_decl(&tree, function).body
-        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
     }
     expression_body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
     expression :: ast.statement_expr(&tree, ast.block_statement(&tree, expression_body, 0))
@@ -1670,8 +1698,9 @@ loop_controls_do_not_guarantee_function_returns test {
     defer deinit(&result)
 
     for (usize(0)..usize(3)) |index| {
-        body :: ast.function_decl(&tree, ast.package_decl(&tree, index)).body
-        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        function :: ast.package_decl(&tree, index)
+        body :: ast.function_decl(&tree, function).body
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
         try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
     }
     closed_body :: ast.function_decl(&tree, ast.package_decl(&tree, 3)).body
@@ -2037,7 +2066,7 @@ range_loop_return_flow_and_controls_are_lexical_and_body_errors_are_isolated tes
         function :: ast.package_decl(&tree, index)
         body :: ast.function_decl(&tree, function).body
         try expect_kind(&result, function, .function)
-        _ = try expect_error(&result, &diagnostic_store, body, .missing_return, ast.node_span(&tree, body))
+        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
         try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
     }
     closed_body :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).body

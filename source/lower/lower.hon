@@ -300,15 +300,9 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     if (trap_type(state, id)) return
     try lower_block(state, declaration.body, false)
     if (state.terminated) return
-    # aggregate arm errors are not demanded by fallthrough; only missing_return is.
-    body_type :: typecheck.type_of(state.checked, declaration.body)
-    if (function.result != .void and body_type.kind == .invalid) {
-        if (diagnostics.get(state.diagnostics, body_type.diagnostic)) |diagnostic| {
-            if (diagnostic.code == .missing_return) {
-                trap(state, body_type.diagnostic, ast.node_span(tree, declaration.body))
-                return
-            }
-        }
+    if (typecheck.fallthrough_diagnostic(state.checked, id)) |diagnostic| {
+        trap(state, diagnostic, ast.node_span(tree, declaration.body))
+        return
     }
     finish(state, ir.no_value, ast.node_span(tree, declaration.body))
 }
