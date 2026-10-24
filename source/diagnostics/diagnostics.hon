@@ -77,8 +77,7 @@ count proc(store @Store) usize {
     return store.list.items.len
 }
 
-# a missing entry leaves an undefined payload, which static initialization rejects.
-@hide:file
+#! constructed at compile time so missing entries fail compilation; message bytes live for the process lifetime.
 messages :: $enummap.init(Code, []u8, {
     invalid_character = "invalid character",
     float_must_end_with_digit = "float literal must end with a digit",
@@ -109,7 +108,3 @@ messages :: $enummap.init(Code, []u8, {
     integer_overflow = "integer arithmetic overflow",
 })
 
-#! returns a borrowed static message; all Code entries are required at compile time.
-message proc(code Code) []u8 {
-    return enummap.get(Code, []u8, &messages, code)?
-}
