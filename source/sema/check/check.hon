@@ -70,10 +70,14 @@ Role :: enum {
 }
 
 @hide:file
-Cell :: struct {
-    role Role = .none
+GroupLink :: struct {
     parent usize = 0
     size usize = 1
+}
+
+@hide:file
+Cell :: struct {
+    role Role = .none
     type Type = Type{}
     numeric bool = false
     anchored bool = false
@@ -106,6 +110,7 @@ State :: struct {
     diagnostics @mut diagnostics.Store
     types []mut Type
     cells []mut Cell
+    groups []mut GroupLink
     edges arraylist.ArrayList(Edge)
     arrays arraylist.ArrayList(ArrayType)
     collecting_assignment bool = false
@@ -127,7 +132,10 @@ check proc(
     cells :: try mem.alloc(Cell, allocator, count)
     defer mem.free(allocator, cells)
     mem.set(cells, Cell{})
-    for (0..count) |i| cells[i].parent = i
+    groups :: try mem.alloc(GroupLink, allocator, count)
+    defer mem.free(allocator, groups)
+    mem.set(groups, GroupLink{})
+    for (0..count) |i| groups[i].parent = i
     queue :: try mem.alloc(ast.NodeId, allocator, count)
     defer mem.free(allocator, queue)
     state := State{
@@ -136,6 +144,7 @@ check proc(
         diagnostics = diagnostic_store,
         types = types,
         cells = cells,
+        groups = groups,
         edges = arraylist.init(allocator),
         arrays = arraylist.init(allocator),
     }
@@ -432,11 +441,11 @@ invalid_type proc(diagnostic diagnostics.DiagnosticId) Type {
 @hide:file
 root proc(state @mut State, index usize) usize {
     current := index
-    while (state.cells[current].parent != current) current = state.cells[current].parent
+    while (state.groups[current].parent != current) current = state.groups[current].parent
     next := index
-    while (state.cells[next].parent != next) {
-        parent :: state.cells[next].parent
-        state.cells[next].parent = current
+    while (state.groups[next].parent != next) {
+        parent :: state.groups[next].parent
+        state.groups[next].parent = current
         next = parent
     }
     return current
@@ -458,13 +467,13 @@ join proc(state @mut State, left, right ast.NodeId) void {
     a := root(state, usize(left))
     b := root(state, usize(right))
     if (a == b) return
-    if (state.cells[a].size < state.cells[b].size) {
+    if (state.groups[a].size < state.groups[b].size) {
         saved :: a
         a = b
         b = saved
     }
-    state.cells[b].parent = a
-    state.cells[a].size += state.cells[b].size
+    state.groups[b].parent = a
+    state.groups[a].size += state.groups[b].size
     if (state.cells[a].type.kind == .none or state.cells[b].type.kind == .invalid) {
         state.cells[a].type = state.cells[b].type
     }
