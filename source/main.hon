@@ -50,11 +50,11 @@ main proc(init process.Init) i32 {
     return command(mem.c_allocator, init.io, init.args) catch |err| {
         if (init.args.values.len > 2) {
             io.print("{s}: infrastructure error: {s}\n", io.stderr(init.io), {
-                init.args.values[2], infrastructure_message(err),
+                init.args.values[2], enummap.get(&infrastructure_messages, err)?,
             }) catch |_| {}
         } else {
             io.print("honey: infrastructure error: {s}\n", io.stderr(init.io), {
-                infrastructure_message(err),
+                enummap.get(&infrastructure_messages, err)?,
             }) catch |_| {}
         }
         return 2
@@ -62,22 +62,20 @@ main proc(init process.Init) i32 {
 }
 
 @hide:file
-infrastructure_message proc(error DriverError) []u8 {
-    return match error {
-        .out_of_memory: "out of memory"
-        .diagnostic_limit_reached: "diagnostic limit reached"
-        .storage_limit_reached: "aggregate storage limit reached"
-        .source_too_large: "source file is too large"
-        .out_of_space: "identifier storage is full"
-        .open_failed: "cannot open source file"
-        .close_failed: "cannot close source file"
-        .not_open_for_reading: "source file is not readable"
-        .read_failed: "cannot read source file"
-        .not_open_for_writing: "output is not writable"
-        .write_failed: "cannot write output"
-        .no_progress: "output writer made no progress"
-    }
-}
+infrastructure_messages :: $enummap.init(DriverError, []u8, {
+    out_of_memory = "out of memory",
+    diagnostic_limit_reached = "diagnostic limit reached",
+    storage_limit_reached = "aggregate storage limit reached",
+    source_too_large = "source file is too large",
+    out_of_space = "identifier storage is full",
+    open_failed = "cannot open source file",
+    close_failed = "cannot close source file",
+    not_open_for_reading = "source file is not readable",
+    read_failed = "cannot read source file",
+    not_open_for_writing = "output is not writable",
+    write_failed = "cannot write output",
+    no_progress = "output writer made no progress",
+})
 
 @hide:file
 command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {

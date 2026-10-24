@@ -24,3 +24,64 @@ handles_sparse_enum_get test {
     try testing.expect_type(?[]u8, eof)
     try testing.expect_equal(null, eof)
 }
+
+@hide:file
+TestLeftError :: enum {
+    shared
+    left
+    absent_left
+}
+
+@hide:file
+TestRightError :: enum {
+    shared
+    right
+    absent_right
+}
+
+@hide:file
+TestNestedError :: alias (TestLeftError | (TestRightError | TestLeftError))
+
+@hide:file
+TestComposedError :: alias TestNestedError
+
+@hide:file
+composed_values :: $init(TestComposedError, i32, {
+    shared = 11,
+    left = 22,
+    absent_left = 33,
+    right = 44,
+    absent_right = 55,
+})
+
+handles_composed_enum_keys_at_runtime test {
+    names EnumMap(TestComposedError, []u8) :: init({
+        shared = "shared error",
+        left = "left error",
+        right = "right error",
+    })
+    keys [_]TestComposedError :: [
+        TestLeftError.shared,
+        TestLeftError.left,
+        TestRightError.shared,
+        TestRightError.right,
+        TestLeftError.absent_left,
+        TestRightError.absent_right,
+    ]
+    expected [_]?[]u8 :: [
+        "shared error",
+        "left error",
+        "shared error",
+        "right error",
+        null,
+        null,
+    ]
+    expected_values [_]i32 :: [11, 22, 11, 44, 33, 55]
+
+    for keys |key, index| {
+        value :: get(&names, key)
+        try testing.expect_type(?[]u8, value)
+        try testing.expect_equal(expected[index], value)
+        try testing.expect_equal(expected_values[index], get(&composed_values, key)?)
+    }
+}
