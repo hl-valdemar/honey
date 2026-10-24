@@ -11,3 +11,78 @@ handles_put_and_get test {
     try testing.expect_type(?u32, value)
     try testing.expect_equal(42, value?)
 }
+
+@hide:file
+collision_hash proc(_ u32) usize { return 0 }
+
+@hide:file
+collision_eql proc(left, right u32) bool {
+    return rem!(left, 100) == rem!(right, 100)
+}
+
+custom_callbacks_preserve_collisions_and_equivalent_keys test {
+    map HashMap(u32, u32, collision_hash, collision_eql) := init(mem.c_allocator)
+    defer deinit(&map)
+    for (u32(1)..u32(32)) |key| try put(&map, key, key * 2)
+    for (u32(1)..u32(32)) |key| {
+        try testing.expect_equal(key * 2, get(&map, key + 100)?)
+    }
+    try testing.expect_equal(null, get(&map, 99))
+    duplicate := false
+    put(&map, 101, 999) catch |error| { duplicate = error == .key_exists }
+    try testing.expect(duplicate)
+    try testing.expect_equal(u32(31), u32(map.count))
+    try testing.expect_equal(u32(2), get(&map, 1)?)
+}
+
+auto_integer_keys_preserve_boundaries_and_rehashing test {
+    map AutoHashMap(i64, usize) := init(mem.c_allocator)
+    defer deinit(&map)
+    keys [_]i64 :: [minval!(i64), -1, 0, 1, maxval!(i64)]
+    for (keys) |key, index| try put(&map, key, index)
+    for (i64(2)..i64(100)) |key| try put(&map, key, usize(key))
+    for (keys) |key, index| try testing.expect_equal(index, get(&map, key)?)
+    for (i64(2)..i64(100)) |key| try testing.expect_equal(usize(key), get(&map, key)?)
+    try testing.expect_equal(null, get(&map, -2))
+    duplicate := false
+    put(&map, -1, 999) catch |error| { duplicate = error == .key_exists }
+    try testing.expect(duplicate)
+    try testing.expect_equal(usize(1), get(&map, -1)?)
+    wide AutoHashMap(u64, bool) := init(mem.c_allocator)
+    defer deinit(&wide)
+    try put(&wide, maxval!(u64), true)
+    try testing.expect_equal(true, get(&wide, maxval!(u64))?)
+}
+
+@hide:file
+TestKeyKind :: enum(u8) { first = 3, second = 91 }
+
+@hide:file
+TestKeyId :: distinct u32
+
+@hide:file
+TestKey :: struct {
+    enabled bool
+    id TestKeyId
+    kind TestKeyKind
+    indices [2]u16
+}
+
+auto_record_keys_use_field_values_and_array_order test {
+    map AutoHashMap(TestKey, i32) := init(mem.c_allocator)
+    defer deinit(&map)
+    first :: TestKey{ enabled = true, id = TestKeyId(17), kind = .first, indices = [2, 9] }
+    reversed :: TestKey{ enabled = true, id = TestKeyId(17), kind = .first, indices = [9, 2] }
+    second :: TestKey{ enabled = false, id = TestKeyId(18), kind = .second, indices = [2, 9] }
+    try put(&map, first, 42)
+    try put(&map, reversed, 51)
+    try put(&map, second, 63)
+    try testing.expect_equal(i32(42), get(&map, TestKey{
+        enabled = true, id = TestKeyId(17), kind = .first, indices = [2, 9],
+    })?)
+    try testing.expect_equal(i32(51), get(&map, reversed)?)
+    try testing.expect_equal(i32(63), get(&map, second)?)
+    try testing.expect_equal(null, get(&map, TestKey{
+        enabled = true, id = TestKeyId(18), kind = .first, indices = [2, 9],
+    }))
+}

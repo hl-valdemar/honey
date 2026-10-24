@@ -1,4 +1,5 @@
 import "@std/mem"
+import "@std/meta"
 
 PutError :: enum { key_exists }
 
@@ -13,10 +14,11 @@ Entry proc($K, $V type) type {
 
 #! owns entry storage and retains its allocator; release storage with deinit.
 #! keys and values are stored by value; any resources they reference remain caller-owned.
+#! null callbacks select automatic operations; equal keys must always produce equal hashes.
 HashMap proc(
     $K, $V type,
-    $hash_key proc(key K) usize,
-    $keys_eql proc(a, b K) bool,
+    $hash_key ?proc(key K) usize,
+    $keys_eql ?proc(a, b K) bool,
 ) type {
     return struct {
         entries []mut Entry(K, V)
@@ -29,11 +31,18 @@ StringHashMap proc($V type) type {
     return HashMap([]u8, V, str_hash, str_eql)
 }
 
+#! automatic value hashing for integers, booleans, enums, distinct types, arrays and records.
+#! slices and floating-point keys require explicit hash/equality operations through HashMap.
+#! record padding is ignored; pointer, union and optional keys are not supported.
+AutoHashMap proc($K, $V type) type {
+    return HashMap(K, V, null, null)
+}
+
 #! retain `allocator` for later growth and cleanup; this call does not allocate.
 init proc(
     $K, $V type,
-    $hash_key proc(key K) usize,
-    $keys_eql proc(a, b K) bool,
+    $hash_key ?proc(key K) usize,
+    $keys_eql ?proc(a, b K) bool,
     allocator mem.Allocator,
 ) HashMap(K, V, hash_key, keys_eql) {
     return HashMap(K, V, hash_key, keys_eql){
@@ -47,29 +56,38 @@ init proc(
 #! note: this operation invalidates the map.
 deinit proc(
     $K, $V type,
-    $hash_key proc(key K) usize,
-    $keys_eql proc(a, b K) bool,
+    $hash_key ?proc(key K) usize,
+    $keys_eql ?proc(a, b K) bool,
     map @HashMap(K, V, hash_key, keys_eql),
 ) void { mem.free(map.allocator, map.entries) }
 
 get proc(
     $K, $V type,
-    $hash_key proc(key K) usize,
-    $keys_eql proc(a, b K) bool,
+    $hash_key ?proc(key K) usize,
+    $keys_eql ?proc(a, b K) bool,
     map @HashMap(K, V, hash_key, keys_eql),
     key K,
 ) ?V {
     if (map.count == 0) return null
 
-    hash :: normalize(hash_key(key))
+    hash usize := 0
+    if $(hash_key == null) {
+        hash = normalize(auto_hash(K, key))
+    } else {
+        hash = normalize(call_hash(K, hash_key?, key))
+    }
     idx := hash & (map.entries.len - 1)
 
     while true {
         entry :: map.entries[idx]
         if (entry.hash == 0) return null
 
-        if (entry.hash == hash and keys_eql(entry.key, key)) {
-            return entry.value
+        if (entry.hash == hash) {
+            if $(keys_eql == null) {
+                if (auto_eql(K, entry.key, key)) return entry.value
+            } else {
+                if (call_eql(K, keys_eql?, entry.key, key)) return entry.value
+            }
         }
 
         idx = (idx + 1) & (map.entries.len - 1)
@@ -78,8 +96,8 @@ get proc(
 
 put proc(
     $K, $V type,
-    $hash_key proc(key K) usize,
-    $keys_eql proc(a, b K) bool,
+    $hash_key ?proc(key K) usize,
+    $keys_eql ?proc(a, b K) bool,
     map @mut HashMap(K, V, hash_key, keys_eql),
     key K,
     value V,
@@ -107,7 +125,12 @@ put proc(
         mem.free(map.allocator, old_entries)
     }
 
-    hash :: normalize(hash_key(key))
+    hash usize := 0
+    if $(hash_key == null) {
+        hash = normalize(auto_hash(K, key))
+    } else {
+        hash = normalize(call_hash(K, hash_key?, key))
+    }
     idx := hash & (map.entries.len - 1)
 
     while true {
@@ -122,12 +145,27 @@ put proc(
             return
         }
 
-        if entry.hash == hash and keys_eql(entry.key, key) {
-            return .key_exists
+        if (entry.hash == hash) {
+            if $(keys_eql == null) {
+                if (auto_eql(K, entry.key, key)) return .key_exists
+            } else {
+                if (call_eql(K, keys_eql?, entry.key, key)) return .key_exists
+            }
         }
 
         idx = (idx + 1) & (map.entries.len - 1)
     }
+}
+
+# concrete comptime callbacks use named calls so their specializations are registered.
+@hide:file
+call_hash proc($K type, $callback proc(key K) usize, key K) usize {
+    return callback(key)
+}
+
+@hide:file
+call_eql proc($K type, $callback proc(a, b K) bool, a, b K) bool {
+    return callback(a, b)
 }
 
 @hide:file
@@ -155,3 +193,61 @@ str_hash proc(key []u8) usize {
 
 @hide:file
 str_eql proc(a, b []u8) bool { return mem.eql(a, b) }
+
+@hide:file
+auto_hash proc($K type, key K) usize {
+    match typeinfo!(K) {
+        .integer: {
+            bytes @[sizeof!(K)]u8 :: ptrcast!(&key)
+            return str_hash(bytes[..])
+        }
+        .bool: return if (key) 1 else 0
+        .enum |info|: {
+            inline for (info.fields) |field| {
+                if (key == field!(K, field.name)) return field.index
+            }
+            unreachable
+        }
+        .distinct |backing|: return auto_hash(ptrcast!(@backing, &key)^)
+        .array: {
+            hash usize := 0
+            for (key) |element| hash = combine_hash(hash, auto_hash(element))
+            return hash
+        }
+        .record |info|: {
+            hash usize := 0
+            inline for (info.fields) |field| {
+                hash = combine_hash(hash, auto_hash(field!(key, field.name)))
+            }
+            return hash
+        }
+        else: compile_error!("AutoHashMap key requires integers, booleans, enums, distinct types, arrays or records; use HashMap for custom hashing")
+    }
+}
+
+@hide:file
+combine_hash proc(left, right usize) usize {
+    # rotate before mixing so ordered fields do not cancel like a plain xor.
+    return ((left << 5) xor (left >> (sizeof!(usize) * 8 - 5))) xor right
+}
+
+@hide:file
+auto_eql proc($K type, left, right K) bool {
+    match typeinfo!(K) {
+        .integer, .bool, .enum: return left == right
+        .distinct |backing|: return auto_eql(ptrcast!(@backing, &left)^, ptrcast!(@backing, &right)^)
+        .array: {
+            for (left) |element, index| {
+                if (!auto_eql(element, right[index])) return false
+            }
+            return true
+        }
+        .record |info|: {
+            inline for (info.fields) |field| {
+                if (!auto_eql(field!(left, field.name), field!(right, field.name))) return false
+            }
+            return true
+        }
+        else: compile_error!("AutoHashMap key requires integers, booleans, enums, distinct types, arrays or records; use HashMap for custom equality")
+    }
+}
