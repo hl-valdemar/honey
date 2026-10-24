@@ -1,0 +1,150 @@
+import "@std/mem"
+import "@std/testing"
+
+@hide:file
+expect_bits proc(text []u8, expected u64) void ! testing.Error {
+    value :: parse_float(mem.c_allocator, text) catch |_| { return .expectation_failed }
+    try testing.expect_equal(expected, ptrcast!(@u64, &value)^)
+}
+
+accepts_signed_decimal_forms_and_exponents test {
+    texts [7][]u8 :: ["1", "+1", "01", "1.", ".1e1", "10e-1", "1E+0"]
+    for (texts) |text| try testing.expect_equal(f64(1), try parse_float(mem.c_allocator, text))
+    try testing.expect_equal(f64(-1.25), try parse_float(mem.c_allocator, "-1.25"))
+    try testing.expect_equal(f64(0.5), try parse_float(mem.c_allocator, "+.5"))
+    try testing.expect_equal(f64(125), try parse_float(mem.c_allocator, "1.25e+2"))
+    try testing.expect_equal(f64(-0.125), try parse_float(mem.c_allocator, "-125E-3"))
+}
+
+accepts_borrowed_slices_without_a_terminator test {
+    bytes [5]mut u8 := ['x', '1', '.', '5', 'x']
+    try testing.expect_equal(f64(1.5), try parse_float(mem.c_allocator, bytes[1..4]))
+    try testing.expect_equal(u8('x'), bytes[0])
+    try testing.expect_equal(u8('x'), bytes[4])
+}
+
+rejects_malformed_or_partially_consumed_input test {
+    texts [33][]u8 :: [
+        "", "+", "-", ".", "+.", "-.", "e1", ".e1",
+        "1e", "1e+", "1e-", "1ee2", "1e1.0", "1.2.3", "--1", "+-1",
+        " 1", "1 ", "\t1", "1\n", "1x", "1_0", "1,5", "1\x00", "1\x002",
+        "0x1", "0x1p0", "inf", "-Infinity", "nan", "NaN(1)", "\xff", "1\xff",
+    ]
+    for texts |text| {
+        _ = parse_float(mem.c_allocator, text) catch |error| {
+            try testing.expect(error == .invalid_number)
+            continue
+        }
+        try testing.expect(false)
+    }
+}
+
+preserves_signed_zero_even_with_extreme_exponents test {
+    positive [4][]u8 :: ["0", "+0.0", "0e999999", "0e-999999"]
+    negative [4][]u8 :: ["-0", "-0.0", "-0e999999", "-0e-999999"]
+    for positive |text| {
+        try expect_bits(text, u64(0))
+    }
+    for negative |text| {
+        try expect_bits(text, maxval!(u64) - u64(9223372036854775807))
+    }
+}
+
+rounds_decimal_midpoints_to_nearest_even test {
+    # IEEE-754 binary64 encodings: 0.1, 1, and the next two values above 1.
+    try expect_bits("0.1", u64(4591870180066957722))
+    try expect_bits("1.00000000000000011102230246251565404236316680908203125", u64(4607182418800017408))
+    try expect_bits("1.00000000000000011102230246251565404236316680908203126", u64(4607182418800017409))
+    try expect_bits("1.00000000000000033306690738754696212708950042724609375", u64(4607182418800017410))
+    try expect_bits("9007199254740993", u64(4845873199050653696))
+}
+
+accepts_finite_representational_boundaries_and_subnormals test {
+    # smallest subnormal, largest subnormal, smallest normal, and largest finite binary64.
+    try expect_bits("4.9406564584124654e-324", u64(1))
+    try expect_bits("2.4703282292062328e-324", u64(1))
+    try expect_bits("-4.9406564584124654e-324", maxval!(u64) - u64(9223372036854775806))
+    try expect_bits("2.225073858507201e-308", u64(4503599627370495))
+    try expect_bits("2.2250738585072014e-308", u64(4503599627370496))
+    try expect_bits("1.7976931348623157e308", u64(9218868437227405311))
+    try expect_bits("1.7976931348623158e308", u64(9218868437227405311))
+    try expect_bits("-1.7976931348623157e308", maxval!(u64) - u64(4503599627370496))
+}
+
+rejects_overflow_and_nonzero_underflow_to_zero test {
+    texts [12][]u8 :: [
+        "1e309", "-1e309", "1.7976931348623159e308", "-1.7976931348623159e308",
+        "1e999999", "-1e999999", "1e-999999", "-1e-999999", "1e-324", "-1e-324",
+        "2.4703282292062327e-324", "-2.4703282292062327e-324",
+    ]
+    for texts |text| {
+        _ = parse_float(mem.c_allocator, text) catch |error| {
+            try testing.expect(error == .out_of_range)
+            continue
+        }
+        try testing.expect(false)
+    }
+}
+
+@hide:file
+AllocationState :: struct {
+    remaining usize = maxval!(usize)
+    live usize = 0
+}
+
+@hide:file
+tracked_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
+    if (memory) |_| state.live += 1
+    return memory
+}
+
+@hide:file
+tracked_realloc proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, new_size usize, alignment usize) ?*mut u8 {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (state.remaining == 0) return null
+    state.remaining -= 1
+    resized :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+    if (new_size == 0) {
+        if (memory) |_| state.live -= 1
+    } else if (resized) |_| {
+        if (memory) |_| {} else state.live += 1
+    }
+    return resized
+}
+
+@hide:file
+tracked_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void {
+    state @mut AllocationState :: ptrcast!(context?)
+    if (memory) |_| state.live -= 1
+    mem.raw_free(mem.c_allocator, memory, size, alignment)
+}
+
+@hide:file
+tracked_vtable :: mem.AllocatorVTable{ alloc = tracked_alloc, realloc = tracked_realloc, free = tracked_free }
+
+releases_temporary_storage_and_propagates_allocation_failure test {
+    state := AllocationState{}
+    allocator :: mem.Allocator{ context = &state, vtable = &tracked_vtable }
+    try testing.expect_equal(f64(1.5), try parse_float(allocator, "1.5"))
+    try testing.expect_equal(usize(0), state.live)
+    texts [2][]u8 :: ["1e999999", "1e-999999"]
+    for texts |text| {
+        _ = parse_float(allocator, text) catch |error| {
+            try testing.expect(error == .out_of_range)
+            try testing.expect_equal(usize(0), state.live)
+            continue
+        }
+        try testing.expect(false)
+    }
+    state.remaining = 0
+    _ = parse_float(allocator, "1.5") catch |error| {
+        try testing.expect(error == .out_of_memory)
+        try testing.expect_equal(usize(0), state.live)
+        return
+    }
+    try testing.expect(false)
+}

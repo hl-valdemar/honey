@@ -1,0 +1,67 @@
+import "@ffi/c"
+import "@std/mem"
+
+ParseError :: enum {
+    invalid_number
+    out_of_range
+}
+
+#! parse a complete ASCII decimal with an optional sign, decimal point, and exponent.
+#! at least one mantissa digit and, after an exponent marker, one exponent digit are required.
+#! whitespace, embedded NUL bytes, trailing bytes, hexadecimal, infinities, and NaNs are invalid.
+#! finite subnormals and signed zero succeed; overflow and nonzero values rounded to zero are out of range.
+#! temporary storage uses `allocator` and is released before returning; the input is only borrowed.
+#! the Darwin backend uses strtod_l with LC_C_LOCALE, independent of the process and thread locales.
+#! decimal rounding follows native libc and the caller's floating-point rounding mode.
+parse_float proc(allocator mem.Allocator, text []u8) f64 ! (mem.AllocError | ParseError) {
+    if (text.len == 0) return .invalid_number
+    cursor := usize(0)
+    if (text[cursor] == '+' or text[cursor] == '-') cursor += 1
+
+    digits := usize(0)
+    nonzero := false
+    point := false
+    while cursor < text.len {
+        byte :: text[cursor]
+        if (byte >= '0' and byte <= '9') {
+            digits += 1
+            if (byte != '0') nonzero = true
+        } else if (byte == '.' and !point) {
+            point = true
+        } else break
+        cursor += 1
+    }
+    if (digits == 0) return .invalid_number
+
+    if (cursor < text.len and (text[cursor] == 'e' or text[cursor] == 'E')) {
+        cursor += 1
+        if (cursor < text.len and (text[cursor] == '+' or text[cursor] == '-')) cursor += 1
+        start :: cursor
+        while (cursor < text.len and text[cursor] >= '0' and text[cursor] <= '9') cursor += 1
+        if (cursor == start) return .invalid_number
+    }
+    if (cursor != text.len) return .invalid_number
+    if (text.len == maxval!(usize)) return .out_of_memory
+
+    buffer :: try mem.alloc(u8, allocator, text.len + 1)
+    defer mem.free(allocator, buffer)
+    memcopy!(buffer[..text.len], text)
+    buffer[text.len] = 0
+    c.__error()?^ = 0
+    value :: f64(strtod_l(ptrcast!(buffer.ptr), null, null))
+    range_error :: c.__error()?^ == c.ERANGE
+
+    # binary64 magnitudes preserve subnormals despite libc's ERANGE; infinity starts at 9218868437227405312.
+    # ERANGE at magnitude >= 1 also catches overflow saturated by directed rounding.
+    magnitude :: ptrcast!(@u64, &value)^ & u64(9223372036854775807)
+    if (
+        magnitude >= u64(9218868437227405312)
+        or (magnitude == 0 and nonzero)
+        or (range_error and magnitude >= u64(4607182418800017408))
+    ) return .out_of_range
+    return value
+}
+
+# Darwin's locale_t is an opaque pointer and LC_C_LOCALE is null (<_locale_posix2008.h>).
+@hide:file
+strtod_l c_func(text ?*c_char, end ?*mut ?*mut c_char, locale ?*mut anyopaque) c_double

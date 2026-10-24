@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/arraylist"
+import "@std/strconv"
 import "@ffi/c"
 import "@source/ast"
 import "@source/diagnostics"
@@ -897,20 +898,20 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
             return try constant(state, ir.Value{ type = .usize, data = ir.ValueData{ unsigned = magnitude } }, span)
         }
     } else {
-        buffer :: try mem.alloc(u8, state.module.allocator, text.len + 1)
-        defer mem.free(state.module.allocator, buffer)
-        for (text) |byte, i| buffer[i] = byte
-        buffer[text.len] = 0
-        c.__error()?^ = 0
-        value :: f64(c.strtod(ptrcast!(buffer.ptr), null))
-        # libc reports ERANGE for representable subnormals as well as zero/infinity.
-        if (c.__error()?^ != c.ERANGE or (value > 0 and value < 1)) {
-            if (ast.expr_kind(state.tree, id) == .literal_int and !exact_float_integer(text, value)) {
-                trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
-                return ir.no_value
+        value :: strconv.parse_float(state.module.allocator, text) catch |err| {
+            match err {
+                .out_of_memory: return err
+                .invalid_number, .out_of_range: {
+                    trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
+                    return ir.no_value
+                }
             }
-            return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
         }
+        if (ast.expr_kind(state.tree, id) == .literal_int and !exact_float_integer(text, value)) {
+            trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
+            return ir.no_value
+        }
+        return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
     }
     trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
     return ir.no_value
