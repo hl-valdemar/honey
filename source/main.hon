@@ -6,17 +6,10 @@ import "@std/io"
 import "@std/process"
 
 import "@source/diagnostics"
-import "@source/strpool"
-import "@source/lexer"
-import "@source/ast"
-import "@source/parser"
-import "@source/sema"
+import "@source/compilation"
 import "@source/ir"
-import "@source/lower"
 import "@source/interpreter"
 import "@source/llvm"
-
-typecheck :: import "@source/sema/check"
 
 test import "@std/mem"
 test import "@std/enummap"
@@ -37,13 +30,11 @@ test import "@source/sema/check"
 test import "@source/ir"
 test import "@source/lower"
 test import "@source/interpreter"
+test import "@source/compilation"
 
 @hide:file
 DriverError :: alias (
-    mem.AllocError
-    | diagnostics.CapacityError
-    | lexer.SourceError
-    | strpool.InternError
+    compilation.Error
     | io.OpenError
     | io.CloseError
     | io.ReadError
@@ -125,12 +116,17 @@ usage proc(output io.Writer) void ! io.WriteError {
 emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
     source := try read_source(allocator, runtime, path)
     defer arraylist.deinit(&source)
+    session := compilation.init(allocator)
+    defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    module := try compile(allocator, source.items, &diagnostic_store)
+    package :: try compilation.add_package(&session)
+    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
-    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, source.items, path)
-    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, null)
+    file :: compilation.source(&session, root)
+    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, file.bytes.items, file.path)
+    try report_diagnostics(allocator, io.stderr(runtime), file.path, file.bytes.items, &diagnostic_store, null)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
@@ -144,9 +140,13 @@ build_file proc(
 ) i32 ! DriverError {
     source := try read_source(allocator, runtime, path)
     defer arraylist.deinit(&source)
+    session := compilation.init(allocator)
+    defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    module := try compile(allocator, source.items, &diagnostic_store)
+    package :: try compilation.add_package(&session)
+    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
 
     template [18]mut u8 := undefined
@@ -159,7 +159,8 @@ build_file proc(
     defer {
         if (!closing) io.close(file) catch |_| {}
     }
-    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, source.items, path)
+    root_source :: compilation.source(&session, root)
+    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, root_source.bytes.items, root_source.path)
     closing = true
     try io.close(file)
     temporary [;0]u8 :: template[..].ptr[..17;0]
@@ -169,7 +170,7 @@ build_file proc(
     ]
     status :: try process.run(allocator, arguments[..])
     if (status != 0) return .compiler_failed
-    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, null)
+    try report_diagnostics(allocator, io.stderr(runtime), root_source.path, root_source.bytes.items, &diagnostic_store, null)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
@@ -193,33 +194,22 @@ read_source proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) arraylist.
 }
 
 @hide:file
-compile proc(allocator mem.Allocator, source []u8, diagnostic_store @mut diagnostics.Store) ir.Module ! DriverError {
-    strings := strpool.init(allocator)
-    defer strpool.deinit(&strings)
-    scan_state := lexer.init(allocator)
-    defer lexer.deinit(&scan_state)
-    try lexer.scan(&scan_state, source, &strings, diagnostic_store)
-    tree := try parser.parse(allocator, scan_state.tokens.items, source, diagnostic_store)
-    defer ast.deinit(&tree)
-    resolution := try sema.resolve(allocator, &tree, &strings, diagnostic_store)
-    defer sema.deinit(&resolution)
-    checked := try typecheck.check(allocator, &tree, &resolution, diagnostic_store)
-    defer typecheck.deinit(&checked)
-    return try lower.lower(allocator, &tree, &resolution, &checked, diagnostic_store)
-}
-
-@hide:file
 run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
     source := try read_source(allocator, runtime, path)
     defer arraylist.deinit(&source)
+    session := compilation.init(allocator)
+    defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    module := try compile(allocator, source.items, &diagnostic_store)
+    package :: try compilation.add_package(&session)
+    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
     outcome := try interpreter.run(allocator, &module, &diagnostic_store)
     defer interpreter.deinit(&outcome)
     if (outcome.trap == null) try print_result(io.stdout(runtime), &module, outcome.value)
-    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, outcome.trap)
+    file :: compilation.source(&session, root)
+    try report_diagnostics(allocator, io.stderr(runtime), file.path, file.bytes.items, &diagnostic_store, outcome.trap)
     if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return 0
 }

@@ -9,9 +9,9 @@
 recovery ultimately reports a missing entry point. an isolated import followed
 by a supported `main` still prints `42` but exits `1`; recovery is not import support.
 
-the driver compiles one source buffer (`source/main.hon:196`); AST declaration
-identities and diagnostic spans currently belong to that single source.
-the following order is a dependency plan, not implemented support.
+the driver now retains frontend storage through `@source/compilation`; source IDs
+qualify local AST declaration IDs, and package IDs retain source membership.
+CLI commands still compile one source. the unchecked items below remain planned support.
 
 ## next milestone: scalar-function packages
 
@@ -20,7 +20,7 @@ of scalar functions, through both the interpreter and native backend.
 using the existing standard library is a later acceptance gate: even `std/mem`
 needs records, pointers, generics and C calls.
 
-- [ ] retain source/package identity and source ownership across the compilation; keep one identifier pool and unambiguous declaration IDs.
+- [x] retain source/package identity and source ownership across the compilation; keep one identifier pool and unambiguous declaration IDs.
 - [ ] load directory packages once per canonical path, with deterministic file discovery, package scopes and root-only entry selection. follow Bro's existing relative and project-root `@` import rules; diagnose cycles rather than recurse indefinitely.
 - [ ] parse bare and aliased imports plus postfix namespace selection; resolve file-local import aliases without injecting dependency names into the importing package.
 - [ ] reuse ordinary scalar signature checking, function values and IR calls for selected declarations; namespaces have no runtime representation.

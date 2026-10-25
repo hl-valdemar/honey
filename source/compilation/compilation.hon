@@ -1,0 +1,170 @@
+import "@std/mem"
+import "@std/debug"
+import "@std/arraylist"
+import "@source/strpool"
+import "@source/diagnostics"
+import "@source/lexer"
+import "@source/parser"
+import "@source/ast"
+import "@source/sema"
+import "@source/lower"
+import "@source/ir"
+typecheck :: import "@source/sema/check"
+
+#! identities are valid only within their owning compilation.
+SourceId :: distinct usize
+PackageId :: distinct usize
+
+#! AST node IDs are source-local; retain both fields when referring across sources.
+DeclarationId :: struct {
+    source SourceId
+    node ast.NodeId
+}
+
+Source :: struct {
+    package PackageId
+    path []u8
+    bytes arraylist.ArrayList(u8)
+    tree ast.Tree
+}
+
+Package :: struct {
+    sources arraylist.ArrayList(SourceId)
+}
+
+#! owns sources, paths, ASTs, package membership and one identifier pool.
+#! borrows returned by source are invalidated by add_source or deinit; IDs remain stable.
+Compilation :: struct {
+    allocator mem.Allocator
+    strings strpool.StringPool
+    sources arraylist.ArrayList(Source)
+    packages arraylist.ArrayList(Package)
+}
+
+Error :: alias mem.AllocError | diagnostics.CapacityError | lexer.SourceError | strpool.InternError
+
+#! retains `allocator`; release all compilation storage with deinit.
+init proc(allocator mem.Allocator) Compilation {
+    return Compilation{
+        allocator = allocator,
+        strings = strpool.init(allocator),
+        sources = arraylist.init(allocator),
+        packages = arraylist.init(allocator),
+    }
+}
+
+deinit proc(compilation @mut Compilation) void {
+    for (compilation.sources.items) |@file| {
+        ast.deinit(&file.tree)
+        arraylist.deinit(&file.bytes)
+        mem.free(compilation.allocator, file.path)
+    }
+    for (compilation.packages.items) |@package| arraylist.deinit(&package.sources)
+    arraylist.deinit(&compilation.sources)
+    arraylist.deinit(&compilation.packages)
+    strpool.deinit(&compilation.strings)
+}
+
+#! creates a distinct package; directory discovery and path deduplication belong to the loader.
+add_package proc(compilation @mut Compilation) PackageId ! mem.AllocError {
+    id :: PackageId(compilation.packages.items.len)
+    try arraylist.append(&compilation.packages, Package{
+        sources = arraylist.init(compilation.allocator),
+    })
+    return id
+}
+
+#! copies `path` and scans/parses using the shared pool; takes `bytes` only on success.
+#! success resets `bytes` without copying its allocation. failure leaves it caller-owned;
+#! diagnostics and interned names produced before failure remain in their respective stores.
+add_source proc(
+    compilation @mut Compilation,
+    package PackageId,
+    path []u8,
+    bytes @mut arraylist.ArrayList(u8),
+    diagnostic_store @mut diagnostics.Store,
+) SourceId ! Error {
+    debug.assert(usize(package) < compilation.packages.items.len)
+
+    id :: SourceId(compilation.sources.items.len)
+    try arraylist.reserve(&compilation.sources, compilation.sources.items.len + 1)
+    members := &compilation.packages.items[usize(package)].sources
+    try arraylist.reserve(members, members.items.len + 1)
+    owned_path :: try mem.alloc(u8, compilation.allocator, path.len)
+    errdefer mem.free(compilation.allocator, owned_path)
+    memcopy!(owned_path, path)
+
+    scan_state := lexer.init(compilation.allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(
+        &scan_state,
+        bytes.items,
+        &compilation.strings,
+        diagnostic_store,
+    )
+    tree := try parser.parse(
+        compilation.allocator,
+        scan_state.tokens.items,
+        bytes.items,
+        diagnostic_store,
+    )
+    errdefer ast.deinit(&tree)
+
+    try arraylist.append(&compilation.sources, Source{
+        package = package,
+        path = owned_path,
+        bytes = bytes^,
+        tree = tree,
+    })
+    try arraylist.append(members, id)
+    bytes^ = arraylist.init(bytes.allocator)
+
+    return id
+}
+
+#! borrows source metadata and its AST until add_source or deinit.
+source proc(compilation @Compilation, id SourceId) @Source {
+    debug.assert(usize(id) < compilation.sources.items.len)
+    return &compilation.sources.items[usize(id)]
+}
+
+#! qualifies a top-level declaration's local AST identity with its owning source.
+declaration proc(compilation @Compilation, id SourceId, index usize) DeclarationId {
+    return DeclarationId{
+        source = id,
+        node = ast.package_decl(&source(compilation, id).tree, index),
+    }
+}
+
+#! compiles one registered source; the returned IR owns its storage and borrows no frontend data.
+#! package scopes and cross-source resolution are added by the package-loading milestone.
+compile proc(
+    compilation @mut Compilation,
+    id SourceId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! Error {
+    tree :: &source(compilation, id).tree
+    resolution := try sema.resolve(
+        compilation.allocator,
+        tree,
+        &compilation.strings,
+        diagnostic_store,
+    )
+    defer sema.deinit(&resolution)
+
+    checked := try typecheck.check(
+        compilation.allocator,
+        tree,
+        &resolution,
+        diagnostic_store,
+    )
+    defer typecheck.deinit(&checked)
+
+    return try lower.lower(
+        compilation.allocator,
+        tree,
+        &resolution,
+        &checked,
+        diagnostic_store,
+    )
+}

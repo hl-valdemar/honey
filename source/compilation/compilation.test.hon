@@ -1,0 +1,71 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@std/testing"
+import "@source/ast"
+import "@source/diagnostics"
+import "@source/ir"
+import "@source/interpreter"
+
+@hide:file
+owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
+    bytes := arraylist.init(u8, mem.c_allocator)
+    errdefer arraylist.deinit(&bytes)
+    try arraylist.reserve(&bytes, text.len)
+    for (text) |byte| try arraylist.append(&bytes, byte)
+    return bytes
+}
+
+keeps_source_local_declarations_distinct_and_ir_independent test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    first := try owned_text("value :: 21\nmain proc() int { return value * 2 }")
+    defer arraylist.deinit(&first)
+    second := try owned_text("value :: 3\nmain proc() int { return value * 2 }")
+    defer arraylist.deinit(&second)
+    sibling := try owned_text("helper proc() int { return 7 }")
+    defer arraylist.deinit(&sibling)
+    path [9]mut u8 := undefined
+    memcopy!(path[..], "first.hon")
+    session := init(mem.c_allocator)
+    # the IR must outlive the compilation, including source buffers and interned names.
+    modules [2]mut ir.Module := undefined
+    {
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        left :: try add_source(&session, root, path[..], &first, &diagnostic_store)
+        right :: try add_source(&session, dependency, "second.hon", &second, &diagnostic_store)
+        third :: try add_source(&session, root, "sibling.hon", &sibling, &diagnostic_store)
+        path[0] = 'X'
+        try testing.expect_equal(0, first.capacity)
+        try testing.expect_equal(0, first.items.len)
+        try testing.expect(mem.eql(source(&session, left).path, "first.hon"))
+        try testing.expect_equal(root, source(&session, left).package)
+        try testing.expect_equal(dependency, source(&session, right).package)
+        try testing.expect_equal(root, source(&session, third).package)
+        try testing.expect_equal(left, session.packages.items[usize(root)].sources.items[0])
+        try testing.expect_equal(third, session.packages.items[usize(root)].sources.items[1])
+        a :: declaration(&session, left, 0)
+        b :: declaration(&session, right, 0)
+        try testing.expect_equal(a.node, b.node)
+        try testing.expect(a.source != b.source)
+        left_tree :: &source(&session, a.source).tree
+        right_tree :: &source(&session, b.source).tree
+        try testing.expect_equal(ast.name_id(left_tree, a.node), ast.name_id(right_tree, b.node))
+        try testing.expect(mem.eql(ast.source_text(left_tree, ast.statement_decl(left_tree, a.node).span), "value :: 21"))
+        try testing.expect(mem.eql(ast.source_text(right_tree, ast.statement_decl(right_tree, b.node).span), "value :: 3"))
+        modules[0] = try compile(&session, left, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, right, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    left_result := try interpreter.run(mem.c_allocator, &modules[0], &diagnostic_store)
+    defer interpreter.deinit(&left_result)
+    right_result := try interpreter.run(mem.c_allocator, &modules[1], &diagnostic_store)
+    defer interpreter.deinit(&right_result)
+    try testing.expect(left_result.trap == null and right_result.trap == null)
+    try testing.expect_equal(i64(42), left_result.value.data.integer)
+    try testing.expect_equal(i64(6), right_result.value.data.integer)
+}
