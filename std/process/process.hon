@@ -1,4 +1,6 @@
 import "@std/io"
+import "@ffi/c"
+import "@std/mem"
 
 Init :: struct {
     io io.Io
@@ -8,4 +10,57 @@ Init :: struct {
 #! borrows argument slices and their zero-terminated strings, valid until main returns.
 Args :: struct {
     values [][;0]u8
+}
+
+RunError :: enum {
+    invalid_arguments
+    spawn_failed
+    wait_failed
+}
+
+#! run a program synchronously without a shell, searching PATH for `arguments[0]`.
+#! arguments and zero-terminated strings are borrowed until this call returns.
+#! an empty argument vector, empty executable name, or embedded NUL is invalid.
+#! the child inherits the current environment and stdin/stdout/stderr.
+#! temporary argument descriptors use `allocator` and are freed on every return.
+#! return the exit code, or 128 plus the terminating signal number.
+run proc(allocator mem.Allocator, arguments [][;0]u8) i32 ! (mem.AllocError | RunError) {
+    if (arguments.len == 0) return .invalid_arguments
+    if (arguments[0].len == 0) return .invalid_arguments
+    for arguments |argument| {
+        for (argument) |byte| if (byte == 0) return .invalid_arguments
+    }
+    if (arguments.len == maxval!(usize)) return .out_of_memory
+
+    descriptors :: try mem.alloc(?*mut c_char, allocator, arguments.len + 1)
+    defer mem.free(allocator, descriptors)
+    for (0..arguments.len) |index| {
+        descriptors[index] = ptrcast!(constcast!(arguments[index]).ptr)
+    }
+    descriptors[arguments.len] = null
+
+    pid [1]mut c_int := [0]
+    result :: c.posix_spawnp(
+        pid[..].ptr,
+        ptrcast!(arguments[0].ptr),
+        null,
+        null,
+        descriptors.ptr,
+        c._NSGetEnviron()?^,
+    )
+    if (result != 0) return .spawn_failed
+
+    status [1]mut c_int := [0]
+    while true {
+        waited :: c.waitpid(pid[0], status[..].ptr, 0)
+        if (waited < 0) {
+            if (c.__error()?^ == c.EINTR) continue
+            return .wait_failed
+        }
+        # Darwin wait status: low seven bits hold the signal, next byte the exit code.
+        signal :: status[0] & 127
+        if (signal == 0) return i32(divtrunc!(status[0], 256) & 255)
+        if (signal != 127) return i32(128 + signal)
+        # A traced child can report a stop even without WUNTRACED; wait for termination.
+    }
 }

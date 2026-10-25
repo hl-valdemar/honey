@@ -1,0 +1,16 @@
+# hand-written Darwin ABI declarations; pid_t is c_int in the existing bindings.
+# Darwin's spawn action and attribute handles are pointers to opaque records.
+posix_spawn_file_actions_t :: alias ?*mut anyopaque
+posix_spawnattr_t :: alias ?*mut anyopaque
+
+posix_spawnp c_func(
+    pid ?*mut c_int,
+    file ?*c_char,
+    actions ?*posix_spawn_file_actions_t,
+    attributes ?*posix_spawnattr_t,
+    arguments ?*?*mut c_char,
+    environment ?*?*mut c_char,
+) c_int
+
+# borrowed process environment; neither the vector nor its strings may be freed.
+_NSGetEnviron c_func() ?*mut ?*mut ?*mut c_char

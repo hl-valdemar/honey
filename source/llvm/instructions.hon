@@ -1,0 +1,221 @@
+import "@std/io"
+import "@source/ir"
+
+@hide
+emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruction) void ! io.WriteError {
+    output :: state.output
+    type :: Type{ kind = instruction.type, shape = instruction.array_type }
+    result := fresh(state)
+    match instruction.op {
+        .constant: {
+            if (instruction.type == .void) return
+            try io.write_all(output, "  store ")
+            try write_type(output, state.module, type)
+            try io.write_all(output, " ")
+            try write_constant(output, state.module, instruction.constant)
+            try io.print(", ptr %v{}\n", output, {u32(instruction.destination)})
+            return
+        }
+        .load_local: {
+            try check_local(state, instruction.slot, true, instruction.span)
+            try io.print("  %r{} = load ", output, {result})
+            try write_type(output, state.module, type)
+            try io.print(", ptr %l{}\n", output, {instruction.slot})
+        }
+        .store_local, .assign_local: {
+            if (instruction.op == .assign_local) try check_local(state, instruction.slot, false, instruction.span)
+            value :: try load(state, instruction.left)
+            try io.write_all(output, "  store ")
+            try write_type(output, state.module, state.values[usize(instruction.left)])
+            try io.print(" %r{}, ptr %l{}\n", output, {value, instruction.slot})
+            if (instruction.op == .store_local) try io.print("  store i1 true, ptr %i{}\n", output, {instruction.slot})
+            return
+        }
+        .reset_local: {
+            try io.print("  store i1 false, ptr %i{}\n", output, {instruction.slot})
+            return
+        }
+        .load_global: {
+            pointer :: fresh(state)
+            position :: location(state.line_starts, instruction.span)
+            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {})\n", output, {pointer, instruction.slot, position.line, position.column})
+            try io.print("  %r{} = load ", output, {result})
+            try write_type(output, state.module, type)
+            try io.print(", ptr %r{}\n", output, {pointer})
+        }
+        .array_literal: {
+            for (0..instruction.arguments_count) |index| {
+                operand :: block.arguments.items[instruction.arguments_start + index]
+                value :: try load(state, operand)
+                pointer :: fresh(state)
+                try io.print("  %r{} = getelementptr ", output, {pointer})
+                try write_type(output, state.module, type)
+                try io.print(", ptr %v{}, i64 0, i64 {}\n  store ", output, {u32(instruction.destination), index})
+                try write_type(output, state.module, state.values[usize(operand)])
+                try io.print(" %r{}, ptr %r{}\n", output, {value, pointer})
+            }
+            return
+        }
+        .index, .index_address: {
+            index :: try load(state, instruction.right)
+            base_type :: state.values[usize(instruction.left)]
+            shape :: state.module.arrays.items[usize(base_type.shape)]
+            failed :: fresh(state)
+            try io.print("  %r{} = icmp uge i64 %r{}, {}\n", output, {failed, index, shape.len})
+            try check_failure(state, failed, .index_out_of_bounds, instruction.span)
+            pointer :: fresh(state)
+            if (instruction.op == .index_address) {
+                base :: try load(state, instruction.left)
+                data :: fresh(state)
+                flag :: fresh(state)
+                address :: fresh(state)
+                try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {data, base})
+                try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, base})
+                try io.print("  %r{} = getelementptr ", output, {pointer})
+                try write_type(output, state.module, Type{ kind = .array, shape = base_type.shape })
+                try io.print(", ptr %r{}, i64 0, i64 %r{}\n", output, {data, index})
+                try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
+                try io.print("  %r{} = insertvalue %address %r{}, ptr %r{}, 1\n", output, {result, address, flag})
+            } else {
+                try io.print("  %r{} = getelementptr ", output, {pointer})
+                try write_type(output, state.module, base_type)
+                try io.print(", ptr %v{}, i64 0, i64 %r{}\n  %r{} = load ", output, {u32(instruction.left), index, result})
+                try write_type(output, state.module, type)
+                try io.print(", ptr %r{}\n", output, {pointer})
+            }
+        }
+        .address_local: {
+            address :: fresh(state)
+            try io.print("  %r{} = insertvalue %address poison, ptr %l{}, 0\n", output, {address, instruction.slot})
+            try io.print("  %r{} = insertvalue %address %r{}, ptr %i{}, 1\n", output, {result, address, instruction.slot})
+        }
+        .address_global: {
+            pointer :: fresh(state)
+            address :: fresh(state)
+            position :: location(state.line_starts, instruction.span)
+            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {})\n", output, {pointer, instruction.slot, position.line, position.column})
+            try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
+            try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
+        }
+        .load_address, .store_address: {
+            address :: try load(state, instruction.left)
+            pointer :: fresh(state)
+            flag :: fresh(state)
+            position :: location(state.line_starts, instruction.span)
+            try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {pointer, address})
+            try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, address})
+            try io.print("  call void @check_init(ptr %r{}, i1 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, position.line, position.column})
+            if (instruction.op == .store_address) {
+                value :: try load(state, instruction.right)
+                try io.write_all(output, "  store ")
+                try write_type(output, state.module, state.values[usize(instruction.right)])
+                try io.print(" %r{}, ptr %r{}\n", output, {value, pointer})
+                return
+            }
+            try io.print("  %r{} = load ", output, {result})
+            try write_type(output, state.module, type)
+            try io.print(", ptr %r{}\n", output, {pointer})
+        }
+        .call: {
+            callee :: try load(state, instruction.left)
+            # operands are frame snapshots; loading them before the call preserves evaluation order.
+            # argument registers are consecutive because load emits exactly one fresh register.
+            first_argument :: state.next_register
+            for (0..instruction.arguments_count) |index| {
+                _ = try load(state, block.arguments.items[instruction.arguments_start + index])
+            }
+            if (instruction.type != .void) try io.print("  %r{} = call ", output, {result})
+            else try io.write_all(output, "  call ")
+            try write_type(output, state.module, type)
+            try io.print(" %r{}(", output, {callee})
+            for (0..instruction.arguments_count) |index| {
+                if (index != 0) try io.write_all(output, ", ")
+                operand :: block.arguments.items[instruction.arguments_start + index]
+                try write_type(output, state.module, state.values[usize(operand)])
+                try io.print(" %r{}", output, {first_argument + index})
+            }
+            try io.write_all(output, ")\n")
+        }
+        .negate: {
+            operand :: try load(state, instruction.left)
+            if (instruction.type == .float) {
+                try io.print("  %r{} = fneg double %r{}\n", output, {result, operand})
+            } else {
+                pair :: fresh(state)
+                overflow :: fresh(state)
+                try io.print("  %r{} = call {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64 0, i64 %r{})\n", output, {pair, operand})
+                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 1\n", output, {overflow, pair})
+                try check_failure(state, overflow, .integer_overflow, instruction.span)
+                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 0\n", output, {result, pair})
+            }
+        }
+        .logical_not: {
+            operand :: try load(state, instruction.left)
+            try io.print("  %r{} = xor i1 %r{}, true\n", output, {result, operand})
+        }
+        .add, .subtract, .multiply, .divide: {
+            left :: try load(state, instruction.left)
+            right :: try load(state, instruction.right)
+            if (instruction.type == .float) {
+                opcode []u8 :: match instruction.op {
+                    .add: "fadd"
+                    .subtract: "fsub"
+                    .multiply: "fmul"
+                    .divide: "fdiv"
+                    else: unreachable
+                }
+                try io.print("  %r{} = {s} double %r{}, %r{}\n", output, {result, opcode, left, right})
+            } else {
+                opcode []u8 :: match instruction.op {
+                    .add: "add"
+                    .subtract: "sub"
+                    .multiply: "mul"
+                    else: unreachable
+                }
+                sign []u8 :: if (instruction.type == .usize) "u" else "s"
+                pair :: fresh(state)
+                overflow :: fresh(state)
+                try io.print("  %r{} = call {{ i64, i1 }} @llvm.{s}{s}.with.overflow.i64(i64 %r{}, i64 %r{})\n", output, {pair, sign, opcode, left, right})
+                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 1\n", output, {overflow, pair})
+                try check_failure(state, overflow, .integer_overflow, instruction.span)
+                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 0\n", output, {result, pair})
+            }
+        }
+        .equal, .not_equal, .less, .less_equal, .greater, .greater_equal: {
+            left :: try load(state, instruction.left)
+            right :: try load(state, instruction.right)
+            operand_type :: state.values[usize(instruction.left)]
+            if (operand_type.kind == .float) {
+                predicate []u8 :: match instruction.op {
+                    .equal: "oeq"
+                    .not_equal: "une"
+                    .less: "olt"
+                    .less_equal: "ole"
+                    .greater: "ogt"
+                    .greater_equal: "oge"
+                    else: unreachable
+                }
+                try io.print("  %r{} = fcmp {s} double %r{}, %r{}\n", output, {result, predicate, left, right})
+            } else {
+                prefix []u8 := ""
+                if (instruction.op != .equal and instruction.op != .not_equal) {
+                    if (operand_type.kind == .usize) prefix = "u"
+                    else prefix = "s"
+                }
+                predicate []u8 :: match instruction.op {
+                    .equal: "eq"
+                    .not_equal: "ne"
+                    .less: "lt"
+                    .less_equal: "le"
+                    .greater: "gt"
+                    .greater_equal: "ge"
+                    else: unreachable
+                }
+                try io.print("  %r{} = icmp {s}{s} ", output, {result, prefix, predicate})
+                try write_type(output, state.module, operand_type)
+                try io.print(" %r{}, %r{}\n", output, {left, right})
+            }
+        }
+    }
+    try store(state, instruction.destination, result)
+}

@@ -1,0 +1,2 @@
+- [ ] milestone: self-hosted honey compiler.
+    - honey can compile itself

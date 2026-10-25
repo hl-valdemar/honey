@@ -1,3 +1,4 @@
+import "@ffi/c"
 import "@std/mem"
 import "@std/arraylist"
 import "@std/enummap"
@@ -13,6 +14,7 @@ import "@source/sema"
 import "@source/ir"
 import "@source/lower"
 import "@source/interpreter"
+import "@source/llvm"
 
 typecheck :: import "@source/sema/check"
 
@@ -46,7 +48,12 @@ DriverError :: alias (
     | io.CloseError
     | io.ReadError
     | io.WriteError
+    | process.RunError
+    | NativeBuildError
 )
+
+@hide:file
+NativeBuildError :: enum { temporary_file_failed, compiler_failed }
 
 main proc(init process.Init) i32 {
     return command(mem.c_allocator, init.io, init.args) catch |err| {
@@ -77,19 +84,93 @@ infrastructure_messages :: $enummap.init(DriverError, []u8, {
     not_open_for_writing = "output is not writable",
     write_failed = "cannot write output",
     no_progress = "output writer made no progress",
+    spawn_failed = "cannot start native compiler",
+    wait_failed = "cannot wait for native compiler",
+    invalid_arguments = "invalid native compiler arguments",
+    temporary_file_failed = "cannot create temporary LLVM file",
+    compiler_failed = "native compiler failed",
 })
 
 @hide:file
 command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {
-    if (args.values.len != 3) {
-        try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
-        return 2
+    if (args.values.len == 3) {
+        if (mem.eql(args.values[1], "run")) return try run_file(allocator, runtime, args.values[2])
+        if (mem.eql(args.values[1], "emit-llvm")) return try emit_file(allocator, runtime, args.values[2])
     }
-    if (!mem.eql(args.values[1], "run")) {
-        try io.print("usage: honey run <file>\n", io.stderr(runtime), {})
-        return 2
+    if (args.values.len == 5 or args.values.len == 6) {
+        if (mem.eql(args.values[1], "build") and mem.eql(args.values[3], "-o") and args.values[4].len != 0) {
+            optimization [;0]u8 := "-O0"
+            if (args.values.len == 6) {
+                optimization = args.values[5]
+                if (!mem.eql(optimization, "-O0") and !mem.eql(optimization, "-O2")) {
+                    try usage(io.stderr(runtime))
+                    return 2
+                }
+            }
+            return try build_file(allocator, runtime, args.values[2], args.values[4], optimization)
+        }
     }
-    return try run_file(allocator, runtime, args.values[2])
+    try usage(io.stderr(runtime))
+    return 2
+}
+
+@hide:file
+usage proc(output io.Writer) void ! io.WriteError {
+    try io.write_all(output, "usage: honey run <file>\n")
+    try io.write_all(output, "       honey emit-llvm <file>\n")
+    try io.write_all(output, "       honey build <file> -o <executable> [-O0|-O2]\n")
+}
+
+@hide:file
+emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
+    source := try read_source(allocator, runtime, path)
+    defer arraylist.deinit(&source)
+    diagnostic_store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile(allocator, source.items, &diagnostic_store)
+    defer ir.deinit(&module)
+    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, source.items, path)
+    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, null)
+    return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
+}
+
+@hide:file
+build_file proc(
+    allocator mem.Allocator,
+    runtime io.Io,
+    path [;0]u8,
+    output [;0]u8,
+    optimization [;0]u8,
+) i32 ! DriverError {
+    source := try read_source(allocator, runtime, path)
+    defer arraylist.deinit(&source)
+    diagnostic_store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile(allocator, source.items, &diagnostic_store)
+    defer ir.deinit(&module)
+
+    template [18]mut u8 := undefined
+    memcopy!(template[..], "/tmp/honey-XXXXXX\0")
+    descriptor :: c.mkstemp(ptrcast!(template[..].ptr))
+    if (descriptor < 0) return .temporary_file_failed
+    defer _ = c.unlink(ptrcast!(template[..].ptr))
+    file :: io.File{ io = runtime, handle = io.Handle{ file_desc = descriptor } }
+    closing := false
+    defer {
+        if (!closing) io.close(file) catch |_| {}
+    }
+    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, source.items, path)
+    closing = true
+    try io.close(file)
+    temporary [;0]u8 :: template[..].ptr[..17;0]
+    arguments [9][;0]u8 :: [
+        "clang", "-target", "arm64-apple-macosx11.0.0",
+        "-x", "ir", optimization, temporary, "-o", output,
+    ]
+    status :: try process.run(allocator, arguments[..])
+    if (status != 0) return .compiler_failed
+    try report_diagnostics(allocator, io.stderr(runtime), path, source.items, &diagnostic_store, null)
+    return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
 @hide:file

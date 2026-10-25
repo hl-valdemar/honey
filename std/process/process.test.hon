@@ -1,0 +1,26 @@
+import "@std/testing"
+import "@std/mem"
+
+runs_without_shell_and_preserves_exit_status test {
+    arguments [4][;0]u8 :: ["/bin/test", "a b;$(exit 99)", "=", "a b;$(exit 99)"]
+    status :: run(mem.c_allocator, arguments[..]) catch |_| { return .expectation_failed }
+    try testing.expect_equal(i32(0), status)
+
+    failing [2][;0]u8 :: ["/bin/test", ""]
+    failure :: run(mem.c_allocator, failing[..]) catch |_| { return .expectation_failed }
+    try testing.expect_equal(i32(1), failure)
+}
+
+rejects_invalid_arguments_and_reports_spawn_failure test {
+    empty [0][;0]u8 :: []
+    _ = run(mem.c_allocator, empty[..]) catch |err| {
+        try testing.expect(err == .invalid_arguments)
+        missing [1][;0]u8 :: ["/nonexistent/honey-process-test"]
+        _ = run(mem.c_allocator, missing[..]) catch |spawn_error| {
+            try testing.expect(spawn_error == .spawn_failed)
+            return
+        }
+        return .expectation_failed
+    }
+    return .expectation_failed
+}

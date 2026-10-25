@@ -1,0 +1,139 @@
+@hide
+runtime ::
+    `target triple = "arm64-apple-macosx11.0.0"
+    `%string = type { ptr, i64 }
+    `%address = type { ptr, ptr }
+    `declare i64 @write(i32, ptr, i64)
+    `declare ptr @__error()
+    `declare i32 @snprintf(ptr, i64, ptr, ...)
+    `declare void @exit(i32) noreturn
+    `declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)
+    `declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)
+    `declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
+    `declare { i64, i1 } @llvm.uadd.with.overflow.i64(i64, i64)
+    `declare { i64, i1 } @llvm.usub.with.overflow.i64(i64, i64)
+    `declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)
+    `@fmt_int = private constant [5 x i8] c"%lld\00"
+    `@fmt_uint = private constant [5 x i8] c"%llu\00"
+    `@fmt_float = private constant [6 x i8] c"%.17g\00"
+    `@true = private constant [4 x i8] c"true"
+    `@false = private constant [5 x i8] c"false"
+    `@colon = private constant [1 x i8] c":"
+    `@error = private constant [9 x i8] c": error: "
+    `@runtime_trap = private constant [16 x i8] c": runtime trap: "
+    `@newline = private constant [1 x i8] c"\0A"
+    `@open = private constant [1 x i8] c"["
+    `@close = private constant [1 x i8] c"]"
+    `@separator = private constant [2 x i8] c", "
+    `@write_error = private constant [44 x i8] c": infrastructure error: cannot write output\0A"
+    `@read = private constant [42 x i8] c"local value was read before initialization"
+    `@assign = private constant [46 x i8] c"local value was assigned before initialization"
+    `@cycle = private constant [27 x i8] c"global initialization cycle"
+    `@overflow = private constant [27 x i8] c"integer arithmetic overflow"
+    `@bounds = private constant [19 x i8] c"index out of bounds"
+    `define internal void @out(i32 %fd, ptr %bytes, i64 %len) {
+    `entry:
+    `  br label %loop
+    `loop:
+    `  %offset = phi i64 [ 0, %entry ], [ %next, %progress ], [ %offset, %retry ]
+    `  %done = icmp eq i64 %offset, %len
+    `  br i1 %done, label %end, label %send
+    `send:
+    `  %remaining = sub i64 %len, %offset
+    `  %pointer = getelementptr i8, ptr %bytes, i64 %offset
+    `  %count = call i64 @write(i32 %fd, ptr %pointer, i64 %remaining)
+    `  %positive = icmp sgt i64 %count, 0
+    `  br i1 %positive, label %progress, label %check
+    `progress:
+    `  %next = add i64 %offset, %count
+    `  br label %loop
+    `check:
+    `  %negative = icmp slt i64 %count, 0
+    `  br i1 %negative, label %errno, label %fail
+    `errno:
+    `  %error_pointer = call ptr @__error()
+    `  %error_value = load i32, ptr %error_pointer
+    `  %interrupted = icmp eq i32 %error_value, 4
+    `  br i1 %interrupted, label %retry, label %fail
+    `retry:
+    `  br label %loop
+    `fail:
+    `  call void @io_failure()
+    `  unreachable
+    `end:
+    `  ret void
+    `}
+    `define internal void @print_integer(i32 %fd, i64 %value, i1 %unsigned) {
+    `entry:
+    `  %buffer = alloca [64 x i8], align 16
+    `  %format = select i1 %unsigned, ptr @fmt_uint, ptr @fmt_int
+    `  %count = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buffer, i64 64, ptr %format, i64 %value)
+    `  %valid_low = icmp sge i32 %count, 0
+    `  %valid_high = icmp slt i32 %count, 64
+    `  %valid = and i1 %valid_low, %valid_high
+    `  br i1 %valid, label %output, label %fail
+    `output:
+    `  %length = zext i32 %count to i64
+    `  call void @out(i32 %fd, ptr %buffer, i64 %length)
+    `  ret void
+    `fail:
+    `  call void @io_failure()
+    `  unreachable
+    `}
+    `define internal void @print_float(double %value) {
+    `entry:
+    `  %buffer = alloca [64 x i8], align 16
+    `  %count = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buffer, i64 64, ptr @fmt_float, double %value)
+    `  %valid_low = icmp sge i32 %count, 0
+    `  %valid_high = icmp slt i32 %count, 64
+    `  %valid = and i1 %valid_low, %valid_high
+    `  br i1 %valid, label %output, label %fail
+    `output:
+    `  %length = zext i32 %count to i64
+    `  call void @out(i32 1, ptr %buffer, i64 %length)
+    `  ret void
+    `fail:
+    `  call void @io_failure()
+    `  unreachable
+    `}
+    `define internal void @print_bool(i1 %value) {
+    `entry:
+    `  %bytes = select i1 %value, ptr @true, ptr @false
+    `  %length = select i1 %value, i64 4, i64 5
+    `  call void @out(i32 1, ptr %bytes, i64 %length)
+    `  ret void
+    `}
+    `define internal void @print_string(%string %value) {
+    `entry:
+    `  %bytes = extractvalue %string %value, 0
+    `  %length = extractvalue %string %value, 1
+    `  call void @out(i32 1, ptr %bytes, i64 %length)
+    `  ret void
+    `}
+    `define internal void @trap(i64 %id, i64 %line, i64 %column, ptr %message, i64 %length) noreturn {
+    `entry:
+    `  call void @report(i64 %id)
+    `  %generated = icmp eq i64 %id, -1
+    `  br i1 %generated, label %new, label %end
+    `new:
+    `  call void @diagnose(i64 %line, i64 %column, ptr %message, i64 %length, i1 true)
+    `  br label %end
+    `end:
+    `  call void @exit(i32 1)
+    `  unreachable
+    `}
+    `define internal void @check_init(ptr %flag, i1 %read, i64 %line, i64 %column) {
+    `entry:
+    `  %global = icmp eq ptr %flag, null
+    `  br i1 %global, label %end, label %check
+    `check:
+    `  %ready = load i1, ptr %flag
+    `  br i1 %ready, label %end, label %fail
+    `fail:
+    `  %message = select i1 %read, ptr @read, ptr @assign
+    `  %length = select i1 %read, i64 42, i64 46
+    `  call void @trap(i64 -1, i64 %line, i64 %column, ptr %message, i64 %length)
+    `  unreachable
+    `end:
+    `  ret void
+    `}

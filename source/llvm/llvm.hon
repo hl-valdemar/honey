@@ -1,0 +1,396 @@
+import "@std/mem"
+import "@std/io"
+import "@std/enummap"
+import "@std/arraylist"
+import "@source/ir"
+import "@source/diagnostics"
+
+@hide
+Type :: struct {
+    kind ir.Type = .void
+    shape ir.ArrayId = ir.no_array
+}
+
+@hide
+State :: struct {
+    output io.Writer
+    module @ir.Module
+    line_starts []usize
+    values []mut Type
+    next_register usize = 0
+}
+
+#! writes a standalone native LLVM module; all temporary emitter storage is released before returning.
+emit proc(
+    allocator mem.Allocator,
+    output io.Writer,
+    module @ir.Module,
+    diagnostic_store @diagnostics.Store,
+    source []u8,
+    path []u8,
+) void ! (mem.AllocError | io.WriteError) {
+    line_starts := arraylist.init(usize, allocator)
+    defer arraylist.deinit(&line_starts)
+    try arraylist.append(&line_starts, usize(0))
+    for (source) |byte, index| {
+        if (byte == '\n') try arraylist.append(&line_starts, index + 1)
+    }
+    try io.write_all(output, runtime)
+    try io.write_all(output, "\n@path = private constant ")
+    try bytes_constant(output, path)
+    try io.write_all(output, "\n")
+    for (module.strings.items) |_, index| {
+        try io.print("@s{} = private constant ", output, {index})
+        try bytes_constant(output, ir.string_bytes(module, ir.StringId(index)))
+        try io.write_all(output, "\n")
+    }
+    for (diagnostic_store.list.items) |diagnostic, index| {
+        try io.print("@d{} = private constant ", output, {index})
+        try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?)
+        try io.write_all(output, "\n")
+    }
+    try emit_reporting(output, diagnostic_store, line_starts.items, path.len)
+    for (module.globals.items) |global, index| {
+        try io.print("@g{} = internal global ", output, {index})
+        storage_kind :: if (global.type == .void) ir.Type.invalid else global.type
+        try write_type(output, module, Type{ kind = storage_kind, shape = global.array_type })
+        try io.print(" zeroinitializer\n@gs{} = internal global i8 0\n", output, {index})
+        try emit_global(output, module, global, index)
+    }
+    for (module.arrays.items) |_, index| try emit_array_printer(output, module, ir.ArrayId(index))
+    for (module.functions.items) |function, index| {
+        values :: try mem.alloc(Type, allocator, function.value_count)
+        defer mem.free(allocator, values)
+        mem.set(values, Type{})
+        for (function.blocks.items) |block| {
+            for (block.instructions.items) |instruction| {
+                if (instruction.destination != ir.no_value) {
+                    values[usize(instruction.destination)] = Type{ kind = instruction.type, shape = instruction.array_type }
+                }
+            }
+        }
+        state := State{ output = output, module = module, line_starts = line_starts.items, values = values }
+        try emit_function(&state, &function, index)
+    }
+    try io.write_all(output, "define i32 @main() {\nentry:\n")
+    if (module.entry) |entry| {
+        function :: module.functions.items[usize(entry)]
+        result :: Type{ kind = function.result, shape = function.result_array_type }
+        if (result.kind != .void) try io.write_all(output, "  %result = ")
+        else try io.write_all(output, "  ")
+        try io.write_all(output, "call ")
+        try write_type(output, module, result)
+        try io.print(" @f{}()\n", output, {u32(entry)})
+        if (result.kind != .void and result.kind != .invalid) {
+            try print_call(output, module, result, "%result")
+            try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
+        }
+        try io.write_all(output, "  call void @report(i64 -1)\n")
+        status i32 :: if (diagnostics.count(diagnostic_store) == 0) 0 else 1
+        try io.print("  ret i32 {}\n", output, {status})
+    } else {
+        try io.print("  call void @trap(i64 {}, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
+    }
+    try io.write_all(output, "}\n")
+}
+
+@hide:file
+bytes_constant proc(output io.Writer, bytes []u8) void ! io.WriteError {
+    try io.print("[{} x i8] c\"", output, {bytes.len})
+    digits :: "0123456789ABCDEF"
+    for (bytes) |byte| {
+        escaped [3]u8 :: ['\\', digits[usize(divtrunc!(byte, 16))], digits[usize(rem!(byte, 16))]]
+        try io.write_all(output, (&escaped)[..])
+    }
+    try io.write_all(output, "\"")
+}
+
+@hide
+write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
+    match type.kind {
+        .int, .usize: try io.write_all(output, "i64")
+        .float: try io.write_all(output, "double")
+        .bool: try io.write_all(output, "i1")
+        .string: try io.write_all(output, "%string")
+        .function: try io.write_all(output, "ptr")
+        .address: try io.write_all(output, "%address")
+        .array: {
+            shape :: module.arrays.items[usize(type.shape)]
+            try io.print("[{} x ", output, {shape.len})
+            try write_type(output, module, Type{ kind = shape.element, shape = shape.element_array })
+            try io.write_all(output, "]")
+        }
+        .void: try io.write_all(output, "void")
+        # invalid storage only belongs to recovery paths that trap before reading it.
+        .invalid: try io.write_all(output, "i8")
+    }
+}
+
+@hide:file
+local_type proc(function @ir.Function, index usize) Type {
+    type := Type{ kind = function.locals.items[index] }
+    if (type.kind == .void) type.kind = .invalid
+    if (type.kind == .array) {
+        for (function.array_storage.items) |storage| {
+            if (storage.local and usize(storage.index) == index) {
+                type.shape = storage.array_type
+                break
+            }
+        }
+    }
+    return type
+}
+
+@hide
+Location :: struct {
+    line usize = 1
+    column usize = 1
+}
+
+@hide
+location proc(line_starts []usize, span diagnostics.Span) Location {
+    offset :: usize(span.start)
+    line := usize(0)
+    end := line_starts.len
+    while (line + 1 < end) {
+        middle :: line + divtrunc!(end - line, 2)
+        if (line_starts[middle] <= offset) line = middle
+        else end = middle
+    }
+    return Location{ line = line + 1, column = offset - line_starts[line] + 1 }
+}
+
+@hide:file
+emit_reporting proc(output io.Writer, diagnostic_store @diagnostics.Store, line_starts []usize, path_length usize) void ! io.WriteError {
+    try io.write_all(output, "define internal void @io_failure() noreturn {\nentry:\n")
+    try io.print("  %path_result = call i64 @write(i32 2, ptr @path, i64 {})\n", output, {path_length})
+    try io.write_all(output, "  %message_result = call i64 @write(i32 2, ptr @write_error, i64 44)\n  call void @exit(i32 2)\n  unreachable\n}\n")
+    try io.write_all(output, "define internal void @diagnose(i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
+    try io.print("  call void @out(i32 2, ptr @path, i64 {})\n", output, {path_length})
+    try io.write_all(output,
+        `  call void @out(i32 2, ptr @colon, i64 1)
+        `  call void @print_integer(i32 2, i64 %line, i1 true)
+        `  call void @out(i32 2, ptr @colon, i64 1)
+        `  call void @print_integer(i32 2, i64 %column, i1 true)
+        `  %label = select i1 %trap, ptr @runtime_trap, ptr @error
+        `  %label_length = select i1 %trap, i64 16, i64 9
+        `  call void @out(i32 2, ptr %label, i64 %label_length)
+        `  call void @out(i32 2, ptr %message, i64 %length)
+        `  call void @out(i32 2, ptr @newline, i64 1)
+        `  ret void
+        `}
+    )
+    try io.write_all(output, "define internal void @report(i64 %trap) {\nentry:\n")
+    for (diagnostic_store.list.items) |diagnostic, index| {
+        position :: location(line_starts, diagnostic.span)
+        message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?
+        try io.print("  %t{} = icmp eq i64 %trap, {}\n", output, {index, index})
+        try io.print("  call void @diagnose(i64 {}, i64 {}, ptr @d{}, i64 {}, i1 %t{})\n", output, {
+            position.line, position.column, index, message.len, index,
+        })
+    }
+    try io.write_all(output, "  ret void\n}\n")
+}
+
+@hide:file
+emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index usize) void ! io.WriteError {
+    type :: Type{ kind = global.type, shape = global.array_type }
+    try io.print("define internal ptr @global{}(i64 %line, i64 %column) {{\nentry:\n", output, {index})
+    try io.print("  %state = load i8, ptr @gs{}\n", output, {index})
+    try io.write_all(output,
+        `  switch i8 %state, label %initialize [ i8 1, label %cycle i8 2, label %ready ]
+        `cycle:
+        `  call void @trap(i64 -1, i64 %line, i64 %column, ptr @cycle, i64 27)
+        `  unreachable
+        `initialize:
+    )
+    try io.print("  store i8 1, ptr @gs{}\n", output, {index})
+    if (type.kind == .void) {
+        try io.print("  call void @f{}()\n", output, {u32(global.initializer)})
+    } else {
+        try io.write_all(output, "  %value = call ")
+        try write_type(output, module, type)
+        try io.print(" @f{}()\n  store ", output, {u32(global.initializer)})
+        try write_type(output, module, type)
+        try io.print(" %value, ptr @g{}\n", output, {index})
+    }
+    try io.print("  store i8 2, ptr @gs{}\n  br label %ready\nready:\n  ret ptr @g{}\n}}\n", output, {index, index})
+}
+
+@hide:file
+print_call proc(output io.Writer, module @ir.Module, type Type, operand []u8) void ! io.WriteError {
+    match type.kind {
+        .int, .usize: try io.print("  call void @print_integer(i32 1, i64 {s}, i1 {})\n", output, {operand, type.kind == .usize})
+        .float: try io.print("  call void @print_float(double {s})\n", output, {operand})
+        .bool: try io.print("  call void @print_bool(i1 {s})\n", output, {operand})
+        .string: try io.print("  call void @print_string(%string {s})\n", output, {operand})
+        .array: {
+            try io.print("  call void @print_array{}(", output, {u32(type.shape)})
+            try write_type(output, module, type)
+            try io.print(" {s})\n", output, {operand})
+        }
+        else: unreachable
+    }
+}
+
+@hide:file
+emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
+    shape :: module.arrays.items[usize(id)]
+    type :: Type{ kind = .array, shape = id }
+    element :: Type{ kind = shape.element, shape = shape.element_array }
+    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try write_type(output, module, type)
+    try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
+    try write_type(output, module, type)
+    try io.write_all(output, "\n  store ")
+    try write_type(output, module, type)
+    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
+    try io.print("  %done = icmp eq i64 %index, {}\n", output, {shape.len})
+    try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @out(i32 1, ptr @separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
+    try write_type(output, module, type)
+    try io.write_all(output, ", ptr %storage, i64 0, i64 %index\n  %item = load ")
+    try write_type(output, module, element)
+    try io.write_all(output, ", ptr %pointer\n")
+    # functions may occur inside arrays without being printable source results.
+    if (element.kind != .function) try print_call(output, module, element, "%item")
+    else try io.write_all(output, "  call void @exit(i32 2)\n")
+    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @out(i32 1, ptr @close, i64 1)\n  ret void\n}\n")
+}
+
+@hide
+fresh proc(state @mut State) usize {
+    value :: state.next_register
+    state.next_register += 1
+    return value
+}
+
+@hide
+load proc(state @mut State, value ir.ValueId) usize ! io.WriteError {
+    result :: fresh(state)
+    try io.print("  %r{} = load ", state.output, {result})
+    try write_type(state.output, state.module, state.values[usize(value)])
+    try io.print(", ptr %v{}\n", state.output, {u32(value)})
+    return result
+}
+
+@hide
+store proc(state @State, destination ir.ValueId, register usize) void ! io.WriteError {
+    if (destination == ir.no_value or state.values[usize(destination)].kind == .void) return
+    try io.write_all(state.output, "  store ")
+    try write_type(state.output, state.module, state.values[usize(destination)])
+    try io.print(" %r{}, ptr %v{}\n", state.output, {register, u32(destination)})
+}
+
+@hide
+check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void ! io.WriteError {
+    position :: location(state.line_starts, span)
+    try io.print("  call void @check_init(ptr %i{}, i1 {}, i64 {}, i64 {})\n", state.output, {slot, read, position.line, position.column})
+}
+
+@hide:file
+trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.WriteError {
+    position :: location(state.line_starts, span)
+    symbol []u8 :: match code {
+        .integer_overflow: "overflow"
+        .index_out_of_bounds: "bounds"
+        else: unreachable
+    }
+    message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
+    length :: message.len
+    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, ptr @{s}, i64 {})\n  unreachable\n", state.output, {position.line, position.column, symbol, length})
+}
+
+@hide
+check_failure proc(state @mut State, condition usize, code diagnostics.Code, span diagnostics.Span) void ! io.WriteError {
+    label :: fresh(state)
+    try io.print("  br i1 %r{}, label %fail{}, label %ok{}\nfail{}:\n", state.output, {condition, label, label, label})
+    try trap(state, code, span)
+    try io.print("ok{}:\n", state.output, {label})
+}
+
+@hide
+write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
+    match value.type {
+        .int: try io.print("{}", output, {value.data.integer})
+        .usize: try io.print("{}", output, {value.data.unsigned})
+        .float: {
+            bits :: ptrcast!(@u64, &value.data.real)^
+            try io.print("bitcast (i64 {} to double)", output, {bits})
+        }
+        .bool: try io.print("{}", output, {value.data.boolean})
+        .string: try io.print("{{ ptr @s{}, i64 {} }}", output, {u32(value.data.string), ir.string_bytes(module, value.data.string).len})
+        .function: try io.print("@f{}", output, {u32(value.data.function)})
+        .array: {
+            shape :: module.arrays.items[usize(value.array_type)]
+            width :: if (shape.element == .array) module.arrays.items[usize(shape.element_array)].cells else 1
+            try io.write_all(output, "[")
+            for (0..shape.len) |index| {
+                if (index != 0) try io.write_all(output, ", ")
+                element := ir.Value{}
+                if (shape.element == .array) {
+                    element = ir.Value{ type = .array, array_type = shape.element_array, data = ir.ValueData{ elements = value.data.elements[index * width..(index + 1) * width] } }
+                } else element = value.data.elements[index]
+                try write_type(output, module, Type{ kind = element.type, shape = element.array_type })
+                try io.write_all(output, " ")
+                try write_constant(output, module, element)
+            }
+            try io.write_all(output, "]")
+        }
+        else: unreachable
+    }
+}
+
+@hide:file
+emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.WriteError {
+    output :: state.output
+    try io.write_all(output, "define internal ")
+    try write_type(output, state.module, Type{ kind = function.result, shape = function.result_array_type })
+    try io.print(" @f{}(", output, {id})
+    for (function.parameters.items) |_, index| {
+        if (index != 0) try io.write_all(output, ", ")
+        try write_type(output, state.module, local_type(function, index))
+        try io.print(" %p{}", output, {index})
+    }
+    try io.write_all(output, ") {\nentry:\n")
+    for (function.locals.items) |_, index| {
+        type :: local_type(function, index)
+        try io.print("  %l{} = alloca ", output, {index})
+        try write_type(output, state.module, type)
+        try io.print("\n  %i{} = alloca i1\n  store i1 {}, ptr %i{}\n", output, {index, index < function.parameters.items.len, index})
+        if (index < function.parameters.items.len) {
+            try io.write_all(output, "  store ")
+            try write_type(output, state.module, type)
+            try io.print(" %p{}, ptr %l{}\n", output, {index, index})
+        }
+    }
+    for (state.values) |type, index| {
+        if (type.kind == .void) continue
+        try io.print("  %v{} = alloca ", output, {index})
+        try write_type(output, state.module, type)
+        try io.write_all(output, "\n")
+    }
+    try io.print("  br label %b{}\n", output, {u32(function.entry)})
+    for (function.blocks.items) |block, index| {
+        try io.print("b{}:\n", output, {index})
+        for (block.instructions.items) |instruction| try emit_instruction(state, &block, instruction)
+        terminator :: block.terminator
+        match terminator.kind {
+            .return_value: {
+                if (terminator.value == ir.no_value or state.values[usize(terminator.value)].kind == .void) try io.write_all(output, "  ret void\n")
+                else {
+                    result :: try load(state, terminator.value)
+                    try io.write_all(output, "  ret ")
+                    try write_type(output, state.module, state.values[usize(terminator.value)])
+                    try io.print(" %r{}\n", output, {result})
+                }
+            }
+            .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
+            .jump: try io.print("  br label %b{}\n", output, {u32(terminator.target)})
+            .branch: {
+                condition :: try load(state, terminator.value)
+                try io.print("  br i1 %r{}, label %b{}, label %b{}\n", output, {condition, u32(terminator.target), u32(terminator.alternative)})
+            }
+        }
+    }
+    try io.write_all(output, "}\n")
+}

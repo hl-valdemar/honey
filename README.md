@@ -29,9 +29,33 @@ main proc() int {
 }
 ```
 
-this prints `42`. interpreted `main` must be a top-level function with no parameters; nonvoid results are printed, not used as process exit statuses.
+this prints `42`. both interpreted and Honey-compiled `main` must be a top-level function with no parameters; nonvoid results are printed, not used as process exit statuses.
+
+compile the same supported language subset to a standalone Apple Silicon macOS executable:
+
+```sh
+./build/honey build programs/factorial.hon -o build/factorial -O2
+./build/factorial
+```
+
+this prints `120`. `build` requires `-o <executable>` and accepts `-O0` (the default) or `-O2` as its final option. Honey emits textual LLVM IR and invokes `clang` from `PATH` without a shell, targeting `arm64-apple-macosx11.0.0`. Apple Clang 21 is the verified toolchain; LLVM libraries, LLVM bindings and a C emission stage are not required. the temporary IR file is private and removed after compilation, including on failure.
+
+inspect or compile the LLVM text separately:
+
+```sh
+./build/honey emit-llvm programs/factorial.hon > build/factorial.ll
+clang -target arm64-apple-macosx11.0.0 -O2 build/factorial.ll -o build/factorial
+```
+
+`emit-llvm` writes LLVM text to stdout and source diagnostics to stderr. both emission commands return `1` for recoverable source diagnostics while still producing their output when emission and linking succeed. the resulting executable preserves demand-driven traps, reports all source diagnostics, and returns `1` even if unaffected code completes. runtime-generated diagnostics retain source locations; the original source file and compiler are not needed to run the executable. invocation or Clang failures return `2`.
+
+the backend (`@source/llvm`) consumes the existing typed IR, emits native functions and control flow, and uses entry-block stack slots for locals and instruction results, including non-SSA result IDs. LLVM can promote eligible slots during optimization. arrays use typed native aggregates with by-value copies; loop storage is allocated once per invocation. signed and unsigned arithmetic use checked overflow intrinsics, array accesses retain bounds checks, local initialization flags reset on scope re-entry, globals initialize lazily with cycle checks, and floating operations preserve IEEE behavior without fast-math flags. native calls use the native stack rather than the interpreter's heap-backed frames.
+
+run the bootstrap suite with `bro test`. after `bro build`, run `python3 tests/native.py` for executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling.
 
 the native bootstrap accepts either a no-argument `main` or `main proc(init process.Init)`. it supplies `init.io` and `init.args` from native startup `argc`/`argv`. startup scans each argument once into a heap-allocated array of borrowed zero-terminated slices (`process.Args.values: [][;0]u8`), without copying strings. the descriptor array and borrowed strings remain valid until `main` returns; startup then frees the descriptors, including on a fallible return. allocation failure exits with status `2`. `init.args.values.len` includes the executable name, and `init.args.values[index]` directly accesses an argument after a length guard. callers can supply their own `process.Args { values = slices[..] }` for testing.
+
+`process.run(allocator, arguments)` starts a child synchronously using Darwin `posix_spawnp`, searches `PATH`, and inherits the environment and standard streams. argument strings are borrowed zero-terminated slices; no shell parsing occurs. it releases temporary argument descriptors on every return, retries interrupted waits, and returns the exit code or `128 + signal` for signal termination.
 
 source loading uses the supplied `io.Io` for opening, reading, and closing files. `io.open` accepts a borrowed zero-terminated slice (`[;0]u8`), including `init.args.values[index]` without copying its storage. the bootstrap supports checked sentinel-slice construction with `pointer[..length;0]`. `io.read_all(allocator, reader, maximum)` reads to EOF into a caller-owned `ArrayList(u8)`; release it with `arraylist.deinit`. it frees partial storage on error and consumes one extra byte to distinguish an exact-size input from a limit violation. the driver maps `limit_exceeded` to `source_too_large` at its `u32` source-size limit.
 
@@ -95,4 +119,4 @@ IR construction owns derived layout metadata. `ir.add_array` checks shape capaci
 
 `interpreter.run` consumes only IR and returns an `Outcome` containing a value or diagnostic trap. returned arrays own their escaped cell storage; release every outcome with `interpreter.deinit` before releasing its module. string values carry a module-local `ir.StringId`, not a slice; resolve bytes with `ir.string_bytes(&module, id)` before releasing the module. decoded bytes and their full backing allocations remain module-owned, without copying strings during calls or returns. array descriptors also borrow the module. heap-backed invocation frames track their current block and resume it after calls or global initialization; loop iterations reuse the invocation's storage without allocating new frames. parameters are initialized on entry and local declarations execute in statement order. premature local reads and assignments trap; assignment evaluates its right-hand side before checking the destination's initialization. globals initialize lazily on their first read, cache their result for that run, and trap on initialization cycles. `int`/`i64` use signed 64-bit storage, `usize` uses unsigned 64-bit storage, both with checked arithmetic; `float`/`f64` use 64-bit IEEE arithmetic and comparisons, including NaN behavior. `usize` supports `+`, `-`, `*` and comparisons, but not unary negation or division. numeric literal overflow and float underflow to zero are diagnosed; representable subnormals are accepted. strings support `\\`, `\"`, `\n`, `\r`, `\t`, `\0` and `\xNN` escapes.
 
-recoverable source errors do not stop execution of unaffected code. unused invalid functions, globals and nested bodies retain diagnostic traps; reaching invalid code reports its original diagnostic identity. missing-return traps affect only paths that fall through, not paths that already return or trap. diagnostics include the filename, line and byte column. exit status is `0` for clean execution, `1` for source diagnostics or a runtime trap, and `2` for usage or infrastructure failure. native code generation and compound assignment remain unimplemented.
+recoverable source errors do not stop execution of unaffected code. unused invalid functions, globals and nested bodies retain diagnostic traps; reaching invalid code reports its original diagnostic identity. missing-return traps affect only paths that fall through, not paths that already return or trap. diagnostics include the filename, line and byte column. exit status is `0` for clean execution, `1` for source diagnostics or a runtime trap, and `2` for usage or infrastructure failure. compound assignment remains unimplemented.
