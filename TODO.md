@@ -1,2 +1,48 @@
-- [ ] milestone: self-hosted honey compiler.
-    - honey can compile itself
+# self-hosting
+
+- [ ] milestone: Honey compiles its production compiler, then that compiler compiles itself again and builds/runs the example programs.
+
+## observed baseline
+
+`./build/honey run source/main.hon` exits `1`: import declarations produce
+`unexpected token`, qualified names produce `invalid character` at `.`, and
+recovery ultimately reports a missing entry point. an isolated import followed
+by a supported `main` still prints `42` but exits `1`; recovery is not import support.
+
+the driver compiles one source buffer (`source/main.hon:196`); AST declaration
+identities and diagnostic spans currently belong to that single source.
+the following order is a dependency plan, not implemented support.
+
+## next milestone: scalar-function packages
+
+compile and run a small multi-file directory package importing a second package
+of scalar functions, through both the interpreter and native backend.
+using the existing standard library is a later acceptance gate: even `std/mem`
+needs records, pointers, generics and C calls.
+
+- [ ] retain source/package identity and source ownership across the compilation; keep one identifier pool and unambiguous declaration IDs.
+- [ ] load directory packages once per canonical path, with deterministic file discovery, package scopes and root-only entry selection. follow Bro's existing relative and project-root `@` import rules; diagnose cycles rather than recurse indefinitely.
+- [ ] parse bare and aliased imports plus postfix namespace selection; resolve file-local import aliases without injecting dependency names into the importing package.
+- [ ] reuse ordinary scalar signature checking, function values and IR calls for selected declarations; namespaces have no runtime representation.
+- [ ] preserve originating filenames and spans in dependency diagnostics and native runtime traps; retain demand-driven diagnostic recovery.
+- [ ] verify sibling source files, transitive/shared imports, same-spelled declarations in different packages, alias conflicts, missing packages/members, argument errors and dependency-file diagnostics. preserve existing single-file commands.
+
+visibility follows Bro's public-by-default contract; unsupported visibility
+attributes must be diagnosed, never ignored. this milestone does not include
+general record fields, imported types, test discovery or FFI.
+
+## subsequent dependency gates
+
+- [ ] concrete data models: required integer widths/conversions, records/tuples and construction, fields, enums, distinct/alias types, unions and matching. examples: `source/lexer/token.hon`, `source/sema/resolve.hon`, `std/mem/mem.hon`.
+- [ ] memory representation: source pointers/references, mutable and sentinel slices, optionals, layout/cast builtins and allocator-required libc calls. internal IR array addresses are not source pointers. examples: `std/mem/mem.hon`, `std/arraylist/arraylist.hon`.
+- [ ] fallible results and cleanup: error-set composition, `try`/`catch`, `defer`/`errdefer`; infrastructure errors remain distinct from diagnostic traps. examples: `source/main.hon:41`, `source/sema/check/check.hon:117`.
+- [ ] generic specialization and compile-time execution/reflection sufficient for existing `ArrayList`, hash maps, `enummap`, `meta` and `io.print`; include type/value parameters and compile-time generated storage.
+- [ ] remaining source constructs: collection/index iteration, expression-valued control flow and `yield`, compound updates and multiline strings. examples: `source/parser/parse.hon`, `source/llvm/runtime.hon`.
+- [ ] standard-library milestone: compile/run a multi-package program exercising existing allocation and IO, including error cleanup; no replacement miniature standard library.
+- [ ] native driver integration: required C ABI declarations, `process.Init` startup arguments/IO, actual CLI exit statuses, file loading, temporary files and spawning Clang. Honey-generated programs currently accept only parameterless `main` and print its result; Bro's bootstrap startup support is not Honey backend support.
+- [ ] self-hosting proof: bootstrap-built Honey builds the production compiler (excluding test-only imports); that executable rebuilds the compiler; the rebuilt compiler passes representative interpreter/native examples and CLI/error scenarios without Bro at runtime.
+
+the gates may require interleaving (notably allocation, errors and generics).
+extend checking, IR and native emission together; accepting syntax alone does
+not complete a gate. additional targets, a package registry, a replacement
+linker and interpreter execution of arbitrary FFI are not prerequisites.
