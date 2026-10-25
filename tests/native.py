@@ -336,6 +336,99 @@ def check_packages(temporary, executable):
     return 15
 
 
+def check_namespace_packages(temporary, executable):
+    project = temporary / "namespaces"
+
+    def put(path, text):
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        return target
+
+    put("build.hon", "# project root\n")
+    main = put("app/main.hon", """
+import "../left"
+right :: import "@right"
+import "../shared-link"
+main proc() int {
+    functions :: [left.helper, right.helper]
+    selected := left.helper
+    selected = right.helper
+    return sibling(18) + functions[0]() + selected() + shared.helper()
+}
+""")
+    sibling = put("app/sibling.hon", """
+right :: import "../left"
+sibling proc(n int) int { return n * 2 + right.helper() - 1 }
+""")
+    put("left/main.hon", """
+import "../shared"
+helper proc() int { return shared.helper() - 2 }
+main proc() int { return 99 }
+""")
+    put("right/main.hon", """
+import "../shared-link"
+helper proc() int { return shared.helper() - 1 }
+""")
+    dependency = put("shared/main.hon", """
+value :: 3
+helper proc() int { return value }
+identity proc(n f64) f64 { return n }
+fail proc() int { return 9223372036854775807 + 1 }
+""")
+    (project / "shared-link").symlink_to(project / "shared", target_is_directory=True)
+    app = main.parent
+    check(app, executable, (b"42\n", None))
+    emitted = run(str(HONEY), "emit-llvm", str(app))
+    assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
+    sibling.write_text("sibling proc(n int) int { return n * 2 }\n")
+    cases = [
+        ('import "../left"\nmain proc() int { return left.helper() }', b"1\n", None),
+        ('lib :: import "../shared"\nmain proc() f64 { f :: lib.identity\nreturn f(1.5) }', b"1.5\n", None),
+        ('lib :: import "../shared"\nmain proc() int { return lib.value }', b"3\n", None),
+        ('lib :: import "../shared"\nmain proc() int { return lib.absent() }', b"", b"unknown name"),
+        ('lib :: import "../shared"\nmain proc() int { return helper() }', b"", b"unknown name"),
+        ('import "../left"\nmain proc() int { return left.shared.helper() }', b"", b"unknown name"),
+        ('import "../shared"\nmain proc() int { return shared.helper(1) }', b"", b"argument count"),
+        ('import "../shared"\nmain proc() f64 { return shared.identity(true) }', b"", b"incompatible value type"),
+        ('import "../shared"\nmain proc() int { shared\nreturn 42 }', b"", b"namespace cannot be used as a value"),
+        ('import "../shared"\nmain proc() int { return shared.value.member }', b"", b"requires a package namespace"),
+        ('lib :: import "../absent"\nmain proc() int { return lib.helper() }', b"", b"cannot load package directory"),
+        ('lib :: import "../left"\nlib :: import "../right"\nmain proc() int { return lib.helper() }', b"1\n", b"duplicate name"),
+        ('lib :: import "../shared"\nlib :: 42\nmain proc() int { return lib.helper() }', b"", b"duplicate name"),
+        ('lib :: import "../shared"\nmain proc() int { lib :: 42\nreturn lib }', b"", b"duplicate name"),
+        ('int :: import "../shared"\nmain proc() int { return 42 }', b"", b"duplicate name"),
+        ('import "../shared"\nmain proc() int { shared.value = 42\nreturn 0 }', b"", b"mutable local binding"),
+        ('import "../shared"\nmain proc() int { shared = 42\nreturn 0 }', b"", b"mutable local binding"),
+        ('import "../shared"\nunused proc() int { return shared.absent() }\nmain proc() int { return 42 }', b"42\n", b"unknown name"),
+        ('import "../shared"\nmain proc() int { return shared.fail() }', b"", b"integer arithmetic overflow"),
+        ('import "../shared"\nmain proc() int { return shared. }', b"", b"unexpected token"),
+    ]
+    for text, stdout, error in cases:
+        main.write_text(text + "\n")
+        check(app, executable, (stdout, error))
+    # Imports in a sibling file are invisible even though its declarations are shared.
+    main.write_text("main proc() int { return local.helper() }\n")
+    sibling.write_text('local :: import "../shared"\nsibling proc(n int) int { return n }\n')
+    check(app, executable, (b"", b"unknown name"))
+    # A missing package selection reuses the loader diagnostic instead of cascading.
+    main.write_text('lib :: import "../absent"\nmain proc() int { return lib.helper() }\n')
+    diagnosed = run(str(HONEY), "run", str(app))
+    assert diagnosed.stderr.count(b"cannot load package directory") == 1, outcome(diagnosed)
+    assert b"unknown name" not in diagnosed.stderr, outcome(diagnosed)
+    # Dependency diagnostics and reached traps preserve their original source file.
+    main.write_text('import "../shared"\nmain proc() int { return shared.helper() }\n')
+    dependency.write_text("helper proc() int { return missing }\n")
+    check(app, executable, (b"", b"unknown name"))
+    diagnosed = run(str(HONEY), "run", str(app))
+    assert str(dependency.resolve()).encode() + b":1:" in diagnosed.stderr, outcome(diagnosed)
+    dependency.write_text("\nhelper proc() int { return 9223372036854775807 + 1 }\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    trapped = run(str(HONEY), "run", str(app))
+    assert str(dependency.resolve()).encode() + b":2:" in trapped.stderr, outcome(trapped)
+    return len(cases) + 4
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -350,6 +443,7 @@ def main():
             check(source, executable, (stdout, error))
             count += 1
         count += check_packages(temporary, executable)
+        count += check_namespace_packages(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))
         assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)

@@ -250,6 +250,32 @@ parses_call_statements_and_postfix_precedence test {
     )
 }
 
+parses_namespace_selection_with_calls_indices_and_prefixes test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "main proc() int { return -library.factory()[0].member(1) + 2 }"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    returned :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 0)).value?
+    binary :: ast.binary_expr(&tree, returned)
+    try testing.expect_equal(ast.BinaryOperator.add, binary.operator)
+    call :: ast.unary_expr(&tree, binary.left).operand
+    selected :: ast.selection_expr(&tree, ast.call_expr(&tree, call).callee)
+    try testing.expect_equal("member", ast.source_text(&tree, ast.node_span(&tree, selected.member)))
+    index :: ast.index_expr(&tree, selected.base)
+    factory :: ast.selection_expr(&tree, ast.call_expr(&tree, index.base).callee)
+    try testing.expect_equal("library", ast.source_text(&tree, ast.node_span(&tree, factory.base)))
+    try testing.expect_equal("factory", ast.source_text(&tree, ast.node_span(&tree, factory.member)))
+    try testing.expect_equal("library.factory()[0].member", ast.source_text(&tree, selected.span))
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 recovers_malformed_calls_and_preserves_siblings test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)

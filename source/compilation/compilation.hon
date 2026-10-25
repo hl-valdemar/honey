@@ -348,8 +348,49 @@ compile proc(
     if (compilation.module_root == null) {
         compilation.module_root = try ast.add_package(&compilation.builder, diagnostics.Span{ start = 0, end = 0 }, declarations.items)
     }
+    imports := arraylist.init(sema.Import, compilation.allocator)
+    defer arraylist.deinit(&imports)
     tree :: ast.view(&compilation.builder, compilation.module_root?)
-    resolution := try sema.resolve_packages(compilation.allocator, &tree, roots.items, &compilation.strings, diagnostic_store)
+    for (compilation.imports.items) |link| {
+        imported :: ast.import_decl(&tree, link.node)
+        name := strpool.no_str
+        failure ?diagnostics.DiagnosticId := null
+        for (diagnostic_store.list.items) |diagnostic, index| {
+            if (diagnostic.span.source == imported.path.source
+                and diagnostic.span.start == imported.path.start
+                and diagnostic.span.end == imported.path.end
+                and (diagnostic.code == .package_unavailable
+                    or diagnostic.code == .invalid_import_path
+                    or diagnostic.code == .import_cycle)) {
+                failure = diagnostics.DiagnosticId(index)
+                break
+            }
+        }
+        if (imported.namespace) |explicit| {
+            name = explicit
+        } else {
+            path :: if (link.target) |target|
+                compilation.packages.items[usize(target)].path
+            else
+                ast.source_text(&tree, imported.path)
+            start := path.len
+            while (start > 0 and path[start - 1] != '/') start -= 1
+            candidate :: path[start..]
+            valid := candidate.len > 0
+            for (candidate) |byte, index| {
+                if (!(byte >= 'a' and byte <= 'z') and !(byte >= 'A' and byte <= 'Z')
+                    and byte != '_' and !(index > 0 and byte >= '0' and byte <= '9')) valid = false
+            }
+            if (valid) {
+                name = try strpool.intern(&compilation.strings, candidate)
+            } else if (failure == null) {
+                failure = try diagnostics.add(diagnostic_store, .invalid_import_alias, imported.path)
+            }
+        }
+        target ?ast.NodeId :: if (link.target) |package| roots.items[usize(package)] else null
+        try arraylist.append(&imports, sema.Import{ node = link.node, name = name, target = target, diagnostic = failure })
+    }
+    resolution := try sema.resolve_packages(compilation.allocator, &tree, roots.items, imports.items, &compilation.strings, diagnostic_store)
     defer sema.deinit(&resolution)
     checked := try typecheck.check(compilation.allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)

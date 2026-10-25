@@ -3,13 +3,13 @@
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr ('..' | '..=') expr
+#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' identifier | expr ('..' | '..=') expr
 #! * decl ..... -> identifier [type] binding expr | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls; else binds to the nearest if.
-#! precedence (tightest first): calls/indices, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
+#! precedence (tightest first): calls/indices/selections, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -44,6 +44,7 @@ ExprKind :: enum {
     array_type
     array_literal
     index
+    selection
     invalid
 }
 
@@ -96,6 +97,7 @@ NodeKind :: enum {
     expr_array_type
     expr_array_literal
     expr_index
+    expr_selection
     stmt_expr
     stmt_decl
     stmt_return
@@ -213,6 +215,12 @@ IndexView :: struct {
     span Span
     base NodeId
     index NodeId
+}
+
+SelectionView :: struct {
+    span Span
+    base NodeId
+    member NodeId
 }
 
 ReturnView :: struct {
@@ -447,6 +455,18 @@ add_index proc(builder @mut Builder, span Span, base, index NodeId) NodeId ! mem
         kind = .expr_index,
         data0 = NodeData{ node_id = base },
         data1 = NodeData{ node_id = index },
+    }, span)
+}
+
+add_selection proc(
+    builder @mut Builder,
+    span Span,
+    base, member NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_selection,
+        data0 = NodeData{ node_id = base },
+        data1 = NodeData{ node_id = member },
     }, span)
 }
 
@@ -903,6 +923,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_array_type: .array_type
         .expr_array_literal: .array_literal
         .expr_index: .index
+        .expr_selection: .selection
         .invalid_expr: .invalid
         else: unreachable
     }
@@ -993,6 +1014,16 @@ index_expr proc(tree @Tree, id NodeId) IndexView {
         span = get_span(&tree.storage, id),
         base = node.data0.node_id,
         index = node.data1.node_id,
+    }
+}
+
+selection_expr proc(tree @Tree, id NodeId) SelectionView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_selection)
+    return SelectionView{
+        span = get_span(&tree.storage, id),
+        base = node.data0.node_id,
+        member = node.data1.node_id,
     }
 }
 

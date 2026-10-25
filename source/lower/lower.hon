@@ -760,7 +760,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (trap_type(state, id)) return ir.no_value
             return try lower_string(state, id)
         }
-        .identifier: {
+        .identifier, .selection: {
             if (trap_binding(state, id) or trap_type(state, id)) return ir.no_value
             binding :: sema.binding(state.resolution, id)
             location :: state.storage[usize(binding.data.declaration)]

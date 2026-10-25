@@ -171,7 +171,7 @@ check proc(
     for 0..count |i| {
         if (cells[i].role != .assignment_stmt) continue
         target :: ast.assignment_stmt(tree, ast.NodeId(i)).target
-        if (ast.expr_kind(tree, target) != .identifier) continue
+        if (!declaration_reference(tree, target)) continue
         binding :: sema.binding(resolution, target)
         if (binding.kind == .invalid) {
             cells[i].type = invalid_type(binding.data.diagnostic)
@@ -185,7 +185,7 @@ check proc(
     # aliases share a type variable; explicit annotations and parameters are boundaries.
     for (0..count) |i| {
         id :: ast.NodeId(i)
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .identifier) continue
+        if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
         binding :: sema.binding(resolution, id)
         if (binding.kind != .declaration) continue
         target :: binding.data.declaration
@@ -197,7 +197,7 @@ check proc(
         if (cells[i].role == .declaration and !cells[i].fixed) {
             join(&state, id, ast.statement_decl(tree, id).initializer)
         }
-        if (cells[i].role != .expression or ast.expr_kind(tree, id) != .identifier) continue
+        if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
         binding :: sema.binding(resolution, id)
         if (binding.kind == .declaration and !cells[i].assignment_value and !cells[usize(binding.data.declaration)].fixed) {
             join(&state, id, binding.data.declaration)
@@ -212,7 +212,10 @@ check proc(
         if (assignment_values) {
             for (0..count) |i| {
                 id :: ast.NodeId(i)
-                if (!cells[i].assignment_value or cells[i].role != .expression or ast.expr_kind(tree, id) != .identifier) continue
+                if (!cells[i].assignment_value
+                    or cells[i].role != .expression
+                    or !declaration_reference(tree, id)
+                ) continue
                 binding :: sema.binding(resolution, id)
                 if (binding.kind == .declaration) cells[i].type = types[usize(binding.data.declaration)]
             }
@@ -677,7 +680,7 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 state.has_assignments = true
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 binding :: sema.binding(state.resolution, assignment.target)
-                if (binding.kind == .builtin) {
+                if (binding.kind == .builtin or binding.kind == .namespace) {
                     state.cells[usize(assignment.target)].role = .expression
                     state.cells[usize(assignment.target)].type = invalid_type(try diagnostics.add(
                         state.diagnostics, .invalid_assignment_target, ast.node_span(tree, assignment.target),
@@ -760,11 +763,12 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         .literal_float: state.cells[usize(id)].type = Type{ kind = .float }
         .literal_bool: state.cells[usize(id)].type = Type{ kind = .bool }
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
-        .identifier: {
+        .identifier, .selection: {
             binding :: sema.binding(state.resolution, id)
             match binding.kind {
                 .invalid: state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
                 .builtin: state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
+                .namespace: state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .namespace_not_value, ast.node_span(tree, id)))
                 else: {}
             }
         }
@@ -837,6 +841,12 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         }
         .invalid: collect_invalid(state, id)
     }
+}
+
+@hide:file
+declaration_reference proc(tree @ast.Tree, id ast.NodeId) bool {
+    kind :: ast.expr_kind(tree, id)
+    return kind == .identifier or kind == .selection
 }
 
 @hide:file
@@ -1200,7 +1210,7 @@ constant_integer proc(state @mut State, id ast.NodeId) ?ConstantInteger {
             }
             return ConstantInteger{ magnitude = value }
         }
-        .identifier: {
+        .identifier, .selection: {
             binding :: sema.binding(state.resolution, id)
             if (binding.kind != .declaration) return null
             target :: binding.data.declaration
@@ -1328,7 +1338,7 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     if (state.cells[index].type.kind == .invalid) return state.cells[index].type
     state.cells[index].visiting = true
     defer state.cells[index].visiting = false
-    if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .identifier) {
+    if (state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)) {
         binding :: sema.binding(state.resolution, id)
         if (binding.kind == .declaration) {
             target :: binding.data.declaration
@@ -1486,7 +1496,10 @@ prepare_ranges proc(state @mut State, assignment_values, constrain bool) void ! 
     }
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
-        if (state.cells[i].role != .expression or state.cells[i].assignment_value or ast.expr_kind(tree, id) != .identifier) continue
+        if (state.cells[i].role != .expression
+            or state.cells[i].assignment_value
+            or !declaration_reference(tree, id)
+        ) continue
         binding :: sema.binding(state.resolution, id)
         if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture) {
             seed(state, id, group_type(state, binding.data.declaration))
@@ -1544,7 +1557,10 @@ specialize_annotations proc(state @mut State) void ! (mem.AllocError | diagnosti
     }
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
-        if (state.cells[i].role != .expression or state.cells[i].assignment_value or ast.expr_kind(state.tree, id) != .identifier) continue
+        if (state.cells[i].role != .expression
+            or state.cells[i].assignment_value
+            or !declaration_reference(state.tree, id)
+        ) continue
         binding :: sema.binding(state.resolution, id)
         if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].fixed) {
             seed(state, id, state.cells[usize(binding.data.declaration)].type)

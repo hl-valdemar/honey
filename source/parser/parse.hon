@@ -658,6 +658,22 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             left_grouped = false
             continue
         }
+        if (token.kind == .dot) {
+            state.next_token += 1
+            member :: try consume(state, .ident)
+            member_id :: try ast.add_identifier(state.builder, member.span, member.data.str_id)
+            left = try ast.add_selection(
+                state.builder,
+                ast.Span{
+                    start = state.tokens[expression_start].span.start,
+                    end = member.span.end,
+                    source = member.span.source,
+                },
+                left, member_id,
+            )
+            left_grouped = false
+            continue
+        }
         if (token.kind == .range or token.kind == .range_inclusive) {
             if (min_bp > BindingPowerScalar(0)) break
             left = try validate_range_bound(state, left, left_grouped)

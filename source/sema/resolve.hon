@@ -42,10 +42,11 @@ intern_builtins proc(
     return ids
 }
 
-BindingKind :: enum { none, declaration, builtin, invalid }
+BindingKind :: enum { none, declaration, namespace, builtin, invalid }
 
 BindingData :: union {
     declaration ast.NodeId
+    namespace ast.NodeId
     builtin BuiltinType
     diagnostic diagnostics.DiagnosticId
 }
@@ -53,6 +54,14 @@ BindingData :: union {
 Binding :: struct {
     kind BindingKind = .none
     data BindingData = BindingData{ diagnostic = diagnostics.no_diagnostic }
+}
+
+#! links a file-local import to a package root; failed loads retain their diagnostic.
+Import :: struct {
+    node ast.NodeId
+    name strpool.StringId
+    target ?ast.NodeId
+    diagnostic ?diagnostics.DiagnosticId = null
 }
 
 @hide:file
@@ -78,6 +87,7 @@ State :: struct {
     bindings []mut Binding
     builtin_ids []strpool.StringId
     allocator mem.Allocator
+    namespaces hashmap.AutoHashMap(ast.NodeId, Scope)
 }
 
 #! borrows `tree`, its identifier `pool`, and `diagnostic_store` during resolution.
@@ -88,9 +98,20 @@ resolve proc(
     tree @ast.Tree,
     pool @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
-) Resolution ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError) {
+) Resolution ! (
+    mem.AllocError
+    | strpool.InternError
+    | diagnostics.CapacityError
+) {
     roots [1]ast.NodeId :: [tree.root]
-    return try resolve_packages(allocator, tree, roots[..], pool, diagnostic_store)
+    return try resolve_packages(
+        allocator,
+        tree,
+        roots[..],
+        &[],
+        pool,
+        diagnostic_store,
+    )
 }
 
 #! resolves each package root in its own namespace; AST IDs share the compilation arena.
@@ -98,6 +119,7 @@ resolve_packages proc(
     allocator mem.Allocator,
     tree @ast.Tree,
     roots []ast.NodeId,
+    imports []Import,
     pool @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
 ) Resolution ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError) {
@@ -112,9 +134,45 @@ resolve_packages proc(
         bindings = bindings,
         builtin_ids = builtin_ids[..],
         allocator = allocator,
+        namespaces = hashmap.init(allocator),
+    }
+    defer {
+        for (state.namespaces.entries) |entry| {
+            if (entry.hash == 0) continue
+            scope := entry.value
+            hashmap.deinit(&scope.names)
+        }
+        hashmap.deinit(&state.namespaces)
     }
 
-    for (roots) |root| try resolve_package(&state, root)
+    package_scopes :: try mem.alloc(Scope, allocator, roots.len)
+    defer mem.free(allocator, package_scopes)
+    file_scopes :: try mem.alloc(Scope, allocator, ast.source_files(tree).len)
+    defer mem.free(allocator, file_scopes)
+    for (file_scopes) |@scope| scope^ = Scope{ names = hashmap.init(allocator), parent = null }
+    defer { for (file_scopes) |@scope| hashmap.deinit(&scope.names) }
+    for (roots) |root, index| {
+        package_scopes[index] = Scope{ names = hashmap.init(allocator), parent = null }
+        scope := &package_scopes[index]
+        errdefer hashmap.deinit(&scope.names)
+        for (0..ast.package_decl_count_at(tree, root)) |i| {
+            id :: ast.package_decl_at(tree, root, i)
+            file_scopes[usize(ast.node_span(tree, id).source)].parent = scope
+            match ast.decl_kind(tree, id) {
+                .statement: try predeclare(&state, scope, id, ast.statement_decl(tree, id).name)
+                .function: try predeclare(&state, scope, id, ast.function_decl(tree, id).name)
+                .import, .invalid: {}
+            }
+        }
+        hashmap.put(&state.namespaces, root, scope^) catch |err| {
+            match err {
+                .key_exists: unreachable
+                else: return err
+            }
+        }
+    }
+    for (imports) |imported| try resolve_import(&state, &file_scopes[usize(ast.node_span(tree, imported.node).source)], imported)
+    for (roots) |root| try resolve_package(&state, root, file_scopes)
 
     return Resolution{ storage = Storage{
         bindings = bindings,
@@ -123,32 +181,53 @@ resolve_packages proc(
 }
 
 @hide:file
-resolve_package proc(state @mut State, root ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+resolve_package proc(
+    state @mut State, root ast.NodeId, file_scopes []Scope,
+) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree := state.tree^
     tree.root = root
-    package_scope := Scope{
-        names = hashmap.init(state.allocator),
-        parent = null,
-    }
-    defer hashmap.deinit(&package_scope.names)
     for (0..ast.package_decl_count(&tree)) |i| {
         id :: ast.package_decl(&tree, i)
+        scope :: &file_scopes[usize(ast.node_span(&tree, id).source)]
         match ast.decl_kind(&tree, id) {
-            .statement: try predeclare(state, &package_scope, id, ast.statement_decl(&tree, id).name)
-            .function: try predeclare(state, &package_scope, id, ast.function_decl(&tree, id).name)
-            .import, .invalid: {}
-        }
-    }
-    for (0..ast.package_decl_count(&tree)) |i| {
-        id :: ast.package_decl(&tree, i)
-        match ast.decl_kind(&tree, id) {
-            .statement: try resolve_statement_decl(state, &package_scope, id)
-            .function: try resolve_function(state, &package_scope, id)
+            .statement: try resolve_statement_decl(state, scope, id)
+            .function: try resolve_function(state, scope, id)
             .invalid: resolve_invalid(state, id)
             .import: {}
         }
     }
+}
 
+@hide:file
+resolve_import proc(
+    state @mut State, scope @mut Scope, imported Import,
+) void ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.import_decl(state.tree, imported.node).span
+    value := if (imported.diagnostic) |diagnostic|
+        Binding{ kind = .invalid, data = BindingData{ diagnostic = diagnostic } }
+    else if (imported.target) |target|
+        Binding{ kind = .namespace, data = BindingData{ namespace = target } }
+    else
+        Binding{ kind = .invalid, data = BindingData{
+            diagnostic = try diagnostics.add(state.diagnostics, .package_unavailable, span),
+        } }
+    if (imported.name == strpool.no_str) {
+        state.bindings[usize(imported.node)] = value
+        return
+    }
+    if hashmap.get(&scope.names, imported.name) |_| {
+        state.bindings[usize(imported.node)] = Binding{ kind = .invalid, data = BindingData{
+            diagnostic = try diagnostics.add(state.diagnostics, .duplicate_name, span),
+        } }
+        return
+    }
+    if lookup(state, scope.parent, imported.name) |_| {
+        value = Binding{ kind = .invalid, data = BindingData{
+            diagnostic = try diagnostics.add(state.diagnostics, .duplicate_name, span),
+        } }
+    }
+    try put_name(scope, imported.name, value)
+    state.bindings[usize(imported.node)] = value
 }
 
 #! releases binding storage with the allocator retained by resolve.
@@ -348,6 +427,30 @@ resolve_expr proc(
                     data = BindingData{ diagnostic = diagnostic },
                 }
             }
+        }
+        .selection: {
+            expression :: ast.selection_expr(tree, id)
+            try resolve_expr(state, scope, expression.base)
+            base :: state.bindings[usize(expression.base)]
+            value := base
+            if (base.kind != .invalid) {
+                if (base.kind == .namespace) {
+                    namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
+                    if hashmap.get(&namespace.names, ast.name_id(tree, expression.member)) |found| {
+                        value = found
+                    } else {
+                        value = Binding{ kind = .invalid, data = BindingData{
+                            diagnostic = try diagnostics.add(state.diagnostics, .unknown_name, ast.node_span(tree, expression.member)),
+                        } }
+                    }
+                } else {
+                    value = Binding{ kind = .invalid, data = BindingData{
+                        diagnostic = try diagnostics.add(state.diagnostics, .not_namespace, ast.node_span(tree, expression.base)),
+                    } }
+                }
+            }
+            state.bindings[usize(id)] = value
+            state.bindings[usize(expression.member)] = value
         }
         .unary: try resolve_expr(state, scope, ast.unary_expr(tree, id).operand)
         .binary: {
