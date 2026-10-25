@@ -1,0 +1,61 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@std/testing"
+
+shape_and_segment_limits_preserve_zero_leaf_arrays_and_allow_retry test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    limit :: divtrunc!(maxval!(usize), sizeof!(Value))
+    rejected := false
+    _ = add_array(&module, .int, no_array, limit + 1, false) catch |error| {
+        rejected = error == .storage_limit_reached
+        yield no_array
+    }
+    try testing.expect(rejected)
+    pair :: try add_array(&module, .int, no_array, 2, false)
+    rejected = false
+    _ = add_array(&module, .array, pair, maxval!(usize), false) catch |error| {
+        rejected = error == .storage_limit_reached
+        yield no_array
+    }
+    try testing.expect(rejected)
+    full :: try add_array(&module, .int, no_array, limit - 2, false)
+    empty :: try add_array(&module, .bool, no_array, 0, false)
+    zero_rows :: try add_array(&module, .array, empty, maxval!(usize), false)
+    try arraylist.append(&module.functions, init_function(module.allocator))
+    function :: FunctionId(0)
+    try arraylist.append(&module.functions.items[0].blocks, init_block(module.allocator))
+    try testing.expect_equal(LocalId(0), try add_parameter(&module, function, .array, full))
+    element :: try emit(&module, function, BlockId(0), Instruction{
+        op = .constant, type = .int, constant = Value{ type = .int, data = ValueData{ integer = 42 } },
+    })
+    try arraylist.append(&module.functions.items[0].blocks.items[0].arguments, element)
+    try arraylist.append(&module.functions.items[0].blocks.items[0].arguments, element)
+    result :: try emit(&module, function, BlockId(0), Instruction{
+        op = .array_literal, type = .array, array_type = pair, arguments_count = 2,
+    })
+    # redefining an array result reuses backing even when no further cells fit.
+    _ = try emit(&module, function, BlockId(0), Instruction{
+        op = .array_literal, type = .array, array_type = pair, arguments_count = 2, destination = result,
+    })
+    rejected = false
+    _ = add_parameter(&module, function, .array, pair) catch |error| {
+        rejected = error == .storage_limit_reached
+        yield LocalId(0)
+    }
+    try testing.expect(rejected)
+    # a rejected parameter consumes neither a parameter/local identity nor aggregate storage.
+    try testing.expect_equal(LocalId(1), try add_parameter(&module, function, .array, zero_rows))
+    rejected = false
+    _ = emit(&module, function, BlockId(0), Instruction{
+        op = .array_literal, type = .array, array_type = pair, arguments_count = 2,
+    }) catch |error| {
+        rejected = error == .storage_limit_reached
+        yield no_value
+    }
+    try testing.expect(rejected)
+    # a rejected result consumes no temporary; zero-leaf shapes still fit a full segment layout.
+    try testing.expect_equal(ValueId(2), try emit(&module, function, BlockId(0), Instruction{
+        op = .load_local, type = .array, array_type = zero_rows, slot = 1,
+    }))
+}

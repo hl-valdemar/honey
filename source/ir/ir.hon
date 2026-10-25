@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/arraylist"
+import "@std/debug"
 import "@source/diagnostics"
 
 FunctionId :: distinct u32
@@ -41,7 +42,7 @@ Value :: struct {
     data ValueData = ValueData{ integer = 0 }
 }
 
-#! fixed recursive shape; `cells` counts flattened scalar leaves, including zero-sized children.
+#! fixed recursive shape; add_array derives `cells`, the flattened scalar-leaf count.
 ArrayType :: struct {
     element Type
     element_array ArrayId = no_array
@@ -124,6 +125,8 @@ Block :: struct {
     terminator Terminator = Terminator{}
 }
 
+#! construction derives storage segments, aggregate totals, value counts, and address presence.
+#! producers use add_local, add_parameter, and emit; derived metadata is read-only to callers.
 Function :: struct {
     parameters arraylist.ArrayList(Type)
     locals arraylist.ArrayList(Type)
@@ -187,6 +190,125 @@ init_block proc(allocator mem.Allocator) Block {
         instructions = arraylist.init(allocator),
         arguments = arraylist.init(allocator),
     }
+}
+
+#! adds a fixed shape and derives its flattened storage size; child shapes must already exist.
+#! scalar elements use no_array; zero-leaf children retain their logical lengths.
+add_array proc(
+    module @mut Module,
+    element Type,
+    element_array ArrayId,
+    len usize,
+    mutable bool,
+) ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    debug.assert((element == .array) == (element_array != no_array))
+    width :: if (element == .array) module.arrays.items[usize(element_array)].cells else 1
+    if (width != 0 and len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
+    cells :: len * width
+    if (cells > divtrunc!(maxval!(usize), sizeof!(Value))) return .storage_limit_reached
+    if (module.arrays.items.len >= usize(no_array)) return .storage_limit_reached
+    id :: ArrayId(module.arrays.items.len)
+    try arraylist.append(&module.arrays, ArrayType{
+        element = element,
+        element_array = element_array,
+        len = len,
+        cells = cells,
+        mutable = mutable,
+    })
+    return id
+}
+
+@hide:file
+prepare_storage proc(module @Module, function @mut Function, index u32, shape ArrayId, local bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    cells :: module.arrays.items[usize(shape)].cells
+    if (cells > divtrunc!(maxval!(usize), sizeof!(Value)) - function.aggregate_cells) return .storage_limit_reached
+    try arraylist.append(&function.array_storage, ArrayStorage{
+        index = index,
+        array_type = shape,
+        offset = function.aggregate_cells,
+        local = local,
+    })
+    function.aggregate_cells += cells
+}
+
+#! creates a local and its disjoint by-value backing together; scalar locals use no_array.
+add_local proc(
+    module @mut Module,
+    function FunctionId,
+    type Type,
+    shape ArrayId,
+) LocalId ! (mem.AllocError | diagnostics.CapacityError) {
+    debug.assert((type == .array) == (shape != no_array))
+    body :: &module.functions.items[usize(function)]
+    if (body.locals.items.len >= usize(maxval!(LocalId))) return .storage_limit_reached
+    id :: LocalId(body.locals.items.len)
+    try arraylist.append(&body.locals, type)
+    errdefer _ = arraylist.pop(&body.locals)
+    if (type == .array) try prepare_storage(module, body, u32(id), shape, true)
+    return id
+}
+
+#! creates a parameter and its local backing; all parameters precede non-parameter locals.
+add_parameter proc(
+    module @mut Module,
+    function FunctionId,
+    type Type,
+    shape ArrayId,
+) LocalId ! (mem.AllocError | diagnostics.CapacityError) {
+    body :: &module.functions.items[usize(function)]
+    debug.assert(body.parameters.items.len == body.locals.items.len)
+    try arraylist.append(&body.parameters, type)
+    errdefer _ = arraylist.pop(&body.parameters)
+    return try add_local(module, function, type, shape)
+}
+
+#! appends an instruction and derives its result count, array backing, and address presence.
+#! no_value requests a fresh result; explicit result IDs support non-SSA definitions across blocks.
+#! repeated array results must retain their shape and reuse their existing segment.
+#! failures leave instruction and storage lengths, totals, counts, and flags unchanged.
+emit proc(
+    module @mut Module,
+    function FunctionId,
+    block BlockId,
+    instruction Instruction,
+) ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    body :: &module.functions.items[usize(function)]
+    target :: &body.blocks.items[usize(block)]
+    operation := instruction
+    produces_value :: (
+        operation.op != .store_local
+        and operation.op != .assign_local
+        and operation.op != .reset_local
+        and operation.op != .store_address
+    )
+    count := body.value_count
+    if (produces_value) {
+        if (operation.destination == no_value) {
+            if (count >= usize(no_value)) return .storage_limit_reached
+            operation.destination = ValueId(count)
+        }
+        if (usize(operation.destination) >= count) count = usize(operation.destination) + 1
+    } else {
+        debug.assert(operation.destination == no_value)
+    }
+    try arraylist.append(&target.instructions, operation)
+    errdefer _ = arraylist.pop(&target.instructions)
+    if (produces_value and operation.type == .array) {
+        debug.assert(operation.array_type != no_array)
+        registered := false
+        if (usize(operation.destination) < body.value_count) {
+            for (body.array_storage.items) |storage| {
+                if (storage.local or storage.index != u32(operation.destination)) continue
+                debug.assert(storage.array_type == operation.array_type)
+                registered = true
+                break
+            }
+        }
+        if (!registered) try prepare_storage(module, body, u32(operation.destination), operation.array_type, false)
+    }
+    body.value_count = count
+    if (operation.type == .address) body.has_addresses = true
+    return operation.destination
 }
 
 #! resolves a module-local ID to bytes borrowed until module deinit.

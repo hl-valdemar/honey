@@ -129,39 +129,16 @@ prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.All
     if (state.arrays[usize(id)] != ir.no_array) return state.arrays[usize(id)]
     descriptor :: typecheck.array_type(state.checked, id)
     child := ir.no_array
-    width := usize(1)
-    if (descriptor.element.kind == .array) {
-        child = try prepare_array(state, descriptor.element.array_type)
-        width = state.module.arrays.items[usize(child)].cells
-    }
-    if (width != 0 and descriptor.len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
-    if (descriptor.len * width > divtrunc!(maxval!(usize), sizeof!(ir.Value))) return .storage_limit_reached
-    if (state.module.arrays.items.len >= usize(ir.no_array)) return .storage_limit_reached
-    result :: ir.ArrayId(state.module.arrays.items.len)
-    try arraylist.append(&state.module.arrays, ir.ArrayType{
-        element = lower_type(descriptor.element),
-        element_array = child,
-        len = descriptor.len,
-        cells = descriptor.len * width,
-        mutable = descriptor.mutable,
-    })
+    if (descriptor.element.kind == .array) child = try prepare_array(state, descriptor.element.array_type)
+    result :: try ir.add_array(
+        state.module,
+        lower_type(descriptor.element),
+        child,
+        descriptor.len,
+        descriptor.mutable,
+    )
     state.arrays[usize(id)] = result
     return result
-}
-
-@hide:file
-prepare_storage proc(state @mut State, index u32, shape ir.ArrayId, local bool) void ! (mem.AllocError | diagnostics.CapacityError) {
-    if (shape == ir.no_array) return
-    function := &state.module.functions.items[state.function]
-    cells :: state.module.arrays.items[usize(shape)].cells
-    if (cells > divtrunc!(maxval!(usize), sizeof!(ir.Value)) - function.aggregate_cells) return .storage_limit_reached
-    try arraylist.append(&function.array_storage, ir.ArrayStorage{
-        index = index,
-        array_type = shape,
-        offset = function.aggregate_cells,
-        local = local,
-    })
-    function.aggregate_cells += cells
 }
 
 @hide:file
@@ -239,17 +216,7 @@ finish proc(state @mut State, value ir.ValueId, span diagnostics.Span) void {
 
 @hide:file
 emit proc(state @mut State, instruction ir.Instruction) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
-    function := &state.module.functions.items[state.function]
-    operation := instruction
-    if (operation.op != .store_local and operation.op != .assign_local and operation.op != .reset_local and operation.op != .store_address) {
-        if (function.value_count >= usize(ir.no_value)) return .storage_limit_reached
-        operation.destination = ir.ValueId(function.value_count)
-        function.value_count += 1
-        if (operation.type == .array) try prepare_storage(state, u32(operation.destination), operation.array_type, false)
-    }
-    if (operation.type == .address) function.has_addresses = true
-    try arraylist.append(&function.blocks.items[usize(state.block)].instructions, operation)
-    return operation.destination
+    return try ir.emit(state.module, ir.FunctionId(state.function), state.block, instruction)
 }
 
 @hide:file
@@ -280,16 +247,18 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     state.function = usize(state.storage[usize(id)].index)
     state.block = ir.BlockId(0)
     state.terminated = false
-    function := &state.module.functions.items[state.function]
-    function.result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
-    function.result_array_type = try array_shape(state, typecheck.type_of(state.checked, declaration.return_type))
+    state.module.functions.items[state.function].result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
+    state.module.functions.items[state.function].result_array_type = try array_shape(state, typecheck.type_of(state.checked, declaration.return_type))
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
-        type :: lower_type(typecheck.type_of(state.checked, parameter))
-        state.storage[usize(parameter)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
-        try arraylist.append(&function.parameters, type)
-        try arraylist.append(&function.locals, type)
-        try prepare_storage(state, state.storage[usize(parameter)].index, try array_shape(state, typecheck.type_of(state.checked, parameter)), true)
+        type :: typecheck.type_of(state.checked, parameter)
+        local :: try ir.add_parameter(
+            state.module,
+            ir.FunctionId(state.function),
+            lower_type(type),
+            try array_shape(state, type),
+        )
+        state.storage[usize(parameter)] = Storage{ kind = .local, index = u32(local) }
     }
     try predeclare_locals(state, declaration.body)
     # signature errors are entry traps; body errors are reached in statement order.
@@ -313,10 +282,14 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
         statement :: ast.block_statement(state.tree, block, i)
         match ast.stmt_kind(state.tree, statement) {
             .declaration: {
-                function := &state.module.functions.items[state.function]
-                state.storage[usize(statement)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
-                try arraylist.append(&function.locals, lower_type(typecheck.type_of(state.checked, statement)))
-                try prepare_storage(state, state.storage[usize(statement)].index, try array_shape(state, typecheck.type_of(state.checked, statement)), true)
+                type :: typecheck.type_of(state.checked, statement)
+                local :: try ir.add_local(
+                    state.module,
+                    ir.FunctionId(state.function),
+                    lower_type(type),
+                    try array_shape(state, type),
+                )
+                state.storage[usize(statement)] = Storage{ kind = .local, index = u32(local) }
             }
             .if_stmt: {
                 conditional :: ast.if_stmt(state.tree, statement)
@@ -326,16 +299,14 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
             .while_stmt: try predeclare_locals(state, ast.while_stmt(state.tree, statement).body)
             .for_stmt: {
                 loop :: ast.for_stmt(state.tree, statement)
-                function := &state.module.functions.items[state.function]
-                slot :: u32(function.locals.items.len)
                 family :: typecheck.type_of(state.checked, loop.iterable).range_element
                 type ir.Type :: if (family == .usize) .usize else .int
-                try arraylist.append(&function.locals, type)
-                state.storage[usize(statement)] = Storage{ kind = .local, index = slot }
+                slot :: try ir.add_local(state.module, ir.FunctionId(state.function), type, ir.no_array)
+                state.storage[usize(statement)] = Storage{ kind = .local, index = u32(slot) }
                 if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
                 if (loop.index) |index| {
-                    state.storage[usize(index)] = Storage{ kind = .local, index = u32(function.locals.items.len) }
-                    try arraylist.append(&function.locals, ir.Type.int)
+                    index_slot :: try ir.add_local(state.module, ir.FunctionId(state.function), .int, ir.no_array)
+                    state.storage[usize(index)] = Storage{ kind = .local, index = u32(index_slot) }
                 }
                 try predeclare_locals(state, loop.body)
             }
@@ -604,8 +575,7 @@ lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
     left :: try lower_expression(state, expression.left)
     if (state.terminated) return ir.no_value
     origin :: state.block
-    slot :: u32(state.module.functions.items[state.function].locals.items.len)
-    try arraylist.append(&state.module.functions.items[state.function].locals, ir.Type.bool)
+    slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .bool, ir.no_array))
     right_block :: try add_block(state)
     skip :: try add_block(state)
     join :: try add_block(state)
