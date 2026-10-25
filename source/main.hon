@@ -203,8 +203,8 @@ print_result proc(output io.Writer, module @ir.Module, value ir.Value) void ! io
 @hide:file
 print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
     match value.type {
-        .int: try io.print("{}", output, {value.data.integer})
-        .usize: try io.print("{}", output, {value.data.unsigned})
+        .int, .i8, .i16, .i32, .isize: try io.print("{}", output, {value.data.integer})
+        .usize, .u8, .u16, .u32, .u64: try io.print("{}", output, {value.data.unsigned})
         .float: try io.print("{d}", output, {value.data.real})
         .bool: try io.print("{}", output, {value.data.boolean})
         .string: try io.print("{s}", output, {ir.string_bytes(module, value.data.string)})

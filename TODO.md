@@ -5,8 +5,10 @@
 ## current boundary
 
 directory packages support file-local import namespaces and postfix declaration
-selection through the interpreter and native backend. the richer types/control
-flow used by the compiler remain unsupported. the driver retains frontend storage
+selection through the interpreter and native backend. concrete 8/16/32/64-bit
+integers and checked numeric conversions work through both execution paths;
+records and the richer types/control flow used by the compiler remain unsupported.
+the driver retains frontend storage
 and source provenance through `@source/compilation`, with compilation-wide AST node identities.
 file commands retain single-file behavior; directory commands compile the
 package's production files and load its dependencies in separate scopes.
@@ -32,6 +34,8 @@ general record fields, imported types, test discovery or FFI.
 ## subsequent dependency gates
 
 - [ ] concrete data models: required integer widths/conversions, records/tuples and construction, fields, enums, distinct/alias types, unions and matching. examples: `source/lexer/token.hon`, `source/sema/resolve.hon`, `std/mem/mem.hon`.
+  - [x] native integer widths (`i8`–`i64`, `u8`–`u64`, `isize`/`usize`) and checked explicit numeric conversions, including float truncation/range checks and integer-to-float rounding. preserve exact types through arrays, calls and range captures; retain strict implicit conversion rules.
+  - [ ] records/tuples and construction, fields, enums, distinct/alias types, unions and matching.
 - [ ] memory representation: source pointers/references, mutable and sentinel slices, optionals, layout/cast builtins and allocator-required libc calls. internal IR array addresses are not source pointers. examples: `std/mem/mem.hon`, `std/arraylist/arraylist.hon`.
 - [ ] fallible results and cleanup: error-set composition, `try`/`catch`, `defer`/`errdefer`; infrastructure errors remain distinct from diagnostic traps. examples: `source/main.hon:41`, `source/sema/check/check.hon:117`.
 - [ ] generic specialization and compile-time execution/reflection sufficient for existing `ArrayList`, hash maps, `enummap`, `meta` and `io.print`; include type/value parameters and compile-time generated storage.

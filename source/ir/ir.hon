@@ -24,6 +24,48 @@ Type :: enum {
     array,
     usize,
     address,
+    i8, i16, i32, isize,
+    u8, u16, u32, u64,
+}
+
+#! integer storage widths for the supported 64-bit target; zero for noninteger types.
+integer_bits proc(type Type) usize {
+    return match type {
+        .i8, .u8: 8
+        .i16, .u16: 16
+        .i32, .u32: 32
+        .int, .isize, .usize, .u64: 64
+        else: 0
+    }
+}
+
+unsigned_integer proc(type Type) bool {
+    return type == .u8 or type == .u16 or type == .u32 or type == .u64 or type == .usize
+}
+
+integer_max proc(type Type) u64 {
+    return match type {
+        .i8: 127
+        .i16: 32767
+        .i32: 2147483647
+        .int, .isize: u64(maxval!(i64))
+        .u8: 255
+        .u16: 65535
+        .u32: 4294967295
+        .u64, .usize: maxval!(u64)
+        else: unreachable
+    }
+}
+
+integer_min proc(type Type) i64 {
+    return match type {
+        .i8: -128
+        .i16: -32768
+        .i32: -2147483648
+        .int, .isize: minval!(i64)
+        .u8, .u16, .u32, .u64, .usize: 0
+        else: unreachable
+    }
 }
 
 ValueData :: union {
@@ -74,6 +116,7 @@ Op :: enum {
     load_address
     store_address
     negate
+    convert
     logical_not
     add
     subtract

@@ -308,15 +308,20 @@ run proc(
                     continue
                 }
             }
+            .convert: {
+                operand :: frames.items[frame_index].values[usize(instruction.left)]
+                if (convert(operand, instruction.type)) |converted| value = converted
+                else return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+            }
             .negate: {
                 operand :: frames.items[frame_index].values[usize(instruction.left)]
                 if instruction.type == .float {
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = -operand.data.real } }
                 } else {
-                    if operand.data.integer == minval!(i64) {
+                    if operand.data.integer == ir.integer_min(instruction.type) {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     }
-                    value = ir.Value{ type = .int, data = ir.ValueData{ integer = -operand.data.integer } }
+                    value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = -operand.data.integer } }
                 }
             }
             .logical_not: {
@@ -336,17 +341,21 @@ run proc(
                         else: unreachable
                     }
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = result } }
-                } else if instruction.type == .usize {
+                } else if ir.unsigned_integer(instruction.type) {
                     result :: checked_unsigned(instruction.op, left.data.unsigned, right.data.unsigned)
                     if result |unsigned| {
-                        value = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = unsigned } }
+                        if (unsigned > ir.integer_max(instruction.type)) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                        value = ir.Value{ type = instruction.type, data = ir.ValueData{ unsigned = unsigned } }
                     } else {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     }
                 } else {
                     result :: checked_integer(instruction.op, left.data.integer, right.data.integer)
                     if result |result_integer| {
-                        value = ir.Value{ type = .int, data = ir.ValueData{ integer = result_integer } }
+                        if (result_integer < ir.integer_min(instruction.type) or result_integer > i64(ir.integer_max(instruction.type))) {
+                            return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                        }
+                        value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = result_integer } }
                     } else {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     }
@@ -357,7 +366,7 @@ run proc(
                 right :: frames.items[frame_index].values[usize(instruction.right)]
                 result := false
                 match left.type {
-                    .int: result = match instruction.op {
+                    .int, .isize, .i8, .i16, .i32: result = match instruction.op {
                         .equal: left.data.integer == right.data.integer
                         .not_equal: left.data.integer != right.data.integer
                         .less: left.data.integer < right.data.integer
@@ -366,7 +375,7 @@ run proc(
                         .greater_equal: left.data.integer >= right.data.integer
                         else: unreachable
                     }
-                    .usize: result = match instruction.op {
+                    .usize, .u8, .u16, .u32, .u64: result = match instruction.op {
                         .equal: left.data.unsigned == right.data.unsigned
                         .not_equal: left.data.unsigned != right.data.unsigned
                         .less: left.data.unsigned < right.data.unsigned
@@ -532,4 +541,48 @@ checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {
         }
         else: unreachable
     }
+}
+
+@hide:file
+convert proc(source ir.Value, target ir.Type) ?ir.Value {
+    result := ir.Value{ type = target }
+    if (target == .float) {
+        if (source.type == .float) result.data = source.data
+        else if (ir.unsigned_integer(source.type)) result.data = ir.ValueData{ real = f64(source.data.unsigned) }
+        else result.data = ir.ValueData{ real = f64(source.data.integer) }
+        return result
+    }
+    if (source.type == .float) {
+        real :: source.data.real
+        # Guard the conversion itself before testing narrower bounds; NaN fails
+        # ordered comparisons, and the upper 64-bit bound is exclusive.
+        if (ir.unsigned_integer(target)) {
+            if (!(real > -1.0 and real < 18446744073709551616.0)) return null
+            integer :: u64(real)
+            if (integer > ir.integer_max(target)) return null
+            result.data = ir.ValueData{ unsigned = integer }
+        } else {
+            if (!(real >= -9223372036854775808.0 and real < 9223372036854775808.0)) return null
+            integer :: i64(real)
+            if (integer < ir.integer_min(target) or integer > i64(ir.integer_max(target))) return null
+            result.data = ir.ValueData{ integer = integer }
+        }
+        return result
+    }
+    if (ir.unsigned_integer(source.type)) {
+        integer :: source.data.unsigned
+        if (integer > ir.integer_max(target)) return null
+        if (ir.unsigned_integer(target)) result.data = ir.ValueData{ unsigned = integer }
+        else result.data = ir.ValueData{ integer = i64(integer) }
+    } else {
+        integer :: source.data.integer
+        if (ir.unsigned_integer(target)) {
+            if (integer < 0 or u64(integer) > ir.integer_max(target)) return null
+            result.data = ir.ValueData{ unsigned = u64(integer) }
+        } else {
+            if (integer < ir.integer_min(target) or integer > i64(ir.integer_max(target))) return null
+            result.data = ir.ValueData{ integer = integer }
+        }
+    }
+    return result
 }

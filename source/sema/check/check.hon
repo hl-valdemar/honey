@@ -18,6 +18,14 @@ TypeKind :: enum {
     range,
     array,
     usize,
+    i8,
+    i16,
+    i32,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
 }
 
 ArrayId :: distinct u32
@@ -84,6 +92,7 @@ Cell :: struct {
     numeric bool = false
     anchored bool = false
     demand TypeKind = .none
+    conversion_unsigned bool = false
     fixed bool = false
     local bool = false
     assignment_value bool = false
@@ -224,6 +233,7 @@ check proc(
         for (0..count) |i| {
             id :: ast.NodeId(i)
             if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            if (conversion_kind(&state, id) != .none) continue
             callee :: ast.call_expr(tree, id).callee
             signature :: try infer_shape(&state, callee, false)
             if (signature.function != ast.NodeId(maxval!(u32))) {
@@ -236,6 +246,7 @@ check proc(
         for (0..count) |i| {
             id :: ast.NodeId(i)
             if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            if (conversion_kind(&state, id) != .none) continue
             callee :: ast.call_expr(tree, id).callee
             signature :: group_type(&state, callee)
             if (signature.function != ast.NodeId(maxval!(u32))) continue
@@ -314,7 +325,8 @@ check proc(
             if (root(&state, i) != i or cells[i].assignment_value != assignment_values) continue
             if (cells[i].type.kind == .invalid) continue
             if (cells[i].numeric and cells[i].anchored) {
-                kind TypeKind :: if (cells[i].demand != .none) cells[i].demand else .int
+                kind TypeKind :: if (cells[i].demand != .none) cells[i].demand
+                    else if (cells[i].conversion_unsigned) .u64 else .int
                 cells[i].type = Type{ kind = kind }
             }
         }
@@ -323,6 +335,7 @@ check proc(
         for (0..count) |i| {
             id :: ast.NodeId(i)
             if (cells[i].role != .expression or cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+            if (conversion_kind(&state, id) != .none) continue
             callee :: ast.call_expr(tree, id).callee
             signature :: group_type(&state, callee)
             if (signature.function != ast.NodeId(maxval!(u32)) or signature.kind == .none or signature.kind == .invalid) continue
@@ -505,6 +518,7 @@ join proc(state @mut State, left, right ast.NodeId) void {
     state.cells[a].numeric = state.cells[a].numeric or state.cells[b].numeric
     state.cells[a].anchored = state.cells[a].anchored or state.cells[b].anchored
     if (state.cells[a].demand == .none) state.cells[a].demand = state.cells[b].demand
+    state.cells[a].conversion_unsigned = state.cells[a].conversion_unsigned or state.cells[b].conversion_unsigned
     if (state.cells[a].literal == ast.NodeId(maxval!(u32))) state.cells[a].literal = state.cells[b].literal
     if (state.cells[a].producer == ast.NodeId(maxval!(u32))) state.cells[a].producer = state.cells[b].producer
 }
@@ -563,14 +577,7 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
     match binding.kind {
         .invalid: type = invalid_type(binding.data.diagnostic)
         .builtin: {
-            type.kind = match binding.data.builtin {
-                .int, .i64: .int
-                .float, .f64: .float
-                .usize: .usize
-                .bool: .bool
-                .string: .string
-                .void: .void
-            }
+            type.kind = builtin_kind(binding.data.builtin)
             if (type.kind == .void and !allow_void) {
                 type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_void_type, ast.node_span(state.tree, id)))
             }
@@ -813,8 +820,16 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         }
         .call: {
             callee :: ast.call_expr(tree, id).callee
-            try collect_expression(state, callee)
-            try depend(state, callee, id)
+            destination :: conversion_kind(state, id)
+            if (destination != .none) {
+                state.cells[usize(callee)].role = .annotation
+                state.cells[usize(callee)].type = Type{ kind = destination }
+                state.types[usize(callee)] = Type{ kind = destination }
+                state.cells[usize(id)].type = Type{ kind = destination }
+            } else {
+                try collect_expression(state, callee)
+                try depend(state, callee, id)
+            }
             for (0..ast.call_arg_count(tree, id)) |i| {
                 argument :: ast.call_arg(tree, id, i)
                 try collect_expression(state, argument)
@@ -850,8 +865,50 @@ declaration_reference proc(tree @ast.Tree, id ast.NodeId) bool {
 }
 
 @hide:file
+integer_kind proc(kind TypeKind) bool {
+    return (
+        kind == .int or kind == .i8 or kind == .i16 or kind == .i32 or kind == .isize
+        or unsigned_kind(kind)
+    )
+}
+
+@hide:file
+unsigned_kind proc(kind TypeKind) bool {
+    return kind == .u8 or kind == .u16 or kind == .u32 or kind == .u64 or kind == .usize
+}
+
+@hide:file
 numeric_kind proc(kind TypeKind) bool {
-    return kind == .int or kind == .float or kind == .usize
+    return integer_kind(kind) or kind == .float
+}
+
+@hide:file
+builtin_kind proc(type sema.BuiltinType) TypeKind {
+    return match type {
+        .int, .i64: .int
+        .float, .f64: .float
+        .i8: .i8
+        .i16: .i16
+        .i32: .i32
+        .isize: .isize
+        .u8: .u8
+        .u16: .u16
+        .u32: .u32
+        .u64, .uint: .u64
+        .usize: .usize
+        .bool: .bool
+        .string: .string
+        .void: .void
+    }
+}
+
+@hide:file
+conversion_kind proc(state @State, id ast.NodeId) TypeKind {
+    callee :: ast.call_expr(state.tree, id).callee
+    binding :: sema.binding(state.resolution, callee)
+    if (binding.kind != .builtin) return .none
+    kind :: builtin_kind(binding.data.builtin)
+    return if (numeric_kind(kind)) kind else .none
 }
 
 @hide:file
@@ -1072,7 +1129,7 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         return
                     }
                     operand :: state.types[usize(expression.operand)]
-                    if (operand.kind != .invalid and (!numeric_kind(operand.kind) or operand.kind == .usize)) {
+                    if (operand.kind != .invalid and (!numeric_kind(operand.kind) or unsigned_kind(operand.kind))) {
                         try fail(state, id, .invalid_operand, ast.node_span(tree, id))
                     }
                 }
@@ -1098,11 +1155,12 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     expression :: ast.range_expr(tree, id)
                     start_type :: state.types[usize(expression.start)]
                     end_type :: state.types[usize(expression.end)]
-                    family TypeKind :: if (start_type.kind == .usize or end_type.kind == .usize) .usize else .int
-                    if (start_type.kind != .invalid and start_type.kind != family) {
+                    family TypeKind :: if (integer_kind(start_type.kind)) start_type.kind
+                        else if (integer_kind(end_type.kind)) end_type.kind else .int
+                    if (start_type.kind != .invalid and (!integer_kind(start_type.kind) or start_type.kind != family)) {
                         try fail(state, expression.start, .invalid_range_bound, ast.node_span(tree, expression.start))
                     }
-                    if (end_type.kind != .invalid and end_type.kind != family) {
+                    if (end_type.kind != .invalid and (!integer_kind(end_type.kind) or end_type.kind != family)) {
                         try fail(state, expression.end, .invalid_range_bound, ast.node_span(tree, expression.end))
                     }
                 }
@@ -1143,6 +1201,19 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
 validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     expression :: ast.call_expr(tree, id)
+    if (conversion_kind(state, id) != .none) {
+        if (ast.call_arg_count(tree, id) != 1) {
+            try fail(state, id, .argument_count_mismatch, expression.span)
+        }
+        for 0..ast.call_arg_count(tree, id) |i| {
+            argument :: ast.call_arg(tree, id, i)
+            actual :: state.types[usize(argument)]
+            if (actual.kind != .invalid and !numeric_kind(actual.kind)) {
+                try fail(state, argument, .invalid_operand, ast.node_span(tree, argument))
+            }
+        }
+        return
+    }
     callee :: state.types[usize(expression.callee)]
     signature :: group_type(state, expression.callee)
     if (signature.function == ast.NodeId(maxval!(u32))) {
@@ -1219,9 +1290,7 @@ constant_integer proc(state @mut State, id ast.NodeId) ?ConstantInteger {
             if (declaration.mutability != .constant) return null
             if (declaration.type) |annotation| {
                 type_binding :: sema.binding(state.resolution, annotation)
-                if (type_binding.kind != .builtin) return null
-                kind :: type_binding.data.builtin
-                if (kind != .int and kind != .i64 and kind != .usize) return null
+                if (type_binding.kind != .builtin or !integer_kind(builtin_kind(type_binding.data.builtin))) return null
             }
             return constant_integer(state, declaration.initializer)
         }
@@ -1338,6 +1407,13 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     if (state.cells[index].type.kind == .invalid) return state.cells[index].type
     state.cells[index].visiting = true
     defer state.cells[index].visiting = false
+    if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .call) {
+        destination :: conversion_kind(state, id)
+        if (destination != .none) {
+            seed(state, id, Type{ kind = destination })
+            return group_type(state, id)
+        }
+    }
     if (state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)) {
         binding :: sema.binding(state.resolution, id)
         if (binding.kind == .declaration) {
@@ -1435,6 +1511,17 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
             if (mutable_target(state, view.target)) try context_demand(state, view.value, state.types[usize(view.target)], .type_mismatch, early)
         }
         if (state.cells[i].role != .expression or state.cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
+        if (conversion_kind(state, id) != .none) {
+            for 0..ast.call_arg_count(tree, id) |j| {
+                argument :: ast.call_arg(tree, id, j)
+                if (constant_integer(state, argument)) |value| {
+                    if (!value.negative and value.magnitude > u64(maxval!(i64))) {
+                        state.cells[root(state, usize(argument))].conversion_unsigned = true
+                    }
+                }
+            }
+            continue
+        }
         signature :: group_type(state, ast.call_expr(tree, id).callee)
         if (signature.function == ast.NodeId(maxval!(u32))) continue
         count :: ast.function_param_count(tree, signature.function)
@@ -1448,7 +1535,7 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
 
 @hide:file
 context_demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Code, early bool) void ! (mem.AllocError | diagnostics.CapacityError) {
-    if (early and expected.kind != .array and expected.kind != .usize) return
+    if (early and expected.kind != .array and !integer_kind(expected.kind)) return
     try demand(state, id, expected, code)
 }
 
@@ -1466,8 +1553,8 @@ bound_family proc(state @mut State, id ast.NodeId) TypeKind {
     left :: bound_family(state, view.left)
     right :: bound_family(state, view.right)
     if (left == .float or right == .float) return .float
-    if (left == .usize or right == .usize) return .usize
-    if (left == .int or right == .int) return .int
+    if (integer_kind(left)) return left
+    if (integer_kind(right)) return right
     return .none
 }
 
@@ -1480,7 +1567,7 @@ prepare_ranges proc(state @mut State, assignment_values, constrain bool) void ! 
         view :: ast.range_expr(tree, id)
         left :: bound_family(state, view.start)
         right :: bound_family(state, view.end)
-        family TypeKind :: if (left == .usize or right == .usize) .usize else .int
+        family TypeKind :: if (integer_kind(left)) left else if (integer_kind(right)) right else .int
         if (constrain) {
             try range_bound_context(state, view.start, family)
             try range_bound_context(state, view.end, family)

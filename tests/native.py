@@ -230,6 +230,120 @@ CASES = {
     ),
 }
 
+# Exercise each representation through storage, calls, ranges and checked updates.
+for integer_type, bits, signed in (
+    ("i8", 8, True), ("i16", 16, True), ("i32", 32, True),
+    ("i64", 64, True), ("isize", 64, True),
+    ("u8", 8, False), ("u16", 16, False), ("u32", 32, False),
+    ("u64", 64, False), ("usize", 64, False),
+):
+    minimum = -(1 << (bits - 1)) if signed else 0
+    maximum = (1 << (bits - int(signed))) - 1
+    CASES[f"{integer_type}_storage"] = (
+        f"""
+        seed [2]mut {integer_type} :: [{minimum}, {maximum}]
+        identity proc(a [2]mut {integer_type}) [2]mut {integer_type} {{ return a }}
+        main proc() [2]mut {integer_type} {{
+            a := identity(seed)
+            b := a
+            a[0] = 1
+            return b
+        }}
+        """, f"[{minimum}, {maximum}]\n".encode(), None,
+    )
+    CASES[f"{integer_type}_inclusive_max"] = (
+        f"""
+        main proc() int {{
+            start {integer_type} :: {maximum - 1}
+            end {integer_type} :: {maximum}
+            count := 0
+            for start..=end |i| {{
+                if (i < start) return -1
+                count = count + 1
+                continue
+            }}
+            return count
+        }}
+        """, b"2\n", None,
+    )
+    for operation, left, right in (
+        ("+", maximum, 1), ("-", minimum, 1), ("*", maximum, 2),
+    ):
+        CASES[f"{integer_type}_overflow_{operation}"] = (
+            f"main proc() {integer_type} {{ a {integer_type} :: {left}\nreturn a {operation} {right} }}",
+            b"", b"integer arithmetic overflow",
+        )
+    CASES[f"{integer_type}_literal_range"] = (
+        f"main proc() {integer_type} {{ return {maximum + 1} }}",
+        b"", b"numeric literal is outside",
+    )
+    if signed:
+        CASES[f"{integer_type}_negate_min"] = (
+            f"main proc() {integer_type} {{ a {integer_type} :: {minimum}\nreturn -a }}",
+            b"", b"integer arithmetic overflow",
+        )
+
+CASES.update({
+    "integer_casts": (
+        """
+        identity proc(n u8) u8 { return n }
+        main proc() [4]i64 {
+            large u64 :: 18446744073709551615
+            small := identity(u8(i16(255)))
+            if (large != u64(18446744073709551615)) return [0, 0, 0, 0]
+            return [i64(small), i64(i8(-128)), i64(u32(4294967295)), i64(u8(255))]
+        }
+        """,
+        b"[255, -128, 4294967295, 255]\n", None,
+    ),
+    "cast_unsigned_max": ("main proc() u64 { return u64(18446744073709551615) }", b"18446744073709551615\n", None),
+    "cast_float_rounding": ("main proc() f64 { return f64(9007199254740993) - 9007199254740992.0 }", b"0\n", None),
+    "cast_fractional": ("main proc() [4]i64 { return [i64(i8(-128.9)), i64(u8(-0.9)), i64(u8(255.9)), i64(i8(127.9))] }", b"[-128, 0, 255, 127]\n", None),
+    "cast_float_u64_max_below": ("main proc() u64 { return u64(18446744073709549568.0) }", b"18446744073709549568\n", None),
+    "cast_float_i64_min": ("main proc() i64 { return i64(-9223372036854775808.0) }", b"-9223372036854775808\n", None),
+    "cast_unused_trap": ("bad proc() u8 { return u8(256) }\nmain proc() int { return 42 }", b"42\n", None),
+    "cast_short_circuit": ("main proc() bool { return true or u8(256) == 0 }", b"true\n", None),
+    "cast_bool_invalid": ("main proc() u8 { return u8(true) }", b"", b""),
+    "cast_zero_arguments": ("main proc() u8 { return u8() }", b"", b"argument count"),
+    "cast_extra_arguments": ("main proc() u8 { return u8(1, 2) }", b"", b"argument count"),
+    "cast_type_as_value": ("main proc() int { u8\nreturn 42 }", b"", b"type name cannot"),
+    "integer_no_implicit_narrowing": ("main proc() u8 { a u16 :: 1\nreturn a }", b"", b"return does not match"),
+    "integer_no_implicit_signedness": ("main proc() i8 { a u8 :: 1\nreturn a }", b"", b"return does not match"),
+    "integer_no_implicit_widening": ("main proc() u16 { a u8 :: 1\nreturn a }", b"", b"return does not match"),
+    "integer_assignment_cast": (
+        "main proc() u8 { a u8 := 1\nb u16 :: 254\na = u8(b + 1)\nreturn a }",
+        b"255\n", None,
+    ),
+    "integer_function_value": (
+        "identity proc(n i16) i16 { return n }\nmain proc() i16 { f :: identity\nreturn f(i16(-32768)) }",
+        b"-32768\n", None,
+    ),
+    "integer_typed_float_cast": (
+        "main proc() f64 { a u64 :: 18446744073709551615\nreturn f64(a) - 18446744073709551616.0 }",
+        b"0\n", None,
+    ),
+    "integer_bad_index": ("main proc() i64 { a :: [42]\ni u8 :: 0\nreturn a[i] }", b"", b"array index must have type usize"),
+    "integer_cast_index": ("main proc() i64 { a :: [42]\ni u8 :: 0\nreturn a[usize(i)] }", b"42\n", None),
+    "integer_cast_unknown": ("main proc() u8 { return u8(missing) }", b"", b"unknown name"),
+    "integer_cast_bad_unused": ("bad proc() u8 { return u8(true) }\nmain proc() int { return 42 }", b"42\n", b""),
+})
+for name, expression in {
+    "narrow": "u8(256)",
+    "signed_negative": "u8(-1)",
+    "signed_high": "i8(128)",
+    "unsigned_to_signed": "i64(u64(18446744073709551615))",
+    "float_high": "u8(256.0)",
+    "float_low": "i8(-129.0)",
+    "float_unsigned_negative": "u8(-1.0)",
+    "float_signed_limit": "i64(9223372036854775808.0)",
+    "float_unsigned_limit": "u64(18446744073709551616.0)",
+    "nan": "i32(0.0 / 0.0)",
+    "infinity": "u32(1.0 / 0.0)",
+}.items():
+    CASES[f"cast_trap_{name}"] = (
+        f"main proc() i64 {{ return i64({expression}) }}", b"", b"integer arithmetic overflow",
+    )
+
 
 def run(*args, env=None):
     return subprocess.run(args, cwd=ROOT, capture_output=True, timeout=30, env=env)
@@ -245,9 +359,9 @@ def check(source, executable, expected=None):
     if expected is not None:
         stdout, error = expected
         assert interpreted.stdout == stdout, (source.name, outcome(interpreted), stdout)
-        assert interpreted.returncode == (1 if error else 0), outcome(interpreted)
-        if error:
-            assert error in interpreted.stderr, outcome(interpreted)
+        assert interpreted.returncode == (1 if error is not None else 0), outcome(interpreted)
+        if error is not None:
+            assert interpreted.stderr and error in interpreted.stderr, outcome(interpreted)
     for optimization in ("-O0", "-O2"):
         built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
         assert built.returncode in (0, 1), (source.name, optimization, outcome(built))

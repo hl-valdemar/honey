@@ -126,6 +126,14 @@ lower_type proc(type typecheck.Type) ir.Type {
     return match type.kind {
         .int: .int
         .usize: .usize
+        .i8: .i8
+        .i16: .i16
+        .i32: .i32
+        .isize: .isize
+        .u8: .u8
+        .u16: .u16
+        .u32: .u32
+        .u64: .u64
         .array: .array
         .float: .float
         .bool: .bool
@@ -325,7 +333,7 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
             .for_stmt: {
                 loop :: ast.for_stmt(state.tree, statement)
                 family :: typecheck.type_of(state.checked, loop.iterable).range_element
-                type ir.Type :: if (family == .usize) .usize else .int
+                type :: lower_type(typecheck.Type{ kind = family })
                 slot :: try ir.add_local(state.module, ir.FunctionId(state.function), type, ir.no_array)
                 state.storage[usize(statement)] = Storage{ kind = .local, index = u32(slot) }
                 if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
@@ -498,8 +506,8 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
         kind = .branch, value = finished, target = exit, alternative = increment, span = interval.span,
     }
     state.block = increment
-    unit := ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } }
-    if (family == .usize) unit = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = 1 } }
+    unit := ir.Value{ type = family, data = ir.ValueData{ integer = 1 } }
+    if (ir.unsigned_integer(family)) unit.data = ir.ValueData{ unsigned = 1 }
     one :: try constant(state, unit, interval.span)
     next :: try emit(state, ir.Instruction{ op = .add, type = family, left = last, right = one, span = interval.span })
     _ = try emit(state, ir.Instruction{ op = .store_local, type = family, left = next, slot = slot, span = interval.span })
@@ -776,11 +784,12 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .unary: {
             expression :: ast.unary_expr(tree, id)
-            if (expression.operator == .negate and type == .int and ast.expr_kind(tree, expression.operand) == .literal_int) {
+            if (expression.operator == .negate and ir.integer_bits(type) != 0 and !ir.unsigned_integer(type) and ast.expr_kind(tree, expression.operand) == .literal_int) {
                 text :: ast.source_text(tree, ast.node_span(tree, expression.operand))
-                if (integer_magnitude(text, u64(maxval!(i64)) + 1)) |magnitude| {
-                    if (magnitude == u64(maxval!(i64)) + 1) {
-                        return try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = minval!(i64) } }, span)
+                magnitude_limit :: ir.integer_max(type) + 1
+                if (integer_magnitude(text, magnitude_limit)) |magnitude| {
+                    if (magnitude == magnitude_limit) {
+                        return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = ir.integer_min(type) } }, span)
                     }
                 }
             }
@@ -817,6 +826,17 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
         .call: {
+            target :: sema.binding(state.resolution, ast.call_expr(tree, id).callee)
+            if (target.kind == .builtin) {
+                operand := ir.no_value
+                for (0..ast.call_arg_count(tree, id)) |i| {
+                    value :: try lower_expression(state, ast.call_arg(tree, id, i))
+                    if (state.terminated) return ir.no_value
+                    if (i == 0) operand = value
+                }
+                if (trap_type(state, id)) return ir.no_value
+                return try emit(state, ir.Instruction{ op = .convert, type = type, left = operand, span = span })
+            }
             callee :: try lower_expression(state, ast.call_expr(tree, id).callee)
             if (state.terminated) return ir.no_value
             # recursion borrows later scratch slots; no items pointer survives a child.
@@ -856,7 +876,7 @@ integer_magnitude proc(text []u8, limit u64) ?u64 {
     for (text) |byte| {
         if (byte < '0' or byte > '9') return null
         digit :: u64(byte - '0')
-        if (value > divtrunc!(limit - digit, u64(10))) return null
+        if (digit > limit or value > divtrunc!(limit - digit, u64(10))) return null
         value = value * 10 + digit
     }
     return value
@@ -878,13 +898,13 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     span :: ast.node_span(state.tree, id)
     text :: ast.source_text(state.tree, span)
     type :: lower_type(typecheck.type_of(state.checked, id))
-    if (type == .int) {
-        if (integer_magnitude(text, u64(maxval!(i64)))) |magnitude| {
-            return try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = i64(magnitude) } }, span)
+    if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
+        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
+            return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
         }
-    } else if (type == .usize) {
-        if (integer_magnitude(text, maxval!(u64))) |magnitude| {
-            return try constant(state, ir.Value{ type = .usize, data = ir.ValueData{ unsigned = magnitude } }, span)
+    } else if (ir.unsigned_integer(type)) {
+        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
+            return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
         }
     } else {
         value :: strconv.parse_float(state.module.allocator, text) catch |err| {

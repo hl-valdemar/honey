@@ -123,7 +123,10 @@ bytes_constant proc(output io.Writer, bytes []u8) void ! io.WriteError {
 @hide
 write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
     match type.kind {
-        .int, .usize: try io.write_all(output, "i64")
+        .i8, .u8: try io.write_all(output, "i8")
+        .i16, .u16: try io.write_all(output, "i16")
+        .i32, .u32: try io.write_all(output, "i32")
+        .int, .isize, .u64, .usize: try io.write_all(output, "i64")
         .float: try io.write_all(output, "double")
         .bool: try io.write_all(output, "i1")
         .string: try io.write_all(output, "%string")
@@ -243,7 +246,15 @@ emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index us
 @hide:file
 print_call proc(output io.Writer, module @ir.Module, type Type, operand []u8) void ! io.WriteError {
     match type.kind {
-        .int, .usize: try io.print("  call void @print_integer(i32 1, i64 {s}, i1 {})\n", output, {operand, type.kind == .usize})
+        .i8, .i16, .i32, .int, .isize, .u8, .u16, .u32, .u64, .usize: {
+            bits :: ir.integer_bits(type.kind)
+            unsigned :: ir.unsigned_integer(type.kind)
+            if (bits < 64) {
+                extension []u8 :: if (unsigned) "zext" else "sext"
+                try io.print("  %print_value = {s} i{} {s} to i64\n", output, {extension, bits, operand})
+                try io.print("  call void @print_integer(i32 1, i64 %print_value, i1 {})\n", output, {unsigned})
+            } else try io.print("  call void @print_integer(i32 1, i64 {s}, i1 {})\n", output, {operand, unsigned})
+        }
         .float: try io.print("  call void @print_float(double {s})\n", output, {operand})
         .bool: try io.print("  call void @print_bool(i1 {s})\n", output, {operand})
         .string: try io.print("  call void @print_string(%string {s})\n", output, {operand})
@@ -334,8 +345,8 @@ check_failure proc(state @mut State, condition usize, code diagnostics.Code, spa
 @hide
 write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
     match value.type {
-        .int: try io.print("{}", output, {value.data.integer})
-        .usize: try io.print("{}", output, {value.data.unsigned})
+        .i8, .i16, .i32, .int, .isize: try io.print("{}", output, {value.data.integer})
+        .u8, .u16, .u32, .u64, .usize: try io.print("{}", output, {value.data.unsigned})
         .float: {
             bits :: ptrcast!(@u64, &value.data.real)^
             try io.print("bitcast (i64 {} to double)", output, {bits})

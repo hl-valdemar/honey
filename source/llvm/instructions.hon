@@ -136,6 +136,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             }
             try io.write_all(output, ")\n")
         }
+        .convert: result = try emit_conversion(state, instruction)
         .negate: {
             operand :: try load(state, instruction.left)
             if (instruction.type == .float) {
@@ -143,10 +144,12 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             } else {
                 pair :: fresh(state)
                 overflow :: fresh(state)
-                try io.print("  %r{} = call {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64 0, i64 %r{})\n", output, {pair, operand})
-                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 1\n", output, {overflow, pair})
+                bits :: ir.integer_bits(instruction.type)
+                sign []u8 :: if (ir.unsigned_integer(instruction.type)) "u" else "s"
+                try io.print("  %r{} = call {{ i{}, i1 }} @llvm.{s}sub.with.overflow.i{}(i{} 0, i{} %r{})\n", output, {pair, bits, sign, bits, bits, bits, operand})
+                try io.print("  %r{} = extractvalue {{ i{}, i1 }} %r{}, 1\n", output, {overflow, bits, pair})
                 try check_failure(state, overflow, .integer_overflow, instruction.span)
-                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 0\n", output, {result, pair})
+                try io.print("  %r{} = extractvalue {{ i{}, i1 }} %r{}, 0\n", output, {result, bits, pair})
             }
         }
         .logical_not: {
@@ -172,13 +175,14 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                     .multiply: "mul"
                     else: unreachable
                 }
-                sign []u8 :: if (instruction.type == .usize) "u" else "s"
+                bits :: ir.integer_bits(instruction.type)
+                sign []u8 :: if (ir.unsigned_integer(instruction.type)) "u" else "s"
                 pair :: fresh(state)
                 overflow :: fresh(state)
-                try io.print("  %r{} = call {{ i64, i1 }} @llvm.{s}{s}.with.overflow.i64(i64 %r{}, i64 %r{})\n", output, {pair, sign, opcode, left, right})
-                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 1\n", output, {overflow, pair})
+                try io.print("  %r{} = call {{ i{}, i1 }} @llvm.{s}{s}.with.overflow.i{}(i{} %r{}, i{} %r{})\n", output, {pair, bits, sign, opcode, bits, bits, left, bits, right})
+                try io.print("  %r{} = extractvalue {{ i{}, i1 }} %r{}, 1\n", output, {overflow, bits, pair})
                 try check_failure(state, overflow, .integer_overflow, instruction.span)
-                try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 0\n", output, {result, pair})
+                try io.print("  %r{} = extractvalue {{ i{}, i1 }} %r{}, 0\n", output, {result, bits, pair})
             }
         }
         .equal, .not_equal, .less, .less_equal, .greater, .greater_equal: {
@@ -199,7 +203,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             } else {
                 prefix []u8 := ""
                 if (instruction.op != .equal and instruction.op != .not_equal) {
-                    if (operand_type.kind == .usize) prefix = "u"
+                    if (ir.unsigned_integer(operand_type.kind)) prefix = "u"
                     else prefix = "s"
                 }
                 predicate []u8 :: match instruction.op {
@@ -218,4 +222,70 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         }
     }
     try store(state, instruction.destination, result)
+}
+
+@hide:file
+emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.WriteError {
+    output :: state.output
+    source :: state.values[usize(instruction.left)].kind
+    destination :: instruction.type
+    operand :: try load(state, instruction.left)
+    if (source == .float and destination == .float) return operand
+    source_bits :: ir.integer_bits(source)
+    destination_bits :: ir.integer_bits(destination)
+    source_unsigned :: ir.unsigned_integer(source)
+    destination_unsigned :: ir.unsigned_integer(destination)
+    if (destination == .float) {
+        result :: fresh(state)
+        opcode []u8 :: if (source_unsigned) "uitofp" else "sitofp"
+        try io.print("  %r{} = {s} i{} %r{} to double\n", output, {result, opcode, source_bits, operand})
+        return result
+    }
+    if (source == .float) {
+        # compare the truncated value before fptosi/fptoui, whose out-of-range result is poison.
+        truncated :: fresh(state)
+        lower_valid :: fresh(state)
+        upper_valid :: fresh(state)
+        valid :: fresh(state)
+        failed :: fresh(state)
+        upper []u8 :: match destination {
+            .i8: "1.280000e+02"
+            .i16: "3.276800e+04"
+            .i32: "2.147483648e+09"
+            .int, .isize: "9.223372036854775808e+18"
+            .u8: "2.560000e+02"
+            .u16: "6.553600e+04"
+            .u32: "4.294967296e+09"
+            .u64, .usize: "1.8446744073709551616e+19"
+            else: unreachable
+        }
+        try io.print("  %r{} = call double @llvm.trunc.f64(double %r{})\n", output, {truncated, operand})
+        if (destination_unsigned) try io.print("  %r{} = fcmp oge double %r{}, 0.0\n", output, {lower_valid, truncated})
+        else try io.print("  %r{} = fcmp oge double %r{}, -{s}\n", output, {lower_valid, truncated, upper})
+        try io.print("  %r{} = fcmp olt double %r{}, {s}\n", output, {upper_valid, truncated, upper})
+        try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {valid, lower_valid, upper_valid})
+        try io.print("  %r{} = xor i1 %r{}, true\n", output, {failed, valid})
+        try check_failure(state, failed, .integer_overflow, instruction.span)
+        result :: fresh(state)
+        opcode []u8 :: if (destination_unsigned) "fptoui" else "fptosi"
+        try io.print("  %r{} = {s} double %r{} to i{}\n", output, {result, opcode, truncated, destination_bits})
+        return result
+    }
+    if (!source_unsigned and (destination_unsigned or destination_bits < source_bits)) {
+        failed :: fresh(state)
+        try io.print("  %r{} = icmp slt i{} %r{}, {}\n", output, {failed, source_bits, operand, ir.integer_min(destination)})
+        try check_failure(state, failed, .integer_overflow, instruction.span)
+    }
+    if (destination_bits < source_bits or (source_unsigned and !destination_unsigned and destination_bits == source_bits)) {
+        failed :: fresh(state)
+        predicate []u8 :: if (source_unsigned) "ugt" else "sgt"
+        try io.print("  %r{} = icmp {s} i{} %r{}, {}\n", output, {failed, predicate, source_bits, operand, ir.integer_max(destination)})
+        try check_failure(state, failed, .integer_overflow, instruction.span)
+    }
+    if (source_bits == destination_bits) return operand
+    result :: fresh(state)
+    opcode []u8 := "trunc"
+    if (source_bits < destination_bits) opcode = if (source_unsigned) "zext" else "sext"
+    try io.print("  %r{} = {s} i{} %r{} to i{}\n", output, {result, opcode, source_bits, operand, destination_bits})
+    return result
 }
