@@ -67,3 +67,54 @@ keeps_package_declarations_distinct_and_ir_independent test {
     try testing.expect_equal(i64(42), left_result.value.data.integer)
     try testing.expect_equal(i64(6), right_result.value.data.integer)
 }
+
+dependency_traps_keep_original_spans_and_remain_demand_driven test {
+    mains [2][]u8 :: [
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.fail(false) }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.fail(true) }\n",
+    ]
+    prefix :: "\nfail proc(take bool) int {\n    if take {\n        return "
+    for (mains) |main, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module ir.Module := undefined
+        dependency_source SourceId := undefined
+        original diagnostics.DiagnosticId := undefined
+        {
+            session := init(mem.c_allocator)
+            defer deinit(&session)
+            root :: try add_package(&session)
+            dependency :: try add_package(&session)
+            root_bytes := try owned_text(main)
+            defer arraylist.deinit(&root_bytes)
+            dependency_bytes := try owned_text(
+                "\nfail proc(take bool) int {\n    if take {\n        return missing\n    }\n    return 42\n}\n",
+            )
+            defer arraylist.deinit(&dependency_bytes)
+            root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
+            dependency_source = try add_source(&session, dependency, "dependency/fail.hon", &dependency_bytes, &diagnostic_store)
+            try arraylist.append(&session.imports, Import{
+                node = declaration(&session, root_source, 0).node,
+                target = dependency,
+            })
+            module = try compile(&session, root, &diagnostic_store)
+        }
+        defer ir.deinit(&module)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        original = diagnostics.DiagnosticId(0)
+        diagnostic :: diagnostics.get(&diagnostic_store, original)?
+        try testing.expect_equal(diagnostics.Code.unknown_name, diagnostic.code)
+        try testing.expect_equal(dependency_source, diagnostic.span.source)
+        try testing.expect_equal(u32(prefix.len), diagnostic.span.start)
+        try testing.expect_equal(u32(prefix.len + 7), diagnostic.span.end)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        if (index == 0) {
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(i64(42), outcome.value.data.integer)
+        } else {
+            try testing.expect_equal(original, outcome.trap?)
+        }
+    }
+}

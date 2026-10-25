@@ -22,7 +22,7 @@ needs records, pointers, generics and C calls.
 - [x] load directory packages once per canonical path, with deterministic file discovery, package scopes and root-only entry selection. follow Bro's existing relative and project-root `@` import rules; diagnose cycles rather than recurse indefinitely.
 - [x] finish postfix namespace selection and resolve file-local import aliases without injecting dependency names into the importing package; bare and aliased import declarations are already parsed for dependency discovery.
 - [x] reuse ordinary scalar signature checking, function values and IR calls for selected declarations; namespaces have no runtime representation.
-- [ ] preserve originating filenames and spans in dependency diagnostics and native runtime traps; retain demand-driven diagnostic recovery.
+- [x] preserve originating filenames and spans in dependency diagnostics and native runtime traps; retain demand-driven diagnostic recovery.
 - [ ] verify sibling source files, transitive/shared imports, same-spelled declarations in different packages, alias conflicts, missing packages/members, argument errors and dependency-file diagnostics. preserve existing single-file commands.
 
 visibility follows Bro's public-by-default contract; unsupported visibility

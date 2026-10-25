@@ -429,6 +429,70 @@ fail proc() int { return 9223372036854775807 + 1 }
     return len(cases) + 4
 
 
+def check_dependency_provenance(temporary, executable):
+    project = temporary / "provenance"
+    app = project / "app"
+    dependency = project / "dependency"
+    app.mkdir(parents=True)
+    dependency.mkdir()
+    main = app / "main.hon"
+    source = dependency / "diagnostic.hon"
+    # A transitive call must report the leaf's location, not either importing file.
+    bridge = project / "bridge"
+    bridge.mkdir()
+    (bridge / "main.hon").write_text(
+        'import "../dependency"\nfail proc() int { return dependency.fail() }\n'
+    )
+    cases = [
+        ("fail proc() int {\n    return `\n}\n", 4, 12, True),
+        ("fail proc() int {\n    return (1\n}\n", 4, 14, True),
+        ("fail proc() int {\n    text :: \"é\" return missing\n}\n", 4, 25, True),
+        ("fail proc() int {\n    if (1) return 0\n    return 42\n}\n", 4, 9, True),
+        ("fail proc() int {\n    return 9223372036854775808\n}\n", 4, 12, True),
+        ("fail proc() int {\n    return 9223372036854775807 + 1\n}\n", 4, 12, False),
+        ("fail proc() int {\n    a :: [42]\n    return a[1]\n}\n", 5, 12, False),
+        ("fail proc() int {\n    before :: after\n    after :: 42\n    return before\n}\n", 4, 15, False),
+        ("a int :: b\nb int :: a\nfail proc() int { return a }\n", 4, 10, False),
+    ]
+    for text, line, column, static in cases:
+        source.write_text("\n# utf8: é\n" + text)
+        location = f"{source.resolve()}:{line}:{column}: ".encode()
+        for reached in (False, True):
+            main.write_text(
+                'import "../bridge"\nmain proc() int {\n'
+                f'    if ({str(reached).lower()}) return bridge.fail()\n'
+                '    return 42\n}\n'
+            )
+            interpreted = run(str(HONEY), "run", str(app))
+            assert interpreted.returncode == int(static or reached), outcome(interpreted)
+            assert interpreted.stdout == (b"" if reached else b"42\n"), outcome(interpreted)
+            if static or reached:
+                label = b"runtime trap: " if reached else b"error: "
+                assert interpreted.stderr.startswith(location + label), outcome(interpreted)
+                assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+            else:
+                assert interpreted.stderr == b"", outcome(interpreted)
+            emitted = run(str(HONEY), "emit-llvm", str(app))
+            assert emitted.returncode == int(static), outcome(emitted)
+            expected_diagnostics = interpreted.stderr.replace(b"runtime trap: ", b"error: ") if static else b""
+            assert emitted.stderr == expected_diagnostics, outcome(emitted)
+            for optimization in ("-O0", "-O2"):
+                built = run(str(HONEY), "build", str(app), "-o", str(executable), optimization)
+                assert outcome(built) == (int(static), b"", expected_diagnostics), outcome(built)
+                # Generated diagnostics must not reopen sources at runtime.
+                hidden = project.with_name("hidden-provenance")
+                project.rename(hidden)
+                try:
+                    compiled = run(str(executable))
+                    assert outcome(compiled) == outcome(interpreted), (
+                        optimization, outcome(interpreted), outcome(compiled)
+                    )
+                finally:
+                    hidden.rename(project)
+                    executable.unlink()
+    return len(cases) * 2
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -444,6 +508,7 @@ def main():
             count += 1
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
+        count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))
         assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
