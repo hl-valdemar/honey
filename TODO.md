@@ -11,10 +11,10 @@ and source provenance through `@source/compilation`, with compilation-wide AST n
 file commands retain single-file behavior; directory commands compile the
 package's production files and load its dependencies in separate scopes.
 
-## next milestone: scalar-function packages
+## completed milestone: scalar-function packages
 
-compile and run a small multi-file directory package importing a second package
-of scalar functions, through both the interpreter and native backend.
+verified: compile and run a small multi-file directory package importing a second
+package of scalar functions, through both the interpreter and native backend.
 using the existing standard library is a later acceptance gate: even `std/mem`
 needs records, pointers, generics and C calls.
 
@@ -23,7 +23,7 @@ needs records, pointers, generics and C calls.
 - [x] finish postfix namespace selection and resolve file-local import aliases without injecting dependency names into the importing package; bare and aliased import declarations are already parsed for dependency discovery.
 - [x] reuse ordinary scalar signature checking, function values and IR calls for selected declarations; namespaces have no runtime representation.
 - [x] preserve originating filenames and spans in dependency diagnostics and native runtime traps; retain demand-driven diagnostic recovery.
-- [ ] verify sibling source files, transitive/shared imports, same-spelled declarations in different packages, alias conflicts, missing packages/members, argument errors and dependency-file diagnostics. preserve existing single-file commands.
+- [x] verify sibling source files, transitive/shared imports, same-spelled declarations in different packages, alias conflicts, missing packages/members, argument errors and dependency-file diagnostics. preserve existing single-file commands.
 
 visibility follows Bro's public-by-default contract; unsupported visibility
 attributes must be diagnosed, never ignored. this milestone does not include

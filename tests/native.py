@@ -364,6 +364,7 @@ sibling proc(n int) int { return n * 2 + right.helper() - 1 }
     put("left/main.hon", """
 import "../shared"
 helper proc() int { return shared.helper() - 2 }
+identity proc(n int) int { return n }
 main proc() int { return 99 }
 """)
     put("right/main.hon", """
@@ -371,11 +372,14 @@ import "../shared-link"
 helper proc() int { return shared.helper() - 1 }
 """)
     dependency = put("shared/main.hon", """
-value :: 3
 helper proc() int { return value }
-identity proc(n f64) f64 { return n }
 fail proc() int { return 9223372036854775807 + 1 }
 """)
+    put("shared/zfunctions.bro", """
+value :: 3
+identity proc(n f64) f64 { return n }
+""")
+    put("shared/ignored.test.bro", "this is deliberately not valid source\n")
     (project / "shared-link").symlink_to(project / "shared", target_is_directory=True)
     app = main.parent
     check(app, executable, (b"42\n", None))
@@ -386,6 +390,13 @@ fail proc() int { return 9223372036854775807 + 1 }
         ('import "../left"\nmain proc() int { return left.helper() }', b"1\n", None),
         ('lib :: import "../shared"\nmain proc() f64 { f :: lib.identity\nreturn f(1.5) }', b"1.5\n", None),
         ('lib :: import "../shared"\nmain proc() int { return lib.value }', b"3\n", None),
+        ("""
+import "../left"
+import "../shared"
+main proc() bool {
+    return left.identity(41) == 41 and shared.identity(1.5) == 1.5
+}
+""", b"true\n", None),
         ('lib :: import "../shared"\nmain proc() int { return lib.absent() }', b"", b"unknown name"),
         ('lib :: import "../shared"\nmain proc() int { return helper() }', b"", b"unknown name"),
         ('import "../left"\nmain proc() int { return left.shared.helper() }', b"", b"unknown name"),
@@ -426,7 +437,19 @@ fail proc() int { return 9223372036854775807 + 1 }
     check(app, executable, (b"", b"integer arithmetic overflow"))
     trapped = run(str(HONEY), "run", str(app))
     assert str(dependency.resolve()).encode() + b":2:" in trapped.stderr, outcome(trapped)
-    return len(cases) + 4
+    # File commands still load dependency siblings, but never their own siblings.
+    single = put("single/main.bro", """
+import "../shared"
+main proc() f64 { return shared.identity(42) }
+""")
+    put("single/poison.hon", """
+main proc() int { return missing }
+""")
+    check(single, executable, (b"42\n", None))
+    emitted = run(str(HONEY), "emit-llvm", str(single))
+    assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
+    check(single.parent, executable, (b"42\n", b"duplicate name"))
+    return len(cases) + 6
 
 
 def check_dependency_provenance(temporary, executable):
