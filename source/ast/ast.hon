@@ -4,7 +4,7 @@
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
 #! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr ('..' | '..=') expr
-#! * decl ..... -> identifier [type] binding expr
+#! * decl ..... -> identifier [type] binding expr | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
@@ -48,19 +48,22 @@ ExprKind :: enum {
 }
 
 DeclKind :: enum {
-    statement, function, invalid
+    statement
+    function
+    import
+    invalid
 }
 
 StmtKind :: enum {
-    declaration,
-    expression,
-    assignment_stmt,
-    return_stmt,
-    break_stmt,
-    continue_stmt,
-    if_stmt,
-    while_stmt,
-    for_stmt,
+    declaration
+    expression
+    assignment_stmt
+    return_stmt
+    break_stmt
+    continue_stmt
+    if_stmt
+    while_stmt
+    for_stmt
     invalid
 }
 
@@ -71,44 +74,45 @@ Mutability :: enum {
 UnaryOperator :: enum { negate, logical_not }
 
 BinaryOperator :: enum {
-    add, subtract,
+    add, subtract
     multiply, divide
-    equal, not_equal,
-    less, less_equal,
+    equal, not_equal
+    less, less_equal
     greater, greater_equal
     logical_and, logical_or
 }
 
 @hide:file
 NodeKind :: enum {
-    literal_int,
-    literal_float,
-    literal_string,
-    literal_bool,
-    expr_identifier,
-    expr_unary,
-    expr_binary,
-    expr_call,
-    expr_range,
-    expr_array_type,
-    expr_array_literal,
-    expr_index,
-    stmt_expr,
-    stmt_decl,
-    stmt_return,
-    stmt_break,
-    stmt_continue,
-    stmt_if,
-    stmt_assignment,
-    stmt_while,
-    stmt_for,
-    func_decl,
-    param_decl,
-    block,
-    package,
-    invalid_expr,
-    invalid_stmt,
-    invalid_decl,
+    literal_int
+    literal_float
+    literal_string
+    literal_bool
+    expr_identifier
+    expr_unary
+    expr_binary
+    expr_call
+    expr_range
+    expr_array_type
+    expr_array_literal
+    expr_index
+    stmt_expr
+    stmt_decl
+    stmt_return
+    stmt_break
+    stmt_continue
+    stmt_if
+    stmt_assignment
+    stmt_while
+    stmt_for
+    func_decl
+    param_decl
+    import_decl
+    block
+    package
+    invalid_expr
+    invalid_stmt
+    invalid_decl
 }
 
 @hide:file
@@ -135,19 +139,27 @@ Storage :: struct {
     nodes arraylist.ArrayList(Node)
     extra arraylist.ArrayList(u32)
     spans arraylist.ArrayList(Span)
+    sources arraylist.ArrayList(diagnostics.Source)
 }
 
-#! owns node storage, retains its allocator, and borrows source until finish or deinit_builder.
+#! owns node storage and source descriptors; borrows registered source paths and text.
 Builder :: struct {
     storage Storage
     source []u8
+    source_id diagnostics.SourceId = diagnostics.SourceId(0)
 }
 
-#! owns node storage and borrows source; source must remain valid until deinit.
+#! owns storage after finish, or borrows it after view; registered source paths and text remain borrowed.
 Tree :: struct {
     storage Storage
-    source []u8
     root NodeId
+}
+
+ImportView :: struct {
+    span Span
+    path Span
+    namespace ?strpool.StringId
+    test_only bool
 }
 
 StatementDeclView :: struct {
@@ -255,36 +267,78 @@ init_builder proc(allocator mem.Allocator, source []u8) Builder {
             nodes = arraylist.init(allocator),
             extra = arraylist.init(allocator),
             spans = arraylist.init(allocator),
+            sources = arraylist.init(allocator),
         },
         source = source,
     }
 }
 
-#! releases builder-owned node storage with its retained allocator, without freeing source.
+#! registers borrowed `path` and `text`; both must remain valid until deinit_builder or deinit.
+set_source proc(
+    builder @mut Builder, path, text []u8,
+) diagnostics.SourceId ! mem.AllocError {
+    id :: diagnostics.SourceId(builder.storage.sources.items.len)
+    try arraylist.append(&builder.storage.sources,
+        diagnostics.Source{
+            path = path,
+            text = text
+        })
+    builder.source = text
+    builder.source_id = id
+    return id
+}
+
+#! removes the latest source after its failed parse has rolled back all nodes.
+remove_source proc(builder @mut Builder) void {
+    debug.assert(builder.storage.sources.items.len > 0)
+    _ = arraylist.pop(&builder.storage.sources)
+    if (builder.storage.sources.items.len == 0) {
+        builder.source = &[]
+        builder.source_id = diagnostics.SourceId(0)
+        return
+    }
+    builder.source_id = diagnostics.SourceId(builder.storage.sources.items.len - 1)
+    builder.source = builder.storage.sources.items[usize(builder.source_id)].text
+}
+
+#! borrows builder storage; refresh after builder mutation and never pass this view to deinit.
+view proc(builder @Builder, root NodeId) Tree {
+    return Tree{ storage = builder.storage, root = root }
+}
+
+source_files proc(tree @Tree) []diagnostics.Source {
+    return tree.storage.sources.items
+}
+
+#! releases owned AST and source-descriptor storage, without freeing source paths or text.
 deinit_builder proc(builder @mut Builder) void {
     arraylist.deinit(&builder.storage.nodes)
     arraylist.deinit(&builder.storage.extra)
     arraylist.deinit(&builder.storage.spans)
+    arraylist.deinit(&builder.storage.sources)
 }
 
-#! transfers node storage and the source borrow to a caller-owned Tree; release with deinit.
+#! transfers storage and source borrows to a caller-owned Tree; release with deinit.
 finish proc(builder @mut Builder, root NodeId) Tree {
-    tree :: Tree{ storage = builder.storage, source = builder.source, root = root }
+    tree :: view(builder, root)
     allocator :: builder.storage.nodes.allocator
     builder.storage = Storage{
         nodes = arraylist.init(allocator),
         extra = arraylist.init(allocator),
         spans = arraylist.init(allocator),
+        sources = arraylist.init(allocator),
     }
     builder.source = &[]
+    builder.source_id = diagnostics.SourceId(0)
     return tree
 }
 
-#! releases owned node storage with its retained allocator, without freeing source.
+#! releases owned AST and source-descriptor storage, without freeing source paths or text.
 deinit proc(tree @mut Tree) void {
     arraylist.deinit(&tree.storage.nodes)
     arraylist.deinit(&tree.storage.extra)
     arraylist.deinit(&tree.storage.spans)
+    arraylist.deinit(&tree.storage.sources)
 }
 
 add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem.AllocError {
@@ -541,7 +595,29 @@ add_function_decl proc(
     }, span)
 }
 
-add_block proc(builder @mut Builder, span Span, statements []NodeId) NodeId ! mem.AllocError {
+add_import_decl proc(
+    builder @mut Builder,
+    span, path Span,
+    namespace ?strpool.StringId,
+    test_only bool,
+) NodeId ! mem.AllocError {
+    extra :: try add_extra(builder, path.start)
+    _ = try add_extra(builder, path.end)
+    alias_id :: if (namespace) |id| id else strpool.no_str
+    flag :: if (test_only) u32(1) else u32(0)
+    return try add_node(builder, Node{
+        kind = .import_decl,
+        main = NodeData{ extra = extra },
+        data0 = NodeData{ name_id = alias_id },
+        data1 = NodeData{ extra = flag },
+    }, span)
+}
+
+add_block proc(
+    builder @mut Builder,
+    span Span,
+    statements []NodeId,
+) NodeId ! mem.AllocError {
     start :: builder.storage.extra.items.len
     for (statements) |statement| _ = try add_extra(builder, u32(statement))
     return try add_node(builder, Node{
@@ -611,22 +687,41 @@ name_id proc(tree @Tree, id NodeId) strpool.StringId {
 }
 
 package_decl_count proc(tree @Tree) usize {
-    root :: get_node(&tree.storage, tree.root)
+    return package_decl_count_at(tree, tree.root)
+}
+
+package_decl proc(tree @Tree, index usize) NodeId {
+    return package_decl_at(tree, tree.root, index)
+}
+
+package_decl_count_at proc(tree @Tree, package NodeId) usize {
+    root :: get_node(&tree.storage, package)
     debug.assert(root.kind == .package)
     return usize(root.data1.extra - root.data0.extra)
 }
 
-package_decl proc(tree @Tree, index usize) NodeId {
-    root :: get_node(&tree.storage, tree.root)
+package_decl_at proc(tree @Tree, package NodeId, index usize) NodeId {
+    root :: get_node(&tree.storage, package)
     debug.assert(root.kind == .package)
     debug.assert(index < usize(root.data1.extra - root.data0.extra))
     return NodeId(tree.storage.extra.items[usize(root.data0.extra) + index])
+}
+
+builder_package_decl_count proc(builder @Builder, package NodeId) usize {
+    tree :: view(builder, package)
+    return package_decl_count(&tree)
+}
+
+builder_package_decl proc(builder @Builder, package NodeId, index usize) NodeId {
+    tree :: view(builder, package)
+    return package_decl(&tree, index)
 }
 
 decl_kind proc(tree @Tree, id NodeId) DeclKind {
     return match get_node(&tree.storage, id).kind {
         .stmt_decl: .statement
         .func_decl: .function
+        .import_decl: .import
         .invalid_decl: .invalid
         else: unreachable
     }
@@ -716,7 +811,7 @@ statement_decl proc(tree @Tree, id NodeId) StatementDeclView {
     raw_type :: tree.storage.extra.items[extra + 2]
     return StatementDeclView{
         span = get_span(&tree.storage, id),
-        name = span_from_extra(&tree.storage, extra),
+        name = span_from_extra(&tree.storage, extra, get_span(&tree.storage, id).source),
         type = maybe_node_id(raw_type),
         initializer = NodeId(tree.storage.extra.items[extra + 3]),
         mutability = node.data0.mutability,
@@ -729,9 +824,22 @@ function_decl proc(tree @Tree, id NodeId) FunctionDeclView {
     extra :: usize(node.main.extra)
     return FunctionDeclView{
         span = get_span(&tree.storage, id),
-        name = span_from_extra(&tree.storage, extra),
+        name = span_from_extra(&tree.storage, extra, get_span(&tree.storage, id).source),
         return_type = NodeId(tree.storage.extra.items[extra + 2]),
         body = node.data0.node_id,
+    }
+}
+
+import_decl proc(tree @Tree, id NodeId) ImportView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .import_decl)
+    span :: get_span(&tree.storage, id)
+    namespace ?strpool.StringId :: if (node.data0.name_id == strpool.no_str) null else node.data0.name_id
+    return ImportView{
+        span = span,
+        path = span_from_extra(&tree.storage, usize(node.main.extra), span.source),
+        namespace = namespace,
+        test_only = node.data1.extra != 0,
     }
 }
 
@@ -753,7 +861,7 @@ param proc(tree @Tree, id NodeId) ParamView {
     debug.assert(node.kind == .param_decl)
     return ParamView{
         span = get_span(&tree.storage, id),
-        name = span_from_extra(&tree.storage, usize(node.main.extra)),
+        name = span_from_extra(&tree.storage, usize(node.main.extra), get_span(&tree.storage, id).source),
         type = node.data0.node_id,
     }
 }
@@ -906,8 +1014,10 @@ invalid proc(tree @Tree, id NodeId) InvalidView {
 
 #! returns text borrowed from the source buffer; the caller must not free it.
 source_text proc(tree @Tree, span Span) []u8 {
-    debug.assert(span.start <= span.end and usize(span.end) <= tree.source.len)
-    return tree.source[usize(span.start)..usize(span.end)]
+    debug.assert(usize(span.source) < tree.storage.sources.items.len)
+    text :: tree.storage.sources.items[usize(span.source)].text
+    debug.assert(span.start <= span.end and usize(span.end) <= text.len)
+    return text[usize(span.start)..usize(span.end)]
 }
 
 builder_span proc(builder @Builder, id NodeId) Span {
@@ -915,16 +1025,19 @@ builder_span proc(builder @Builder, id NodeId) Span {
 }
 
 @hide:file
-span_from_extra proc(storage @Storage, start usize) Span {
+span_from_extra proc(storage @Storage, start usize, source diagnostics.SourceId) Span {
     return Span{
         start = storage.extra.items[start],
         end = storage.extra.items[start + 1],
+        source = source,
     }
 }
 
 @hide:file
 add_node proc(builder @mut Builder, node Node, span Span) NodeId ! mem.AllocError {
     debug.assert(builder.storage.nodes.items.len == builder.storage.spans.items.len)
+    if (builder.storage.sources.items.len == 0)
+        _ = try set_source(builder, "", builder.source)
     id :: node_id(builder.storage.nodes.items.len)
     try arraylist.reserve(&builder.storage.nodes, builder.storage.nodes.items.len + 1)
     try arraylist.reserve(&builder.storage.spans, builder.storage.spans.items.len + 1)

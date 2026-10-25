@@ -15,7 +15,7 @@ Type :: struct {
 State :: struct {
     output io.Writer
     module @ir.Module
-    line_starts []usize
+    line_starts []arraylist.ArrayList(usize)
     values []mut Type
     next_register usize = 0
 }
@@ -26,19 +26,34 @@ emit proc(
     output io.Writer,
     module @ir.Module,
     diagnostic_store @diagnostics.Store,
-    source []u8,
-    path []u8,
+    sources []diagnostics.Source,
+    primary diagnostics.SourceId,
 ) void ! (mem.AllocError | io.WriteError) {
-    line_starts := arraylist.init(usize, allocator)
-    defer arraylist.deinit(&line_starts)
-    try arraylist.append(&line_starts, usize(0))
-    for (source) |byte, index| {
-        if (byte == '\n') try arraylist.append(&line_starts, index + 1)
+    line_starts := arraylist.init(arraylist.ArrayList(usize), allocator)
+    defer {
+        for (line_starts.items) |@starts| arraylist.deinit(starts)
+        arraylist.deinit(&line_starts)
+    }
+    for (sources) |source| {
+        starts := arraylist.init(usize, allocator)
+        errdefer arraylist.deinit(&starts)
+        try arraylist.append(&starts, usize(0))
+        for (source.text) |byte, index| {
+            if (byte == '\n') try arraylist.append(&starts, index + 1)
+        }
+        try arraylist.append(&line_starts, starts)
     }
     try io.write_all(output, runtime)
-    try io.write_all(output, "\n@path = private constant ")
-    try bytes_constant(output, path)
-    try io.write_all(output, "\n")
+    for (sources) |source, index| {
+        try io.print("\n@p{} = private constant ", output, {index})
+        try bytes_constant(output, source.path)
+    }
+    try io.print("\n@paths = private constant [{} x %string] [", output, {sources.len})
+    for (sources) |source, index| {
+        if (index != 0) try io.write_all(output, ", ")
+        try io.print("%string {{ ptr @p{}, i64 {} }}", output, {index, source.path.len})
+    }
+    try io.write_all(output, "]\n")
     for (module.strings.items) |_, index| {
         try io.print("@s{} = private constant ", output, {index})
         try bytes_constant(output, ir.string_bytes(module, ir.StringId(index)))
@@ -49,7 +64,7 @@ emit proc(
         try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?)
         try io.write_all(output, "\n")
     }
-    try emit_reporting(output, diagnostic_store, line_starts.items, path.len)
+    try emit_reporting(output, diagnostic_store, line_starts.items, sources, primary)
     for (module.globals.items) |global, index| {
         try io.print("@g{} = internal global ", output, {index})
         storage_kind :: if (global.type == .void) ir.Type.invalid else global.type
@@ -89,7 +104,7 @@ emit proc(
         status i32 :: if (diagnostics.count(diagnostic_store) == 0) 0 else 1
         try io.print("  ret i32 {}\n", output, {status})
     } else {
-        try io.print("  call void @trap(i64 {}, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
+        try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
     }
     try io.write_all(output, "}\n")
 }
@@ -148,7 +163,8 @@ Location :: struct {
 }
 
 @hide
-location proc(line_starts []usize, span diagnostics.Span) Location {
+location proc(sources []arraylist.ArrayList(usize), span diagnostics.Span) Location {
+    line_starts :: sources[usize(span.source)].items
     offset :: usize(span.start)
     line := usize(0)
     end := line_starts.len
@@ -161,12 +177,19 @@ location proc(line_starts []usize, span diagnostics.Span) Location {
 }
 
 @hide:file
-emit_reporting proc(output io.Writer, diagnostic_store @diagnostics.Store, line_starts []usize, path_length usize) void ! io.WriteError {
+emit_reporting proc(
+    output io.Writer,
+    diagnostic_store @diagnostics.Store,
+    line_starts []arraylist.ArrayList(usize),
+    sources []diagnostics.Source,
+    primary diagnostics.SourceId,
+) void ! io.WriteError {
     try io.write_all(output, "define internal void @io_failure() noreturn {\nentry:\n")
-    try io.print("  %path_result = call i64 @write(i32 2, ptr @path, i64 {})\n", output, {path_length})
+    try io.print("  %path_result = call i64 @write(i32 2, ptr @p{}, i64 {})\n", output, {usize(primary), sources[usize(primary)].path.len})
     try io.write_all(output, "  %message_result = call i64 @write(i32 2, ptr @write_error, i64 44)\n  call void @exit(i32 2)\n  unreachable\n}\n")
-    try io.write_all(output, "define internal void @diagnose(i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
-    try io.print("  call void @out(i32 2, ptr @path, i64 {})\n", output, {path_length})
+    try io.write_all(output, "define internal void @diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
+    try io.print("  %descriptor = getelementptr [{} x %string], ptr @paths, i64 0, i64 %source\n", output, {sources.len})
+    try io.write_all(output, "  %path = load %string, ptr %descriptor\n  %bytes = extractvalue %string %path, 0\n  %path_length = extractvalue %string %path, 1\n  call void @out(i32 2, ptr %bytes, i64 %path_length)\n")
     try io.write_all(output,
         `  call void @out(i32 2, ptr @colon, i64 1)
         `  call void @print_integer(i32 2, i64 %line, i1 true)
@@ -185,8 +208,8 @@ emit_reporting proc(output io.Writer, diagnostic_store @diagnostics.Store, line_
         position :: location(line_starts, diagnostic.span)
         message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?
         try io.print("  %t{} = icmp eq i64 %trap, {}\n", output, {index, index})
-        try io.print("  call void @diagnose(i64 {}, i64 {}, ptr @d{}, i64 {}, i1 %t{})\n", output, {
-            position.line, position.column, index, message.len, index,
+        try io.print("  call void @diagnose(i64 {}, i64 {}, i64 {}, ptr @d{}, i64 {}, i1 %t{})\n", output, {
+            usize(diagnostic.span.source), position.line, position.column, index, message.len, index,
         })
     }
     try io.write_all(output, "  ret void\n}\n")
@@ -195,12 +218,12 @@ emit_reporting proc(output io.Writer, diagnostic_store @diagnostics.Store, line_
 @hide:file
 emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index usize) void ! io.WriteError {
     type :: Type{ kind = global.type, shape = global.array_type }
-    try io.print("define internal ptr @global{}(i64 %line, i64 %column) {{\nentry:\n", output, {index})
+    try io.print("define internal ptr @global{}(i64 %source, i64 %line, i64 %column) {{\nentry:\n", output, {index})
     try io.print("  %state = load i8, ptr @gs{}\n", output, {index})
     try io.write_all(output,
         `  switch i8 %state, label %initialize [ i8 1, label %cycle i8 2, label %ready ]
         `cycle:
-        `  call void @trap(i64 -1, i64 %line, i64 %column, ptr @cycle, i64 27)
+        `  call void @trap(i64 -1, i64 %source, i64 %line, i64 %column, ptr @cycle, i64 27)
         `  unreachable
         `initialize:
     )
@@ -284,7 +307,7 @@ store proc(state @State, destination ir.ValueId, register usize) void ! io.Write
 @hide
 check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void ! io.WriteError {
     position :: location(state.line_starts, span)
-    try io.print("  call void @check_init(ptr %i{}, i1 {}, i64 {}, i64 {})\n", state.output, {slot, read, position.line, position.column})
+    try io.print("  call void @check_init(ptr %i{}, i1 {}, i64 {}, i64 {}, i64 {})\n", state.output, {slot, read, usize(span.source), position.line, position.column})
 }
 
 @hide:file
@@ -297,7 +320,7 @@ trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.
     }
     message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
     length :: message.len
-    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, ptr @{s}, i64 {})\n  unreachable\n", state.output, {position.line, position.column, symbol, length})
+    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @{s}, i64 {})\n  unreachable\n", state.output, {usize(span.source), position.line, position.column, symbol, length})
 }
 
 @hide
@@ -384,7 +407,7 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
                     try io.print(" %r{}\n", output, {result})
                 }
             }
-            .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
+            .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
             .jump: try io.print("  br label %b{}\n", output, {u32(terminator.target)})
             .branch: {
                 condition :: try load(state, terminator.value)

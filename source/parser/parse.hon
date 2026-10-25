@@ -4,6 +4,7 @@ import "@std/arraylist"
 import "@source/diagnostics"
 import "@source/lexer"
 import "@source/ast"
+import "@source/strpool"
 
 @hide:file
 SyntaxError :: enum { unexpected_token }
@@ -22,7 +23,7 @@ BindingPower :: struct {
 
 @hide:file
 State :: struct {
-    builder ast.Builder
+    builder @mut ast.Builder
     diagnostics @mut diagnostics.Store
     tokens []lexer.Token
     allocator mem.Allocator
@@ -39,16 +40,36 @@ parse proc(
     source []u8,
     diagnostic_store @mut diagnostics.Store,
 ) ast.Tree ! (mem.AllocError | diagnostics.CapacityError) {
+    builder := ast.init_builder(allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parse_source(&builder, tokens, diagnostic_store)
+    return ast.finish(&builder, root)
+}
+
+#! appends one source to shared node storage; token spans must identify the builder's current source.
+#! infrastructure failure rolls back all nodes, extra data, spans, and diagnostics added by this parse.
+parse_source proc(
+    builder @mut ast.Builder,
+    tokens []lexer.Token,
+    diagnostic_store @mut diagnostics.Store,
+) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
+    node_count :: builder.storage.nodes.items.len
+    extra_count :: builder.storage.extra.items.len
+    diagnostic_count :: diagnostic_store.list.items.len
+    errdefer {
+        builder.storage.nodes.items = builder.storage.nodes.items.ptr[..node_count]
+        builder.storage.spans.items = builder.storage.spans.items.ptr[..node_count]
+        builder.storage.extra.items = builder.storage.extra.items.ptr[..extra_count]
+        diagnostic_store.list.items = diagnostic_store.list.items.ptr[..diagnostic_count]
+    }
     state := State{
-        builder = ast.init_builder(allocator, source),
+        builder = builder,
         diagnostics = diagnostic_store,
         tokens = tokens,
-        allocator = allocator,
+        allocator = builder.storage.nodes.allocator,
         next_token = 0,
     }
-    defer ast.deinit_builder(&state.builder)
-    root :: try parse_package(&state)
-    return ast.finish(&state.builder, root)
+    return try parse_package(&state)
 }
 
 @hide:file
@@ -74,17 +95,48 @@ parse_package proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
         skip_newlines(state)
     }
 
-    return try ast.add_package(
-        &state.builder,
-        ast.Span{ start = 0, end = u32(state.builder.source.len) },
-        declarations.items,
-    )
+    return try ast.add_package(state.builder, ast.Span{
+        start = 0,
+        end = u32(state.builder.source.len),
+        source = state.builder.source_id,
+    }, declarations.items)
 }
 
 @hide:file
 parse_decl proc(state @mut State) ast.NodeId ! ParseError {
+    if (
+        next_is(state, .import) or next_is(state, .test)
+        or (next_is(state, .ident) and next_n_is(state, 1, .double_colon) and next_n_is(state, 2, .import))
+    ) return try parse_import_decl(state)
     if (next_is(state, .ident) and next_n_is(state, 1, .proc)) return try parse_func_decl(state)
     return try parse_statement_decl(state)
+}
+
+@hide:file
+parse_import_decl proc(state @mut State) ast.NodeId ! ParseError {
+    start :: current(state).span
+    test_only :: next_is(state, .test)
+    if (test_only) state.next_token += 1
+    namespace ?strpool.StringId := null
+    if next_is(state, .ident) {
+        name :: try consume(state, .ident)
+        namespace = name.data.str_id
+        _ = try consume(state, .double_colon)
+    }
+    _ = try consume(state, .import)
+    token :: try consume(state, .string)
+    path :: ast.Span{ start = token.span.start + 1, end = token.span.end - 1, source = token.span.source }
+    # import paths are literal filesystem paths, not escaped string values.
+    valid := path.start != path.end
+    for (state.builder.source[usize(path.start)..usize(path.end)]) |byte| {
+        if (byte < 32 or byte == 127 or byte == '\\') valid = false
+    }
+    span :: ast.Span{ start = start.start, end = token.span.end, source = start.source }
+    if (!valid) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .invalid_import_path, path)
+        return try ast.add_invalid_decl(state.builder, span, diagnostic)
+    }
+    return try ast.add_import_decl(state.builder, span, path, namespace, test_only)
 }
 
 @hide:file
@@ -108,11 +160,11 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
         }
 
         type_id :: try parse_type(state)
-        type_span :: ast.builder_span(&state.builder, type_id)
+        type_span :: ast.builder_span(state.builder, type_id)
         for (names.items) |parameter_name| {
             param_id :: try ast.add_param(
-                &state.builder,
-                ast.Span{ start = parameter_name.span.start, end = type_span.end },
+                state.builder,
+                ast.Span{ start = parameter_name.span.start, end = type_span.end, source = parameter_name.span.source },
                 parameter_name.span,
                 parameter_name.data.str_id,
                 type_id,
@@ -125,10 +177,14 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
     _ = try consume(state, .close_paren)
     return_type :: try parse_type(state)
     body :: try parse_block(state)
-    body_span :: ast.builder_span(&state.builder, body)
+    body_span :: ast.builder_span(state.builder, body)
     return try ast.add_function_decl(
-        &state.builder,
-        ast.Span{ start = name.span.start, end = body_span.end },
+        state.builder,
+        ast.Span{
+            start = name.span.start,
+            end = body_span.end,
+            source = name.span.source,
+        },
         name.span,
         name.data.str_id,
         return_type,
@@ -163,8 +219,12 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 
     close :: try consume(state, .close_curly)
     return try ast.add_block(
-        &state.builder,
-        ast.Span{ start = open.span.start, end = close.span.end },
+        state.builder,
+        ast.Span{
+            start = open.span.start,
+            end = close.span.end,
+            source = open.span.source,
+        },
         statements.items,
     )
 }
@@ -191,7 +251,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket: {
             expression :: try parse_expr(state)
             if next_is(state, .equal) return try parse_assignment(state, expression, allow_else)
-            return try ast.add_expression_stmt(&state.builder, expression)
+            return try ast.add_expression_stmt(state.builder, expression)
         }
         else: return .unexpected_token
     }
@@ -204,7 +264,7 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)
         or (allow_else and next_is(state, .else))
     ) {
-        return try ast.add_return_stmt(&state.builder, keyword.span, null)
+        return try ast.add_return_stmt(state.builder, keyword.span, null)
     }
     value :: try parse_expr(state)
     if (
@@ -216,8 +276,12 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     # include consumed grouping punctuation, which has no separate expression node.
     end :: state.tokens[state.next_token - 1].span.end
     return try ast.add_return_stmt(
-        &state.builder,
-        ast.Span{ start = keyword.span.start, end = end },
+        state.builder,
+        ast.Span{
+            start = keyword.span.start,
+            end = end,
+            source = keyword.span.source,
+        },
         value,
     )
 }
@@ -234,9 +298,9 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
     ) return .unexpected_token
 
     if (keyword.kind == .break)
-        return try ast.add_break_stmt(&state.builder, keyword.span)
+        return try ast.add_break_stmt(state.builder, keyword.span)
 
-    return try ast.add_continue_stmt(&state.builder, keyword.span)
+    return try ast.add_continue_stmt(state.builder, keyword.span)
 }
 
 @hide:file
@@ -253,8 +317,12 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
     }
     end :: state.tokens[state.next_token - 1].span.end
     return try ast.add_assignment_stmt(
-        &state.builder,
-        ast.Span{ start = ast.builder_span(&state.builder, target).start, end = end },
+        state.builder,
+        ast.Span{
+            start = ast.builder_span(state.builder, target).start,
+            end = end,
+            source = state.builder.source_id,
+        },
         target,
         value,
     )
@@ -277,12 +345,16 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
         state.next_token = after_then
     }
     end :: if (alternative) |block|
-        ast.builder_span(&state.builder, block).end
+        ast.builder_span(state.builder, block).end
     else
-        ast.builder_span(&state.builder, then_block).end
+        ast.builder_span(state.builder, then_block).end
     return try ast.add_if_stmt(
-        &state.builder,
-        ast.Span{ start = keyword.span.start, end = end },
+        state.builder,
+        ast.Span{
+            start = keyword.span.start,
+            end = end,
+            source = keyword.span.source,
+        },
         condition,
         then_block,
         alternative,
@@ -295,8 +367,12 @@ parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     condition :: try parse_guard(state)
     body :: try parse_arm(state, allow_else)
     return try ast.add_while_stmt(
-        &state.builder,
-        ast.Span{ start = keyword.span.start, end = ast.builder_span(&state.builder, body).end },
+        state.builder,
+        ast.Span{
+            start = keyword.span.start,
+            end = ast.builder_span(state.builder, body).end,
+            source = keyword.span.source,
+        },
         condition,
         body,
     )
@@ -317,7 +393,11 @@ parse_capture_name proc(state @mut State) ?ast.NodeId ! ParseError {
     if (
         name.span.end != name.span.start + 1
         or state.builder.source[usize(name.span.start)] != '_'
-    ) capture = try ast.add_identifier(&state.builder, name.span, name.data.str_id)
+    ) capture = try ast.add_identifier(
+        state.builder,
+        name.span,
+        name.data.str_id,
+    )
     return capture
 }
 
@@ -352,9 +432,15 @@ parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
             .unexpected_token: {}
             else: return err
         }
-        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
+        diagnostic :: try diagnostics.add(
+            state.diagnostics,
+            .unexpected_token,
+            current(state).span,
+        )
         iterable = try ast.add_invalid_expr(
-            &state.builder, ast.builder_span(&state.builder, iterable), diagnostic,
+            state.builder,
+            ast.builder_span(state.builder, iterable),
+            diagnostic,
         )
         while (
             !next_is(state, .open_curly) and !next_is(state, .close_curly)
@@ -367,23 +453,27 @@ parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     skip_newlines(state)
     if (
         !next_is(state, .open_curly) and !grouped
-        and ast.builder_expr_kind(&state.builder, iterable) != .call
-        and ast.builder_expr_kind(&state.builder, iterable) != .invalid
+        and ast.builder_expr_kind(state.builder, iterable) != .call
+        and ast.builder_expr_kind(state.builder, iterable) != .invalid
     ) {
         diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
         iterable = try ast.add_invalid_expr(
-            &state.builder, ast.builder_span(&state.builder, iterable), diagnostic,
+            state.builder, ast.builder_span(state.builder, iterable), diagnostic,
         )
     }
     # a malformed capture list must not swallow the next line's sibling.
     if (
-        ast.builder_expr_kind(&state.builder, iterable) == .invalid
+        ast.builder_expr_kind(state.builder, iterable) == .invalid
         and !next_is(state, .open_curly)
     ) state.next_token = after_captures
     body :: try parse_arm(state, allow_else)
     return try ast.add_for_stmt(
-        &state.builder,
-        ast.Span{ start = keyword.span.start, end = ast.builder_span(&state.builder, body).end },
+        state.builder,
+        ast.Span{
+            start = keyword.span.start,
+            end = ast.builder_span(state.builder, body).end,
+            source = keyword.span.source,
+        },
         iterable, captures.item, captures.index, captures.pointer, captures.indexed, body,
     )
 }
@@ -397,9 +487,9 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             else: return err
         }
         diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
-        yield try ast.add_invalid_expr(&state.builder, current(state).span, diagnostic)
+        yield try ast.add_invalid_expr(state.builder, current(state).span, diagnostic)
     }
-    if (ast.builder_expr_kind(&state.builder, condition) == .invalid) {
+    if (ast.builder_expr_kind(state.builder, condition) == .invalid) {
         # discard a malformed guard's tail, but leave its body and enclosing block intact.
         while (
             !next_is(state, .open_curly) and !next_is(state, .close_curly)
@@ -416,13 +506,13 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
     if (
         !next_is(state, .open_curly)
         and !parenthesized_guard(state, condition_start)
-        and ast.builder_expr_kind(&state.builder, condition) != .call
-        and ast.builder_expr_kind(&state.builder, condition) != .invalid
+        and ast.builder_expr_kind(state.builder, condition) != .call
+        and ast.builder_expr_kind(state.builder, condition) != .invalid
     ) {
         diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
         condition = try ast.add_invalid_expr(
-            &state.builder,
-            ast.builder_span(&state.builder, condition),
+            state.builder,
+            ast.builder_span(state.builder, condition),
             diagnostic,
         )
     }
@@ -455,12 +545,12 @@ parse_arm proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         }
         diagnostic :: try unexpected_diagnostic(state)
         span :: synchronize(state, start, true, true, false)
-        yield try ast.add_invalid_stmt(&state.builder, span, diagnostic)
+        yield try ast.add_invalid_stmt(state.builder, span, diagnostic)
     }
     statements [1]ast.NodeId :: [statement]
     return try ast.add_block(
-        &state.builder,
-        ast.builder_span(&state.builder, statement),
+        state.builder,
+        ast.builder_span(state.builder, statement),
         statements[..],
     )
 }
@@ -476,11 +566,15 @@ parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
 
     assignment :: try consume_either(state, &[.double_colon, .colon_equal])
     initializer :: try parse_expr(state)
-    end :: ast.builder_span(&state.builder, initializer).end
+    end :: ast.builder_span(state.builder, initializer).end
     mutability :: if (assignment.kind == .double_colon) .constant else .variable
     return try ast.add_statement_decl(
-        &state.builder,
-        ast.Span{ start = name.span.start, end = end },
+        state.builder,
+        ast.Span{
+            start = name.span.start,
+            end = end,
+            source = name.span.source,
+        },
         name.span,
         name.data.str_id,
         type_id,
@@ -508,13 +602,17 @@ parse_type proc(state @mut State) ast.NodeId ! ParseError {
         if (mutable) state.next_token += 1
         element :: try parse_type(state)
         return try ast.add_array_type(
-            &state.builder,
-            ast.Span{ start = open.span.start, end = ast.builder_span(&state.builder, element).end },
+            state.builder,
+            ast.Span{
+                start = open.span.start,
+                end = ast.builder_span(state.builder, element).end,
+                source = open.span.source,
+            },
             count, element, mutable,
         )
     }
     token :: try consume(state, .ident)
-    return try ast.add_identifier(&state.builder, token.span, token.data.str_id)
+    return try ast.add_identifier(state.builder, token.span, token.data.str_id)
 }
 
 @hide:file
@@ -530,11 +628,15 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     left := if (prefix_binding_power(token.kind)) |right_bp| {
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
-        operand_span :: ast.builder_span(&state.builder, operand)
+        operand_span :: ast.builder_span(state.builder, operand)
         operator ast.UnaryOperator :: if (token.kind == .bang) .logical_not else .negate
         yield try ast.add_unary(
-            &state.builder,
-            ast.Span{ start = token.span.start, end = operand_span.end },
+            state.builder,
+            ast.Span{
+                start = token.span.start,
+                end = operand_span.end,
+                source = token.span.source,
+            },
             operator,
             operand,
         )
@@ -564,10 +666,11 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             right := try parse_expr_bp(state, BindingPowerScalar(1))
             right = try validate_range_bound(state, right, parenthesized_guard(state, right_start))
             left = try ast.add_range(
-                &state.builder,
+                state.builder,
                 ast.Span{
                     start = state.tokens[expression_start].span.start,
                     end = state.tokens[state.next_token - 1].span.end,
+                    source = state.builder.source_id,
                 },
                 left, right, token.kind == .range_inclusive,
             )
@@ -578,11 +681,15 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             if (power.left < min_bp) break
             state.next_token += 1
             right :: try parse_expr_bp(state, power.right)
-            left_span :: ast.builder_span(&state.builder, left)
-            right_span :: ast.builder_span(&state.builder, right)
+            left_span :: ast.builder_span(state.builder, left)
+            right_span :: ast.builder_span(state.builder, right)
             left = try ast.add_binary(
-                &state.builder,
-                ast.Span{ start = left_span.start, end = right_span.end },
+                state.builder,
+                ast.Span{
+                    start = left_span.start,
+                    end = right_span.end,
+                    source = left_span.source,
+                },
                 binary_operator(token.kind),
                 left,
                 right,
@@ -600,11 +707,11 @@ validate_range_bound proc(
     state @mut State, bound ast.NodeId, grouped bool,
 ) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     if (grouped) return bound
-    match ast.builder_expr_kind(&state.builder, bound) {
+    match ast.builder_expr_kind(state.builder, bound) {
         .unary, .binary, .range: {
-            span :: ast.builder_span(&state.builder, bound)
+            span :: ast.builder_span(state.builder, bound)
             diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, span)
-            return try ast.add_invalid_expr(&state.builder, span, diagnostic)
+            return try ast.add_invalid_expr(state.builder, span, diagnostic)
         }
         else: return bound
     }
@@ -628,10 +735,11 @@ parse_call proc(state @mut State, callee ast.NodeId, start u32) ast.NodeId ! Par
     }
     close :: try consume(state, .close_paren)
     return try ast.add_call(
-        &state.builder,
+        state.builder,
         ast.Span{
             start = start,
             end = close.span.end,
+            source = state.builder.source_id,
         },
         callee,
         arguments.items,
@@ -645,18 +753,23 @@ parse_index proc(state @mut State, base ast.NodeId, start u32) ast.NodeId ! Pars
     if !next_is(state, .close_bracket) {
         diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
         return try ast.add_invalid_expr(
-            &state.builder,
+            state.builder,
             ast.Span{
                 start = start,
-                end = ast.builder_span(&state.builder, index).end,
+                end = ast.builder_span(state.builder, index).end,
+                source = state.builder.source_id,
             },
             diagnostic,
         )
     }
     close :: try consume(state, .close_bracket)
     return try ast.add_index(
-        &state.builder,
-        ast.Span{ start = start, end = close.span.end },
+        state.builder,
+        ast.Span{
+            start = start,
+            end = close.span.end,
+            source = state.builder.source_id,
+        },
         base, index,
     )
 }
@@ -699,26 +812,32 @@ parse_array_literal proc(state @mut State) ast.NodeId ! ParseError {
         if next_is(state, .close_bracket) break
         if !next_is(state, .comma) {
             state.next_token = after_element
-            return try invalid_array_literal(state, open.span.start, ast.builder_span(&state.builder, element).end)
+            return try invalid_array_literal(state, open.span.start, ast.builder_span(state.builder, element).end)
         }
         state.next_token += 1
         after_comma :: state.next_token
         skip_newlines(state)
         if named_binding_starts(state) {
             state.next_token = after_comma
-            return try invalid_array_literal(state, open.span.start, ast.builder_span(&state.builder, element).end)
+            return try invalid_array_literal(state, open.span.start, ast.builder_span(state.builder, element).end)
         }
     }
     close :: try consume(state, .close_bracket)
-    return try ast.add_array_literal(
-        &state.builder, ast.Span{ start = open.span.start, end = close.span.end }, elements.items,
-    )
+    return try ast.add_array_literal(state.builder, ast.Span{
+        start = open.span.start,
+        end = close.span.end,
+        source = open.span.source,
+    }, elements.items)
 }
 
 @hide:file
 invalid_array_literal proc(state @mut State, start, end u32) ast.NodeId ! ParseError {
     diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
-    return try ast.add_invalid_expr(&state.builder, ast.Span{ start = start, end = end }, diagnostic)
+    return try ast.add_invalid_expr(state.builder, ast.Span{
+        start = start,
+        end = end,
+        source = state.builder.source_id,
+    }, diagnostic)
 }
 
 @hide:file
@@ -754,30 +873,31 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
                 .unexpected_token,
                 current(state).span,
             )
-            return try ast.add_invalid_expr(&state.builder, ast.Span{
+            return try ast.add_invalid_expr(state.builder, ast.Span{
                 start = token.span.start,
-                end = ast.builder_span(&state.builder, expression).end,
+                end = ast.builder_span(state.builder, expression).end,
+                source = token.span.source,
             }, diagnostic)
         }
         .int: {
             state.next_token += 1
-            return try ast.add_literal(&state.builder, .int, token.span)
+            return try ast.add_literal(state.builder, .int, token.span)
         }
         .float: {
             state.next_token += 1
-            return try ast.add_literal(&state.builder, .float, token.span)
+            return try ast.add_literal(state.builder, .float, token.span)
         }
         .string: {
             state.next_token += 1
-            return try ast.add_literal(&state.builder, .string, token.span)
+            return try ast.add_literal(state.builder, .string, token.span)
         }
         .true, .false: {
             state.next_token += 1
-            return try ast.add_literal(&state.builder, .bool, token.span)
+            return try ast.add_literal(state.builder, .bool, token.span)
         }
         .ident: {
             state.next_token += 1
-            return try ast.add_identifier(&state.builder, token.span, token.data.str_id)
+            return try ast.add_identifier(state.builder, token.span, token.data.str_id)
         }
         else: {
             diagnostic :: if (token.data.diagnostic != diagnostics.no_diagnostic)
@@ -789,7 +909,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
                 state.next_token += 1
             }
 
-            return try ast.add_invalid_expr(&state.builder, token.span, diagnostic)
+            return try ast.add_invalid_expr(state.builder, token.span, diagnostic)
         }
     }
 }
@@ -858,7 +978,7 @@ recover_decl proc(
 ) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     diagnostic :: try unexpected_diagnostic(state)
     span :: synchronize(state, start, false, false, true)
-    return try ast.add_invalid_decl(&state.builder, span, diagnostic)
+    return try ast.add_invalid_decl(state.builder, span, diagnostic)
 }
 
 @hide:file
@@ -868,7 +988,7 @@ recover_statement proc(
 ) ast.NodeId ! (mem.AllocError | diagnostics.CapacityError) {
     diagnostic :: try unexpected_diagnostic(state)
     span :: synchronize(state, start, true, false, true)
-    return try ast.add_invalid_stmt(&state.builder, span, diagnostic)
+    return try ast.add_invalid_stmt(state.builder, span, diagnostic)
 }
 
 @hide:file
@@ -910,7 +1030,11 @@ synchronize proc(
         end = current(state).span.end
         state.next_token += 1
     }
-    return ast.Span{ start = first.start, end = end }
+    return ast.Span{
+        start = first.start,
+        end = end,
+        source = first.source,
+    }
 }
 
 @hide:file

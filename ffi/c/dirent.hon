@@ -1,0 +1,37 @@
+# Darwin arm64 uses the 64-bit inode dirent layout from sys/dirent.h.
+DIR :: opaque
+dirent :: c_struct {
+    d_ino c_ulonglong
+    d_seekoff c_ulonglong
+    d_reclen c_ushort
+    d_namlen c_ushort
+    d_type c_uchar
+    d_name [1024]c_char
+}
+
+opendir c_func(path ?*c_char) ?*mut DIR
+readdir c_func(directory ?*mut DIR) ?*mut dirent
+closedir c_func(directory ?*mut DIR) c_int
+
+# Darwin arm64 struct stat from sys/stat.h; timestamps use the existing timespec binding.
+Stat :: c_struct {
+    st_dev c_int
+    st_mode c_ushort
+    st_nlink c_ushort
+    st_ino c_ulonglong
+    st_uid c_uint
+    st_gid c_uint
+    st_rdev c_int
+    st_atimespec timespec
+    st_mtimespec timespec
+    st_ctimespec timespec
+    st_birthtimespec timespec
+    st_size c_longlong
+    st_blocks c_longlong
+    st_blksize c_int
+    st_flags c_uint
+    st_gen c_uint
+    st_lspare c_int
+    st_qspare [2]c_longlong
+}
+stat c_func(path ?*c_char, result ?*mut Stat) c_int

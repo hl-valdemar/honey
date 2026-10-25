@@ -48,6 +48,25 @@ lower proc(
     checked @typecheck.Result,
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
+    return try lower_package(
+        allocator,
+        tree,
+        resolution,
+        checked,
+        tree.root,
+        diagnostic_store,
+    )
+}
+
+#! lowers the module arena, selecting an entry only from `root_package`.
+lower_package proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    checked @typecheck.Result,
+    root_package ast.NodeId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
     module := ir.init(allocator)
     errdefer ir.deinit(&module)
     storage :: try mem.alloc(Storage, allocator, ast.node_count(tree))
@@ -87,16 +106,16 @@ lower proc(
                 })
                 storage[usize(id)] = Storage{ kind = .global, index = global }
             }
-            .invalid: {}
+            .import, .invalid: {}
         }
     }
-    try find_entry(&state)
+    try find_entry(&state, root_package)
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
         match ast.decl_kind(tree, id) {
             .function: try lower_function(&state, id)
             .statement: try lower_global(&state, id)
-            .invalid: {}
+            .import, .invalid: {}
         }
     }
     return module
@@ -152,15 +171,17 @@ add_function proc(module @mut ir.Module, span diagnostics.Span) ir.FunctionId ! 
 }
 
 @hide:file
-find_entry proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityError) {
-    tree :: state.tree
+find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    package_tree := state.tree^
+    package_tree.root = root_package
+    tree :: &package_tree
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
         name := diagnostics.Span{ start = 0, end = 0 }
         match ast.decl_kind(tree, id) {
             .function: name = ast.function_decl(tree, id).name
             .statement: name = ast.statement_decl(tree, id).name
-            .invalid: continue
+            .import, .invalid: continue
         }
         if (!mem.eql(ast.source_text(tree, name), "main")) continue
         if (ast.decl_kind(tree, id) != .function) {
@@ -176,7 +197,11 @@ find_entry proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityE
         state.module.entry = ir.FunctionId(state.storage[usize(id)].index)
         return
     }
-    state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .missing_entry, ast.node_span(tree, tree.root))
+    state.module.entry_diagnostic = try diagnostics.add(
+        state.diagnostics,
+        .missing_entry,
+        ast.node_span(tree, root_package),
+    )
 }
 
 @hide:file

@@ -31,6 +31,7 @@ test import "@source/ir"
 test import "@source/lower"
 test import "@source/interpreter"
 test import "@source/compilation"
+test import "@source/loader"
 
 @hide:file
 DriverError :: alias (
@@ -80,6 +81,10 @@ infrastructure_messages :: $enummap.init(DriverError, []u8, {
     invalid_arguments = "invalid native compiler arguments",
     temporary_file_failed = "cannot create temporary LLVM file",
     compiler_failed = "native compiler failed",
+    empty_package = "package contains no production source files",
+    invalid_path = "invalid filesystem path",
+    path_failed = "cannot resolve filesystem path",
+    directory_failed = "cannot read package directory",
 })
 
 @hide:file
@@ -107,26 +112,24 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
 
 @hide:file
 usage proc(output io.Writer) void ! io.WriteError {
-    try io.write_all(output, "usage: honey run <file>\n")
-    try io.write_all(output, "       honey emit-llvm <file>\n")
-    try io.write_all(output, "       honey build <file> -o <executable> [-O0|-O2]\n")
+    try io.write_all(output, "usage: honey run <file-or-directory>\n")
+    try io.write_all(output, "       honey emit-llvm <file-or-directory>\n")
+    try io.write_all(output, "       honey build <file-or-directory> -o <executable> [-O0|-O2]\n")
 }
 
 @hide:file
 emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
-    source := try read_source(allocator, runtime, path)
-    defer arraylist.deinit(&source)
     session := compilation.init(allocator)
     defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    package :: try compilation.add_package(&session)
-    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
-    file :: compilation.source(&session, root)
-    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, file.bytes.items, file.path)
-    try report_diagnostics(allocator, io.stderr(runtime), file.path, file.bytes.items, &diagnostic_store, null)
+    sources :: compilation.source_files(&session)
+    primary :: session.packages.items[usize(root)].sources.items[0]
+    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, sources, primary)
+    try report_diagnostics(allocator, io.stderr(runtime), sources, &diagnostic_store, null)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
@@ -138,14 +141,11 @@ build_file proc(
     output [;0]u8,
     optimization [;0]u8,
 ) i32 ! DriverError {
-    source := try read_source(allocator, runtime, path)
-    defer arraylist.deinit(&source)
     session := compilation.init(allocator)
     defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    package :: try compilation.add_package(&session)
-    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
 
@@ -159,8 +159,9 @@ build_file proc(
     defer {
         if (!closing) io.close(file) catch |_| {}
     }
-    root_source :: compilation.source(&session, root)
-    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, root_source.bytes.items, root_source.path)
+    sources :: compilation.source_files(&session)
+    primary :: session.packages.items[usize(root)].sources.items[0]
+    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, sources, primary)
     closing = true
     try io.close(file)
     temporary [;0]u8 :: template[..].ptr[..17;0]
@@ -170,46 +171,23 @@ build_file proc(
     ]
     status :: try process.run(allocator, arguments[..])
     if (status != 0) return .compiler_failed
-    try report_diagnostics(allocator, io.stderr(runtime), root_source.path, root_source.bytes.items, &diagnostic_store, null)
+    try report_diagnostics(allocator, io.stderr(runtime), sources, &diagnostic_store, null)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
 @hide:file
-read_source proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) arraylist.ArrayList(u8) ! DriverError {
-    file :: try io.open(runtime, path, .read_only)
-    closing := false
-    defer {
-        if (!closing) io.close(file) catch |_| {}
-    }
-    bytes := io.read_all(allocator, io.reader(file), usize(maxval!(u32))) catch |err| {
-        match err {
-            .limit_exceeded: return .source_too_large
-            else: return err
-        }
-    }
-    errdefer arraylist.deinit(&bytes)
-    closing = true
-    try io.close(file)
-    return bytes
-}
-
-@hide:file
 run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
-    source := try read_source(allocator, runtime, path)
-    defer arraylist.deinit(&source)
     session := compilation.init(allocator)
     defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    package :: try compilation.add_package(&session)
-    root :: try compilation.add_source(&session, package, path, &source, &diagnostic_store)
+    root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
     outcome := try interpreter.run(allocator, &module, &diagnostic_store)
     defer interpreter.deinit(&outcome)
     if (outcome.trap == null) try print_result(io.stdout(runtime), &module, outcome.value)
-    file :: compilation.source(&session, root)
-    try report_diagnostics(allocator, io.stderr(runtime), file.path, file.bytes.items, &diagnostic_store, outcome.trap)
+    try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, outcome.trap)
     if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return 0
 }
@@ -261,26 +239,35 @@ print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.
 report_diagnostics proc(
     allocator mem.Allocator,
     output io.Writer,
-    path []u8,
-    source []u8,
+    sources []diagnostics.Source,
     diagnostic_store @diagnostics.Store,
     trap ?diagnostics.DiagnosticId,
 ) void ! (mem.AllocError | io.WriteError) {
     if (diagnostics.count(diagnostic_store) == 0) return
-    starts := arraylist.init(usize, allocator)
-    defer arraylist.deinit(&starts)
-    try arraylist.append(&starts, usize(0))
-    for (source) |byte, index| {
-        if (byte == '\n') try arraylist.append(&starts, index + 1)
+    line_starts := arraylist.init(arraylist.ArrayList(usize), allocator)
+    defer {
+        for (line_starts.items) |@starts| arraylist.deinit(starts)
+        arraylist.deinit(&line_starts)
+    }
+    for (sources) |source| {
+        starts := arraylist.init(usize, allocator)
+        errdefer arraylist.deinit(&starts)
+        try arraylist.append(&starts, usize(0))
+        for (source.text) |byte, index| {
+            if (byte == '\n') try arraylist.append(&starts, index + 1)
+        }
+        try arraylist.append(&line_starts, starts)
     }
     for (0..diagnostics.count(diagnostic_store)) |index| {
         if (diagnostics.get(diagnostic_store, diagnostics.DiagnosticId(index))) |diagnostic| {
+            source :: sources[usize(diagnostic.span.source)]
+            starts :: line_starts.items[usize(diagnostic.span.source)].items
             offset :: usize(diagnostic.span.start)
             line := usize(0)
-            end := starts.items.len
+            end := starts.len
             while (line + 1 < end) {
                 middle :: line + divtrunc!(end - line, 2)
-                if (starts.items[middle] <= offset) line = middle
+                if (starts[middle] <= offset) line = middle
                 else end = middle
             }
             label []u8 := "error"
@@ -288,9 +275,9 @@ report_diagnostics proc(
                 if (id == diagnostics.DiagnosticId(index)) label = "runtime trap"
             }
             try io.print("{s}:{}:{}: {s}: {s}\n", output, {
-                path,
+                source.path,
                 line + 1,
-                offset - starts.items[line] + 1,
+                offset - starts[line] + 1,
                 label,
                 enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?,
             })

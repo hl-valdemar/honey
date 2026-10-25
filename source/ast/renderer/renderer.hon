@@ -26,6 +26,11 @@ render proc(renderer @mut Renderer, tree @ast.Tree) void ! mem.AllocError {
         match ast.decl_kind(tree, declaration) {
             .statement: try render_statement(renderer, tree, declaration, "  ")
             .function: try render_function(renderer, tree, declaration)
+            .import: {
+                try append_text(renderer, "  ")
+                try append_text(renderer, ast.source_text(tree, ast.import_decl(tree, declaration).span))
+                try append_text(renderer, "\n")
+            }
             .invalid: try append_text(renderer, "  invalid declaration\n")
         }
     }

@@ -2,16 +2,14 @@
 
 - [ ] milestone: Honey compiles its production compiler, then that compiler compiles itself again and builds/runs the example programs.
 
-## observed baseline
+## current boundary
 
-`./build/honey run source/main.hon` exits `1`: import declarations produce
-`unexpected token`, qualified names produce `invalid character` at `.`, and
-recovery ultimately reports a missing entry point. an isolated import followed
-by a supported `main` still prints `42` but exits `1`; recovery is not import support.
-
-the driver now retains frontend storage through `@source/compilation`; source IDs
-qualify local AST declaration IDs, and package IDs retain source membership.
-CLI commands still compile one source. the unchecked items below remain planned support.
+directory loading and import declaration discovery are implemented; qualified
+namespace selection and the richer types/control flow used by the compiler
+remain unsupported. the driver retains frontend storage and source provenance
+through `@source/compilation`, with compilation-wide AST node identities.
+file commands retain single-file behavior; directory commands compile the
+package's production files and load its dependencies in separate scopes.
 
 ## next milestone: scalar-function packages
 
@@ -21,8 +19,8 @@ using the existing standard library is a later acceptance gate: even `std/mem`
 needs records, pointers, generics and C calls.
 
 - [x] retain source/package identity and source ownership across the compilation; keep one identifier pool and unambiguous declaration IDs.
-- [ ] load directory packages once per canonical path, with deterministic file discovery, package scopes and root-only entry selection. follow Bro's existing relative and project-root `@` import rules; diagnose cycles rather than recurse indefinitely.
-- [ ] parse bare and aliased imports plus postfix namespace selection; resolve file-local import aliases without injecting dependency names into the importing package.
+- [x] load directory packages once per canonical path, with deterministic file discovery, package scopes and root-only entry selection. follow Bro's existing relative and project-root `@` import rules; diagnose cycles rather than recurse indefinitely.
+- [ ] finish postfix namespace selection and resolve file-local import aliases without injecting dependency names into the importing package; bare and aliased import declarations are already parsed for dependency discovery.
 - [ ] reuse ordinary scalar signature checking, function values and IR calls for selected declarations; namespaces have no runtime representation.
 - [ ] preserve originating filenames and spans in dependency diagnostics and native runtime traps; retain demand-driven diagnostic recovery.
 - [ ] verify sibling source files, transitive/shared imports, same-spelled declarations in different packages, alias conflicts, missing packages/members, argument errors and dependency-file diagnostics. preserve existing single-file commands.

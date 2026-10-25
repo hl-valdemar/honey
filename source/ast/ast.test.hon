@@ -1,6 +1,7 @@
 import "@std/mem"
 import "@std/testing"
 import "@source/strpool"
+import "@source/diagnostics"
 
 exposes_typed_declaration_views test {
     strings := strpool.init(mem.c_allocator)
@@ -73,4 +74,41 @@ exposes_array_type_literal_and_index_views test {
     try testing.expect_equal(ExprKind.index, expr_kind(&tree, indexed))
     try testing.expect_equal(literal, index_expr(&tree, indexed).base)
     try testing.expect_equal(count, index_expr(&tree, indexed).index)
+}
+
+registers_borrowed_sources_and_removes_failed_source test {
+    builder := init_builder(mem.c_allocator, "")
+    defer deinit_builder(&builder)
+    first :: try set_source(&builder, "first.hon", "first")
+    root :: try add_package(&builder, Span{ start = 0, end = 5, source = first }, &[])
+    failed :: try set_source(&builder, "failed.hon", "failed")
+    try testing.expect_equal(diagnostics.SourceId(1), failed)
+    remove_source(&builder)
+    try testing.expect_equal(first, builder.source_id)
+    try testing.expect_equal("first", builder.source)
+    next :: try set_source(&builder, "next.hon", "next")
+    try testing.expect_equal(failed, next)
+    # package roots may use a source other than the currently active source.
+    declarations [1]NodeId :: [root]
+    combined :: try add_package(&builder, Span{ start = 0, end = 5, source = first }, declarations[..])
+    tree :: view(&builder, combined)
+    try testing.expect_equal(first, node_span(&tree, combined).source)
+    try testing.expect_equal("first", source_text(&tree, node_span(&tree, combined)))
+    try testing.expect_equal(2, source_files(&tree).len)
+    try testing.expect_equal("first.hon", source_files(&tree)[usize(first)].path)
+    try testing.expect_equal("next.hon", source_files(&tree)[usize(next)].path)
+    try testing.expect_equal("next", source_files(&tree)[usize(next)].text)
+    try testing.expect_equal(1, builder_package_decl_count(&builder, combined))
+    try testing.expect_equal(root, builder_package_decl(&builder, combined, 0))
+}
+
+removes_only_registered_source_without_allocating_builder test {
+    builder := init_builder(mem.c_allocator, "")
+    defer deinit_builder(&builder)
+    _ = try set_source(&builder, "failed.hon", "failed")
+    remove_source(&builder)
+    try testing.expect_equal(diagnostics.SourceId(0), builder.source_id)
+    try testing.expect_equal("", builder.source)
+    replacement :: try set_source(&builder, "replacement.hon", "")
+    try testing.expect_equal(diagnostics.SourceId(0), replacement)
 }

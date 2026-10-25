@@ -1,6 +1,8 @@
 import "@std/mem"
 import "@std/debug"
 import "@std/arraylist"
+import "@std/hashmap"
+import "@std/io"
 import "@source/strpool"
 import "@source/diagnostics"
 import "@source/lexer"
@@ -8,14 +10,15 @@ import "@source/parser"
 import "@source/ast"
 import "@source/sema"
 import "@source/lower"
+import "@source/loader"
 import "@source/ir"
 typecheck :: import "@source/sema/check"
 
 #! identities are valid only within their owning compilation.
-SourceId :: distinct usize
+SourceId :: alias diagnostics.SourceId
 PackageId :: distinct usize
 
-#! AST node IDs are source-local; retain both fields when referring across sources.
+#! node IDs belong to the compilation arena; source identifies their originating file.
 DeclarationId :: struct {
     source SourceId
     node ast.NodeId
@@ -25,58 +28,79 @@ Source :: struct {
     package PackageId
     path []u8
     bytes arraylist.ArrayList(u8)
-    tree ast.Tree
+    root ast.NodeId
 }
 
 Package :: struct {
     sources arraylist.ArrayList(SourceId)
+    path []u8 = &[]
+    root ?ast.NodeId = null
+    loading bool = false
 }
 
-#! owns sources, paths, ASTs, package membership and one identifier pool.
-#! borrows returned by source are invalidated by add_source or deinit; IDs remain stable.
+Import :: struct {
+    node ast.NodeId
+    target ?PackageId
+}
+
+#! owns source buffers, paths, the AST arena, package graph and one identifier pool.
+#! metadata borrows are invalidated by registration; IDs remain stable until deinit.
 Compilation :: struct {
     allocator mem.Allocator
     strings strpool.StringPool
+    builder ast.Builder
     sources arraylist.ArrayList(Source)
     packages arraylist.ArrayList(Package)
+    imports arraylist.ArrayList(Import)
+    paths hashmap.StringHashMap(PackageId)
+    module_root ?ast.NodeId = null
 }
 
-Error :: alias mem.AllocError | diagnostics.CapacityError | lexer.SourceError | strpool.InternError
+LoadError :: enum { empty_package }
+Error :: alias mem.AllocError | diagnostics.CapacityError | lexer.SourceError | strpool.InternError | loader.Error | LoadError
 
 #! retains `allocator`; release all compilation storage with deinit.
 init proc(allocator mem.Allocator) Compilation {
     return Compilation{
         allocator = allocator,
         strings = strpool.init(allocator),
+        builder = ast.init_builder(allocator, &[]),
         sources = arraylist.init(allocator),
         packages = arraylist.init(allocator),
+        imports = arraylist.init(allocator),
+        paths = hashmap.init(allocator),
     }
 }
 
 deinit proc(compilation @mut Compilation) void {
+    ast.deinit_builder(&compilation.builder)
+    hashmap.deinit(&compilation.paths)
     for (compilation.sources.items) |@file| {
-        ast.deinit(&file.tree)
         arraylist.deinit(&file.bytes)
         mem.free(compilation.allocator, file.path)
     }
-    for (compilation.packages.items) |@package| arraylist.deinit(&package.sources)
+    for (compilation.packages.items) |@package| {
+        arraylist.deinit(&package.sources)
+        mem.free(compilation.allocator, package.path)
+    }
     arraylist.deinit(&compilation.sources)
     arraylist.deinit(&compilation.packages)
+    arraylist.deinit(&compilation.imports)
     strpool.deinit(&compilation.strings)
 }
 
-#! creates a distinct package; directory discovery and path deduplication belong to the loader.
+#! creates an in-memory package; load registers filesystem packages by canonical directory.
 add_package proc(compilation @mut Compilation) PackageId ! mem.AllocError {
     id :: PackageId(compilation.packages.items.len)
     try arraylist.append(&compilation.packages, Package{
         sources = arraylist.init(compilation.allocator),
     })
+    compilation.module_root = null
     return id
 }
 
-#! copies `path` and scans/parses using the shared pool; takes `bytes` only on success.
-#! success resets `bytes` without copying its allocation. failure leaves it caller-owned;
-#! diagnostics and interned names produced before failure remain in their respective stores.
+#! copies `path`, scans/parses into the shared arena and takes `bytes` only on success.
+#! failure leaves bytes caller-owned and rolls back source diagnostics; interned names may remain.
 add_source proc(
     compilation @mut Compilation,
     package PackageId,
@@ -85,86 +109,248 @@ add_source proc(
     diagnostic_store @mut diagnostics.Store,
 ) SourceId ! Error {
     debug.assert(usize(package) < compilation.packages.items.len)
-
-    id :: SourceId(compilation.sources.items.len)
     try arraylist.reserve(&compilation.sources, compilation.sources.items.len + 1)
     members := &compilation.packages.items[usize(package)].sources
     try arraylist.reserve(members, members.items.len + 1)
     owned_path :: try mem.alloc(u8, compilation.allocator, path.len)
     errdefer mem.free(compilation.allocator, owned_path)
     memcopy!(owned_path, path)
-
+    id :: try ast.set_source(&compilation.builder, owned_path, bytes.items)
+    errdefer ast.remove_source(&compilation.builder)
+    diagnostic_count :: diagnostics.count(diagnostic_store)
+    errdefer diagnostic_store.list.items = diagnostic_store.list.items[..diagnostic_count]
+    debug.assert(usize(id) == compilation.sources.items.len)
     scan_state := lexer.init(compilation.allocator)
     defer lexer.deinit(&scan_state)
-    try lexer.scan(
-        &scan_state,
-        bytes.items,
-        &compilation.strings,
-        diagnostic_store,
-    )
-    tree := try parser.parse(
-        compilation.allocator,
-        scan_state.tokens.items,
-        bytes.items,
-        diagnostic_store,
-    )
-    errdefer ast.deinit(&tree)
-
+    scan_state.source_id = id
+    try lexer.scan(&scan_state, bytes.items, &compilation.strings, diagnostic_store)
+    root :: try parser.parse_source(&compilation.builder, scan_state.tokens.items, diagnostic_store)
     try arraylist.append(&compilation.sources, Source{
         package = package,
         path = owned_path,
         bytes = bytes^,
-        tree = tree,
+        root = root,
     })
     try arraylist.append(members, id)
     bytes^ = arraylist.init(bytes.allocator)
-
+    compilation.packages.items[usize(package)].root = null
+    compilation.module_root = null
     return id
 }
 
-#! borrows source metadata and its AST until add_source or deinit.
+#! borrows source metadata until registration or deinit.
 source proc(compilation @Compilation, id SourceId) @Source {
     debug.assert(usize(id) < compilation.sources.items.len)
     return &compilation.sources.items[usize(id)]
 }
 
-#! qualifies a top-level declaration's local AST identity with its owning source.
 declaration proc(compilation @Compilation, id SourceId, index usize) DeclarationId {
     return DeclarationId{
         source = id,
-        node = ast.package_decl(&source(compilation, id).tree, index),
+        node = ast.builder_package_decl(&compilation.builder, source(compilation, id).root, index),
     }
 }
 
-#! compiles one registered source; the returned IR owns its storage and borrows no frontend data.
-#! package scopes and cross-source resolution are added by the package-loading milestone.
+#! borrows source paths and bytes until registration or deinit; valid after loading a source.
+source_files proc(compilation @Compilation) []diagnostics.Source {
+    tree :: ast.view(&compilation.builder, compilation.sources.items[0].root)
+    return ast.source_files(&tree)
+}
+
+#! loads a file alone or every production source in a directory, then its dependency graph.
+#! directory identities resolve symlinks; file commands do not implicitly include siblings.
+load proc(
+    compilation @mut Compilation,
+    runtime io.Io,
+    path []u8,
+    diagnostic_store @mut diagnostics.Store,
+) PackageId ! Error {
+    canonical :: try loader.canonical(compilation.allocator, path)
+    defer mem.free(compilation.allocator, canonical)
+    directory :: try loader.directory(compilation.allocator, canonical)
+    transferred := false
+    defer { if (!transferred) mem.free(compilation.allocator, directory) }
+    project_root :: try loader.project_root(compilation.allocator, directory)
+    defer mem.free(compilation.allocator, project_root)
+    entry_file ?[]u8 := null
+    if (!try loader.is_directory(compilation.allocator, canonical)) entry_file = canonical
+    transferred = true
+    return try load_package(compilation, runtime, project_root, directory, entry_file, null, diagnostic_store)
+}
+
+@hide:file
+load_package proc(
+    compilation @mut Compilation,
+    runtime io.Io,
+    project_root []u8,
+    owned_directory []mut u8,
+    entry_file ?[]u8,
+    import_span ?diagnostics.Span,
+    diagnostic_store @mut diagnostics.Store,
+) PackageId ! Error {
+    registered := false
+    defer { if (!registered) mem.free(compilation.allocator, owned_directory) }
+    if (hashmap.get(&compilation.paths, owned_directory)) |existing| {
+        if (compilation.packages.items[usize(existing)].loading) {
+            if (import_span) |span| _ = try diagnostics.add(diagnostic_store, .import_cycle, span)
+        }
+        return existing
+    }
+    id :: try add_package(compilation)
+    compilation.packages.items[usize(id)].path = owned_directory
+    compilation.packages.items[usize(id)].loading = true
+    registered = true
+    hashmap.put(&compilation.paths, owned_directory, id) catch |err| {
+        match err {
+            .key_exists: unreachable
+            else: return err
+        }
+    }
+    read_failed := false
+    load_sources(compilation, runtime, id, entry_file, diagnostic_store) catch |err| {
+        match err {
+            .out_of_memory, .diagnostic_limit_reached, .storage_limit_reached, .out_of_space: return err
+            else: {
+                if (import_span) |span| {
+                    _ = try diagnostics.add(diagnostic_store, .package_unavailable, span)
+                    read_failed = true
+                } else return err
+            }
+        }
+    }
+    if (compilation.packages.items[usize(id)].sources.items.len == 0) {
+        if (import_span) |span| {
+            if (!read_failed) _ = try diagnostics.add(diagnostic_store, .package_unavailable, span)
+        } else return .empty_package
+    }
+    # Source and package arrays may grow during recursion; retain IDs, never their element addresses.
+    for (0..(compilation.packages.items[usize(id)].sources.items.len)) |index| {
+        file_id :: compilation.packages.items[usize(id)].sources.items[index]
+        root :: source(compilation, file_id).root
+        count :: ast.builder_package_decl_count(&compilation.builder, root)
+        for (0..count) |declaration_index| {
+            node :: ast.builder_package_decl(&compilation.builder, root, declaration_index)
+            tree :: ast.view(&compilation.builder, root)
+            if (ast.decl_kind(&tree, node) != .import) continue
+            imported :: ast.import_decl(&tree, node)
+            if (imported.test_only) continue
+            path :: ast.source_text(&tree, imported.path)
+            target ?PackageId := null
+            if (path.len == 0 or path[0] == '/' or (path.len == 1 and path[0] == '@')) {
+                _ = try diagnostics.add(diagnostic_store, .invalid_import_path, imported.path)
+            } else {
+                resolved := loader.resolve(
+                    compilation.allocator,
+                    project_root,
+                    compilation.packages.items[usize(id)].path,
+                    path,
+                ) catch |err| {
+                    match err {
+                        .out_of_memory: return err
+                        .invalid_path: {
+                            _ = try diagnostics.add(diagnostic_store, .invalid_import_path, imported.path)
+                            try arraylist.append(&compilation.imports, Import{ node = node, target = null })
+                            continue
+                        }
+                        else: {
+                            _ = try diagnostics.add(diagnostic_store, .package_unavailable, imported.path)
+                            try arraylist.append(&compilation.imports, Import{ node = node, target = null })
+                            continue
+                        }
+                    }
+                }
+                owned := true
+                defer { if (owned) mem.free(compilation.allocator, resolved) }
+                if (try loader.is_directory(compilation.allocator, resolved)) {
+                    owned = false
+                    target = try load_package(compilation, runtime, project_root, resolved, null, imported.path, diagnostic_store)
+                } else {
+                    _ = try diagnostics.add(diagnostic_store, .package_unavailable, imported.path)
+                }
+            }
+            try arraylist.append(&compilation.imports, Import{ node = node, target = target })
+        }
+    }
+    compilation.packages.items[usize(id)].loading = false
+    return id
+}
+
+@hide:file
+load_sources proc(
+    compilation @mut Compilation,
+    runtime io.Io,
+    package PackageId,
+    entry_file ?[]u8,
+    diagnostic_store @mut diagnostics.Store,
+) void ! Error {
+    if (entry_file) |path| {
+        try load_source(compilation, runtime, package, path, diagnostic_store)
+        return
+    }
+    files := try loader.files(compilation.allocator, compilation.packages.items[usize(package)].path)
+    defer {
+        for (files.items) |path| mem.free(compilation.allocator, path)
+        arraylist.deinit(&files)
+    }
+    for (files.items) |path| try load_source(compilation, runtime, package, path, diagnostic_store)
+}
+
+@hide:file
+load_source proc(
+    compilation @mut Compilation,
+    runtime io.Io,
+    package PackageId,
+    path []u8,
+    diagnostic_store @mut diagnostics.Store,
+) void ! Error {
+    bytes := try loader.read_source(compilation.allocator, runtime, path)
+    defer arraylist.deinit(&bytes)
+    _ = try add_source(compilation, package, path, &bytes, diagnostic_store)
+}
+
+@hide:file
+package_root proc(compilation @mut Compilation, package PackageId) ast.NodeId ! mem.AllocError {
+    if (compilation.packages.items[usize(package)].root) |root| return root
+    declarations := arraylist.init(ast.NodeId, compilation.allocator)
+    defer arraylist.deinit(&declarations)
+    span := diagnostics.Span{ start = 0, end = 0 }
+    for (compilation.packages.items[usize(package)].sources.items) |id, index| {
+        root :: source(compilation, id).root
+        tree :: ast.view(&compilation.builder, root)
+        if (index == 0) span = ast.node_span(&tree, root)
+        for (0..ast.package_decl_count(&tree)) |i| try arraylist.append(&declarations, ast.package_decl(&tree, i))
+    }
+    root :: try ast.add_package(&compilation.builder, span, declarations.items)
+    compilation.packages.items[usize(package)].root = root
+    return root
+}
+
+#! checks every package in a separate scope and lowers one module with root-only entry selection.
+#! returned IR borrows no frontend data; release it with ir.deinit.
 compile proc(
     compilation @mut Compilation,
-    id SourceId,
+    root_package PackageId,
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! Error {
-    tree :: &source(compilation, id).tree
-    resolution := try sema.resolve(
-        compilation.allocator,
-        tree,
-        &compilation.strings,
-        diagnostic_store,
-    )
+    roots := arraylist.init(ast.NodeId, compilation.allocator)
+    defer arraylist.deinit(&roots)
+    declarations := arraylist.init(ast.NodeId, compilation.allocator)
+    defer arraylist.deinit(&declarations)
+    for (0..(compilation.packages.items.len)) |index| {
+        root :: try package_root(compilation, PackageId(index))
+        try arraylist.append(&roots, root)
+        if (compilation.module_root == null) {
+            tree :: ast.view(&compilation.builder, root)
+            for (0..ast.package_decl_count(&tree)) |i| try arraylist.append(&declarations, ast.package_decl(&tree, i))
+        }
+    }
+    if (compilation.module_root == null) {
+        compilation.module_root = try ast.add_package(&compilation.builder, diagnostics.Span{ start = 0, end = 0 }, declarations.items)
+    }
+    tree :: ast.view(&compilation.builder, compilation.module_root?)
+    resolution := try sema.resolve_packages(compilation.allocator, &tree, roots.items, &compilation.strings, diagnostic_store)
     defer sema.deinit(&resolution)
-
-    checked := try typecheck.check(
-        compilation.allocator,
-        tree,
-        &resolution,
-        diagnostic_store,
-    )
+    checked := try typecheck.check(compilation.allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)
-
-    return try lower.lower(
-        compilation.allocator,
-        tree,
-        &resolution,
-        &checked,
-        diagnostic_store,
-    )
+    return try lower.lower_package(compilation.allocator, &tree, &resolution, &checked, roots.items[usize(root_package)], diagnostic_store)
 }

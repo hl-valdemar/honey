@@ -31,3 +31,24 @@ renders_array_annotations_literals_and_indexed_assignments test {
         renderer.bytes.items,
     )
 }
+
+renders_import_declarations test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "import \"relative\"\nname :: import \"@root/pkg\"\ntest import \"test_only\"\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    renderer := init(mem.c_allocator)
+    defer deinit(&renderer)
+    try render(&renderer, &tree)
+    try testing.expect_equal(
+        "package\n  import \"relative\"\n  name :: import \"@root/pkg\"\n  test import \"test_only\"\n",
+        renderer.bytes.items,
+    )
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}

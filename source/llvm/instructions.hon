@@ -38,7 +38,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         .load_global: {
             pointer :: fresh(state)
             position :: location(state.line_starts, instruction.span)
-            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {})\n", output, {pointer, instruction.slot, position.line, position.column})
+            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
             try io.print("  %r{} = load ", output, {result})
             try write_type(output, state.module, type)
             try io.print(", ptr %r{}\n", output, {pointer})
@@ -93,7 +93,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             pointer :: fresh(state)
             address :: fresh(state)
             position :: location(state.line_starts, instruction.span)
-            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {})\n", output, {pointer, instruction.slot, position.line, position.column})
+            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
             try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
             try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
         }
@@ -104,7 +104,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             position :: location(state.line_starts, instruction.span)
             try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {pointer, address})
             try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, address})
-            try io.print("  call void @check_init(ptr %r{}, i1 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, position.line, position.column})
+            try io.print("  call void @check_init(ptr %r{}, i1 {}, i64 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, usize(instruction.span.source), position.line, position.column})
             if (instruction.op == .store_address) {
                 value :: try load(state, instruction.right)
                 try io.write_all(output, "  store ")

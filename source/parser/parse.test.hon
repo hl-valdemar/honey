@@ -1423,3 +1423,177 @@ recovers_nested_square_and_parenthesis_delimiters_without_consuming_siblings tes
     try testing.expect_equal(0, ast.array_element_count(&tree, kept.initializer))
     try testing.expect_equal(1, ast.array_element_count(&tree, sibling.initializer))
 }
+
+parses_import_forms_with_shared_source_provenance test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, "")
+    defer ast.deinit_builder(&builder)
+    first_text :: "value :: 1\n"
+    first_source :: try ast.set_source(&builder, "first.hon", first_text)
+    first_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&first_scan)
+    first_scan.source_id = first_source
+    try lexer.scan(&first_scan, first_text, &strings, &diagnostic_store)
+    first_root :: try parse_source(&builder, first_scan.tokens.items, &diagnostic_store)
+    first_view :: ast.view(&builder, first_root)
+    first_node_count :: ast.node_count(&first_view)
+    second_text ::
+        `import "relative" # preserve imports after comments
+        `named :: import "@root/package"
+        `test import "test_only"
+        `test helper :: import "test_alias"
+        `run proc(parameter i64) i64 {
+        `    values [2]i64 :: [1, 2]
+        `    if (true) { values[0] = parameter + -1 } else { values[1] = 2 }
+        `    while (false) { break }
+        `    for 0..1 |i| { continue }
+        `    return values[0]
+        `}
+    second_source :: try ast.set_source(&builder, "second.hon", second_text)
+    second_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&second_scan)
+    second_scan.source_id = second_source
+    try lexer.scan(&second_scan, second_text, &strings, &diagnostic_store)
+    second_root :: try parse_source(&builder, second_scan.tokens.items, &diagnostic_store)
+    tree :: ast.view(&builder, second_root)
+    try testing.expect(first_root != second_root)
+    try testing.expect_equal(1, ast.package_decl_count_at(&tree, first_root))
+    first :: ast.package_decl_at(&tree, first_root, 0)
+    try testing.expect_equal(first_source, ast.statement_decl(&tree, first).name.source)
+    try testing.expect_equal("value", ast.source_text(&tree, ast.statement_decl(&tree, first).name))
+    try testing.expect_equal(5, ast.package_decl_count(&tree))
+    paths [4][]u8 :: ["relative", "@root/package", "test_only", "test_alias"]
+    for (paths) |path, index| {
+        declaration :: ast.package_decl(&tree, index)
+        try testing.expect_equal(ast.DeclKind.import, ast.decl_kind(&tree, declaration))
+        imported :: ast.import_decl(&tree, declaration)
+        try testing.expect_equal(path, ast.source_text(&tree, imported.path))
+        try testing.expect_equal(second_source, imported.path.source)
+        try testing.expect_equal(index >= 2, imported.test_only)
+        if (index == 0 or index == 2) {
+            try testing.expect_equal(null, imported.namespace)
+        } else {
+            expected :: if (index == 1) "named" else "helper"
+            try testing.expect_equal([]u8, expected, strpool.get_str(&strings, imported.namespace?)?)
+        }
+    }
+    function_id :: ast.package_decl(&tree, 4)
+    function :: ast.function_decl(&tree, function_id)
+    try testing.expect_equal(second_source, function.name.source)
+    try testing.expect_equal("run", ast.source_text(&tree, function.name))
+    parameter :: ast.param(&tree, ast.function_param(&tree, function_id, 0))
+    try testing.expect_equal(second_source, parameter.name.source)
+    try testing.expect_equal("parameter", ast.source_text(&tree, parameter.name))
+    for (usize(0)..ast.node_count(&tree)) |index| {
+        expected :: if (index < first_node_count) first_source else second_source
+        span :: ast.node_span(&tree, ast.NodeId(index))
+        try testing.expect_equal(expected, span.source)
+        _ = ast.source_text(&tree, span)
+    }
+    try testing.expect_equal(2, ast.source_files(&tree).len)
+    try testing.expect_equal("first.hon", ast.source_files(&tree)[usize(first_source)].path)
+    try testing.expect_equal("second.hon", ast.source_files(&tree)[usize(second_source)].path)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+rejects_empty_escaped_and_control_import_paths_without_losing_siblings test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "import \"\"\nimport \"bad\\\\path\"\nimport \"bad\tpath\"\nkept :: 1\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(4, ast.package_decl_count(&tree))
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    for (usize(0)..usize(3)) |index| {
+        declaration :: ast.package_decl(&tree, index)
+        try testing.expect_equal(ast.DeclKind.invalid, ast.decl_kind(&tree, declaration))
+        diagnostic :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, declaration).diagnostic)?
+        try testing.expect_equal(diagnostics.Code.invalid_import_path, diagnostic.code)
+    }
+    kept :: ast.statement_decl(&tree, ast.package_decl(&tree, 3))
+    try testing.expect_equal("kept", ast.source_text(&tree, kept.name))
+}
+
+@hide:file
+AllocationBudget :: struct { remaining usize }
+
+@hide:file
+budget_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+    budget @mut AllocationBudget :: ptrcast!(context?)
+    if (budget.remaining == 0) return null
+    budget.remaining -= 1
+    return mem.raw_alloc(mem.c_allocator, size, alignment)
+}
+
+@hide:file
+budget_realloc proc(
+    context ?@mut anyopaque, memory ?*mut u8, old_size, new_size, alignment usize,
+) ?*mut u8 {
+    budget @mut AllocationBudget :: ptrcast!(context?)
+    if (budget.remaining == 0) return null
+    budget.remaining -= 1
+    return mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+}
+
+@hide:file
+budget_free proc(context ?@mut anyopaque, memory ?*mut u8, size, alignment usize) void {
+    _ = context
+    mem.raw_free(mem.c_allocator, memory, size, alignment)
+}
+
+@hide:file
+budget_vtable :: mem.AllocatorVTable{ alloc = budget_alloc, realloc = budget_realloc, free = budget_free }
+
+rolls_back_shared_nodes_extra_spans_and_diagnostics_on_allocation_failure test {
+    failures := 0
+    for (usize(0)..usize(16)) |remaining| {
+        strings := strpool.init(mem.c_allocator)
+        defer strpool.deinit(&strings)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        budget := AllocationBudget{ remaining = maxval!(usize) }
+        allocator :: mem.Allocator{ context = &budget, vtable = &budget_vtable }
+        builder := ast.init_builder(allocator, "")
+        defer ast.deinit_builder(&builder)
+        first_text :: "value :: 1\n"
+        first_source :: try ast.set_source(&builder, "first.hon", first_text)
+        first_scan := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&first_scan)
+        first_scan.source_id = first_source
+        try lexer.scan(&first_scan, first_text, &strings, &diagnostic_store)
+        first_root :: try parse_source(&builder, first_scan.tokens.items, &diagnostic_store)
+        node_count :: builder.storage.nodes.items.len
+        extra_count :: builder.storage.extra.items.len
+        second_text :: "another :: [1, 2, 3]\n@ broken\nlast :: 4\n"
+        second_source :: try ast.set_source(&builder, "second.hon", second_text)
+        second_scan := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&second_scan)
+        second_scan.source_id = second_source
+        try lexer.scan(&second_scan, second_text, &strings, &diagnostic_store)
+        budget.remaining = remaining
+        _ = parse_source(&builder, second_scan.tokens.items, &diagnostic_store) catch |error| {
+            try testing.expect(error == .out_of_memory)
+            failures += 1
+            try testing.expect_equal(node_count, builder.storage.nodes.items.len)
+            try testing.expect_equal(node_count, builder.storage.spans.items.len)
+            try testing.expect_equal(extra_count, builder.storage.extra.items.len)
+            try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+            ast.remove_source(&builder)
+            tree :: ast.view(&builder, first_root)
+            declaration :: ast.statement_decl(&tree, ast.package_decl(&tree, 0))
+            try testing.expect_equal("value", ast.source_text(&tree, declaration.name))
+            try testing.expect_equal(1, ast.source_files(&tree).len)
+            try testing.expect_equal(first_source, builder.source_id)
+            continue
+        }
+    }
+    try testing.expect(failures > 0)
+}

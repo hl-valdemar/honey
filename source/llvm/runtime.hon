@@ -110,19 +110,19 @@ runtime ::
     `  call void @out(i32 1, ptr %bytes, i64 %length)
     `  ret void
     `}
-    `define internal void @trap(i64 %id, i64 %line, i64 %column, ptr %message, i64 %length) noreturn {
+    `define internal void @trap(i64 %id, i64 %source, i64 %line, i64 %column, ptr %message, i64 %length) noreturn {
     `entry:
     `  call void @report(i64 %id)
     `  %generated = icmp eq i64 %id, -1
     `  br i1 %generated, label %new, label %end
     `new:
-    `  call void @diagnose(i64 %line, i64 %column, ptr %message, i64 %length, i1 true)
+    `  call void @diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 true)
     `  br label %end
     `end:
     `  call void @exit(i32 1)
     `  unreachable
     `}
-    `define internal void @check_init(ptr %flag, i1 %read, i64 %line, i64 %column) {
+    `define internal void @check_init(ptr %flag, i1 %read, i64 %source, i64 %line, i64 %column) {
     `entry:
     `  %global = icmp eq ptr %flag, null
     `  br i1 %global, label %end, label %check
@@ -132,7 +132,7 @@ runtime ::
     `fail:
     `  %message = select i1 %read, ptr @read, ptr @assign
     `  %length = select i1 %read, i64 42, i64 46
-    `  call void @trap(i64 -1, i64 %line, i64 %column, ptr %message, i64 %length)
+    `  call void @trap(i64 -1, i64 %source, i64 %line, i64 %column, ptr %message, i64 %length)
     `  unreachable
     `end:
     `  ret void

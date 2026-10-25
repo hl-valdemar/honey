@@ -2,58 +2,70 @@ import "@std/mem"
 import "@std/arraylist"
 import "@std/enummap"
 
+SourceId :: distinct usize
+
+#! borrows a source path and text owned by the compilation or caller.
+Source :: struct {
+    path []u8
+    text []u8
+}
+
 Span :: struct {
     start u32
     end u32
+    source SourceId = SourceId(0)
 }
 
 DiagnosticId :: distinct u32
 no_diagnostic :: maxval!(DiagnosticId)
 
 Code :: enum {
-    invalid_character,
-    float_must_end_with_digit,
-    unterminated_string,
-    unexpected_token,
-    duplicate_name,
-    unknown_name,
-    expected_type,
-    type_not_value,
-    invalid_void_type,
-    type_mismatch,
-    invalid_operand,
-    integer_division,
-    not_callable,
-    argument_count_mismatch,
-    cannot_infer_type,
-    missing_return,
-    return_type_mismatch,
-    condition_not_bool,
-    invalid_assignment_target,
-    break_outside_loop,
-    continue_outside_loop,
-    invalid_range_bound,
-    invalid_for_iterable,
-    range_value_not_supported,
-    range_pointer_capture,
-    range_index_capture,
-    invalid_array_length,
-    array_length_mismatch,
-    invalid_array_element_type,
-    array_size_overflow,
-    invalid_index_type,
-    not_indexable,
-    invalid_index_assignment,
-    index_out_of_bounds,
-    missing_entry,
-    invalid_entry,
-    literal_out_of_range,
-    inexact_integer_literal,
-    invalid_escape,
-    read_before_initialization,
-    write_before_initialization,
-    initialization_cycle,
-    integer_overflow,
+    invalid_character
+    float_must_end_with_digit
+    unterminated_string
+    unexpected_token
+    duplicate_name
+    unknown_name
+    expected_type
+    type_not_value
+    invalid_void_type
+    type_mismatch
+    invalid_operand
+    integer_division
+    not_callable
+    argument_count_mismatch
+    cannot_infer_type
+    missing_return
+    return_type_mismatch
+    condition_not_bool
+    invalid_assignment_target
+    break_outside_loop
+    continue_outside_loop
+    invalid_range_bound
+    invalid_for_iterable
+    range_value_not_supported
+    range_pointer_capture
+    range_index_capture
+    invalid_array_length
+    array_length_mismatch
+    invalid_array_element_type
+    array_size_overflow
+    invalid_index_type
+    not_indexable
+    invalid_index_assignment
+    index_out_of_bounds
+    missing_entry
+    invalid_entry
+    literal_out_of_range
+    inexact_integer_literal
+    invalid_escape
+    read_before_initialization
+    write_before_initialization
+    initialization_cycle
+    integer_overflow
+    import_cycle
+    invalid_import_path
+    package_unavailable
 }
 
 Diagnostic :: struct {
@@ -138,5 +150,8 @@ messages :: $enummap.init(Code, []u8, {
     write_before_initialization = "local value was assigned before initialization",
     initialization_cycle = "global initialization cycle",
     integer_overflow = "integer arithmetic overflow",
+    import_cycle = "package import cycle",
+    invalid_import_path = "invalid import path",
+    package_unavailable = "cannot load package directory",
 })
 

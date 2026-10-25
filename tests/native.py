@@ -260,6 +260,82 @@ def check(source, executable, expected=None):
         executable.unlink()
 
 
+def check_packages(temporary, executable):
+    project = temporary / "packages"
+
+    def put(path, text):
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        return target
+
+    put("build.hon", "# project-root marker\n")
+    app = project / "app"
+    main = put("app/main.hon", 'import "../left"\nright :: import "@right"\nimport "../shared"\nmain proc() int { return helper(21) }\n')
+    helper = put("app/zhelper.bro", "helper proc(n int) int { return n * 2 }\n")
+    put("app/ignored.test.hon", "this is deliberately not valid source\n")
+    (app / "directory.hon").mkdir()
+    fifo = project / "pipe"
+    os.mkfifo(fifo)
+    (app / "pipe.hon").symlink_to(fifo)
+    put("left/left.hon", 'import "../shared"\nhelper proc() int { return 1 }\nmain proc() int { return 99 }\n')
+    put("right/right.hon", 'import "../shared-link"\nhelper proc() int { return 2 }\n')
+    shared = put("shared/shared.hon", "helper proc() int { return 3 }\n")
+    (project / "shared-link").symlink_to(project / "shared", target_is_directory=True)
+    check(app, executable, (b"42\n", None))
+    # File inputs retain their old single-file semantics, even inside a package.
+    check(main, executable, (b"", b"unknown name"))
+    emitted = run(str(HONEY), "emit-llvm", str(app))
+    assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
+    shared.write_text("bad proc() int { return missing }\n")
+    check(app, executable, (b"42\n", b"unknown name"))
+    diagnosed = run(str(HONEY), "run", str(app))
+    assert diagnosed.stderr.count(b"unknown name") == 1, outcome(diagnosed)
+    assert str(shared.resolve()).encode() + b":1:" in diagnosed.stderr, outcome(diagnosed)
+    # Dependency main functions cannot supply an entry for the root package.
+    main.write_text('import "../left"\nentry proc() int { return 42 }\n')
+    shared.write_text("helper proc() int { return 3 }\n")
+    check(app, executable, (b"", b"program requires a main function"))
+    # Source scopes merge within a package, never across dependency packages.
+    main.write_text('import "../left"\nmain proc() int { return helper() }\n')
+    helper.write_text("local_only proc() int { return 7 }\n")
+    check(app, executable, (b"", b"unknown name"))
+    main.write_text('import "../left"\nmain proc() int { return 42 }\n')
+    shared.write_text('import "../left"\n')
+    check(app, executable, (b"42\n", b"package import cycle"))
+    shared.write_text('import "../shared-link"\n')
+    check(app, executable, (b"42\n", b"package import cycle"))
+    shared.write_text("helper proc() int { return 3 }\n")
+    for imported, message in (
+        ("/tmp", b"invalid import path"),
+        ("@/tmp", b"invalid import path"),
+        ("../absent", b"cannot load package directory"),
+        ("../shared/shared.hon", b"cannot load package directory"),
+        ("../empty", b"cannot load package directory"),
+    ):
+        (project / "empty").mkdir(exist_ok=True)
+        main.write_text(f'import "{imported}"\nmain proc() int {{ return 42 }}\n')
+        check(app, executable, (b"42\n", message))
+    main.write_text('test import "../absent"\nmain proc() int { return 42 }\n')
+    check(app, executable, (b"42\n", None))
+    # Directory order is lexical, not filesystem insertion order; first declaration wins.
+    put("duplicate/z.hon", "value :: 99\n")
+    put("duplicate/a.hon", "value :: 41\n")
+    put("duplicate/main.hon", "main proc() int { return value }\n")
+    check(project / "duplicate", executable, (b"41\n", b"duplicate name"))
+    # Runtime locations must survive source/frontend cleanup in generated executables.
+    main.write_text("main proc() int { return fail() }\n")
+    helper.write_text("\nfail proc() int { return 9223372036854775807 + 1 }\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    trapped = run(str(HONEY), "run", str(app))
+    assert str(helper.resolve()).encode() + b":2:" in trapped.stderr, outcome(trapped)
+    empty = run(str(HONEY), "run", str(project / "empty"))
+    assert empty.returncode == 2 and b"no production source files" in empty.stderr, outcome(empty)
+    special = run(str(HONEY), "run", str(fifo))
+    assert special.returncode == 2 and b"cannot open source file" in special.stderr, outcome(special)
+    return 15
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -273,6 +349,7 @@ def main():
             source.write_text(textwrap.dedent(text).strip() + "\n")
             check(source, executable, (stdout, error))
             count += 1
+        count += check_packages(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))
         assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)

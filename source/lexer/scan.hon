@@ -33,12 +33,15 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "and", .and },
     { "or", .or },
     { "mut", .mut },
+    { "import", .import },
+    { "test", .test },
 ])
 
 #! owns token storage and retains its allocator; release with deinit.
 #! identifier IDs belong to the compilation's separately owned string pool.
 State :: struct {
     tokens arraylist.ArrayList(Token)
+    source_id diagnostics.SourceId = diagnostics.SourceId(0)
 }
 
 #! retains `allocator` for scanned tokens; the caller owns the returned State.
@@ -53,6 +56,7 @@ deinit proc(state @mut State) void {
 
 #! borrows `program`, `pool`, and `diagnostic_store`; tokens remain state-owned.
 #! identifier storage uses the pool's allocator; keep the pool alive while using their IDs.
+#! `source_id` is copied into every token and scanner diagnostic span.
 scan proc(
     state @mut State,
     program []u8,
@@ -60,12 +64,16 @@ scan proc(
     diagnostic_store @mut diagnostics.Store,
 ) void ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError | SourceError) {
     if (program.len > usize(maxval!(u32))) return .source_too_large
+    source :: state.source_id
     cursor := 0
     while cursor < program.len {
         char :: program[cursor]
 
         if char == '\n' {
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .newline })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .newline,
+            })
             cursor += 1
             continue
         }
@@ -84,7 +92,7 @@ scan proc(
             start :: cursor
             result :: try scan_ident(start, program, pool)
             try add_token(state, Token{
-                span = make_span(start, result.end),
+                span = make_span(source, start, result.end),
                 kind = result.kind,
                 data = TokenData{ str_id = result.str_id },
             })
@@ -98,10 +106,10 @@ scan proc(
                 id :: try diagnostics.add(
                     diagnostic_store,
                     diagnostic_code(err.code),
-                    make_span(start, err.end),
+                    make_span(source, start, err.end),
                 )
                 try add_token(state, Token{
-                    span = make_span(start, err.end),
+                    span = make_span(source, start, err.end),
                     kind = .invalid,
                     data = TokenData{ diagnostic = id },
                 })
@@ -109,7 +117,10 @@ scan proc(
                 continue
             }
             kind :: if (result.has_decimal) .float else .int
-            try add_token(state, Token{ span = make_span(start, result.end), kind = kind })
+            try add_token(state, Token{
+                span = make_span(source, start, result.end),
+                kind = kind,
+            })
             cursor = result.end
             continue
         }
@@ -120,17 +131,20 @@ scan proc(
                 id :: try diagnostics.add(
                     diagnostic_store,
                     diagnostic_code(err.code),
-                    make_span(start, err.end),
+                    make_span(source, start, err.end),
                 )
                 try add_token(state, Token{
-                    span = make_span(start, err.end),
+                    span = make_span(source, start, err.end),
                     kind = .invalid,
                     data = TokenData{ diagnostic = id },
                 })
                 cursor = err.end
                 continue
             }
-            try add_token(state, Token{ span = make_span(start, result.end), kind = .string })
+            try add_token(state, Token{
+                span = make_span(source, start, result.end),
+                kind = .string,
+            })
             cursor = result.end
             continue
         }
@@ -140,7 +154,7 @@ scan proc(
             width :: if (inclusive) 3 else 2
             range_kind :: if (inclusive) .range_inclusive else .range
             try add_token(state, Token{
-                span = make_span(cursor, cursor + width),
+                span = make_span(source, cursor, cursor + width),
                 kind = range_kind,
             })
             cursor += width
@@ -150,7 +164,7 @@ scan proc(
         if char == ':' {
             if cursor + 1 < program.len and program[cursor + 1] == ':' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .double_colon,
                 })
                 cursor += 2
@@ -158,13 +172,16 @@ scan proc(
             }
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .colon_equal,
                 })
                 cursor += 2
                 continue
             }
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .colon })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .colon,
+            })
             cursor += 1
             continue
         }
@@ -172,52 +189,64 @@ scan proc(
         if char == '+' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .plus_equal,
                 })
                 cursor += 2
                 continue
             }
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .plus })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .plus,
+            })
             cursor += 1
             continue
         }
         if char == '-' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .minus_equal,
                 })
                 cursor += 2
                 continue
             }
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .minus })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .minus,
+            })
             cursor += 1
             continue
         }
         if char == '*' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .star_equal,
                 })
                 cursor += 2
                 continue
             }
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .star })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .star,
+            })
             cursor += 1
             continue
         }
         if char == '/' {
             if cursor + 1 < program.len and program[cursor + 1] == '=' {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = .slash_equal,
                 })
                 cursor += 2
                 continue
             }
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = .slash })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = .slash,
+            })
             cursor += 1
             continue
         }
@@ -232,7 +261,7 @@ scan proc(
             }
             if (comparison) |value| {
                 try add_token(state, Token{
-                    span = make_span(cursor, cursor + 2),
+                    span = make_span(source, cursor, cursor + 2),
                     kind = value,
                  })
                 cursor += 2
@@ -257,7 +286,10 @@ scan proc(
             else: null
         }
         if (kind) |value| {
-            try add_token(state, Token{ span = make_span(cursor, cursor + 1), kind = value })
+            try add_token(state, Token{
+                span = make_span(source, cursor, cursor + 1),
+                kind = value,
+            })
             cursor += 1
             continue
         }
@@ -265,17 +297,20 @@ scan proc(
         id :: try diagnostics.add(
             diagnostic_store,
             .invalid_character,
-            make_span(cursor, cursor + 1),
+            make_span(source, cursor, cursor + 1),
         )
         try add_token(state, Token{
-            span = make_span(cursor, cursor + 1),
+            span = make_span(source, cursor, cursor + 1),
             kind = .invalid,
             data = TokenData{ diagnostic = id },
         })
         cursor += 1
     }
 
-    try add_token(state, Token{ span = make_span(cursor, cursor), kind = .eof })
+    try add_token(state, Token{
+        span = make_span(source, cursor, cursor),
+        kind = .eof,
+    })
 }
 
 @hide:file
@@ -389,8 +424,12 @@ diagnostic_code proc(code ErrorCode) diagnostics.Code {
 }
 
 @hide:file
-make_span proc(start, end usize) diagnostics.Span {
-    return diagnostics.Span{ start = u32(start), end = u32(end) }
+make_span proc(source diagnostics.SourceId, start, end usize) diagnostics.Span {
+    return diagnostics.Span{
+        start = u32(start),
+        end = u32(end),
+        source = source,
+    }
 }
 
 @hide:file

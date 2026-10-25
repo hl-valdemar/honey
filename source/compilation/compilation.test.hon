@@ -15,7 +15,7 @@ owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
     return bytes
 }
 
-keeps_source_local_declarations_distinct_and_ir_independent test {
+keeps_package_declarations_distinct_and_ir_independent test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     first := try owned_text("value :: 21\nmain proc() int { return value * 2 }")
@@ -47,16 +47,14 @@ keeps_source_local_declarations_distinct_and_ir_independent test {
         try testing.expect_equal(third, session.packages.items[usize(root)].sources.items[1])
         a :: declaration(&session, left, 0)
         b :: declaration(&session, right, 0)
-        try testing.expect_equal(a.node, b.node)
         try testing.expect(a.source != b.source)
-        left_tree :: &source(&session, a.source).tree
-        right_tree :: &source(&session, b.source).tree
-        try testing.expect_equal(ast.name_id(left_tree, a.node), ast.name_id(right_tree, b.node))
-        try testing.expect(mem.eql(ast.source_text(left_tree, ast.statement_decl(left_tree, a.node).span), "value :: 21"))
-        try testing.expect(mem.eql(ast.source_text(right_tree, ast.statement_decl(right_tree, b.node).span), "value :: 3"))
-        modules[0] = try compile(&session, left, &diagnostic_store)
+        tree :: ast.view(&session.builder, source(&session, left).root)
+        try testing.expect_equal(ast.name_id(&tree, a.node), ast.name_id(&tree, b.node))
+        try testing.expect(mem.eql(ast.source_text(&tree, ast.statement_decl(&tree, a.node).span), "value :: 21"))
+        try testing.expect(mem.eql(ast.source_text(&tree, ast.statement_decl(&tree, b.node).span), "value :: 3"))
+        modules[0] = try compile(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, right, &diagnostic_store)
+        modules[1] = try compile(&session, dependency, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])

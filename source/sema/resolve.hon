@@ -89,6 +89,18 @@ resolve proc(
     pool @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
 ) Resolution ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError) {
+    roots [1]ast.NodeId :: [tree.root]
+    return try resolve_packages(allocator, tree, roots[..], pool, diagnostic_store)
+}
+
+#! resolves each package root in its own namespace; AST IDs share the compilation arena.
+resolve_packages proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    roots []ast.NodeId,
+    pool @mut strpool.StringPool,
+    diagnostic_store @mut diagnostics.Store,
+) Resolution ! (mem.AllocError | strpool.InternError | diagnostics.CapacityError) {
     bindings :: try mem.alloc(Binding, allocator, ast.node_count(tree))
     errdefer mem.free(allocator, bindings)
     mem.set(bindings, Binding{})
@@ -102,30 +114,41 @@ resolve proc(
         allocator = allocator,
     }
 
+    for (roots) |root| try resolve_package(&state, root)
+
+    return Resolution{ storage = Storage{
+        bindings = bindings,
+        allocator = allocator,
+    } }
+}
+
+@hide:file
+resolve_package proc(state @mut State, root ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree := state.tree^
+    tree.root = root
     package_scope := Scope{
-        names = hashmap.init(allocator),
+        names = hashmap.init(state.allocator),
         parent = null,
     }
     defer hashmap.deinit(&package_scope.names)
-    for (0..ast.package_decl_count(tree)) |i| {
-        id :: ast.package_decl(tree, i)
-        match ast.decl_kind(tree, id) {
-            .statement: try predeclare(&state, &package_scope, id, ast.statement_decl(tree, id).name)
-            .function: try predeclare(&state, &package_scope, id, ast.function_decl(tree, id).name)
-            .invalid: {}
+    for (0..ast.package_decl_count(&tree)) |i| {
+        id :: ast.package_decl(&tree, i)
+        match ast.decl_kind(&tree, id) {
+            .statement: try predeclare(state, &package_scope, id, ast.statement_decl(&tree, id).name)
+            .function: try predeclare(state, &package_scope, id, ast.function_decl(&tree, id).name)
+            .import, .invalid: {}
+        }
+    }
+    for (0..ast.package_decl_count(&tree)) |i| {
+        id :: ast.package_decl(&tree, i)
+        match ast.decl_kind(&tree, id) {
+            .statement: try resolve_statement_decl(state, &package_scope, id)
+            .function: try resolve_function(state, &package_scope, id)
+            .invalid: resolve_invalid(state, id)
+            .import: {}
         }
     }
 
-    for (0..ast.package_decl_count(tree)) |i| {
-        id :: ast.package_decl(tree, i)
-        match ast.decl_kind(tree, id) {
-            .statement: try resolve_statement_decl(&state, &package_scope, id)
-            .function: try resolve_function(&state, &package_scope, id)
-            .invalid: resolve_invalid(&state, id)
-        }
-    }
-
-    return Resolution{ storage = Storage{ bindings = bindings, allocator = allocator } }
 }
 
 #! releases binding storage with the allocator retained by resolve.
