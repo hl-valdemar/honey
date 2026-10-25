@@ -70,10 +70,20 @@ keeps_package_declarations_distinct_and_ir_independent test {
 
 dependency_traps_keep_original_spans_and_remain_demand_driven test {
     mains [2][]u8 :: [
-        "dep :: import \"../dependency\"\nmain proc() int { return dep.fail(false) }\n",
-        "dep :: import \"../dependency\"\nmain proc() int { return dep.fail(true) }\n",
+        `dep :: import "../dependency"
+        `main proc() int { return dep.fail(false) }
+        `
+        ,
+        `dep :: import "../dependency"
+        `main proc() int { return dep.fail(true) }
+        `
+        ,
     ]
-    prefix :: "\nfail proc(take bool) int {\n    if take {\n        return "
+    prefix ::
+        `
+        `fail proc(take bool) int {
+        `    if take {
+        `
     for (mains) |main, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
@@ -88,7 +98,15 @@ dependency_traps_keep_original_spans_and_remain_demand_driven test {
             root_bytes := try owned_text(main)
             defer arraylist.deinit(&root_bytes)
             dependency_bytes := try owned_text(
-                "\nfail proc(take bool) int {\n    if take {\n        return missing\n    }\n    return 42\n}\n",
+                `
+                `fail proc(take bool) int {
+                `    if take {
+                `        return missing
+                `    }
+                `    return 42
+                `}
+                `
+                ,
             )
             defer arraylist.deinit(&dependency_bytes)
             root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
@@ -105,8 +123,9 @@ dependency_traps_keep_original_spans_and_remain_demand_driven test {
         diagnostic :: diagnostics.get(&diagnostic_store, original)?
         try testing.expect_equal(diagnostics.Code.unknown_name, diagnostic.code)
         try testing.expect_equal(dependency_source, diagnostic.span.source)
-        try testing.expect_equal(u32(prefix.len), diagnostic.span.start)
-        try testing.expect_equal(u32(prefix.len + 7), diagnostic.span.end)
+        start :: u32(prefix.len + "        return ".len)
+        try testing.expect_equal(start, diagnostic.span.start)
+        try testing.expect_equal(start + 7, diagnostic.span.end)
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         defer interpreter.deinit(&outcome)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))

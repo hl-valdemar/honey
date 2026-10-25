@@ -440,29 +440,72 @@ def check_dependency_provenance(temporary, executable):
     # A transitive call must report the leaf's location, not either importing file.
     bridge = project / "bridge"
     bridge.mkdir()
-    (bridge / "main.hon").write_text(
-        'import "../dependency"\nfail proc() int { return dependency.fail() }\n'
-    )
+    (bridge / "main.hon").write_text(textwrap.dedent("""
+        import "../dependency"
+        fail proc() int { return dependency.fail() }
+    """).strip() + "\n")
     cases = [
-        ("fail proc() int {\n    return `\n}\n", 4, 12, True),
-        ("fail proc() int {\n    return (1\n}\n", 4, 14, True),
-        ("fail proc() int {\n    text :: \"é\" return missing\n}\n", 4, 25, True),
-        ("fail proc() int {\n    if (1) return 0\n    return 42\n}\n", 4, 9, True),
-        ("fail proc() int {\n    return 9223372036854775808\n}\n", 4, 12, True),
-        ("fail proc() int {\n    return 9223372036854775807 + 1\n}\n", 4, 12, False),
-        ("fail proc() int {\n    a :: [42]\n    return a[1]\n}\n", 5, 12, False),
-        ("fail proc() int {\n    before :: after\n    after :: 42\n    return before\n}\n", 4, 15, False),
-        ("a int :: b\nb int :: a\nfail proc() int { return a }\n", 4, 10, False),
+        ("""
+            fail proc() int {
+                return `
+            }
+        """, 4, 12, True),
+        ("""
+            fail proc() int {
+                return (1
+            }
+        """, 4, 14, True),
+        ("""
+            fail proc() int {
+                text :: "é" return missing
+            }
+        """, 4, 25, True),
+        ("""
+            fail proc() int {
+                if (1) return 0
+                return 42
+            }
+        """, 4, 9, True),
+        ("""
+            fail proc() int {
+                return 9223372036854775808
+            }
+        """, 4, 12, True),
+        ("""
+            fail proc() int {
+                return 9223372036854775807 + 1
+            }
+        """, 4, 12, False),
+        ("""
+            fail proc() int {
+                a :: [42]
+                return a[1]
+            }
+        """, 5, 12, False),
+        ("""
+            fail proc() int {
+                before :: after
+                after :: 42
+                return before
+            }
+        """, 4, 15, False),
+        ("""
+            a int :: b
+            b int :: a
+            fail proc() int { return a }
+        """, 4, 10, False),
     ]
     for text, line, column, static in cases:
-        source.write_text("\n# utf8: é\n" + text)
+        source.write_text("\n# utf8: é\n" + textwrap.dedent(text).strip() + "\n")
         location = f"{source.resolve()}:{line}:{column}: ".encode()
         for reached in (False, True):
-            main.write_text(
-                'import "../bridge"\nmain proc() int {\n'
-                f'    if ({str(reached).lower()}) return bridge.fail()\n'
-                '    return 42\n}\n'
-            )
+            main.write_text(textwrap.dedent(f"""
+                import "../bridge"
+                main proc() int {{
+                    if ({str(reached).lower()}) return bridge.fail()
+                    return 42
+                }}
+            """).strip() + "\n")
             interpreted = run(str(HONEY), "run", str(app))
             assert interpreted.returncode == int(static or reached), outcome(interpreted)
             assert interpreted.stdout == (b"" if reached else b"42\n"), outcome(interpreted)
