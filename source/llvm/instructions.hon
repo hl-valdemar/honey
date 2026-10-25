@@ -1,5 +1,6 @@
 import "@std/io"
 import "@source/ir"
+import "@source/diagnostics"
 
 @hide
 emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruction) void ! io.WriteError {
@@ -57,11 +58,49 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             }
             return
         }
+        .union_literal: {
+            shape :: state.module.arrays.items[usize(instruction.array_type)]
+            try io.write_all(output, "  store ")
+            try write_type(output, state.module, type)
+            try io.print(" zeroinitializer, ptr %v{}\n", output, {u32(instruction.destination)})
+            if (shape.tag_type != .void) {
+                try io.write_all(output, "  store ")
+                try write_type(output, state.module, Type{ kind = shape.tag_type })
+                try io.write_all(output, " ")
+                try write_constant(output, state.module, instruction.constant)
+                try io.print(", ptr %v{}\n", output, {u32(instruction.destination)})
+            }
+            if (instruction.left != ir.no_value) {
+                payload :: try load(state, instruction.left)
+                pointer :: fresh(state)
+                try io.print("  %r{} = getelementptr i8, ptr %v{}, i64 {}\n", output, {pointer, u32(instruction.destination), shape.payload_offset})
+                try store_payload(state, state.values[usize(instruction.left)], payload, pointer)
+            }
+            return
+        }
+        .union_tag: {
+            try io.print("  %r{} = load ", output, {result})
+            try write_type(output, state.module, type)
+            try io.print(", ptr %v{}\n", output, {u32(instruction.left)})
+        }
         .field: {
-            base :: try load(state, instruction.left)
-            try io.print("  %r{} = extractvalue ", output, {result})
-            try write_type(output, state.module, state.values[usize(instruction.left)])
-            try io.print(" %r{}, {}\n", output, {base, instruction.slot})
+            base_type :: state.values[usize(instruction.left)]
+            shape :: state.module.arrays.items[usize(base_type.shape)]
+            if (shape.is_union) {
+                pointer :: fresh(state)
+                try io.print("  %r{} = getelementptr i8, ptr %v{}, i64 0\n", output, {pointer, u32(instruction.left)})
+                try check_union(state, pointer, shape, usize(instruction.slot), instruction.span)
+                if (instruction.type == .void) return
+                payload :: fresh(state)
+                try io.print("  %r{} = getelementptr i8, ptr %r{}, i64 {}\n  %r{} = load ", output, {payload, pointer, shape.payload_offset, result})
+                try write_type(output, state.module, type)
+                try io.print(", ptr %r{}\n", output, {payload})
+            } else {
+                base :: try load(state, instruction.left)
+                try io.print("  %r{} = extractvalue ", output, {result})
+                try write_type(output, state.module, base_type)
+                try io.print(" %r{}, {}\n", output, {base, instruction.slot})
+            }
         }
         .field_address: {
             base_type :: state.values[usize(instruction.left)]
@@ -72,9 +111,19 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             address :: fresh(state)
             try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {data, base})
             try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, base})
-            try io.print("  %r{} = getelementptr ", output, {pointer})
-            try write_type(output, state.module, Type{ kind = .record, shape = base_type.shape })
-            try io.print(", ptr %r{}, i64 0, i32 {}\n", output, {data, instruction.slot})
+            shape :: state.module.arrays.items[usize(base_type.shape)]
+            if (shape.is_union) {
+                if (shape.tag_type != .void) {
+                    position :: location(state.line_starts, instruction.span)
+                    try io.print("  call void @check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
+                    try check_union(state, data, shape, usize(instruction.slot), instruction.span)
+                }
+                try io.print("  %r{} = getelementptr i8, ptr %r{}, i64 {}\n", output, {pointer, data, shape.payload_offset})
+            } else {
+                try io.print("  %r{} = getelementptr ", output, {pointer})
+                try write_type(output, state.module, Type{ kind = .record, shape = base_type.shape })
+                try io.print(", ptr %r{}, i64 0, i32 {}\n", output, {data, instruction.slot})
+            }
             try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
             try io.print("  %r{} = insertvalue %address %r{}, ptr %r{}, 1\n", output, {result, address, flag})
         }
@@ -129,9 +178,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print("  call void @check_init(ptr %r{}, i1 {}, i64 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, usize(instruction.span.source), position.line, position.column})
             if (instruction.op == .store_address) {
                 value :: try load(state, instruction.right)
-                try io.write_all(output, "  store ")
-                try write_type(output, state.module, state.values[usize(instruction.right)])
-                try io.print(" %r{}, ptr %r{}\n", output, {value, pointer})
+                try store_payload(state, state.values[usize(instruction.right)], value, pointer)
                 return
             }
             try io.print("  %r{} = load ", output, {result})
@@ -244,6 +291,46 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         }
     }
     try store(state, instruction.destination, result)
+}
+
+@hide:file
+check_union proc(state @mut State, pointer usize, shape ir.ArrayType, field usize, span diagnostics.Span) void ! io.WriteError {
+    if (shape.tag_type == .void) return
+    tag :: fresh(state)
+    failed :: fresh(state)
+    try io.print("  %r{} = load ", state.output, {tag})
+    try write_type(state.output, state.module, Type{ kind = shape.tag_type })
+    try io.print(", ptr %r{}\n  %r{} = icmp ne ", state.output, {pointer, failed})
+    try write_type(state.output, state.module, Type{ kind = shape.tag_type })
+    try io.print(" %r{}, ", state.output, {tag})
+    try write_constant(state.output, state.module, shape.fields[field].tag)
+    try io.write_all(state.output, "\n")
+    try check_failure(state, failed, .inactive_union_field, span)
+}
+
+@hide:file
+store_payload proc(state @mut State, type Type, value, pointer usize) void ! io.WriteError {
+    if (type.kind == .void) return
+    if (ir.aggregate(type.kind)) {
+        shape :: state.module.arrays.items[usize(type.shape)]
+        if (!shape.is_union) {
+            count usize :: if (type.kind == .record) shape.fields.len else shape.len
+            for (0..count) |i| {
+                child :: if (type.kind == .record) Type{ kind = shape.fields[i].type, shape = shape.fields[i].array_type } else Type{ kind = shape.element, shape = shape.element_array }
+                offset usize :: if (type.kind == .record) shape.fields[i].byte_offset else i * ir.storage_size(state.module, shape.element, shape.element_array)
+                element :: fresh(state)
+                address :: fresh(state)
+                try io.print("  %r{} = extractvalue ", state.output, {element})
+                try write_type(state.output, state.module, type)
+                try io.print(" %r{}, {}\n  %r{} = getelementptr i8, ptr %r{}, i64 {}\n", state.output, {value, i, address, pointer, offset})
+                try store_payload(state, child, element, address)
+            }
+            return
+        }
+    }
+    try io.write_all(state.output, "  store ")
+    try write_type(state.output, state.module, type)
+    try io.print(" %r{}, ptr %r{}\n", state.output, {value, pointer})
 }
 
 @hide:file

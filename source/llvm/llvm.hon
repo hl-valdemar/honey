@@ -143,6 +143,11 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         }
         .record: {
             shape :: module.arrays.items[usize(type.shape)]
+            if (shape.is_union) {
+                words usize :: divtrunc!(shape.byte_size, 8)
+                try io.print("{{ [{} x i64] }}", output, {words})
+                return
+            }
             try io.write_all(output, "{ ")
             for (shape.fields) |field, index| {
                 if (index != 0) try io.write_all(output, ", ")
@@ -307,6 +312,10 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
 emit_record_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
     shape :: module.arrays.items[usize(id)]
     type :: Type{ kind = .record, shape = id }
+    if (shape.is_union) {
+        try emit_union_printer(output, module, id)
+        return
+    }
     try io.print("define internal void @print_array{}(", output, {u32(id)})
     try write_type(output, module, type)
     try io.write_all(output, " %value) {\nentry:\n  call void @out(i32 1, ptr @record_open, i64 1)\n")
@@ -319,6 +328,51 @@ emit_record_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) voi
         else try io.write_all(output, "  call void @exit(i32 2)\n")
     }
     try io.write_all(output, "  call void @out(i32 1, ptr @record_close, i64 1)\n  ret void\n}\n")
+}
+
+@hide:file
+emit_union_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
+    shape :: module.arrays.items[usize(id)]
+    type :: Type{ kind = .record, shape = id }
+    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try write_type(output, module, type)
+    try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
+    try write_type(output, module, type)
+    try io.write_all(output, "\n  store ")
+    try write_type(output, module, type)
+    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @record_open, i64 1)\n")
+    if (shape.tag_type != .void) {
+        try io.write_all(output, "  %tag = load ")
+        try write_type(output, module, Type{ kind = shape.tag_type })
+        try io.write_all(output, ", ptr %storage\n")
+        target :: if (shape.fields.len == 0) "  br label %end\n" else "  br label %test0\n"
+        try io.write_all(output, target)
+        for (shape.fields) |field, index| {
+            try io.print("test{}:\n  %tag_match{} = icmp eq ", output, {index, index})
+            try write_type(output, module, Type{ kind = shape.tag_type })
+            try io.write_all(output, " %tag, ")
+            try write_constant(output, module, field.tag)
+            try io.print("\n  br i1 %tag_match{}, label %case{}, label %", output, {index, index})
+            if (index + 1 == shape.fields.len) try io.write_all(output, "end\n")
+            else try io.print("test{}\n", output, {index + 1})
+        }
+    } else {
+        target :: if (shape.fields.len == 0) "  br label %end\n" else "  br label %case0\n"
+        try io.write_all(output, target)
+    }
+    for (shape.fields) |field, index| {
+        if (shape.tag_type == .void and index != 0) break
+        try io.print("case{}:\n", output, {index})
+        if (field.type != .void) {
+            try io.print("  %p{} = getelementptr i8, ptr %storage, i64 {}\n  %r{} = load ", output, {index, shape.payload_offset, index})
+            try write_type(output, module, Type{ kind = field.type, shape = field.array_type })
+            try io.print(", ptr %p{}\n", output, {index})
+            if (field.type != .function) try print_call(output, module, Type{ kind = field.type, shape = field.array_type }, index)
+            else try io.write_all(output, "  call void @exit(i32 2)\n")
+        }
+        try io.write_all(output, "  br label %end\n")
+    }
+    try io.write_all(output, "end:\n  call void @out(i32 1, ptr @record_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide
@@ -357,6 +411,7 @@ trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.
     symbol []u8 :: match code {
         .integer_overflow: "overflow"
         .index_out_of_bounds: "bounds"
+        .inactive_union_field: "inactive_union"
         else: unreachable
     }
     message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
@@ -398,6 +453,17 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
         }
         .record: {
             shape :: module.arrays.items[usize(value.array_type)]
+            if (shape.is_union) {
+                words usize :: divtrunc!(shape.byte_size, 8)
+                try io.print("{{ [{} x i64] [", output, {words})
+                for (0..words) |index| {
+                    if (index != 0) try io.write_all(output, ", ")
+                    word :: ir.read_storage(module, .u64, ir.no_array, value.data.elements[index * 8..], true)
+                    try io.print("i64 {}", output, {word.data.unsigned})
+                }
+                try io.write_all(output, "] }")
+                return
+            }
             try io.write_all(output, "{ ")
             for (shape.fields) |_, index| {
                 if (index != 0) try io.write_all(output, ", ")
@@ -457,6 +523,7 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
                 }
             }
             .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
+            .unreachable: try io.write_all(output, "  unreachable\n")
             .jump: try io.print("  br label %b{}\n", output, {u32(terminator.target)})
             .branch: {
                 condition :: try load(state, terminator.value)

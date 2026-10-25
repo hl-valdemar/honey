@@ -102,10 +102,11 @@ lower_package proc(
             }
             .statement: {
                 if (typecheck.type_of(checked, id).kind == .type_value) continue
+                if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) continue
                 initializer :: try add_function(&module, ast.node_span(tree, id))
                 global :: u32(module.globals.items.len)
                 try arraylist.append(&module.globals, ir.Global{
-                    type = lower_type(typecheck.type_of(checked, id)),
+                    type = lower_type(&state, typecheck.type_of(checked, id)),
                     array_type = try array_shape(&state, typecheck.type_of(checked, id)),
                     initializer = initializer,
                     span = ast.node_span(tree, id),
@@ -121,6 +122,7 @@ lower_package proc(
         match ast.decl_kind(tree, id) {
             .function: try lower_function(&state, id)
             .statement: {
+                if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) continue
                 if (typecheck.type_of(checked, id).kind != .type_value) try lower_global(&state, id)
             }
             .import, .invalid: {}
@@ -130,7 +132,10 @@ lower_package proc(
 }
 
 @hide:file
-lower_type proc(type typecheck.Type) ir.Type {
+lower_type proc(state @State, type typecheck.Type) ir.Type {
+    if (type.kind == .enumeration) {
+        return lower_type(state, typecheck.Type{ kind = typecheck.enum_type(state.checked, type.enum_type).backing })
+    }
     return match type.kind {
         .int: .int
         .usize: .usize
@@ -149,6 +154,7 @@ lower_type proc(type typecheck.Type) ir.Type {
         .string: .string
         .void: .void
         .function: .function
+        .enumeration: unreachable
         .none, .invalid, .range, .type_value: .invalid
     }
 }
@@ -169,7 +175,7 @@ prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.All
     if (descriptor.element.kind == .array or descriptor.element.kind == .record) child = try array_shape(state, descriptor.element)
     result :: try ir.add_array(
         state.module,
-        lower_type(descriptor.element),
+        lower_type(state, descriptor.element),
         child,
         descriptor.len,
         descriptor.mutable,
@@ -186,12 +192,24 @@ prepare_record proc(state @mut State, id typecheck.RecordId) ir.ArrayId ! (mem.A
     defer arraylist.deinit(&fields)
     try arraylist.reserve(&fields, descriptor.fields.len)
     for (descriptor.fields) |field| {
+        tag := ir.Value{}
+        if (descriptor.is_union and descriptor.tag_type.kind == .enumeration) {
+            members :: typecheck.enum_type(state.checked, descriptor.tag_type.enum_type).members
+            for members |member, index| {
+                if (ast.name_id(state.tree, member.name) == ast.name_id(state.tree, field.name?)) {
+                    tag = enum_value(state, descriptor.tag_type, index)
+                    break
+                }
+            }
+        }
         try arraylist.append(&fields, ir.RecordField{
-            type = lower_type(field.type),
+            type = lower_type(state, field.type),
             array_type = try array_shape(state, field.type),
+            tag = tag,
         })
     }
-    shape :: try ir.add_record(state.module, fields.items)
+    shape :: if (descriptor.is_union) try ir.add_union(state.module, fields.items, descriptor.tag_type.kind == .enumeration)
+        else try ir.add_record(state.module, fields.items)
     state.records[usize(id)] = shape
     return shape
 }
@@ -225,7 +243,7 @@ find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocErro
             return
         }
         declaration :: ast.function_decl(tree, id)
-        result :: lower_type(typecheck.type_of(state.checked, declaration.return_type))
+        result :: lower_type(state, typecheck.type_of(state.checked, declaration.return_type))
         if (ast.function_param_count(tree, id) != 0 or result == .function) {
             state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
             return
@@ -308,7 +326,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     state.function = usize(state.storage[usize(id)].index)
     state.block = ir.BlockId(0)
     state.terminated = false
-    state.module.functions.items[state.function].result = lower_type(typecheck.type_of(state.checked, declaration.return_type))
+    state.module.functions.items[state.function].result = lower_type(state, typecheck.type_of(state.checked, declaration.return_type))
     state.module.functions.items[state.function].result_array_type = try array_shape(state, typecheck.type_of(state.checked, declaration.return_type))
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
@@ -316,7 +334,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
         local :: try ir.add_parameter(
             state.module,
             ir.FunctionId(state.function),
-            lower_type(type),
+            lower_type(state, type),
             try array_shape(state, type),
         )
         state.storage[usize(parameter)] = Storage{ kind = .local, index = u32(local) }
@@ -344,11 +362,12 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
         match ast.stmt_kind(state.tree, statement) {
             .declaration: {
                 if (typecheck.type_of(state.checked, statement).kind == .type_value) continue
+                if (ast.expr_kind(state.tree, ast.statement_decl(state.tree, statement).initializer) == .alias_expr) continue
                 type :: typecheck.type_of(state.checked, statement)
                 local :: try ir.add_local(
                     state.module,
                     ir.FunctionId(state.function),
-                    lower_type(type),
+                    lower_type(state, type),
                     try array_shape(state, type),
                 )
                 state.storage[usize(statement)] = Storage{ kind = .local, index = u32(local) }
@@ -362,7 +381,7 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
             .for_stmt: {
                 loop :: ast.for_stmt(state.tree, statement)
                 family :: typecheck.type_of(state.checked, loop.iterable).range_element
-                type :: lower_type(typecheck.Type{ kind = family })
+                type :: lower_type(state, typecheck.Type{ kind = family })
                 slot :: try ir.add_local(state.module, ir.FunctionId(state.function), type, ir.no_array)
                 state.storage[usize(statement)] = Storage{ kind = .local, index = u32(slot) }
                 if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
@@ -385,6 +404,7 @@ lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (m
             declaration :: ast.block_statement(state.tree, block, i)
             if (ast.stmt_kind(state.tree, declaration) != .declaration) continue
             if (typecheck.type_of(state.checked, declaration).kind == .type_value) continue
+            if (ast.expr_kind(state.tree, ast.statement_decl(state.tree, declaration).initializer) == .alias_expr) continue
             _ = try emit(state, ir.Instruction{
                 op = .reset_local,
                 slot = state.storage[usize(declaration)].index,
@@ -498,7 +518,7 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
     end :: try lower_expression(state, interval.end)
     if (state.terminated or trap_type(state, loop.iterable) or trap_type(state, id)) return
     slot :: state.storage[usize(id)].index
-    family :: lower_type(typecheck.Type{ kind = typecheck.type_of(state.checked, loop.iterable).range_element })
+    family :: lower_type(state, typecheck.Type{ kind = typecheck.type_of(state.checked, loop.iterable).range_element })
     _ = try emit(state, ir.Instruction{ op = .store_local, type = family, left = start, slot = slot, span = interval.span })
     origin :: state.block
     condition :: try add_block(state)
@@ -596,7 +616,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             binding :: sema.binding(state.resolution, assignment.target)
             _ = try emit(state, ir.Instruction{
                 op = .assign_local,
-                type = lower_type(typecheck.type_of(state.checked, assignment.target)),
+                type = lower_type(state, typecheck.type_of(state.checked, assignment.target)),
                 array_type = try array_shape(state, typecheck.type_of(state.checked, assignment.target)),
                 left = value,
                 slot = state.storage[usize(binding.data.declaration)].index,
@@ -610,6 +630,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         .expression: _ = try lower_expression(state, ast.statement_expr(tree, id))
         .declaration: {
             if (typecheck.type_of(state.checked, id).kind == .type_value) return
+            if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) return
             if (trap_binding(state, id)) return
             declaration :: ast.statement_decl(tree, id)
             if (declaration.type) |annotation| if (trap_type(state, annotation)) return
@@ -617,7 +638,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             if (state.terminated or trap_type(state, id)) return
             _ = try emit(state, ir.Instruction{
                 op = .store_local,
-                type = lower_type(typecheck.type_of(state.checked, id)),
+                type = lower_type(state, typecheck.type_of(state.checked, id)),
                 array_type = try array_shape(state, typecheck.type_of(state.checked, id)),
                 left = value,
                 slot = state.storage[usize(id)].index,
@@ -676,7 +697,186 @@ lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
 }
 
 @hide:file
-lower_record proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+enum_value proc(state @State, type typecheck.Type, index usize) ir.Value {
+    descriptor :: typecheck.enum_type(state.checked, type.enum_type)
+    member :: descriptor.members[index]
+    runtime :: lower_type(state, type)
+    if (ir.unsigned_integer(runtime)) return ir.Value{ type = runtime, data = ir.ValueData{ unsigned = member.magnitude } }
+    integer := i64(0)
+    if (member.negative) {
+        if (member.magnitude == u64(maxval!(i64)) + 1) integer = minval!(i64)
+        else integer = -i64(member.magnitude)
+    } else integer = i64(member.magnitude)
+    return ir.Value{ type = runtime, data = ir.ValueData{ integer = integer } }
+}
+
+@hide:file
+match_condition proc(
+    state @mut State, subject ir.ValueId, pattern ast.NodeId,
+) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, pattern)
+    if (ast.expr_kind(state.tree, pattern) == .range) {
+        interval :: ast.range_expr(state.tree, pattern)
+        start :: try lower_expression(state, interval.start)
+        if (state.terminated) return ir.no_value
+        end :: try lower_expression(state, interval.end)
+        if (state.terminated) return ir.no_value
+        lower_bound :: try emit(state, ir.Instruction{ op = .greater_equal, type = .bool, left = subject, right = start, span = span })
+        upper_op :: if (interval.inclusive) ir.Op.less_equal else ir.Op.less
+        upper :: try emit(state, ir.Instruction{ op = upper_op, type = .bool, left = subject, right = end, span = span })
+        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .bool, ir.no_array))
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = lower_bound, slot = slot, span = span })
+        origin :: state.block
+        check_upper :: try add_block(state)
+        join :: try add_block(state)
+        state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+            kind = .branch, value = lower_bound, target = check_upper, alternative = join, span = span,
+        }
+        state.block = check_upper
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = upper, slot = slot, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = span,
+        }
+        state.block = join
+        return try emit(state, ir.Instruction{ op = .load_local, type = .bool, slot = slot, span = span })
+    }
+    value :: try lower_expression(state, pattern)
+    if (state.terminated) return ir.no_value
+    return try emit(state, ir.Instruction{ op = .equal, type = .bool, left = subject, right = value, span = span })
+}
+
+@hide:file
+lower_match proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    span :: ast.node_span(tree, id)
+    view :: ast.match_expr(tree, id)
+    subject :: try lower_expression(state, view.subject)
+    if (state.terminated or trap_type(state, id)) return ir.no_value
+    subject_type :: typecheck.type_of(state.checked, view.subject)
+    tagged :: subject_type.kind == .record
+    discriminant := subject
+    if (tagged) {
+        tag_type :: typecheck.record_type(state.checked, subject_type.record_type).tag_type
+        discriminant = try emit(state, ir.Instruction{
+            op = .union_tag, type = lower_type(state, tag_type), left = subject, span = span,
+        })
+    }
+    type :: typecheck.type_of(state.checked, id)
+    runtime :: lower_type(state, type)
+    shape :: try array_shape(state, type)
+    result_slot := u32(0)
+    if (runtime != .void) result_slot = u32(try ir.add_local(state.module, ir.FunctionId(state.function), runtime, shape))
+    join :: try add_block(state)
+    falls := false
+    count :: ast.match_arm_count(tree, id)
+    for 0..count |i| {
+        arm :: ast.match_arm(tree, id, i)
+        arm_view :: ast.match_arm_view(tree, arm)
+        body :: try add_block(state)
+        if (arm_view.capture) |capture| {
+            capture_type :: typecheck.type_of(state.checked, capture)
+            local :: try ir.add_local(state.module, ir.FunctionId(state.function), lower_type(state, capture_type), try array_shape(state, capture_type))
+            state.storage[usize(capture)] = Storage{ kind = .local, index = u32(local) }
+        }
+        if (!arm_view.expression) try predeclare_locals(state, arm_view.body)
+        patterns :: ast.match_pattern_count(tree, arm)
+        if (arm_view.catch_all) {
+            state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                kind = .jump, target = body, span = span,
+            }
+        } else {
+            for 0..patterns |j| {
+                pattern :: ast.match_pattern(tree, arm, j)
+                selected :: try add_block(state)
+                final :: i + 1 == count and j + 1 == patterns
+                next := join
+                if (!final) {
+                    condition :: try match_condition(state, discriminant, pattern)
+                    if (state.terminated) return ir.no_value
+                    next = try add_block(state)
+                    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                        kind = .branch, value = condition, target = selected, alternative = next, span = ast.node_span(tree, pattern),
+                    }
+                } else {
+                    # checking proves exhaustiveness; the final pattern is the remaining case.
+                    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                        kind = .jump, target = selected, span = span,
+                    }
+                }
+                state.block = selected
+                if (arm_view.capture) |capture| {
+                    capture_type :: typecheck.type_of(state.checked, capture)
+                    captured := subject
+                    if (tagged) captured = try emit(state, ir.Instruction{
+                        op = .field, type = lower_type(state, capture_type), array_type = try array_shape(state, capture_type),
+                        left = subject, slot = u32(typecheck.union_variant_index(state.checked, pattern)), span = ast.node_span(tree, pattern),
+                    })
+                    _ = try emit(state, ir.Instruction{
+                        op = .store_local, left = captured, slot = state.storage[usize(capture)].index, span = span,
+                    })
+                }
+                state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                    kind = .jump, target = body, span = span,
+                }
+                state.block = next
+            }
+        }
+        next :: state.block
+        state.block = body
+        state.terminated = false
+        if (arm_view.expression) {
+            value :: try lower_expression(state, arm_view.body)
+            if (!state.terminated and runtime != .void) _ = try emit(state, ir.Instruction{
+                op = .store_local, left = value, slot = result_slot, span = span,
+            })
+        } else try lower_block(state, arm_view.body, true)
+        if (!state.terminated) {
+            falls = true
+            state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                kind = .jump, target = join, span = span,
+            }
+        }
+        state.block = next
+        state.terminated = false
+    }
+    state.block = join
+    state.terminated = !falls
+    if (!falls) state.module.functions.items[state.function].blocks.items[usize(join)].terminator = ir.Terminator{ kind = .unreachable }
+    if (!falls or runtime == .void) return ir.no_value
+    return try emit(state, ir.Instruction{
+        op = .load_local, type = runtime, array_type = shape, slot = result_slot, span = span,
+    })
+}
+
+@hide:file
+lower_union proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    if (trap_type(state, id)) return ir.no_value
+    type :: typecheck.type_of(state.checked, id)
+    slot :: typecheck.union_variant_index(state.checked, id)
+    shape :: try array_shape(state, type)
+    field :: state.module.arrays.items[usize(shape)].fields[slot]
+    payload := ir.no_value
+    if (ast.expr_kind(tree, id) == .record_literal) {
+        view :: ast.record_literal(tree, id)
+        count :: ast.record_field_count(tree, id)
+        contextual := false
+        if (view.type) |annotation| contextual = ast.expr_kind(tree, annotation) == .enum_literal
+        if (contextual and field.type == .record and (count != 1 or ast.field(tree, ast.record_field(tree, id, 0)).name != null)) {
+            payload = try lower_record_as(state, id, typecheck.union_payload_type(state.checked, id))
+        } else if (count != 0) {
+            payload = try lower_expression(state, ast.field(tree, ast.record_field(tree, id, 0)).value?)
+        }
+    }
+    if (state.terminated) return ir.no_value
+    return try emit(state, ir.Instruction{
+        op = .union_literal, type = .record, array_type = shape, slot = u32(slot),
+        left = payload, constant = field.tag, span = ast.node_span(tree, id),
+    })
+}
+
+@hide:file
+lower_record_as proc(state @mut State, id ast.NodeId, type typecheck.Type) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     scratch_start :: state.arguments.items.len
     defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
@@ -689,7 +889,6 @@ lower_record proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
         state.arguments.items[scratch_start + i] = value
     }
     if (trap_type(state, id)) return ir.no_value
-    type :: typecheck.type_of(state.checked, id)
     descriptor :: typecheck.record_type(state.checked, type.record_type)
     ordered_start :: state.arguments.items.len
     try arraylist.reserve(&state.arguments, ordered_start + descriptor.fields.len)
@@ -758,7 +957,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         return try emit(state, ir.Instruction{
             op = .field_address,
             type = .address,
-            pointee = lower_type(checked),
+            pointee = lower_type(state, checked),
             array_type = try array_shape(state, checked),
             left = base,
             slot = u32(typecheck.field_index(state.checked, id)),
@@ -774,7 +973,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         return try emit(state, ir.Instruction{
             op = .index_address,
             type = .address,
-            pointee = lower_type(checked),
+            pointee = lower_type(state, checked),
             array_type = try array_shape(state, checked),
             left = base,
             right = index,
@@ -788,7 +987,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
     return try emit(state, ir.Instruction{
         op = operation,
         type = .address,
-        pointee = lower_type(checked),
+        pointee = lower_type(state, checked),
         array_type = try array_shape(state, checked),
         slot = location.index,
         span = span,
@@ -799,8 +998,13 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
 lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     span :: ast.node_span(tree, id)
-    type :: lower_type(typecheck.type_of(state.checked, id))
+    type :: lower_type(state, typecheck.type_of(state.checked, id))
     shape :: try array_shape(state, typecheck.type_of(state.checked, id))
+    if (typecheck.is_enum_member(state.checked, id)) {
+        if (trap_type(state, id)) return ir.no_value
+        return try constant(state, enum_value(state, typecheck.type_of(state.checked, id), typecheck.field_index(state.checked, id)), span)
+    }
+    if (typecheck.is_union_variant(state.checked, id)) return try lower_union(state, id)
     match ast.expr_kind(tree, id) {
         .invalid: {
             invalid :: ast.invalid(tree, id)
@@ -810,12 +1014,23 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             # ranges have no physical value; only lower_for decomposes an iterable.
             if (!trap_type(state, id)) unreachable
         }
-        .array_type, .record_type: {
+        .array_type, .record_type, .enum_type, .union_type, .distinct_type: {
             if (!trap_type(state, id)) {
                 trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
             }
         }
-        .record_literal: return try lower_record(state, id)
+        .alias_expr: return try lower_expression(state, ast.type_operand(tree, id))
+        .enum_literal: {
+            if (!trap_type(state, id)) unreachable
+        }
+        .match_expr: return try lower_match(state, id)
+        .record_literal: {
+            checked :: typecheck.type_of(state.checked, id)
+            if (checked.kind == .record and typecheck.record_type(state.checked, checked.record_type).is_union) {
+                return try lower_union(state, id)
+            }
+            return try lower_record_as(state, id, checked)
+        }
         .array_literal: {
             scratch_start :: state.arguments.items.len
             defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
@@ -948,7 +1163,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .call: {
             target :: sema.binding(state.resolution, ast.call_expr(tree, id).callee)
-            if (target.kind == .builtin) {
+            if (target.kind == .builtin or typecheck.is_type_constructor(state.checked, id)) {
                 operand := ir.no_value
                 for (0..ast.call_arg_count(tree, id)) |i| {
                     value :: try lower_expression(state, ast.call_arg(tree, id, i))
@@ -956,6 +1171,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     if (i == 0) operand = value
                 }
                 if (trap_type(state, id)) return ir.no_value
+                if (typecheck.is_type_constructor(state.checked, id)) {
+                    source :: lower_type(state, typecheck.type_of(state.checked, ast.call_arg(tree, id, 0)))
+                    if (source == type) return operand
+                }
                 return try emit(state, ir.Instruction{ op = .convert, type = type, left = operand, span = span })
             }
             callee :: try lower_expression(state, ast.call_expr(tree, id).callee)
@@ -1018,7 +1237,7 @@ exact_float_integer proc(text []u8, value f64) bool {
 lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
     text :: ast.source_text(state.tree, span)
-    type :: lower_type(typecheck.type_of(state.checked, id))
+    type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
         if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
             return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)

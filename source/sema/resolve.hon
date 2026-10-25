@@ -1,6 +1,7 @@
 import "@std/debug"
 import "@std/mem"
 import "@std/hashmap"
+import "@std/arraylist"
 import "@source/strpool"
 
 import "@source/ast"
@@ -99,6 +100,8 @@ State :: struct {
     builtin_ids []strpool.StringId
     allocator mem.Allocator
     namespaces hashmap.AutoHashMap(ast.NodeId, Scope)
+    aliases []mut ast.NodeId
+    selections arraylist.ArrayList(ast.NodeId)
 }
 
 #! borrows `tree`, its identifier `pool`, and `diagnostic_store` during resolution.
@@ -138,6 +141,9 @@ resolve_packages proc(
     errdefer mem.free(allocator, bindings)
     mem.set(bindings, Binding{})
     builtin_ids :: try intern_builtins(pool, &builtins)
+    aliases :: try mem.alloc(ast.NodeId, allocator, ast.node_count(tree))
+    defer mem.free(allocator, aliases)
+    mem.set(aliases, maxval!(ast.NodeId))
 
     state := State{
         tree = tree,
@@ -146,7 +152,10 @@ resolve_packages proc(
         builtin_ids = builtin_ids[..],
         allocator = allocator,
         namespaces = hashmap.init(allocator),
+        aliases = aliases,
+        selections = arraylist.init(allocator),
     }
+    defer arraylist.deinit(&state.selections)
     defer {
         for (state.namespaces.entries) |entry| {
             if (entry.hash == 0) continue
@@ -184,6 +193,7 @@ resolve_packages proc(
     }
     for (imports) |imported| try resolve_import(&state, &file_scopes[usize(ast.node_span(tree, imported.node).source)], imported)
     for (roots) |root| try resolve_package(&state, root, file_scopes)
+    try canonicalize_aliases(&state)
 
     return Resolution{ storage = Storage{
         bindings = bindings,
@@ -402,8 +412,60 @@ resolve_statement_decl proc(
     id ast.NodeId,
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
     declaration :: ast.statement_decl(state.tree, id)
+    if (ast.expr_kind(state.tree, declaration.initializer) == .alias_expr) {
+        state.aliases[usize(id)] = ast.type_operand(state.tree, declaration.initializer)
+    }
     if (declaration.type) |type| try resolve_expr(state, scope, type)
     try resolve_expr(state, scope, declaration.initializer)
+}
+
+@hide:file
+canonical_binding proc(state @State, original Binding) Binding {
+    value := original
+    for (0..(state.aliases.len)) |_| {
+        if (value.kind != .declaration) break
+        operand :: state.aliases[usize(value.data.declaration)]
+        if (operand == maxval!(ast.NodeId)) break
+        target :: state.bindings[usize(operand)]
+        if (target.kind == .none) break
+        if (target.kind == .declaration and target.data.declaration == value.data.declaration) break
+        value = target
+    }
+    return value
+}
+
+@hide:file
+canonicalize_aliases proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityError) {
+    # aliases may forward-reference other aliases or imported namespace members.
+    for (0..(state.aliases.len)) |_| {
+        changed := false
+        for (state.bindings) |@entry| {
+            value :: canonical_binding(state, entry^)
+            if (value.kind != entry.kind) changed = true
+            else if (value.kind == .declaration and value.data.declaration != entry.data.declaration) changed = true
+            entry^ = value
+        }
+        for (state.selections.items) |id| {
+            expression :: ast.selection_expr(state.tree, id)
+            base :: state.bindings[usize(expression.base)]
+            if (base.kind != .namespace or state.bindings[usize(id)].kind != .none) continue
+            namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
+            found :: if (ast.expr_kind(state.tree, expression.member) == .identifier)
+                hashmap.get(&namespace.names, ast.name_id(state.tree, expression.member))
+            else
+                null
+            value :: if (found) |member| canonical_binding(state, member) else Binding{
+                kind = .invalid,
+                data = BindingData{ diagnostic = try diagnostics.add(
+                    state.diagnostics, .unknown_name, ast.node_span(state.tree, expression.member),
+                ) },
+            }
+            state.bindings[usize(id)] = value
+            state.bindings[usize(expression.member)] = value
+            changed = true
+        }
+        if (!changed) break
+    }
 }
 
 @hide:file
@@ -426,6 +488,30 @@ resolve_expr proc(
     tree :: state.tree
     match ast.expr_kind(tree, id) {
         .literal_int, .literal_float, .literal_bool, .literal_string: {}
+        .enum_literal: {}
+        .distinct_type, .alias_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))
+        .enum_type: {
+            if (ast.enum_type(tree, id).backing) |backing| try resolve_expr(state, scope, backing)
+            for (0..ast.enum_member_count(tree, id)) |i| {
+                member :: ast.field(tree, ast.enum_member(tree, id, i))
+                if (member.value) |value| try resolve_expr(state, scope, value)
+            }
+        }
+        .match_expr: {
+            try resolve_expr(state, scope, ast.match_expr(tree, id).subject)
+            for (0..ast.match_arm_count(tree, id)) |i| {
+                arm_id :: ast.match_arm(tree, id, i)
+                arm :: ast.match_arm_view(tree, arm_id)
+                for (0..ast.match_pattern_count(tree, arm_id)) |j| {
+                    try resolve_expr(state, scope, ast.match_pattern(tree, arm_id, j))
+                }
+                arm_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+                defer hashmap.deinit(&arm_scope.names)
+                if (arm.capture) |capture| try predeclare(state, &arm_scope, capture, ast.node_span(tree, capture))
+                if (arm.expression) try resolve_expr(state, &arm_scope, arm.body)
+                else try resolve_block(state, &arm_scope, arm.body)
+            }
+        }
         .identifier: {
             span :: ast.node_span(tree, id)
             name :: ast.name_id(tree, id)
@@ -441,6 +527,7 @@ resolve_expr proc(
         }
         .selection: {
             expression :: ast.selection_expr(tree, id)
+            try arraylist.append(&state.selections, id)
             try resolve_expr(state, scope, expression.base)
             base :: state.bindings[usize(expression.base)]
             value := Binding{}
@@ -494,9 +581,12 @@ resolve_expr proc(
                 try resolve_expr(state, scope, ast.array_element(tree, id, i))
             }
         }
-        .record_type, .record_literal: {
+        .record_type, .record_literal, .union_type: {
             if (ast.expr_kind(tree, id) == .record_literal) {
                 if (ast.record_literal(tree, id).type) |type| try resolve_expr(state, scope, type)
+            }
+            if (ast.expr_kind(tree, id) == .union_type) {
+                if (ast.union_type(tree, id).tag) |tag| try resolve_expr(state, scope, tag)
             }
             for (0..ast.record_field_count(tree, id)) |i| {
                 field :: ast.field(tree, ast.record_field(tree, id, i))

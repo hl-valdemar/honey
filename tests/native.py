@@ -11,6 +11,245 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "match_float_ranges": (
+        """
+        score proc(n f64) i16 {
+            return match n { (-1.5)..0.5: 1, 0.5..=2.5: 42, else: 0 }
+        }
+        main proc() [3]i16 { return [score(-1.0), score(2.5), score(3.0)] }
+        """, b"[1, 42, 0]\n", None,
+    ),
+    "distinct_float_literal_context": (
+        """
+        Amount :: distinct f64
+        main proc() f64 {
+            first Amount :: 1.5
+            second :: 0.5 + first
+            return f64(second + 40)
+        }
+        """, b"42\n", None,
+    ),
+    "distinct_enum_construction": (
+        "E :: enum { a, b }\nD :: distinct E\nmain proc() bool { return D(E.a) == D(E.a) }",
+        b"true\n", None,
+    ),
+    "union_aligned_record_payload": (
+        """
+        Pair :: struct { a u8, b u64 }
+        U :: union { pair Pair, words [2]mut u64 }
+        main proc() [2]u64 {
+            value := U { words = [1, 42] }
+            value.pair.b = 99
+            copy :: value
+            value.words[1] = 7
+            return [u64(copy.pair.a), copy.pair.b]
+        }
+        """, b"[1, 99]\n", None,
+    ),
+    "tagged_union_result": (
+        "C :: union(enum) { empty void, value struct { x u8, y bool } }\nmain proc() C { return .value { x = 42, y = true } }",
+        b"{{42, true}}\n", None,
+    ),
+    "tagged_union_void_result": (
+        "C :: union(enum) { empty void, value u8 }\nmain proc() C { return .empty }",
+        b"{}\n", None,
+    ),
+    "distinct_boolean_equality": (
+        "Flag :: distinct bool\nmain proc() bool { return Flag(true) == Flag(true) and bool(Flag(true)) and !bool(Flag(false)) }",
+        b"true\n", None,
+    ),
+    "match_aggregate_result": (
+        """
+        E :: enum { a, b }
+        Point :: struct { x i16 }
+        choose proc(e E) Point { return match e { .a: Point { x = 42 }, .b: Point { x = 9 } } }
+        main proc() i16 { return choose(.a).x }
+        """, b"42\n", None,
+    ),
+    "enum_context_and_values": (
+        """
+        Token :: enum(i16) { if = -2, else, return = 40 }
+        identity proc(t Token) Token { return t }
+        main proc() i16 {
+            values [2]Token :: [.if, Token.return]
+            if (identity(values[0]) == .if) return i16(values[1]) + 2
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "enum_unsigned_backing": (
+        "E :: enum(u64) { high = 18446744073709551615 }\nmain proc() u64 { return u64(E.high) }",
+        b"18446744073709551615\n", None,
+    ),
+    "distinct_arithmetic_and_layers": (
+        """
+        Id :: distinct u8
+        Wrapped :: distinct Id
+        Alias :: alias Id
+        identity proc(n Id) Id { return n }
+        main proc() u8 {
+            n Alias := identity(Alias(40))
+            n = n + 2
+            return u8(Id(Wrapped(n)))
+        }
+        """, b"42\n", None,
+    ),
+    "distinct_aggregate_copy": (
+        """
+        Point :: struct { x i16 }
+        Wrapped :: distinct Point
+        identity proc(w Wrapped) Wrapped { return w }
+        main proc() i16 {
+            p Point := { x = 42 }
+            w :: identity(Wrapped(p))
+            p.x = 9
+            copy :: Point(w)
+            return copy.x
+        }
+        """, b"42\n", None,
+    ),
+    "alias_function_and_global_identity": (
+        """
+        value i16 :: 41
+        add proc(n i16) i16 { return n + 1 }
+        invoke :: alias add
+        other :: alias value
+        main proc() i16 { return invoke(other) }
+        """, b"42\n", None,
+    ),
+    "distinct_overflow": (
+        "Id :: distinct u8\nmain proc() Id { a Id :: 255\nreturn a + 1 }",
+        b"", b"integer arithmetic overflow",
+    ),
+    "distinct_constructor_range": (
+        "Id :: distinct u8\nmain proc() Id { return Id(256) }",
+        b"", b"integer arithmetic overflow",
+    ),
+    "distinct_implicit_rejected": (
+        "Id :: distinct u8\nmain proc() Id { n u8 :: 42\nreturn n }",
+        b"", b"return does not match",
+    ),
+    "distinct_identity_rejected": (
+        "A :: distinct u8\nB :: distinct u8\nmain proc() A { return B(42) }",
+        b"", b"return does not match",
+    ),
+    "union_scalar_overlay": (
+        """
+        Bits :: union { integer u64, real f64 }
+        main proc() f64 {
+            b := Bits { integer = 4607182418800017408 }
+            copy :: b
+            b.real = 2.0
+            return copy.real + b.real
+        }
+        """, b"3\n", None,
+    ),
+    "union_nested_layout_and_copy": (
+        """
+        Pair :: struct { low u8, high u8 }
+        Bits :: union { pair Pair, integer u16 }
+        Box :: struct { values [2]mut Bits }
+        identity proc(b Box) Box { return b }
+        main proc() [3]u16 {
+            b Box := { values = [Bits { integer = 513 }, Bits { pair = { low = 3, high = 4 } }] }
+            saved :: identity(b)
+            b.values[0].pair.high = 9
+            return [saved.values[0].integer, saved.values[1].integer, b.values[0].integer]
+        }
+        """, b"[513, 1027, 2305]\n", None,
+    ),
+    "tagged_union_match_copy_and_mutation": (
+        """
+        Tag :: enum(i16) { empty = -1, number = 42, pair = 90 }
+        Choice :: union(Tag) { pair struct { x i16, y i16 = 2 }, number i16, empty void }
+        score proc(c Choice) i16 {
+            return match c {
+                .number |n|: n
+                .pair |p|: p.x + p.y
+                .empty: 0
+            }
+        }
+        main proc() [3]i16 {
+            a Choice := .pair { x = 40 }
+            b :: a
+            a.pair.x = 9
+            c Choice :: .number{42}
+            return [score(b), score(a), score(c)]
+        }
+        """, b"[42, 11, 42]\n", None,
+    ),
+    "tagged_union_void_and_group_capture": (
+        """
+        Choice :: union(enum) { left u8, right u8, empty void }
+        score proc(c Choice) u8 {
+            match c {
+                .left, .right |n|: return n
+                .empty: return 0
+            }
+        }
+        main proc() u8 { a Choice :: .empty
+            return score(Choice { right = 42 }) + score(a) }
+        """, b"42\n", None,
+    ),
+    "tagged_union_inactive_read": (
+        "C :: union(enum) { a u8, b u8 }\nmain proc() u8 { c :: C { a = 42 }\nreturn c.b }",
+        b"", b"tagged union field is not active",
+    ),
+    "tagged_union_inactive_write": (
+        "C :: union(enum) { a u8, b u8 }\nmain proc() u8 { c := C { a = 42 }\nc.b = 9\nreturn c.a }",
+        b"", b"tagged union field is not active",
+    ),
+    "match_expression_context_and_laziness": (
+        """
+        Kind :: enum { first, second }
+        poison i16 :: 32767 + 1
+        choose proc() Kind { return .second }
+        main proc() i16 {
+            result i16 :: match choose() { .first: poison, .second: 42 }
+            return result
+        }
+        """, b"42\n", None,
+    ),
+    "match_scalar_ranges_and_loop_control": (
+        """
+        main proc() i16 {
+            sum i16 := 0
+            for 0..10 |i| {
+                match i {
+                    0..3: continue
+                    3, 4: sum = sum + 1
+                    5..=7: sum = sum + 10
+                    else: break
+                }
+            }
+            return sum
+        }
+        """, b"32\n", None,
+    ),
+    "match_boolean_exhaustive": (
+        "main proc() i16 { return match true { false: 1, true: 42 } }",
+        b"42\n", None,
+    ),
+    "match_non_exhaustive": (
+        "E :: enum { a, b }\nmain proc() i16 { return match E.a { .a: 42 } }",
+        b"", b"match is not exhaustive",
+    ),
+    "match_overlapping_range": (
+        "main proc() i16 { return match 3 { 0..=3: 1, 3..5: 2, else: 42 } }",
+        b"", b"overlapping match pattern",
+    ),
+    "enum_invalid_value": (
+        "E :: enum(u8) { a = 256 }\nmain proc() E { return .a }",
+        b"", b"representable constant integer",
+    ),
+    "enum_nominal_identity": (
+        "A :: enum { a }\nB :: enum { a }\nmain proc() A { return B.a }",
+        b"", b"return does not match",
+    ),
+    "union_requires_one_member": (
+        "U :: union { a u8, b u8 }\nmain proc() U { return U { a = 1, b = 2 } }",
+        b"", b"exactly one member",
+    ),
     "record_defaults_and_copies": (
         """
         Point :: struct { x i16, y i16 = 2 }
@@ -768,6 +1007,51 @@ def check_record_packages(temporary, executable):
     return 2
 
 
+def check_data_model_packages(temporary, executable):
+    project = temporary / "data-models"
+    app, library = project / "app", project / "library"
+    app.mkdir(parents=True)
+    library.mkdir()
+    (library / "types.hon").write_text(textwrap.dedent("""
+        Kind :: enum { number, empty }
+        Id :: distinct i16
+        Choice :: union(Kind) { empty void, number Id }
+        Count :: alias Id
+        seed Id :: Id(41)
+    """).strip() + "\n")
+    (library / "functions.hon").write_text(textwrap.dedent("""
+        identity proc(c Choice) Choice { return c }
+        score proc(c Choice) Id {
+            return match c { .number |n|: n + 1, .empty: Id(0) }
+        }
+        invoke :: alias score
+    """).strip() + "\n")
+    source = app / "main.hon"
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Alias :: alias lib.Choice
+        call :: alias lib.invoke
+        shared :: alias lib.seed
+        main proc() i16 {
+            value Alias :: { number = shared }
+            return i16(call(lib.identity(value)))
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    # Distinct and enum identity remain package/declaration specific.
+    for declaration, body in (
+        ("Id :: distinct i16", "return lib.seed"),
+        ("Kind :: enum { number, empty }", "return lib.Kind.number"),
+    ):
+        result = declaration.split()[0]
+        source.write_text(
+            'lib :: import "../library"\n'
+            + declaration + f"\nmain proc() {result} {{ {body} }}\n"
+        )
+        check(app, executable, (b"", b"return does not match"))
+    return 3
+
+
 def check_dependency_provenance(temporary, executable):
     project = temporary / "provenance"
     app = project / "app"
@@ -891,6 +1175,7 @@ def main():
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
+        count += check_data_model_packages(temporary, executable)
         count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))

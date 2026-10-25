@@ -214,6 +214,15 @@ print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.
             opening :: if (value.type == .array) "[" else "{"
             closing :: if (value.type == .array) "]" else "}"
             try io.write_all(output, opening)
+            if (shape.is_union) {
+                for (shape.fields) |field, index| {
+                    if (!ir.union_active(module, value, index)) continue
+                    if (field.type != .void) try print_value(output, module, ir.aggregate_item(module, value, index))
+                    break
+                }
+                try io.write_all(output, closing)
+                return
+            }
             for (0..count) |index| {
                 if (index != 0) try io.write_all(output, ", ")
                 try print_value(output, module, ir.aggregate_item(module, value, index))

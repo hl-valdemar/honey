@@ -69,8 +69,8 @@ propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `forward float :: -alias * 2 + seed
-        `alias :: seed
+        `forward float :: -forwarded * 2 + seed
+        `forwarded :: seed
         `seed := 3
         `backward :: 4
         `demand float :: backward
@@ -81,7 +81,7 @@ propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
         `text :: "honey"
         `fixed int :: 7
         `anchored :: fixed + 2
-        `nested float :: quotient / (alias + 1)
+        `nested float :: quotient / (forwarded + 1)
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
@@ -192,9 +192,9 @@ checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `alias :: alpha
+        `forwarded :: alpha
         `alpha proc(a, b int) void {
-        `    (alias)(a, b)
+        `    (forwarded)(a, b)
         `    beta(a + b, seed)
         `}
         `beta proc(total int, amount float) void {
@@ -203,7 +203,7 @@ checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
         `seed := 3
         `main proc() void {
         `    beta(1, 2)
-        `    (alias)(3, 4)
+        `    (forwarded)(3, 4)
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -359,8 +359,8 @@ reports_nonvoid_fallthrough_without_poisoning_signatures_and_checks_unused_bodie
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `answer :: alias()
-        `alias :: make
+        `answer :: forwarded()
+        `forwarded :: make
         `make proc() int {}
         `unused proc() float {}
         `broken proc() void {
@@ -762,13 +762,13 @@ checks_bool_comparisons_recursive_returns_and_nested_numeric_context test {
         `flag bool :: true
         `same :: flag == false
         `different :: true != flag
-        `less :: alias < 4.0
+        `less :: forwarded < 4.0
         `less_equal :: seed <= 5
         `greater :: 6 > seed
         `greater_equal :: seed >= 1
         `equal :: seed == 3
         `not_equal :: seed != 2
-        `alias :: seed
+        `forwarded :: seed
         `seed := 3
         `identity proc(value bool) bool { return value }
         `factorial proc(n int) int {
@@ -1789,11 +1789,11 @@ range_checks_both_bounds_and_preserves_fixed_declarations_and_source_errors test
     source ::
         `real float :: 2
         `flag :: true
-        `alias :: flag
+        `forwarded :: flag
         `nothing proc() void {}
         `main proc() void {
         `    for 1.5..2.5 |_| {}
-        `    for alias.."text" |_| {}
+        `    for forwarded.."text" |_| {}
         `    for nothing..nothing() |_| {}
         `    for real..3 |_| {}
         `    for absent_start..absent_end |_| {}
@@ -2206,8 +2206,8 @@ expect_array proc(result @Result, id ast.NodeId, len usize, mutable bool, elemen
 
 fixed_arrays_contextualize_forward_aliases_counts_nested_literals_and_signatures test {
     source ::
-        `context [2]f64 :: alias
-        `alias :: seed
+        `context [2]f64 :: forwarded
+        `forwarded :: seed
         `seed := [1, 2]
         `count :: later * 2 - 1
         `later :: 2

@@ -1,12 +1,14 @@
 #! grammar:
-#! * type ..... -> identifier {'.' identifier} | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' [field {(',' | newline) field}] '}'
+#! * type ..... -> identifier {'.' member} | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' (identifier | int) | expr ('..' | '..=') expr
+#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}'
 #! * decl ..... -> identifier [type] binding expr | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
+#! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
+#! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
 #! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls; else binds to the nearest if.
 #! precedence (tightest first): calls/indices/selections, unary -/!, multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
@@ -45,6 +47,12 @@ ExprKind :: enum {
     array_literal
     record_type
     record_literal
+    enum_type
+    union_type
+    distinct_type
+    alias_expr
+    enum_literal
+    match_expr
     index
     selection
     invalid
@@ -101,6 +109,13 @@ NodeKind :: enum {
     expr_record_type
     expr_record_literal
     record_field
+    expr_enum_type
+    expr_union_type
+    expr_distinct_type
+    expr_alias
+    expr_enum_literal
+    expr_match
+    match_arm
     expr_index
     expr_selection
     stmt_expr
@@ -226,6 +241,16 @@ FieldView :: struct {
     name ?NodeId
     type ?NodeId
     value ?NodeId
+}
+
+EnumTypeView :: struct { backing ?NodeId }
+UnionTypeView :: struct { tag ?NodeId, auto_tag bool }
+MatchView :: struct { subject NodeId }
+MatchArmView :: struct {
+    capture ?NodeId
+    body NodeId
+    expression bool
+    catch_all bool
 }
 
 IndexView :: struct {
@@ -473,6 +498,78 @@ add_record_type proc(builder @mut Builder, span Span, fields []NodeId) NodeId ! 
     return try add_node(builder, Node{
         kind = .expr_record_type,
         data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_enum_type proc(builder @mut Builder, span Span, backing ?NodeId, members []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (members) |member| _ = try add_extra(builder, u32(member))
+    raw_backing :: if (backing) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .expr_enum_type,
+        main = NodeData{ node_id = raw_backing },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_union_type proc(builder @mut Builder, span Span, tag ?NodeId, auto_tag bool, fields []NodeId) NodeId ! mem.AllocError {
+    raw_tag :: if (tag) |id| u32(id) else u32(no_node)
+    tag_flag :: if (auto_tag) u32(1) else u32(0)
+    metadata :: try add_extra(builder, raw_tag)
+    _ = try add_extra(builder, tag_flag)
+    start :: builder.storage.extra.items.len
+    for (fields) |field_id| _ = try add_extra(builder, u32(field_id))
+    return try add_node(builder, Node{
+        kind = .expr_union_type,
+        main = NodeData{ extra = metadata },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_type_operand proc(builder @mut Builder, span Span, operand NodeId, transparent bool) NodeId ! mem.AllocError {
+    kind :: if (transparent) NodeKind.expr_alias else NodeKind.expr_distinct_type
+    return try add_node(builder, Node{
+        kind = kind,
+        main = NodeData{ node_id = operand },
+    }, span)
+}
+
+add_enum_literal proc(builder @mut Builder, span Span, member NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_enum_literal,
+        main = NodeData{ node_id = member },
+    }, span)
+}
+
+add_match proc(builder @mut Builder, span Span, subject NodeId, arms []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (arms) |arm| _ = try add_extra(builder, u32(arm))
+    return try add_node(builder, Node{
+        kind = .expr_match,
+        main = NodeData{ node_id = subject },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_match_arm proc(
+    builder @mut Builder, span Span, patterns []NodeId, capture ?NodeId,
+    body NodeId, expression, catch_all bool,
+) NodeId ! mem.AllocError {
+    raw_capture :: if (capture) |id| u32(id) else u32(no_node)
+    expression_flag :: if (expression) u32(1) else u32(0)
+    catch_all_flag :: if (catch_all) u32(1) else u32(0)
+    start :: try add_extra(builder, raw_capture)
+    _ = try add_extra(builder, expression_flag)
+    _ = try add_extra(builder, catch_all_flag)
+    for (patterns) |pattern| _ = try add_extra(builder, u32(pattern))
+    return try add_node(builder, Node{
+        kind = .match_arm,
+        main = NodeData{ node_id = body },
+        data0 = NodeData{ extra = start },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
     }, span)
 }
@@ -979,6 +1076,12 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_array_literal: .array_literal
         .expr_record_type: .record_type
         .expr_record_literal: .record_literal
+        .expr_enum_type: .enum_type
+        .expr_union_type: .union_type
+        .expr_distinct_type: .distinct_type
+        .expr_alias: .alias_expr
+        .expr_enum_literal: .enum_literal
+        .expr_match: .match_expr
         .expr_index: .index
         .expr_selection: .selection
         .invalid_expr: .invalid
@@ -1084,15 +1187,97 @@ field proc(tree @Tree, id NodeId) FieldView {
     }
 }
 
+enum_type proc(tree @Tree, id NodeId) EnumTypeView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_enum_type)
+    return EnumTypeView{ backing = maybe_node_id(u32(node.main.node_id)) }
+}
+
+enum_member_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_enum_type)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+enum_member proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(index < enum_member_count(tree, id))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+union_type proc(tree @Tree, id NodeId) UnionTypeView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_union_type)
+    extra :: usize(node.main.extra)
+    return UnionTypeView{
+        tag = maybe_node_id(tree.storage.extra.items[extra]),
+        auto_tag = tree.storage.extra.items[extra + 1] != 0,
+    }
+}
+
+type_operand proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias)
+    return node.main.node_id
+}
+
+enum_literal proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_enum_literal)
+    return node.main.node_id
+}
+
+match_expr proc(tree @Tree, id NodeId) MatchView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_match)
+    return MatchView{ subject = node.main.node_id }
+}
+
+match_arm_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_match)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+match_arm proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(index < match_arm_count(tree, id))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+match_arm_view proc(tree @Tree, id NodeId) MatchArmView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .match_arm)
+    extra :: usize(node.data0.extra)
+    return MatchArmView{
+        capture = maybe_node_id(tree.storage.extra.items[extra]),
+        body = node.main.node_id,
+        expression = tree.storage.extra.items[extra + 1] != 0,
+        catch_all = tree.storage.extra.items[extra + 2] != 0,
+    }
+}
+
+match_pattern_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .match_arm)
+    return usize(node.data1.extra - node.data0.extra - 3)
+}
+
+match_pattern proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(index < match_pattern_count(tree, id))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + 3 + index])
+}
+
 record_field_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal)
+    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal or node.kind == .expr_union_type)
     return usize(node.data1.extra - node.data0.extra)
 }
 
 record_field proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal)
+    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal or node.kind == .expr_union_type)
     debug.assert(index < usize(node.data1.extra - node.data0.extra))
     return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
 }

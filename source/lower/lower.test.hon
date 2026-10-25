@@ -132,14 +132,14 @@ executes_forward_lazy_globals_and_function_aliases test {
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `forward :: later + 1
-        `alias :: add
+        `forwarded :: add
         `later :: 18
         `add proc(left int, right int) int {
-        `    local_alias :: alias
+        `    local_alias :: forwarded
         `    return left + right
         `}
         `main proc() int {
-        `    invoke :: alias
+        `    invoke :: forwarded
         `    return invoke(forward, 23)
         `}
     module := try compile_owned(source, &diagnostic_store)
@@ -1684,7 +1684,7 @@ array_context_inference_empty_shapes_and_scalar_leaf_families test {
         "main proc() string {\n a [2]mut string := [\"one\", \"two\"]\n b := a\n a[1] = \"three\"\n return b[1]\n}\n",
         "plus proc(n int) int { return n + 1 }\nminus proc(n int) int { return n - 1 }\nmain proc() bool {\n a :: [plus, minus]\n return a[0](41) == 42 and a[1](43) == 42\n}\n",
         "make proc() [2]i64 { return [20, 22] }\nmain proc() bool {\n return make()[0] + ([20, 22])[1] == 42\n}\n",
-        "count :: alias + 1\nalias :: 1\nmain proc() bool {\n a [count][0]bool :: [[], []]\n return true\n}\n",
+        "count :: forwarded + 1\nforwarded :: 1\nmain proc() bool {\n a [count][0]bool :: [[], []]\n return true\n}\n",
     ]
     for (sources) |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)

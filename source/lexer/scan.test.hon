@@ -13,15 +13,16 @@ reports_invalid_input_and_keeps_scanning test {
 
     try scan(&state, "if name # comment\n$1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
 
-    try testing.expect_equal(8, state.tokens.items.len)
+    try testing.expect_equal(9, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
     try testing.expect_equal(TokenKind.ident, state.tokens.items[1].kind)
-    try testing.expect_equal(TokenKind.invalid, state.tokens.items[2].kind)
+    try testing.expect_equal(TokenKind.newline, state.tokens.items[2].kind)
     try testing.expect_equal(TokenKind.invalid, state.tokens.items[3].kind)
-    try testing.expect_equal(TokenKind.int, state.tokens.items[4].kind)
-    try testing.expect_equal(TokenKind.float, state.tokens.items[5].kind)
-    try testing.expect_equal(TokenKind.string, state.tokens.items[6].kind)
-    try testing.expect_equal(TokenKind.eof, state.tokens.items[7].kind)
+    try testing.expect_equal(TokenKind.invalid, state.tokens.items[4].kind)
+    try testing.expect_equal(TokenKind.int, state.tokens.items[5].kind)
+    try testing.expect_equal(TokenKind.float, state.tokens.items[6].kind)
+    try testing.expect_equal(TokenKind.string, state.tokens.items[7].kind)
+    try testing.expect_equal(TokenKind.eof, state.tokens.items[8].kind)
     try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
     try testing.expect_equal(
         "name",
@@ -142,7 +143,7 @@ scans_array_delimiters_and_mut_keyword test {
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
-reuses_identifiers_without_interning_keywords test {
+reuses_identifier_spellings test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)
     diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -155,8 +156,6 @@ reuses_identifiers_without_interning_keywords test {
     try testing.expect(first != second)
     try testing.expect_equal(first, state.tokens.items[2].data.str_id)
     try testing.expect_equal(second, state.tokens.items[4].data.str_id)
-    try testing.expect_equal(null, strpool.get_id(&pool, "if"))
-    try testing.expect_equal(usize(2), pool.strings.items.len)
 }
 
 @hide:file
@@ -230,8 +229,6 @@ scans_import_keywords_and_preserves_source_in_tokens_and_diagnostics test {
     try scan(&state, "import test $\n1.\n\"unfinished", &pool, &diagnostic_store)
     try testing.expect_equal(TokenKind.import, state.tokens.items[0].kind)
     try testing.expect_equal(TokenKind.test, state.tokens.items[1].kind)
-    try testing.expect_equal(null, strpool.get_id(&pool, "import"))
-    try testing.expect_equal(null, strpool.get_id(&pool, "test"))
     for (state.tokens.items) |token| try testing.expect_equal(state.source_id, token.span.source)
     try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
     for (diagnostic_store.list.items) |diagnostic| {

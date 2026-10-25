@@ -1463,3 +1463,126 @@ inclusive_unsigned_range_reaches_the_maximum_without_incrementing_past_it test {
     try testing.expect(outcome.trap == null)
     try testing.expect_equal(u64(2), outcome.value.data.unsigned)
 }
+
+union_storage_overlays_nested_record_and_array_payloads_and_copies_by_value test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    record_fields [2]ir.RecordField :: [ir.RecordField{ type = .u8 }, ir.RecordField{ type = .u32 }]
+    record :: try ir.add_record(&module, record_fields[..])
+    bytes :: try add_array(&module, .u8, ir.no_array, 8)
+    variants [2]ir.RecordField :: [
+        ir.RecordField{ type = .record, array_type = record },
+        ir.RecordField{ type = .array, array_type = bytes },
+    ]
+    shape :: try ir.add_union(&module, variants[..], false)
+    identity :: try add_function(&module, &[], 0, .record)
+    _ = try ir.add_parameter(&module, identity, .record, shape)
+    module.functions.items[usize(identity)].result_array_type = shape
+    try emit(&module, identity, ir.Instruction{ op = .load_local, type = .record, array_type = shape, destination = ir.ValueId(0) })
+    return_value(&module, identity, ir.ValueId(0))
+    main :: try add_function(&module, &[], 0, .u32)
+    _ = try ir.add_local(&module, main, .record, shape)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .u8, destination = ir.ValueId(0), constant = ir.Value{ type = .u8, data = ir.ValueData{ unsigned = 1 } } })
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .u32, destination = ir.ValueId(1), constant = ir.Value{ type = .u32, data = ir.ValueData{ unsigned = 287454020 } } })
+    block :: &module.functions.items[usize(main)].blocks.items[0]
+    try arraylist.append(&block.arguments, ir.ValueId(0))
+    try arraylist.append(&block.arguments, ir.ValueId(1))
+    try emit(&module, main, ir.Instruction{ op = .record_literal, type = .record, array_type = record, destination = ir.ValueId(2), arguments_count = 2 })
+    try emit(&module, main, ir.Instruction{ op = .union_literal, type = .record, array_type = shape, destination = ir.ValueId(3), left = ir.ValueId(2) })
+    try emit(&module, main, ir.Instruction{ op = .store_local, left = ir.ValueId(3) })
+    try emit(&module, main, function_value(4, identity))
+    try arraylist.append(&block.arguments, ir.ValueId(3))
+    try emit(&module, main, ir.Instruction{ op = .call, type = .record, array_type = shape, destination = ir.ValueId(5), left = ir.ValueId(4), arguments_start = 2, arguments_count = 1 })
+    try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .record, array_type = shape, destination = ir.ValueId(6) })
+    try emit(&module, main, ir.Instruction{ op = .field_address, type = .address, pointee = .array, array_type = bytes, destination = ir.ValueId(7), left = ir.ValueId(6), slot = 1 })
+    try emit(&module, main, unsigned(8, 4))
+    try emit(&module, main, ir.Instruction{ op = .index_address, type = .address, pointee = .u8, destination = ir.ValueId(9), left = ir.ValueId(7), right = ir.ValueId(8) })
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .u8, destination = ir.ValueId(10), constant = ir.Value{ type = .u8, data = ir.ValueData{ unsigned = 153 } } })
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(9), right = ir.ValueId(10) })
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .record, array_type = shape, destination = ir.ValueId(11) })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .record, array_type = record, destination = ir.ValueId(12), left = ir.ValueId(11) })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .u32, destination = ir.ValueId(13), left = ir.ValueId(12), slot = 1 })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .record, array_type = record, destination = ir.ValueId(14), left = ir.ValueId(5) })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .u32, destination = ir.ValueId(15), left = ir.ValueId(14), slot = 1 })
+    try emit(&module, main, ir.Instruction{ op = .subtract, type = .u32, destination = ir.ValueId(16), left = ir.ValueId(13), right = ir.ValueId(15) })
+    return_value(&module, main, ir.ValueId(16))
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(u64(85), outcome.value.data.unsigned)
+}
+
+tagged_unions_preserve_actual_tags_and_trap_inactive_value_and_address_projections test {
+    operations [2]ir.Op :: [.field, .field_address]
+    for (operations) |operation| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        tag :: ir.Value{ type = .i8, data = ir.ValueData{ integer = -1 } }
+        variants [2]ir.RecordField :: [
+            ir.RecordField{ type = .int, tag = tag },
+            ir.RecordField{ type = .int, tag = ir.Value{ type = .i8, data = ir.ValueData{ integer = 37 } } },
+        ]
+        shape :: try ir.add_union(&module, variants[..], true)
+        main :: try add_function(&module, &[], 0, .i8)
+        _ = try ir.add_local(&module, main, .record, shape)
+        module.entry = main
+        try emit(&module, main, integer(0, 42))
+        try emit(&module, main, ir.Instruction{ op = .union_literal, type = .record, array_type = shape, destination = ir.ValueId(1), left = ir.ValueId(0), constant = tag })
+        try emit(&module, main, ir.Instruction{ op = .union_tag, type = .i8, destination = ir.ValueId(2), left = ir.ValueId(1) })
+        return_value(&module, main, ir.ValueId(2))
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(-1), outcome.value.data.integer)
+        base := ir.ValueId(1)
+        if (operation == .field_address) {
+            try emit(&module, main, ir.Instruction{ op = .store_local, left = base })
+            try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .record, array_type = shape, destination = ir.ValueId(3) })
+            base = ir.ValueId(3)
+        }
+        span :: diagnostics.Span{ start = 11, end = 15 }
+        type :: if (operation == .field) ir.Type.int else ir.Type.address
+        try emit(&module, main, ir.Instruction{ op = operation, type = type, pointee = .int, destination = ir.ValueId(4), left = base, slot = 1, span = span })
+        trapped := try run(mem.c_allocator, &module, &store)
+        defer deinit(&trapped)
+        try expect_trap(trapped, &store, .inactive_union_field, span)
+    }
+}
+
+union_scalar_reinterpretation_and_zero_leaf_payloads_keep_their_shapes test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    empty :: try ir.add_record(&module, &[])
+    variants [3]ir.RecordField :: [
+        ir.RecordField{ type = .float },
+        ir.RecordField{ type = .u64 },
+        ir.RecordField{ type = .record, array_type = empty },
+    ]
+    shape :: try ir.add_union(&module, variants[..], false)
+    main :: try add_function(&module, &[], 0, .u64)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .float, destination = ir.ValueId(0), constant = ir.Value{ type = .float, data = ir.ValueData{ real = 1.0 } } })
+    try emit(&module, main, ir.Instruction{ op = .union_literal, type = .record, array_type = shape, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .u64, destination = ir.ValueId(2), left = ir.ValueId(1), slot = 1 })
+    return_value(&module, main, ir.ValueId(2))
+    bits := try run(mem.c_allocator, &module, &store)
+    defer deinit(&bits)
+    try testing.expect(bits.trap == null)
+    try testing.expect_equal(u64(4607182418800017408), bits.value.data.unsigned)
+    try emit(&module, main, ir.Instruction{ op = .field, type = .record, array_type = empty, destination = ir.ValueId(3), left = ir.ValueId(1), slot = 2 })
+    module.functions.items[usize(main)].result = .record
+    module.functions.items[usize(main)].result_array_type = empty
+    return_value(&module, main, ir.ValueId(3))
+    zero := try run(mem.c_allocator, &module, &store)
+    defer deinit(&zero)
+    try testing.expect(zero.trap == null)
+    try testing.expect_equal(empty, zero.value.array_type)
+    try testing.expect_equal(usize(0), zero.value.data.elements.len)
+}

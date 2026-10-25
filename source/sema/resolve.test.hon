@@ -809,3 +809,126 @@ resolves_interleaved_compilations_with_independent_identifier_orders test {
     try testing.expect_equal(usize(0), diagnostics.count(&first_diagnostics))
     try testing.expect_equal(usize(0), diagnostics.count(&second_diagnostics))
 }
+
+resolves_match_capture_scopes_without_looking_up_member_names test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Tag :: enum { if, else }
+        `Value :: union(Tag) { if i32, else void }
+        `inspect proc(value Value) void {
+        `    match value {
+        `        .if |payload|: { local :: payload }
+        `        .else: { local :: 1 }
+        `    }
+        `    payload
+        `    local
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(2, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
+    matched :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 0))
+    first :: ast.match_arm(&tree, matched, 0)
+    arm :: ast.match_arm_view(&tree, first)
+    local :: ast.statement_decl(&tree, ast.block_statement(&tree, arm.body, 0))
+    try testing.expect_equal(arm.capture?, binding(&resolution, local.initializer).data.declaration)
+    member :: ast.enum_literal(&tree, ast.match_pattern(&tree, first, 0))
+    try testing.expect_equal(BindingKind.none, binding(&resolution, member).kind)
+    for (usize(1)..usize(3)) |index| {
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, body, index))
+        try testing.expect_equal(BindingKind.invalid, binding(&resolution, reference).kind)
+    }
+}
+
+canonicalizes_forward_function_global_and_builtin_aliases test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `invoke :: alias call
+        `copy :: alias storage
+        `Number :: alias i32
+        `call :: alias original
+        `original proc() i32 { return storage }
+        `storage i32 := 1
+        `main proc() Number {
+        `    copy = invoke()
+        `    return copy
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    original :: ast.package_decl(&tree, 4)
+    storage :: ast.package_decl(&tree, 5)
+    main :: ast.function_decl(&tree, ast.package_decl(&tree, 6))
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, main.body, 0))
+    try testing.expect_equal(storage, binding(&resolution, assignment.target).data.declaration)
+    try testing.expect_equal(original, binding(&resolution, ast.call_expr(&tree, assignment.value).callee).data.declaration)
+    try testing.expect_equal(BindingKind.builtin, binding(&resolution, main.return_type).kind)
+    try testing.expect_equal(BuiltinType.i32, binding(&resolution, main.return_type).data.builtin)
+    try testing.expect_equal(original, binding(&resolution, ast.package_decl(&tree, 0)).data.declaration)
+}
+
+canonicalizes_imported_aliases_and_namespace_alias_selections test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, "")
+    defer ast.deinit_builder(&builder)
+    library_source :: "original proc() i32 { return storage }\nstorage i32 := 1\nexported :: alias original\n"
+    library_id :: try ast.set_source(&builder, "library.hon", library_source)
+    library_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&library_scan)
+    library_scan.source_id = library_id
+    try lexer.scan(&library_scan, library_source, &pool, &diagnostic_store)
+    library :: try parser.parse_source(&builder, library_scan.tokens.items, &diagnostic_store)
+    main_source ::
+        `lib :: import "library"
+        `invoke :: alias namespace.exported
+        `copy :: alias namespace.storage
+        `namespace :: alias lib
+        `main proc() i32 { copy = invoke()
+        `    return copy
+        `}
+    main_id :: try ast.set_source(&builder, "main.hon", main_source)
+    main_scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&main_scan)
+    main_scan.source_id = main_id
+    try lexer.scan(&main_scan, main_source, &pool, &diagnostic_store)
+    root :: try parser.parse_source(&builder, main_scan.tokens.items, &diagnostic_store)
+    tree := ast.finish(&builder, root)
+    defer ast.deinit(&tree)
+    roots [2]ast.NodeId :: [root, library]
+    imports [1]Import :: [Import{
+        node = ast.package_decl_at(&tree, root, 0),
+        name = strpool.get_id(&pool, "lib")?,
+        target = library,
+    }]
+    resolution := try resolve_packages(mem.c_allocator, &tree, roots[..], imports[..], &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    original :: ast.package_decl_at(&tree, library, 0)
+    storage :: ast.package_decl_at(&tree, library, 1)
+    main :: ast.function_decl(&tree, ast.package_decl_at(&tree, root, 4))
+    assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, main.body, 0))
+    try testing.expect_equal(storage, binding(&resolution, assignment.target).data.declaration)
+    try testing.expect_equal(original, binding(&resolution, ast.call_expr(&tree, assignment.value).callee).data.declaration)
+    namespace :: ast.package_decl_at(&tree, root, 3)
+    try testing.expect_equal(BindingKind.namespace, binding(&resolution, namespace).kind)
+}

@@ -41,6 +41,7 @@ Address :: struct {
     cells []mut ir.Value
     scalar ?@mut ir.Value = null
     initialized ?@mut bool = null
+    raw bool = false
 }
 
 @hide:file
@@ -104,6 +105,7 @@ run proc(
         if instruction_index == block.instructions.items.len {
             terminator :: block.terminator
             if (terminator.kind == .trap) return Outcome{ trap = terminator.diagnostic }
+            if (terminator.kind == .unreachable) unreachable
             if (terminator.kind == .jump or terminator.kind == .branch) {
                 target := terminator.target
                 if (terminator.kind == .branch) {
@@ -121,7 +123,7 @@ run proc(
             completed :: frames.items[frame_index]
             # transfer leaves while the completed frame still owns its backing.
             if completed.global |global_index| {
-                copy_value(&globals[global_index].value, value)
+                copy_value(module, &globals[global_index].value, value)
                 globals[global_index].status = .ready
             }
             if (frames.items.len == 1) {
@@ -134,7 +136,7 @@ run proc(
                 return Outcome{ value = value }
             }
             if completed.destination != ir.no_value {
-                copy_value(&frames.items[frame_index - 1].values[usize(completed.destination)], value)
+                copy_value(module, &frames.items[frame_index - 1].values[usize(completed.destination)], value)
             }
             _ = arraylist.pop(&frames)
             free_frame(allocator, completed)
@@ -155,7 +157,7 @@ run proc(
             }
             .store_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
-                copy_value(&local.value, frames.items[frame_index].values[usize(instruction.left)])
+                copy_value(module, &local.value, frames.items[frame_index].values[usize(instruction.left)])
                 local.initialized = true
                 continue
             }
@@ -164,7 +166,7 @@ run proc(
                 if (!local.initialized) {
                     return try runtime_trap(diagnostic_store, .write_before_initialization, instruction.span)
                 }
-                copy_value(&local.value, frames.items[frame_index].values[usize(instruction.left)])
+                copy_value(module, &local.value, frames.items[frame_index].values[usize(instruction.left)])
                 continue
             }
             .reset_local: {
@@ -199,7 +201,7 @@ run proc(
                 for (0..instruction.arguments_count) |argument_index| {
                     argument :: block.arguments.items[instruction.arguments_start + argument_index]
                     local :: &frames.items[frame_index + 1].locals[argument_index]
-                    copy_value(&local.value, frames.items[frame_index].values[usize(argument)])
+                    copy_value(module, &local.value, frames.items[frame_index].values[usize(argument)])
                     local.initialized = true
                 }
                 continue
@@ -212,7 +214,8 @@ run proc(
                     element :: frames.items[frame_index].values[usize(operand)]
                     if (ir.aggregate(element.type)) {
                         count :: element.data.elements.len
-                        memcopy!(destination.data.elements[offset..offset + count], element.data.elements)
+                        target :: aggregate_view(element.type, element.array_type, destination.data.elements[offset..offset + count])
+                        ir.copy_aggregate(module, target, element)
                         offset += count
                     } else {
                         destination.data.elements[offset] = element
@@ -221,6 +224,18 @@ run proc(
                 }
                 continue
             }
+            .union_literal: {
+                destination :: frames.items[frame_index].values[usize(instruction.destination)]
+                shape :: module.arrays.items[usize(instruction.array_type)]
+                mem.set(destination.data.elements, ir.Value{ type = .u8, data = ir.ValueData{ unsigned = 0 } })
+                if (shape.tag_type != .void) ir.write_storage(module, destination.data.elements, instruction.constant)
+                if (instruction.left != ir.no_value) {
+                    payload :: frames.items[frame_index].values[usize(instruction.left)]
+                    ir.write_storage(module, destination.data.elements[shape.payload_offset..], payload)
+                }
+                continue
+            }
+            .union_tag: value = ir.union_tag(module, frames.items[frame_index].values[usize(instruction.left)])
             .index: {
                 base :: frames.items[frame_index].values[usize(instruction.left)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
@@ -232,6 +247,10 @@ run proc(
             }
             .field: {
                 base :: frames.items[frame_index].values[usize(instruction.left)]
+                shape :: module.arrays.items[usize(base.array_type)]
+                if (shape.is_union and !ir.union_active(module, base, usize(instruction.slot))) {
+                    return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
+                }
                 value = ir.aggregate_item(module, base, usize(instruction.slot))
             }
             .address_local: {
@@ -284,26 +303,37 @@ run proc(
                 if (index >= u64(shape.len)) {
                     return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 }
-                width :: element_cells(module, shape)
+                width :: if (base.raw) ir.storage_size(module, shape.element, shape.element_array) else element_cells(module, shape)
                 start :: usize(index) * width
                 address := Address{
                     type = instruction.pointee, array_type = instruction.array_type,
-                    cells = base.cells[start..start + width], initialized = base.initialized,
+                    cells = base.cells[start..start + width], initialized = base.initialized, raw = base.raw,
                 }
-                if (!ir.aggregate(address.type)) address.scalar = &address.cells[0]
+                if (!address.raw and !ir.aggregate(address.type)) address.scalar = &address.cells[0]
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
             }
             .field_address: {
                 base_id :: frames.items[frame_index].values[usize(instruction.left)].data.address
                 base :: frames.items[frame_index].addresses[usize(base_id)]
-                field :: module.arrays.items[usize(base.array_type)].fields[usize(instruction.slot)]
-                width :: if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
+                shape :: module.arrays.items[usize(base.array_type)]
+                field :: shape.fields[usize(instruction.slot)]
+                if (shape.is_union and shape.tag_type != .void) {
+                    if base.initialized |initialized| {
+                        if (!initialized^) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
+                    }
+                    if (!ir.union_active(module, aggregate_view(.record, base.array_type, base.cells), usize(instruction.slot))) {
+                        return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
+                    }
+                }
+                raw :: base.raw or shape.is_union
+                width :: if (raw) ir.storage_size(module, field.type, field.array_type) else if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
+                start :: if (raw) field.byte_offset else field.offset
                 address := Address{
                     type = instruction.pointee, array_type = instruction.array_type,
-                    cells = base.cells[field.offset..field.offset + width], initialized = base.initialized,
+                    cells = base.cells[start..start + width], initialized = base.initialized, raw = raw,
                 }
-                if (!ir.aggregate(address.type)) address.scalar = &address.cells[0]
+                if (!raw and !ir.aggregate(address.type)) address.scalar = &address.cells[0]
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
             }
@@ -317,10 +347,12 @@ run proc(
                     }
                 }
                 if (instruction.op == .load_address) {
-                    value = if (ir.aggregate(address.type)) aggregate_view(address.type, address.array_type, address.cells) else address.scalar?^
+                    if (address.raw) value = ir.read_storage(module, address.type, address.array_type, address.cells, true)
+                    else value = if (ir.aggregate(address.type)) aggregate_view(address.type, address.array_type, address.cells) else address.scalar?^
                 } else {
                     source :: frames.items[frame_index].values[usize(instruction.right)]
-                    if (ir.aggregate(address.type)) memcopy!(address.cells, source.data.elements)
+                    if (address.raw) ir.write_storage(module, address.cells, source)
+                    else if (ir.aggregate(address.type)) ir.copy_aggregate(module, aggregate_view(address.type, address.array_type, address.cells), source)
                     else address.scalar?^ = source
                     continue
                 }
@@ -421,7 +453,7 @@ run proc(
             }
         }
         if instruction.destination != ir.no_value {
-            copy_value(&frames.items[frame_index].values[usize(instruction.destination)], value)
+            copy_value(module, &frames.items[frame_index].values[usize(instruction.destination)], value)
         }
     }
     unreachable
@@ -518,10 +550,10 @@ aggregate_view proc(type ir.Type, shape ir.ArrayId, cells []mut ir.Value) ir.Val
 }
 
 @hide:file
-copy_value proc(destination @mut ir.Value, source ir.Value) void {
+copy_value proc(module @ir.Module, destination @mut ir.Value, source ir.Value) void {
     if (ir.aggregate(source.type)) {
         # aggregate destinations already own disjoint fixed segments; never install an alias.
-        memcopy!(destination.data.elements, source.data.elements)
+        ir.copy_aggregate(module, destination^, source)
     } else {
         destination^ = source
     }
