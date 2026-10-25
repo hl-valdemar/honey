@@ -1,20 +1,15 @@
-import "@ffi/c"
 import "@std/mem"
 import "@std/io"
+import "@std/fs"
 import "@std/arraylist"
 
-PathError :: enum { invalid_path, path_failed, directory_failed, source_too_large }
-Error :: alias mem.AllocError | PathError | io.OpenError | io.CloseError | io.ReadError
+SourceError :: enum { source_too_large }
 
-@hide:file
-terminated proc(allocator mem.Allocator, text []u8) []mut u8 ! (mem.AllocError | PathError) {
-    if (text.len == 0 or text.len == maxval!(usize)) return .invalid_path
-    for (text) |byte| if (byte == 0) return .invalid_path
-    bytes :: try mem.alloc(u8, allocator, text.len + 1)
-    memcopy!(bytes[..text.len], text)
-    bytes[text.len] = 0
-    return bytes
-}
+Error :: alias fs.Error
+    | SourceError
+    | io.OpenError
+    | io.CloseError
+    | io.ReadError
 
 @hide:file
 copy proc(allocator mem.Allocator, text []u8) []mut u8 ! mem.AllocError {
@@ -23,53 +18,17 @@ copy proc(allocator mem.Allocator, text []u8) []mut u8 ! mem.AllocError {
     return bytes
 }
 
-#! caller owns the canonical absolute path; release it with mem.free using `allocator`.
-canonical proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
-    input :: try terminated(allocator, path)
-    defer mem.free(allocator, input)
-    # Darwin realpath requires a PATH_MAX-sized caller buffer (including its terminator).
-    buffer [1024]mut u8 := undefined
-    if (c.realpath(ptrcast!(input.ptr), ptrcast!(buffer[..].ptr)) == null) {
-        if (c.__error()?^ == c.ENOMEM) return .out_of_memory
-        return .path_failed
-    }
-    length := usize(0)
-    while (length < buffer.len and buffer[length] != 0) length += 1
-    if (length == buffer.len) return .path_failed
-    return try copy(allocator, buffer[..length])
-}
-
-@hide:file
-mode proc(allocator mem.Allocator, path []u8) c_ushort ! Error {
-    input :: try terminated(allocator, path)
-    defer mem.free(allocator, input)
-    result [1]mut c.Stat := undefined
-    if (c.stat(ptrcast!(input.ptr), result[..].ptr) == 0)
-        return result[0].st_mode
-
-    error :: c.__error()?^
-    if (error == c.ENOMEM) return .out_of_memory
-    if (error == c.ENOENT or error == c.ENOTDIR) return 0
-
-    return .path_failed
-}
-
-is_directory proc(allocator mem.Allocator, path []u8) bool ! Error {
-    return ((try mode(allocator, path)) & c_ushort(61440)) == 16384
-}
-
 #! returns an owned canonical package directory for either a file or directory input.
 directory proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
-    resolved :: try canonical(allocator, path)
+    resolved :: try fs.canonical(allocator, path)
     errdefer mem.free(allocator, resolved)
-    if (try is_directory(allocator, resolved)) return resolved
+    if (try fs.kind(allocator, resolved) == .directory) return resolved
 
     end := resolved.len
     while (end > 1 and resolved[end - 1] != '/') end -= 1
     parent_text :: if (end == 1) resolved[..1] else resolved[..end - 1]
     parent :: try copy(allocator, parent_text)
     mem.free(allocator, resolved)
-
     return parent
 }
 
@@ -81,10 +40,8 @@ join proc(allocator mem.Allocator, base, name []u8) []mut u8 ! mem.AllocError {
 
     bytes :: try mem.alloc(u8, allocator, base.len + separator + name.len)
     memcopy!(bytes[..base.len], base)
-
     if (separator != 0) bytes[base.len] = '/'
     memcopy!(bytes[base.len + separator..], name)
-
     return bytes
 }
 
@@ -92,14 +49,7 @@ join proc(allocator mem.Allocator, base, name []u8) []mut u8 ! mem.AllocError {
 exists proc(allocator mem.Allocator, base, name []u8) bool ! Error {
     path :: try join(allocator, base, name)
     defer mem.free(allocator, path)
-    input :: try terminated(allocator, path)
-    defer mem.free(allocator, input)
-    if (c.access(ptrcast!(input.ptr), 0) == 0) return true
-
-    error :: c.__error()?^
-    if (error == c.ENOENT or error == c.ENOTDIR) return false
-
-    return .path_failed
+    return try fs.exists(allocator, path)
 }
 
 #! finds the nearest ancestor build.hon/build.bro, otherwise uses the supplied directory.
@@ -111,7 +61,6 @@ project_root proc(allocator mem.Allocator, package_dir []u8) []mut u8 ! Error {
             return try copy(allocator, base)
 
         if (end == 1) break
-
         while (end > 1 and package_dir[end - 1] != '/') end -= 1
         if (end > 1) end -= 1
     }
@@ -131,7 +80,7 @@ resolve proc(allocator mem.Allocator, root_dir, package_dir, import_path []u8) [
     }
     joined :: try join(allocator, base, path)
     defer mem.free(allocator, joined)
-    return try canonical(allocator, joined)
+    return try fs.canonical(allocator, joined)
 }
 
 @hide:file
@@ -150,47 +99,33 @@ before proc(left, right []u8) bool {
 
 #! lists production sources in bytewise order; caller frees every path and the list.
 files proc(allocator mem.Allocator, package_dir []u8) arraylist.ArrayList([]u8) ! Error {
-    input :: try terminated(allocator, package_dir)
-    defer mem.free(allocator, input)
-    opened :: c.opendir(ptrcast!(input.ptr))
-    if (opened == null) {
-        if (c.__error()?^ == c.ENOMEM) return .out_of_memory
-        return .directory_failed
-    }
-    handle :: opened?
+    handle := try fs.open_directory(allocator, package_dir)
     closing := false
-    defer { if (!closing) _ = c.closedir(handle) }
+    defer { if (!closing) fs.close_directory(&handle) catch |_| {} }
     result := arraylist.init([]u8, allocator)
     errdefer {
         for (result.items) |path| mem.free(allocator, path)
         arraylist.deinit(&result)
     }
-    while true {
-        c.__error()?^ = 0
-        next :: c.readdir(handle)
-        if (next == null) {
-            if (c.__error()?^ != 0) return .directory_failed
-            break
-        }
-        entry :: next?
-        # DT_REG, DT_LNK and DT_UNKNOWN; never open directories, sockets or FIFOs as sources.
-        if (entry.d_type != 8 and entry.d_type != 10 and entry.d_type != 0) continue
-        length :: usize(entry.d_namlen)
-        if (length >= 1024) return .directory_failed
-        pointer *u8 :: ptrcast!(entry.d_name[..].ptr)
-        name :: pointer[..length]
+    while (try fs.next(&handle)) |entry| {
+        if (
+            entry.kind != .file
+            and entry.kind != .link
+            and entry.kind != .unknown
+        ) continue
+        name :: entry.name
         if ((!ends_with(name, ".hon") and !ends_with(name, ".bro"))
             or ends_with(name, ".test.hon") or ends_with(name, ".test.bro")) continue
         path :: try join(allocator, package_dir, name)
         errdefer mem.free(allocator, path)
-        if (entry.d_type != 8 and ((try mode(allocator, path)) & c_ushort(61440)) != 32768) {
+        if (entry.kind != .file and try fs.kind(allocator, path) != .file) {
             mem.free(allocator, path)
             continue
         }
         try arraylist.append(&result, path)
     }
     closing = true
-    if (c.closedir(handle) != 0) return .directory_failed
+    try fs.close_directory(&handle)
     # in-place heapsort: deterministic O(n log n), no additional allocation.
     count := result.items.len
     start :: divtrunc!(count, 2)
@@ -219,23 +154,12 @@ sift proc(items []mut []u8, start, count usize) void {
     }
 }
 
-#! reads through the supplied IO provider; returned bytes belong to the caller.
+#! the compiler limits source size to its u32 span address space; storage remains caller-owned.
 read_source proc(allocator mem.Allocator, runtime io.Io, path []u8) arraylist.ArrayList(u8) ! Error {
-    # source input must be a regular file, not a FIFO/device that can block before reading.
-    if (((try mode(allocator, path)) & c_ushort(61440)) != 32768) return .open_failed
-    input :: try terminated(allocator, path)
-    defer mem.free(allocator, input)
-    file :: try io.open(runtime, input.ptr[..path.len;0], .read_only)
-    closing := false
-    defer { if (!closing) io.close(file) catch |_| {} }
-    bytes := io.read_all(allocator, io.reader(file), usize(maxval!(u32))) catch |err| {
+    return fs.read_file(allocator, runtime, path, usize(maxval!(u32))) catch |err| {
         match err {
             .limit_exceeded: return .source_too_large
             else: return err
         }
     }
-    errdefer arraylist.deinit(&bytes)
-    closing = true
-    try io.close(file)
-    return bytes
 }

@@ -1,0 +1,28 @@
+import "@std/mem"
+import "@std/testing"
+
+rejects_empty_paths_and_embedded_nul_instead_of_truncating test {
+    paths [2][]u8 :: ["", ".\0not-part-of-the-path"]
+    for (paths) |path| {
+        resolved :: canonical(mem.c_allocator, path) catch |err| {
+            try testing.expect(err == .invalid_path)
+            continue
+        }
+        mem.free(mem.c_allocator, resolved)
+        return .expectation_failed
+    }
+}
+
+closed_directory_cannot_be_read_or_closed_again test {
+    directory := try open_directory(mem.c_allocator, ".")
+    try close_directory(&directory)
+    _ = next(&directory) catch |err| {
+        try testing.expect(err == .directory_failed)
+        close_directory(&directory) catch |close_error| {
+            try testing.expect(close_error == .directory_failed)
+            return
+        }
+        return .expectation_failed
+    }
+    return .expectation_failed
+}

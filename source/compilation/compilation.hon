@@ -3,6 +3,7 @@ import "@std/debug"
 import "@std/arraylist"
 import "@std/hashmap"
 import "@std/io"
+import "@std/fs"
 import "@source/strpool"
 import "@source/diagnostics"
 import "@source/lexer"
@@ -165,7 +166,7 @@ load proc(
     path []u8,
     diagnostic_store @mut diagnostics.Store,
 ) PackageId ! Error {
-    canonical :: try loader.canonical(compilation.allocator, path)
+    canonical :: try fs.canonical(compilation.allocator, path)
     defer mem.free(compilation.allocator, canonical)
     directory :: try loader.directory(compilation.allocator, canonical)
     transferred := false
@@ -173,7 +174,7 @@ load proc(
     project_root :: try loader.project_root(compilation.allocator, directory)
     defer mem.free(compilation.allocator, project_root)
     entry_file ?[]u8 := null
-    if (!try loader.is_directory(compilation.allocator, canonical)) entry_file = canonical
+    if (try fs.kind(compilation.allocator, canonical) != .directory) entry_file = canonical
     transferred = true
     return try load_package(compilation, runtime, project_root, directory, entry_file, null, diagnostic_store)
 }
@@ -261,7 +262,7 @@ load_package proc(
                 }
                 owned := true
                 defer { if (owned) mem.free(compilation.allocator, resolved) }
-                if (try loader.is_directory(compilation.allocator, resolved)) {
+                if (try fs.kind(compilation.allocator, resolved) == .directory) {
                     owned = false
                     target = try load_package(compilation, runtime, project_root, resolved, null, imported.path, diagnostic_store)
                 } else {

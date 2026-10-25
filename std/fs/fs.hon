@@ -1,0 +1,142 @@
+import "@ffi/c"
+import "@std/mem"
+import "@std/io"
+import "@std/arraylist"
+
+PathError :: enum { invalid_path, path_failed, directory_failed }
+
+Error :: alias mem.AllocError | PathError
+ReadFileError :: alias Error | io.OpenError | io.CloseError | io.ReadError | io.ReadLimitError
+
+Kind :: enum { missing, file, directory, link, unknown, other }
+
+#! owns a native directory handle; release it exactly once with close_directory.
+Directory :: struct { handle ?*mut c.DIR }
+
+#! name borrows directory-owned storage until the next call to next or close_directory.
+#! enumeration may report link or unknown; kind follows links when classification is needed.
+Entry :: struct {
+    name []u8
+    kind Kind
+}
+
+@hide:file
+terminated proc(allocator mem.Allocator, text []u8) []mut u8 ! Error {
+    if (text.len == 0 or text.len == maxval!(usize)) return .invalid_path
+    for (text) |byte| if (byte == 0) return .invalid_path
+    bytes :: try mem.alloc(u8, allocator, text.len + 1)
+    memcopy!(bytes[..text.len], text)
+    bytes[text.len] = 0
+    return bytes
+}
+
+#! returns an owned absolute path with symlinks resolved; free it with the same allocator.
+canonical proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
+    input :: try terminated(allocator, path)
+    defer mem.free(allocator, input)
+    # Darwin realpath requires a PATH_MAX-sized caller buffer, including its terminator.
+    buffer [1024]mut u8 := undefined
+    if (c.realpath(ptrcast!(input.ptr), ptrcast!(buffer[..].ptr)) == null) {
+        if (c.__error()?^ == c.ENOMEM) return .out_of_memory
+        return .path_failed
+    }
+    length := usize(0)
+    while (length < buffer.len and buffer[length] != 0) length += 1
+    if (length == buffer.len) return .path_failed
+    owned :: try mem.alloc(u8, allocator, length)
+    memcopy!(owned, buffer[..length])
+    return owned
+}
+
+#! follows symlinks; nonexistent paths (including dangling links) return missing.
+kind proc(allocator mem.Allocator, path []u8) Kind ! Error {
+    input :: try terminated(allocator, path)
+    defer mem.free(allocator, input)
+    result [1]mut c.Stat := undefined
+    if (c.stat(ptrcast!(input.ptr), result[..].ptr) == 0) {
+        mode :: result[0].st_mode & c_ushort(61440)
+        if (mode == 16384) return .directory
+        if (mode == 32768) return .file
+        return .other
+    }
+    error :: c.__error()?^
+    if (error == c.ENOMEM) return .out_of_memory
+    if (error == c.ENOENT or error == c.ENOTDIR) return .missing
+    return .path_failed
+}
+
+exists proc(allocator mem.Allocator, path []u8) bool ! Error {
+    return (try kind(allocator, path)) != .missing
+}
+
+#! opens an owned directory handle; path is borrowed only during this call.
+open_directory proc(allocator mem.Allocator, path []u8) Directory ! Error {
+    input :: try terminated(allocator, path)
+    defer mem.free(allocator, input)
+    handle :: c.opendir(ptrcast!(input.ptr))
+    if (handle == null) {
+        if (c.__error()?^ == c.ENOMEM) return .out_of_memory
+        return .directory_failed
+    }
+    return Directory{ handle = handle }
+}
+
+#! returns the next borrowed entry, omitting . and ..; null marks the end.
+#! order is filesystem-defined. no allocation is performed; each name expires on the next call.
+next proc(directory @Directory) ?Entry ! Error {
+    if (directory.handle == null) return .directory_failed
+    while true {
+        c.__error()?^ = 0
+        item :: c.readdir(directory.handle)
+        if (item == null) {
+            if (c.__error()?^ == c.ENOMEM) return .out_of_memory
+            if (c.__error()?^ != 0) return .directory_failed
+            end ?Entry :: null
+            return end
+        }
+        entry :: item?
+        length :: usize(entry.d_namlen)
+        if (length >= 1024) return .directory_failed
+        pointer *u8 :: ptrcast!(entry.d_name[..].ptr)
+        name :: pointer[..length]
+        if (mem.eql(name, ".") or mem.eql(name, "..")) continue
+        entry_kind Kind :: match entry.d_type {
+            0: .unknown
+            4: .directory
+            8: .file
+            10: .link
+            else: .other
+        }
+        return Entry{ name = name, kind = entry_kind }
+    }
+}
+
+#! invalidates the handle, including when native close reports failure.
+close_directory proc(directory @mut Directory) void ! Error {
+    handle :: directory.handle
+    if (handle == null) return .directory_failed
+    directory.handle = null
+    if (c.closedir(handle) != 0) return .directory_failed
+}
+
+#! reads a regular file through runtime IO, accepting at most maximum bytes.
+#! follows symlinks and rejects devices/FIFOs before opening; metadata uses the host filesystem.
+#! returned storage belongs to the caller; release with arraylist.deinit. all errors close the file.
+read_file proc(
+    allocator mem.Allocator,
+    runtime io.Io,
+    path []u8,
+    maximum usize,
+) arraylist.ArrayList(u8) ! ReadFileError {
+    if (try kind(allocator, path) != .file) return .open_failed
+    input :: try terminated(allocator, path)
+    defer mem.free(allocator, input)
+    file :: try io.open(runtime, input.ptr[..path.len;0], .read_only)
+    closing := false
+    defer { if (!closing) io.close(file) catch |_| {} }
+    bytes := try io.read_all(allocator, io.reader(file), maximum)
+    errdefer arraylist.deinit(&bytes)
+    closing = true
+    try io.close(file)
+    return bytes
+}
