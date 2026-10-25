@@ -43,18 +43,40 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try write_type(output, state.module, type)
             try io.print(", ptr %r{}\n", output, {pointer})
         }
-        .array_literal: {
+        .array_literal, .record_literal: {
             for (0..instruction.arguments_count) |index| {
                 operand :: block.arguments.items[instruction.arguments_start + index]
                 value :: try load(state, operand)
                 pointer :: fresh(state)
                 try io.print("  %r{} = getelementptr ", output, {pointer})
                 try write_type(output, state.module, type)
-                try io.print(", ptr %v{}, i64 0, i64 {}\n  store ", output, {u32(instruction.destination), index})
+                index_type []u8 :: if (instruction.op == .record_literal) "i32" else "i64"
+                try io.print(", ptr %v{}, i64 0, {s} {}\n  store ", output, {u32(instruction.destination), index_type, index})
                 try write_type(output, state.module, state.values[usize(operand)])
                 try io.print(" %r{}, ptr %r{}\n", output, {value, pointer})
             }
             return
+        }
+        .field: {
+            base :: try load(state, instruction.left)
+            try io.print("  %r{} = extractvalue ", output, {result})
+            try write_type(output, state.module, state.values[usize(instruction.left)])
+            try io.print(" %r{}, {}\n", output, {base, instruction.slot})
+        }
+        .field_address: {
+            base_type :: state.values[usize(instruction.left)]
+            base :: try load(state, instruction.left)
+            data :: fresh(state)
+            flag :: fresh(state)
+            pointer :: fresh(state)
+            address :: fresh(state)
+            try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {data, base})
+            try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, base})
+            try io.print("  %r{} = getelementptr ", output, {pointer})
+            try write_type(output, state.module, Type{ kind = .record, shape = base_type.shape })
+            try io.print(", ptr %r{}, i64 0, i32 {}\n", output, {data, instruction.slot})
+            try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
+            try io.print("  %r{} = insertvalue %address %r{}, ptr %r{}, 1\n", output, {result, address, flag})
         }
         .index, .index_address: {
             index :: try load(state, instruction.right)

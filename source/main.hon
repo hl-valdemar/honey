@@ -208,29 +208,17 @@ print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.
         .float: try io.print("{d}", output, {value.data.real})
         .bool: try io.print("{}", output, {value.data.boolean})
         .string: try io.print("{s}", output, {ir.string_bytes(module, value.data.string)})
-        .array: {
+        .array, .record: {
             shape :: module.arrays.items[usize(value.array_type)]
-            stride usize :: if (shape.element == .array)
-                module.arrays.items[usize(shape.element_array)].cells
-            else
-                1
-            try io.print("[", output, {})
-            for 0..(shape.len) |index| {
-                if (index != 0) try io.print(", ", output, {})
-                element := ir.Value{}
-                if shape.element == .array {
-                    start :: index * stride
-                    element = ir.Value{
-                        type = .array,
-                        array_type = shape.element_array,
-                        data = ir.ValueData{ elements = value.data.elements[start..(start + stride)] },
-                    }
-                } else {
-                    element = value.data.elements[index]
-                }
-                try print_value(output, module, element)
+            count :: if (value.type == .array) shape.len else shape.fields.len
+            opening :: if (value.type == .array) "[" else "{"
+            closing :: if (value.type == .array) "]" else "}"
+            try io.write_all(output, opening)
+            for (0..count) |index| {
+                if (index != 0) try io.write_all(output, ", ")
+                try print_value(output, module, ir.aggregate_item(module, value, index))
             }
-            try io.print("]", output, {})
+            try io.write_all(output, closing)
         }
         else: unreachable
     }

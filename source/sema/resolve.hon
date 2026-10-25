@@ -443,20 +443,24 @@ resolve_expr proc(
             expression :: ast.selection_expr(tree, id)
             try resolve_expr(state, scope, expression.base)
             base :: state.bindings[usize(expression.base)]
-            value := base
-            if (base.kind != .invalid) {
-                if (base.kind == .namespace) {
-                    namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
-                    if hashmap.get(&namespace.names, ast.name_id(tree, expression.member)) |found| {
-                        value = found
-                    } else {
-                        value = Binding{ kind = .invalid, data = BindingData{
-                            diagnostic = try diagnostics.add(state.diagnostics, .unknown_name, ast.node_span(tree, expression.member)),
-                        } }
-                    }
+            value := Binding{}
+            if (base.kind == .invalid) {
+                value = base
+            } else if (base.kind == .namespace) {
+                namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
+                found :: if (ast.expr_kind(tree, expression.member) == .identifier)
+                    hashmap.get(&namespace.names, ast.name_id(tree, expression.member))
+                else
+                    null
+                if (found) |member| {
+                    value = member
                 } else {
                     value = Binding{ kind = .invalid, data = BindingData{
-                        diagnostic = try diagnostics.add(state.diagnostics, .not_namespace, ast.node_span(tree, expression.base)),
+                        diagnostic = try diagnostics.add(
+                            state.diagnostics,
+                            .unknown_name,
+                            ast.node_span(tree, expression.member),
+                        ),
                     } }
                 }
             }
@@ -488,6 +492,16 @@ resolve_expr proc(
         .array_literal: {
             for (0..ast.array_element_count(tree, id)) |i| {
                 try resolve_expr(state, scope, ast.array_element(tree, id, i))
+            }
+        }
+        .record_type, .record_literal: {
+            if (ast.expr_kind(tree, id) == .record_literal) {
+                if (ast.record_literal(tree, id).type) |type| try resolve_expr(state, scope, type)
+            }
+            for (0..ast.record_field_count(tree, id)) |i| {
+                field :: ast.field(tree, ast.record_field(tree, id, i))
+                if (field.type) |type| try resolve_expr(state, scope, type)
+                if (field.value) |value| try resolve_expr(state, scope, value)
             }
         }
         .index: {

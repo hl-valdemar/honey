@@ -1,9 +1,9 @@
 #! grammar:
-#! * type ..... -> identifier | '[' (expr | '_') ']' ['mut'] type
+#! * type ..... -> identifier {'.' identifier} | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' [field {(',' | newline) field}] '}'
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' identifier | expr ('..' | '..=') expr
+#! * expr ..... -> identifier | literal | type | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!') expr | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' (identifier | int) | expr ('..' | '..=') expr
 #! * decl ..... -> identifier [type] binding expr | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
@@ -43,6 +43,8 @@ ExprKind :: enum {
     range
     array_type
     array_literal
+    record_type
+    record_literal
     index
     selection
     invalid
@@ -96,6 +98,9 @@ NodeKind :: enum {
     expr_range
     expr_array_type
     expr_array_literal
+    expr_record_type
+    expr_record_literal
+    record_field
     expr_index
     expr_selection
     stmt_expr
@@ -209,6 +214,18 @@ ArrayTypeView :: struct {
     count ?NodeId
     element NodeId
     mutable bool
+}
+
+RecordLiteralView :: struct {
+    span Span
+    type ?NodeId
+}
+
+FieldView :: struct {
+    span Span
+    name ?NodeId
+    type ?NodeId
+    value ?NodeId
 }
 
 IndexView :: struct {
@@ -447,6 +464,44 @@ add_array_literal proc(builder @mut Builder, span Span, elements []NodeId) NodeI
         kind = .expr_array_literal,
         data0 = NodeData{ extra = u32(start) },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_record_type proc(builder @mut Builder, span Span, fields []NodeId) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (fields) |field_id| _ = try add_extra(builder, u32(field_id))
+    return try add_node(builder, Node{
+        kind = .expr_record_type,
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_record_literal proc(
+    builder @mut Builder, span Span, type ?NodeId, fields []NodeId,
+) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (fields) |field_id| _ = try add_extra(builder, u32(field_id))
+    raw_type :: if (type) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .expr_record_literal,
+        main = NodeData{ node_id = raw_type },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_field proc(
+    builder @mut Builder, span Span, name, type, value ?NodeId,
+) NodeId ! mem.AllocError {
+    raw_name :: if (name) |id| id else no_node
+    raw_type :: if (type) |id| id else no_node
+    raw_value :: if (value) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .record_field,
+        main = NodeData{ node_id = raw_name },
+        data0 = NodeData{ node_id = raw_type },
+        data1 = NodeData{ node_id = raw_value },
     }, span)
 }
 
@@ -922,6 +977,8 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_range: .range
         .expr_array_type: .array_type
         .expr_array_literal: .array_literal
+        .expr_record_type: .record_type
+        .expr_record_literal: .record_literal
         .expr_index: .index
         .expr_selection: .selection
         .invalid_expr: .invalid
@@ -1003,6 +1060,39 @@ array_element_count proc(tree @Tree, id NodeId) usize {
 array_element proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .expr_array_literal)
+    debug.assert(index < usize(node.data1.extra - node.data0.extra))
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
+}
+
+record_literal proc(tree @Tree, id NodeId) RecordLiteralView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_record_literal)
+    return RecordLiteralView{
+        span = get_span(&tree.storage, id),
+        type = maybe_node_id(u32(node.main.node_id)),
+    }
+}
+
+field proc(tree @Tree, id NodeId) FieldView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .record_field)
+    return FieldView{
+        span = get_span(&tree.storage, id),
+        name = maybe_node_id(u32(node.main.node_id)),
+        type = maybe_node_id(u32(node.data0.node_id)),
+        value = maybe_node_id(u32(node.data1.node_id)),
+    }
+}
+
+record_field_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal)
+    return usize(node.data1.extra - node.data0.extra)
+}
+
+record_field proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_record_type or node.kind == .expr_record_literal)
     debug.assert(index < usize(node.data1.extra - node.data0.extra))
     return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
 }

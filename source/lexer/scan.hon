@@ -33,6 +33,7 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "and", .and },
     { "or", .or },
     { "mut", .mut },
+    { "struct", .struct },
     { "import", .import },
     { "test", .test },
 ])
@@ -102,7 +103,12 @@ scan proc(
 
         if is_digit(char) {
             start :: cursor
-            result :: scan_number(start, program) catch |err| {
+            member :: (
+                state.tokens.items.len > 0
+                and state.tokens.items[state.tokens.items.len - 1].kind == .dot
+                and usize(state.tokens.items[state.tokens.items.len - 1].span.end) == start
+            )
+            result :: scan_number(start, program, !member) catch |err| {
                 id :: try diagnostics.add(
                     diagnostic_store,
                     diagnostic_code(err.code),
@@ -362,12 +368,12 @@ ScanNumResult :: struct {
 }
 
 @hide:file
-scan_number proc(start usize, program []u8) ScanNumResult ! ScanError {
+scan_number proc(start usize, program []u8, allow_decimal bool) ScanNumResult ! ScanError {
     cursor := start
     has_decimal := false
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
     if (
-        cursor < program.len and program[cursor] == '.'
+        allow_decimal and cursor < program.len and program[cursor] == '.'
         and !(cursor + 1 < program.len and program[cursor + 1] == '.')
     ) {
         has_decimal = true

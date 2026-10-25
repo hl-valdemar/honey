@@ -11,7 +11,7 @@ Outcome :: struct {
 }
 
 #! release an escaped aggregate with its retained allocator; scalar and trap outcomes need no allocation.
-#! strings and array descriptors borrow the module, which must outlive this outcome.
+#! strings and aggregate descriptors borrow the module, which must outlive this outcome.
 deinit proc(outcome @mut Outcome) void {
     if (outcome.owned_elements) |elements| mem.free(outcome.allocator?, elements)
     outcome.owned_elements = null
@@ -57,7 +57,7 @@ Frame :: struct {
 }
 
 #! executes typed IR with invocation/global storage released on every exit.
-#! array results own flat storage released by `deinit`; string IDs and shapes resolve through `module`.
+#! aggregate results own flat storage released by `deinit`; string IDs and shapes resolve through `module`.
 run proc(
     allocator mem.Allocator,
     module @ir.Module,
@@ -75,7 +75,7 @@ run proc(
     mem.set(globals, GlobalState{})
     global_cells usize := 0
     for (module.globals.items) |global| {
-        if (global.type != .array) continue
+        if (!ir.aggregate(global.type)) continue
         cells :: module.arrays.items[usize(global.array_type)].cells
         if (cells > maxval!(usize) - global_cells) return .storage_limit_reached
         global_cells += cells
@@ -84,9 +84,9 @@ run proc(
     defer mem.free(allocator, aggregate_globals)
     global_offset usize := 0
     for (module.globals.items) |global, i| {
-        if (global.type != .array) continue
+        if (!ir.aggregate(global.type)) continue
         cells :: module.arrays.items[usize(global.array_type)].cells
-        globals[i].value = array_view(global.array_type, aggregate_globals[global_offset..global_offset + cells])
+        globals[i].value = aggregate_view(global.type, global.array_type, aggregate_globals[global_offset..global_offset + cells])
         global_offset += cells
     }
     frames := arraylist.init(Frame, allocator)
@@ -125,7 +125,7 @@ run proc(
                 globals[global_index].status = .ready
             }
             if (frames.items.len == 1) {
-                if (value.type == .array) {
+                if (ir.aggregate(value.type)) {
                     escaped :: try mem.alloc(ir.Value, allocator, value.data.elements.len)
                     memcopy!(escaped, value.data.elements)
                     value.data.elements = escaped
@@ -204,13 +204,13 @@ run proc(
                 }
                 continue
             }
-            .array_literal: {
+            .array_literal, .record_literal: {
                 destination :: &frames.items[frame_index].values[usize(instruction.destination)]
                 offset usize := 0
                 for (0..instruction.arguments_count) |i| {
                     operand :: block.arguments.items[instruction.arguments_start + i]
                     element :: frames.items[frame_index].values[usize(operand)]
-                    if (element.type == .array) {
+                    if (ir.aggregate(element.type)) {
                         count :: element.data.elements.len
                         memcopy!(destination.data.elements[offset..offset + count], element.data.elements)
                         offset += count
@@ -228,7 +228,11 @@ run proc(
                 if (index >= u64(shape.len)) {
                     return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 }
-                value = indexed_value(module, base.array_type, base.data.elements, usize(index))
+                value = ir.aggregate_item(module, base, usize(index))
+            }
+            .field: {
+                base :: frames.items[frame_index].values[usize(instruction.left)]
+                value = ir.aggregate_item(module, base, usize(instruction.slot))
             }
             .address_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
@@ -238,7 +242,7 @@ run proc(
                     cells = &[],
                     initialized = &local.initialized,
                 }
-                if (address.type == .array) address.cells = local.value.data.elements
+                if (ir.aggregate(address.type)) address.cells = local.value.data.elements
                 else address.scalar = &local.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{
@@ -264,7 +268,7 @@ run proc(
                     array_type = instruction.array_type,
                     cells = &[],
                 }
-                if (address.type == .array) address.cells = global.value.data.elements
+                if (ir.aggregate(address.type)) address.cells = global.value.data.elements
                 else address.scalar = &global.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{
@@ -286,7 +290,20 @@ run proc(
                     type = instruction.pointee, array_type = instruction.array_type,
                     cells = base.cells[start..start + width], initialized = base.initialized,
                 }
-                if (address.type != .array) address.scalar = &address.cells[0]
+                if (!ir.aggregate(address.type)) address.scalar = &address.cells[0]
+                frames.items[frame_index].addresses[usize(instruction.destination)] = address
+                value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+            }
+            .field_address: {
+                base_id :: frames.items[frame_index].values[usize(instruction.left)].data.address
+                base :: frames.items[frame_index].addresses[usize(base_id)]
+                field :: module.arrays.items[usize(base.array_type)].fields[usize(instruction.slot)]
+                width :: if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
+                address := Address{
+                    type = instruction.pointee, array_type = instruction.array_type,
+                    cells = base.cells[field.offset..field.offset + width], initialized = base.initialized,
+                }
+                if (!ir.aggregate(address.type)) address.scalar = &address.cells[0]
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
             }
@@ -300,10 +317,10 @@ run proc(
                     }
                 }
                 if (instruction.op == .load_address) {
-                    value = if (address.type == .array) array_view(address.array_type, address.cells) else address.scalar?^
+                    value = if (ir.aggregate(address.type)) aggregate_view(address.type, address.array_type, address.cells) else address.scalar?^
                 } else {
                     source :: frames.items[frame_index].values[usize(instruction.right)]
-                    if (address.type == .array) memcopy!(address.cells, source.data.elements)
+                    if (ir.aggregate(address.type)) memcopy!(address.cells, source.data.elements)
                     else address.scalar?^ = source
                     continue
                 }
@@ -432,7 +449,7 @@ push_frame proc(
     errdefer mem.free(allocator, addresses)
     for (signature.array_storage.items) |storage| {
         cells :: module.arrays.items[usize(storage.array_type)].cells
-        value :: array_view(storage.array_type, aggregate[storage.offset..storage.offset + cells])
+        value :: aggregate_view(module.arrays.items[usize(storage.array_type)].kind, storage.array_type, aggregate[storage.offset..storage.offset + cells])
         if (storage.local) locals[usize(storage.index)].value = value
         else values[usize(storage.index)] = value
     }
@@ -496,13 +513,13 @@ checked_integer proc(op ir.Op, left i64, right i64) ?i64 {
 }
 
 @hide:file
-array_view proc(shape ir.ArrayId, cells []mut ir.Value) ir.Value {
-    return ir.Value{ type = .array, array_type = shape, data = ir.ValueData{ elements = cells } }
+aggregate_view proc(type ir.Type, shape ir.ArrayId, cells []mut ir.Value) ir.Value {
+    return ir.Value{ type = type, array_type = shape, data = ir.ValueData{ elements = cells } }
 }
 
 @hide:file
 copy_value proc(destination @mut ir.Value, source ir.Value) void {
-    if (source.type == .array) {
+    if (ir.aggregate(source.type)) {
         # aggregate destinations already own disjoint fixed segments; never install an alias.
         memcopy!(destination.data.elements, source.data.elements)
     } else {
@@ -512,17 +529,9 @@ copy_value proc(destination @mut ir.Value, source ir.Value) void {
 
 @hide:file
 element_cells proc(module @ir.Module, shape ir.ArrayType) usize {
-    return if (shape.element == .array) module.arrays.items[usize(shape.element_array)].cells else 1
+    return if (ir.aggregate(shape.element)) module.arrays.items[usize(shape.element_array)].cells else 1
 }
 
-@hide:file
-indexed_value proc(module @ir.Module, shape_id ir.ArrayId, cells []mut ir.Value, index usize) ir.Value {
-    shape :: module.arrays.items[usize(shape_id)]
-    if (shape.element != .array) return cells[index]
-    width :: element_cells(module, shape)
-    start :: index * width
-    return array_view(shape.element_array, cells[start..start + width])
-}
 
 @hide:file
 checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {

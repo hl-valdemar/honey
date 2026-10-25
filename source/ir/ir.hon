@@ -14,18 +14,22 @@ no_array :: maxval!(ArrayId)
 no_value :: maxval!(ValueId)
 
 Type :: enum {
-    invalid,
-    int,
-    float,
-    bool,
-    string,
-    void,
-    function,
-    array,
-    usize,
-    address,
-    i8, i16, i32, isize,
-    u8, u16, u32, u64,
+    invalid
+    int
+    float
+    bool
+    string
+    void
+    function
+    array
+    record
+    address
+    i8, i16, i32, isize
+    u8, u16, u32, u64, usize
+}
+
+aggregate proc(type Type) bool {
+    return type == .array or type == .record
 }
 
 #! integer storage widths for the supported 64-bit target; zero for noninteger types.
@@ -84,13 +88,22 @@ Value :: struct {
     data ValueData = ValueData{ integer = 0 }
 }
 
-#! fixed recursive shape; add_array derives `cells`, the flattened scalar-leaf count.
+RecordField :: struct {
+    type Type
+    array_type ArrayId = no_array
+    offset usize = 0
+}
+
+#! fixed recursive aggregate shape; constructors derive the flattened scalar-leaf count.
+#! record fields are owned by the module; array metadata retains its existing representation.
 ArrayType :: struct {
-    element Type
+    kind Type = .array
+    element Type = .invalid
     element_array ArrayId = no_array
-    len usize
-    cells usize
-    mutable bool
+    len usize = 0
+    cells usize = 0
+    mutable bool = false
+    fields []mut RecordField = &[]
 }
 
 #! maps a local slot or temporary to its preallocated, by-value frame segment.
@@ -109,10 +122,13 @@ Op :: enum {
     reset_local
     load_global
     array_literal
+    record_literal
+    field
     index
     address_local
     address_global
     index_address
+    field_address
     load_address
     store_address
     negate
@@ -244,8 +260,8 @@ add_array proc(
     len usize,
     mutable bool,
 ) ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
-    debug.assert((element == .array) == (element_array != no_array))
-    width :: if (element == .array) module.arrays.items[usize(element_array)].cells else 1
+    debug.assert(aggregate(element) == (element_array != no_array))
+    width :: if (aggregate(element)) module.arrays.items[usize(element_array)].cells else 1
     if (width != 0 and len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
     cells :: len * width
     if (cells > divtrunc!(maxval!(usize), sizeof!(Value))) return .storage_limit_reached
@@ -259,6 +275,48 @@ add_array proc(
         mutable = mutable,
     })
     return id
+}
+
+#! copies declaration-order fields and derives their flattened offsets; child shapes must exist.
+add_record proc(
+    module @mut Module,
+    fields []RecordField,
+) ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (module.arrays.items.len >= usize(no_array)) return .storage_limit_reached
+    owned :: try mem.alloc(RecordField, module.allocator, fields.len)
+    errdefer mem.free(module.allocator, owned)
+    cells usize := 0
+    for (fields) |field, index| {
+        debug.assert(aggregate(field.type) == (field.array_type != no_array))
+        width :: if (aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
+        if (width > divtrunc!(maxval!(usize), sizeof!(Value)) - cells) return .storage_limit_reached
+        owned[index] = RecordField{ type = field.type, array_type = field.array_type, offset = cells }
+        cells += width
+    }
+    id :: ArrayId(module.arrays.items.len)
+    try arraylist.append(&module.arrays, ArrayType{ kind = .record, fields = owned, cells = cells })
+    return id
+}
+
+#! returns a borrowed child value from flattened aggregate storage, preserving zero-cell shapes.
+aggregate_item proc(module @Module, value Value, index usize) Value {
+    shape :: module.arrays.items[usize(value.array_type)]
+    type := shape.element
+    child := shape.element_array
+    start usize := 0
+    width usize := 1
+    if (shape.kind == .record) {
+        field :: shape.fields[index]
+        type = field.type
+        child = field.array_type
+        start = field.offset
+    } else {
+        if (aggregate(type)) width = module.arrays.items[usize(child)].cells
+        start = index * width
+    }
+    if (!aggregate(type)) return value.data.elements[start]
+    width = module.arrays.items[usize(child)].cells
+    return Value{ type = type, array_type = child, data = ValueData{ elements = value.data.elements[start..start + width] } }
 }
 
 @hide:file
@@ -281,13 +339,13 @@ add_local proc(
     type Type,
     shape ArrayId,
 ) LocalId ! (mem.AllocError | diagnostics.CapacityError) {
-    debug.assert((type == .array) == (shape != no_array))
+    debug.assert(aggregate(type) == (shape != no_array))
     body :: &module.functions.items[usize(function)]
     if (body.locals.items.len >= usize(maxval!(LocalId))) return .storage_limit_reached
     id :: LocalId(body.locals.items.len)
     try arraylist.append(&body.locals, type)
     errdefer _ = arraylist.pop(&body.locals)
-    if (type == .array) try prepare_storage(module, body, u32(id), shape, true)
+    if (aggregate(type)) try prepare_storage(module, body, u32(id), shape, true)
     return id
 }
 
@@ -305,9 +363,9 @@ add_parameter proc(
     return try add_local(module, function, type, shape)
 }
 
-#! appends an instruction and derives its result count, array backing, and address presence.
+#! appends an instruction and derives its result count, aggregate backing, and address presence.
 #! no_value requests a fresh result; explicit result IDs support non-SSA definitions across blocks.
-#! repeated array results must retain their shape and reuse their existing segment.
+#! repeated aggregate results must retain their shape and reuse their existing segment.
 #! failures leave instruction and storage lengths, totals, counts, and flags unchanged.
 emit proc(
     module @mut Module,
@@ -336,7 +394,7 @@ emit proc(
     }
     try arraylist.append(&target.instructions, operation)
     errdefer _ = arraylist.pop(&target.instructions)
-    if (produces_value and operation.type == .array) {
+    if (produces_value and aggregate(operation.type)) {
         debug.assert(operation.array_type != no_array)
         registered := false
         if (usize(operation.destination) < body.value_count) {
@@ -377,6 +435,9 @@ deinit proc(module @mut Module) void {
     for (module.strings.items) |string|
         mem.free(module.allocator, string.allocation)
 
+    for (module.arrays.items) |shape| {
+        if (shape.kind == .record) mem.free(module.allocator, shape.fields)
+    }
     arraylist.deinit(&module.functions)
     arraylist.deinit(&module.globals)
     arraylist.deinit(&module.strings)

@@ -33,6 +33,7 @@ State :: struct {
     storage []mut Storage
     arrays []mut ir.ArrayId
     arguments arraylist.ArrayList(ir.ValueId)
+    records []mut ir.ArrayId
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
@@ -75,6 +76,9 @@ lower_package proc(
     arrays :: try mem.alloc(ir.ArrayId, allocator, typecheck.array_type_count(checked))
     defer mem.free(allocator, arrays)
     mem.set(arrays, ir.no_array)
+    records :: try mem.alloc(ir.ArrayId, allocator, typecheck.record_type_count(checked))
+    defer mem.free(allocator, records)
+    mem.set(records, ir.no_array)
     state := State{
         tree = tree,
         resolution = resolution,
@@ -83,6 +87,7 @@ lower_package proc(
         module = &module,
         storage = storage,
         arrays = arrays,
+        records = records,
         arguments = arraylist.init(ir.ValueId, allocator),
     }
     defer arraylist.deinit(&state.arguments)
@@ -96,6 +101,7 @@ lower_package proc(
                 storage[usize(id)] = Storage{ kind = .function, index = u32(function) }
             }
             .statement: {
+                if (typecheck.type_of(checked, id).kind == .type_value) continue
                 initializer :: try add_function(&module, ast.node_span(tree, id))
                 global :: u32(module.globals.items.len)
                 try arraylist.append(&module.globals, ir.Global{
@@ -114,7 +120,9 @@ lower_package proc(
         id :: ast.package_decl(tree, i)
         match ast.decl_kind(tree, id) {
             .function: try lower_function(&state, id)
-            .statement: try lower_global(&state, id)
+            .statement: {
+                if (typecheck.type_of(checked, id).kind != .type_value) try lower_global(&state, id)
+            }
             .import, .invalid: {}
         }
     }
@@ -135,17 +143,19 @@ lower_type proc(type typecheck.Type) ir.Type {
         .u32: .u32
         .u64: .u64
         .array: .array
+        .record: .record
         .float: .float
         .bool: .bool
         .string: .string
         .void: .void
         .function: .function
-        .none, .invalid, .range: .invalid
+        .none, .invalid, .range, .type_value: .invalid
     }
 }
 
 @hide:file
 array_shape proc(state @mut State, type typecheck.Type) ir.ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (type.kind == .record) return try prepare_record(state, type.record_type)
     if (type.kind != .array) return ir.no_array
     # checker history includes unresolved shapes; materialize only final used types.
     return try prepare_array(state, type.array_type)
@@ -156,7 +166,7 @@ prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.All
     if (state.arrays[usize(id)] != ir.no_array) return state.arrays[usize(id)]
     descriptor :: typecheck.array_type(state.checked, id)
     child := ir.no_array
-    if (descriptor.element.kind == .array) child = try prepare_array(state, descriptor.element.array_type)
+    if (descriptor.element.kind == .array or descriptor.element.kind == .record) child = try array_shape(state, descriptor.element)
     result :: try ir.add_array(
         state.module,
         lower_type(descriptor.element),
@@ -166,6 +176,24 @@ prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.All
     )
     state.arrays[usize(id)] = result
     return result
+}
+
+@hide:file
+prepare_record proc(state @mut State, id typecheck.RecordId) ir.ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.records[usize(id)] != ir.no_array) return state.records[usize(id)]
+    descriptor :: typecheck.record_type(state.checked, id)
+    fields := arraylist.init(ir.RecordField, state.module.allocator)
+    defer arraylist.deinit(&fields)
+    try arraylist.reserve(&fields, descriptor.fields.len)
+    for (descriptor.fields) |field| {
+        try arraylist.append(&fields, ir.RecordField{
+            type = lower_type(field.type),
+            array_type = try array_shape(state, field.type),
+        })
+    }
+    shape :: try ir.add_record(state.module, fields.items)
+    state.records[usize(id)] = shape
+    return shape
 }
 
 @hide:file
@@ -315,6 +343,7 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
         statement :: ast.block_statement(state.tree, block, i)
         match ast.stmt_kind(state.tree, statement) {
             .declaration: {
+                if (typecheck.type_of(state.checked, statement).kind == .type_value) continue
                 type :: typecheck.type_of(state.checked, statement)
                 local :: try ir.add_local(
                     state.module,
@@ -355,6 +384,7 @@ lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (m
         for (0..ast.block_statement_count(state.tree, block)) |i| {
             declaration :: ast.block_statement(state.tree, block, i)
             if (ast.stmt_kind(state.tree, declaration) != .declaration) continue
+            if (typecheck.type_of(state.checked, declaration).kind == .type_value) continue
             _ = try emit(state, ir.Instruction{
                 op = .reset_local,
                 slot = state.storage[usize(declaration)].index,
@@ -539,7 +569,9 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
-            if (ast.expr_kind(tree, assignment.target) == .index) {
+            if (ast.expr_kind(tree, assignment.target) == .index
+                or (ast.expr_kind(tree, assignment.target) == .selection
+                    and sema.binding(state.resolution, assignment.target).kind == .none)) {
                 value :: try lower_expression(state, assignment.value)
                 if (state.terminated) return
                 if (!is_place(state, assignment.target)) {
@@ -577,6 +609,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         }
         .expression: _ = try lower_expression(state, ast.statement_expr(tree, id))
         .declaration: {
+            if (typecheck.type_of(state.checked, id).kind == .type_value) return
             if (trap_binding(state, id)) return
             declaration :: ast.statement_decl(tree, id)
             if (declaration.type) |annotation| if (trap_type(state, annotation)) return
@@ -643,9 +676,65 @@ lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
 }
 
 @hide:file
+lower_record proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    scratch_start :: state.arguments.items.len
+    defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
+    explicit_count :: ast.record_field_count(tree, id)
+    try arraylist.reserve(&state.arguments, scratch_start + explicit_count)
+    for (0..explicit_count) |_| try arraylist.append(&state.arguments, ir.no_value)
+    for (0..explicit_count) |i| {
+        value :: try lower_expression(state, ast.field(tree, ast.record_field(tree, id, i)).value?)
+        if (state.terminated) return ir.no_value
+        state.arguments.items[scratch_start + i] = value
+    }
+    if (trap_type(state, id)) return ir.no_value
+    type :: typecheck.type_of(state.checked, id)
+    descriptor :: typecheck.record_type(state.checked, type.record_type)
+    ordered_start :: state.arguments.items.len
+    try arraylist.reserve(&state.arguments, ordered_start + descriptor.fields.len)
+    for (descriptor.fields) |_| try arraylist.append(&state.arguments, ir.no_value)
+    for (0..(descriptor.fields.len)) |i| {
+        initializer :: typecheck.initializer_field(state.checked, id, i)
+        value := ir.no_value
+        # ponytail: quadratic field reorder; retain an inverse map if large records make lowering costly.
+        for (0..explicit_count) |j| {
+            if (ast.field(tree, ast.record_field(tree, id, j)).value? == initializer) {
+                value = state.arguments.items[scratch_start + j]
+                break
+            }
+        }
+        if (value == ir.no_value) value = try lower_expression(state, initializer)
+        if (state.terminated) return ir.no_value
+        state.arguments.items[ordered_start + i] = value
+    }
+    block := &state.module.functions.items[state.function].blocks.items[usize(state.block)]
+    start :: block.arguments.items.len
+    try arraylist.reserve(&block.arguments, start + descriptor.fields.len)
+    for (0..(descriptor.fields.len)) |i| try arraylist.append(&block.arguments, state.arguments.items[ordered_start + i])
+    return try emit(state, ir.Instruction{
+        op = .record_literal,
+        type = .record,
+        array_type = try array_shape(state, type),
+        arguments_start = start,
+        arguments_count = descriptor.fields.len,
+        span = ast.node_span(tree, id),
+    })
+}
+
+@hide:file
 is_place proc(state @State, id ast.NodeId) bool {
     match ast.expr_kind(state.tree, id) {
         .index: return is_place(state, ast.index_expr(state.tree, id).base)
+        .selection: {
+            if (sema.binding(state.resolution, id).kind == .none) {
+                return is_place(state, ast.selection_expr(state.tree, id).base)
+            }
+            binding :: sema.binding(state.resolution, id)
+            if (binding.kind != .declaration) return false
+            location :: state.storage[usize(binding.data.declaration)]
+            return location.kind == .local or location.kind == .global
+        }
         .identifier: {
             binding :: sema.binding(state.resolution, id)
             if (binding.kind == .invalid) return true
@@ -661,6 +750,21 @@ is_place proc(state @State, id ast.NodeId) bool {
 lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
     checked :: typecheck.type_of(state.checked, id)
+    if (ast.expr_kind(state.tree, id) == .selection
+        and sema.binding(state.resolution, id).kind == .none) {
+        expression :: ast.selection_expr(state.tree, id)
+        base :: try lower_place(state, expression.base)
+        if (state.terminated or trap_type(state, id)) return ir.no_value
+        return try emit(state, ir.Instruction{
+            op = .field_address,
+            type = .address,
+            pointee = lower_type(checked),
+            array_type = try array_shape(state, checked),
+            left = base,
+            slot = u32(typecheck.field_index(state.checked, id)),
+            span = span,
+        })
+    }
     if (ast.expr_kind(state.tree, id) == .index) {
         expression :: ast.index_expr(state.tree, id)
         base :: try lower_place(state, expression.base)
@@ -706,11 +810,12 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             # ranges have no physical value; only lower_for decomposes an iterable.
             if (!trap_type(state, id)) unreachable
         }
-        .array_type: {
+        .array_type, .record_type: {
             if (!trap_type(state, id)) {
                 trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
             }
         }
+        .record_literal: return try lower_record(state, id)
         .array_literal: {
             scratch_start :: state.arguments.items.len
             defer state.arguments.items = state.arguments.items.ptr[..scratch_start]
@@ -769,6 +874,22 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             return try lower_string(state, id)
         }
         .identifier, .selection: {
+            if (ast.expr_kind(tree, id) == .selection
+                and sema.binding(state.resolution, id).kind == .none) {
+                if (is_place(state, id)) {
+                    address :: try lower_place(state, id)
+                    if (state.terminated) return ir.no_value
+                    return try emit(state, ir.Instruction{
+                        op = .load_address, type = type, array_type = shape, left = address, span = span,
+                    })
+                }
+                base :: try lower_expression(state, ast.selection_expr(tree, id).base)
+                if (state.terminated or trap_type(state, id)) return ir.no_value
+                return try emit(state, ir.Instruction{
+                    op = .field, type = type, array_type = shape, left = base,
+                    slot = u32(typecheck.field_index(state.checked, id)), span = span,
+                })
+            }
             if (trap_binding(state, id) or trap_type(state, id)) return ir.no_value
             binding :: sema.binding(state.resolution, id)
             location :: state.storage[usize(binding.data.declaration)]

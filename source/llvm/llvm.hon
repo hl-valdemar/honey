@@ -72,7 +72,10 @@ emit proc(
         try io.print(" zeroinitializer\n@gs{} = internal global i8 0\n", output, {index})
         try emit_global(output, module, global, index)
     }
-    for (module.arrays.items) |_, index| try emit_array_printer(output, module, ir.ArrayId(index))
+    for (module.arrays.items) |shape, index| {
+        if (shape.kind == .record) try emit_record_printer(output, module, ir.ArrayId(index))
+        else try emit_array_printer(output, module, ir.ArrayId(index))
+    }
     for (module.functions.items) |function, index| {
         values :: try mem.alloc(Type, allocator, function.value_count)
         defer mem.free(allocator, values)
@@ -91,13 +94,13 @@ emit proc(
     if (module.entry) |entry| {
         function :: module.functions.items[usize(entry)]
         result :: Type{ kind = function.result, shape = function.result_array_type }
-        if (result.kind != .void) try io.write_all(output, "  %result = ")
+        if (result.kind != .void) try io.write_all(output, "  %r0 = ")
         else try io.write_all(output, "  ")
         try io.write_all(output, "call ")
         try write_type(output, module, result)
         try io.print(" @f{}()\n", output, {u32(entry)})
         if (result.kind != .void and result.kind != .invalid) {
-            try print_call(output, module, result, "%result")
+            try print_call(output, module, result, 0)
             try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
         }
         try io.write_all(output, "  call void @report(i64 -1)\n")
@@ -138,6 +141,15 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
             try write_type(output, module, Type{ kind = shape.element, shape = shape.element_array })
             try io.write_all(output, "]")
         }
+        .record: {
+            shape :: module.arrays.items[usize(type.shape)]
+            try io.write_all(output, "{ ")
+            for (shape.fields) |field, index| {
+                if (index != 0) try io.write_all(output, ", ")
+                try write_type(output, module, Type{ kind = field.type, shape = field.array_type })
+            }
+            try io.write_all(output, " }")
+        }
         .void: try io.write_all(output, "void")
         # invalid storage only belongs to recovery paths that trap before reading it.
         .invalid: try io.write_all(output, "i8")
@@ -148,7 +160,7 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
 local_type proc(function @ir.Function, index usize) Type {
     type := Type{ kind = function.locals.items[index] }
     if (type.kind == .void) type.kind = .invalid
-    if (type.kind == .array) {
+    if (ir.aggregate(type.kind)) {
         for (function.array_storage.items) |storage| {
             if (storage.local and usize(storage.index) == index) {
                 type.shape = storage.array_type
@@ -244,24 +256,24 @@ emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index us
 }
 
 @hide:file
-print_call proc(output io.Writer, module @ir.Module, type Type, operand []u8) void ! io.WriteError {
+print_call proc(output io.Writer, module @ir.Module, type Type, operand usize) void ! io.WriteError {
     match type.kind {
         .i8, .i16, .i32, .int, .isize, .u8, .u16, .u32, .u64, .usize: {
             bits :: ir.integer_bits(type.kind)
             unsigned :: ir.unsigned_integer(type.kind)
             if (bits < 64) {
                 extension []u8 :: if (unsigned) "zext" else "sext"
-                try io.print("  %print_value = {s} i{} {s} to i64\n", output, {extension, bits, operand})
-                try io.print("  call void @print_integer(i32 1, i64 %print_value, i1 {})\n", output, {unsigned})
-            } else try io.print("  call void @print_integer(i32 1, i64 {s}, i1 {})\n", output, {operand, unsigned})
+                try io.print("  %print_value{} = {s} i{} %r{} to i64\n", output, {operand, extension, bits, operand})
+                try io.print("  call void @print_integer(i32 1, i64 %print_value{}, i1 {})\n", output, {operand, unsigned})
+            } else try io.print("  call void @print_integer(i32 1, i64 %r{}, i1 {})\n", output, {operand, unsigned})
         }
-        .float: try io.print("  call void @print_float(double {s})\n", output, {operand})
-        .bool: try io.print("  call void @print_bool(i1 {s})\n", output, {operand})
-        .string: try io.print("  call void @print_string(%string {s})\n", output, {operand})
-        .array: {
+        .float: try io.print("  call void @print_float(double %r{})\n", output, {operand})
+        .bool: try io.print("  call void @print_bool(i1 %r{})\n", output, {operand})
+        .string: try io.print("  call void @print_string(%string %r{})\n", output, {operand})
+        .array, .record: {
             try io.print("  call void @print_array{}(", output, {u32(type.shape)})
             try write_type(output, module, type)
-            try io.print(" {s})\n", output, {operand})
+            try io.print(" %r{})\n", output, {operand})
         }
         else: unreachable
     }
@@ -282,13 +294,31 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
     try io.print("  %done = icmp eq i64 %index, {}\n", output, {shape.len})
     try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @out(i32 1, ptr @separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
     try write_type(output, module, type)
-    try io.write_all(output, ", ptr %storage, i64 0, i64 %index\n  %item = load ")
+    try io.write_all(output, ", ptr %storage, i64 0, i64 %index\n  %r0 = load ")
     try write_type(output, module, element)
     try io.write_all(output, ", ptr %pointer\n")
     # functions may occur inside arrays without being printable source results.
-    if (element.kind != .function) try print_call(output, module, element, "%item")
+    if (element.kind != .function) try print_call(output, module, element, 0)
     else try io.write_all(output, "  call void @exit(i32 2)\n")
     try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @out(i32 1, ptr @close, i64 1)\n  ret void\n}\n")
+}
+
+@hide:file
+emit_record_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
+    shape :: module.arrays.items[usize(id)]
+    type :: Type{ kind = .record, shape = id }
+    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try write_type(output, module, type)
+    try io.write_all(output, " %value) {\nentry:\n  call void @out(i32 1, ptr @record_open, i64 1)\n")
+    for (shape.fields) |field, index| {
+        if (index != 0) try io.write_all(output, "  call void @out(i32 1, ptr @separator, i64 2)\n")
+        try io.print("  %r{} = extractvalue ", output, {index})
+        try write_type(output, module, type)
+        try io.print(" %value, {}\n", output, {index})
+        if (field.type != .function) try print_call(output, module, Type{ kind = field.type, shape = field.array_type }, index)
+        else try io.write_all(output, "  call void @exit(i32 2)\n")
+    }
+    try io.write_all(output, "  call void @out(i32 1, ptr @record_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide
@@ -356,19 +386,27 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
         .function: try io.print("@f{}", output, {u32(value.data.function)})
         .array: {
             shape :: module.arrays.items[usize(value.array_type)]
-            width :: if (shape.element == .array) module.arrays.items[usize(shape.element_array)].cells else 1
             try io.write_all(output, "[")
             for (0..shape.len) |index| {
                 if (index != 0) try io.write_all(output, ", ")
-                element := ir.Value{}
-                if (shape.element == .array) {
-                    element = ir.Value{ type = .array, array_type = shape.element_array, data = ir.ValueData{ elements = value.data.elements[index * width..(index + 1) * width] } }
-                } else element = value.data.elements[index]
+                element :: ir.aggregate_item(module, value, index)
                 try write_type(output, module, Type{ kind = element.type, shape = element.array_type })
                 try io.write_all(output, " ")
                 try write_constant(output, module, element)
             }
             try io.write_all(output, "]")
+        }
+        .record: {
+            shape :: module.arrays.items[usize(value.array_type)]
+            try io.write_all(output, "{ ")
+            for (shape.fields) |_, index| {
+                if (index != 0) try io.write_all(output, ", ")
+                field :: ir.aggregate_item(module, value, index)
+                try write_type(output, module, Type{ kind = field.type, shape = field.array_type })
+                try io.write_all(output, " ")
+                try write_constant(output, module, field)
+            }
+            try io.write_all(output, " }")
         }
         else: unreachable
     }

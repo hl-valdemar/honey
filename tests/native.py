@@ -11,6 +11,183 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "record_defaults_and_copies": (
+        """
+        Point :: struct { x i16, y i16 = 2 }
+        seed Point :: { x = 40 }
+        identity proc(p Point) Point { return p }
+        main proc() [3]i16 {
+            a := identity(seed)
+            b := a
+            a.x = 9
+            return [b.x + b.y, a.x, seed.x]
+        }
+        """, b"[42, 9, 40]\n", None,
+    ),
+    "contextual_record_arguments": (
+        """
+        Point :: struct { x u8, y u8 = 2 }
+        add proc(p Point) u8 { return p.x + p.y }
+        main proc() u8 { return add({ x = 40 }) }
+        """, b"42\n", None,
+    ),
+    "nested_records_arrays_tuples": (
+        """
+        Point :: struct { x i16, y i16 = 2 }
+        Box :: struct { points [2]mut Point, pair struct { u8, bool }, empty struct {} }
+        identity proc(b Box) Box { return b }
+        main proc() Box {
+            a Box := { points = [{ x = 1 }, { x = 40 }], pair = {255, true}, empty = {} }
+            b :: identity(a)
+            a.points[0].x = 9
+            a.pair.0 = 8
+            return b
+        }
+        """, b"{[{1, 2}, {40, 2}], {255, true}, {}}\n", None,
+    ),
+    "anonymous_records_and_numeric_fields": (
+        """
+        main proc() i64 {
+            a := { x = 40, pair = {{2, true}, false} }
+            b :: a
+            a.x = 1
+            return b.x + b.pair.0.0
+        }
+        """, b"42\n", None,
+    ),
+    "record_temporary_fields_and_guards": (
+        """
+        Point :: struct { x u8, y u8 = 2 }
+        make proc() Point { return { x = 40 } }
+        main proc() u8 {
+            flag :: { ready = true }
+            if flag.ready { return make().x + make().y }
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "zero_cell_records": (
+        """
+        Empty :: struct {}
+        Box :: struct { values [3]Empty, empty Empty }
+        main proc() Box { return { values = [{}, {}, {}], empty = {} } }
+        """, b"{[{}, {}, {}], {}}\n", None,
+    ),
+    "record_default_override": (
+        """
+        Point :: struct { x i64 = 9223372036854775807 + 1 }
+        main proc() i64 { p :: Point { x = 42 }
+            return p.x }
+        """, b"42\n", None,
+    ),
+    "record_default_trap": (
+        """
+        Point :: struct { x i64 = 9223372036854775807 + 1 }
+        main proc() i64 { p :: Point {}
+            return p.x }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "record_branchful_default": (
+        """
+        Point :: struct { x bool = false and (9223372036854775807 + 1 == 0) }
+        main proc() bool { p :: Point {}
+            return !p.x }
+        """, b"true\n", None,
+    ),
+    "record_explicit_evaluation_order": (
+        """
+        cycle i64 :: cycle
+        Point :: struct { x i64, y i64 }
+        main proc() Point { return Point { y = 9223372036854775807 + 1, x = cycle } }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "record_explicit_before_default": (
+        """
+        cycle i64 :: cycle
+        Point :: struct { x i64 = cycle, y i64 }
+        main proc() Point { return Point { y = 9223372036854775807 + 1 } }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "record_assignment_rhs_before_place": (
+        """
+        Point :: struct { xs [1]mut i64 }
+        main proc() Point { p Point := { xs = [0] }
+            p.xs[1] = 9223372036854775807 + 1
+            return p }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "record_reordered_structural_assignment": (
+        "main proc() int { a := { x = 1, y = 2 }\na = { y = 40, x = 2 }\nreturn a.x + a.y }",
+        b"42\n", None,
+    ),
+    "record_local_type_and_loop": (
+        """
+        main proc() i16 {
+            Point :: struct { x i16 }
+            p Point := { x = 0 }
+            for 0..100 |i| {
+                copy := p
+                copy.x = p.x + 1
+                p = copy
+            }
+            return p.x
+        }
+        """, b"100\n", None,
+    ),
+    "record_function_field": (
+        """
+        plus proc(n i64) i64 { return n + 1 }
+        minus proc(n i64) i64 { return n - 1 }
+        main proc() i64 { p := { f = plus }
+            p.f = minus
+            return p.f(43) }
+        """, b"42\n", None,
+    ),
+    "record_nominal_mismatch": (
+        "A :: struct { x i64 }\nB :: struct { x i64 }\nmain proc() A { b :: B { x = 42 }\nreturn b }",
+        b"", b"",
+    ),
+    "record_missing_field": (
+        "Point :: struct { x i64, y i64 }\nmain proc() Point { return { x = 42 } }", b"", b"",
+    ),
+    "record_duplicate_field": (
+        "Point :: struct { x i64 }\nmain proc() Point { return { x = 1, x = 2 } }", b"", b"",
+    ),
+    "record_unknown_field": (
+        "Point :: struct { x i64 }\nmain proc() Point { return { x = 1, z = 2 } }", b"", b"",
+    ),
+    "record_wrong_field_type": (
+        "Point :: struct { x u8 }\nmain proc() Point { n u16 :: 42\nreturn { x = n } }", b"", b"",
+    ),
+    "record_readonly_field": (
+        "Point :: struct { x i64 }\nmain proc() i64 { p :: Point { x = 1 }\np.x = 2\nreturn p.x }",
+        b"", b"",
+    ),
+    "record_readonly_array_field": (
+        "Point :: struct { xs [1]i64 }\nmain proc() i64 { p Point := { xs = [1] }\np.xs[0] = 2\nreturn p.xs[0] }",
+        b"", b"",
+    ),
+    "record_parameter_readonly": (
+        "Point :: struct { x i64 }\nmutate proc(p Point) i64 { p.x = 2\nreturn p.x }\nmain proc() i64 { return mutate({ x = 1 }) }",
+        b"", b"",
+    ),
+    "record_recursive_layout": (
+        "Point :: struct { next Point }\nmain proc() int { return 42 }", b"42\n", b"",
+    ),
+    "record_tuple_arity": (
+        "main proc() struct { i64, bool } { return {42,} }", b"", b"",
+    ),
+    "record_unused_bad_body": (
+        "Point :: struct { x i64 }\nbad proc() Point { return { missing = 1 } }\nmain proc() i64 { return 42 }",
+        b"42\n", b"",
+    ),
+    "record_field_bounds": (
+        "Point :: struct { xs [1]i64 }\nmain proc() i64 { p :: Point { xs = [42] }\nreturn p.xs[1] }",
+        b"", b"index out of bounds",
+    ),
+    "record_type_not_value": (
+        "Point :: struct { x i64 }\nmain proc() i64 { Point\nreturn 42 }", b"", b"type name cannot",
+    ),
     "void": ("main proc() void {}", b"", None),
     "signed_limits": (
         "main proc() [2]i64 { return [-9223372036854775808, 9223372036854775807] }",
@@ -517,7 +694,7 @@ main proc() bool {
         ('import "../shared"\nmain proc() int { return shared.helper(1) }', b"", b"argument count"),
         ('import "../shared"\nmain proc() f64 { return shared.identity(true) }', b"", b"incompatible value type"),
         ('import "../shared"\nmain proc() int { shared\nreturn 42 }', b"", b"namespace cannot be used as a value"),
-        ('import "../shared"\nmain proc() int { return shared.value.member }', b"", b"requires a package namespace"),
+        ('import "../shared"\nmain proc() int { return shared.value.member }', b"", b""),
         ('lib :: import "../absent"\nmain proc() int { return lib.helper() }', b"", b"cannot load package directory"),
         ('lib :: import "../left"\nlib :: import "../right"\nmain proc() int { return lib.helper() }', b"1\n", b"duplicate name"),
         ('lib :: import "../shared"\nlib :: 42\nmain proc() int { return lib.helper() }', b"", b"duplicate name"),
@@ -564,6 +741,31 @@ main proc() int { return missing }
     assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
     check(single.parent, executable, (b"42\n", b"duplicate name"))
     return len(cases) + 6
+
+
+def check_record_packages(temporary, executable):
+    project = temporary / "records"
+    app, library = project / "app", project / "library"
+    app.mkdir(parents=True)
+    library.mkdir()
+    types = library / "types.hon"
+    types.write_text("Point :: struct { x i16, y i16 = 2 }\n")
+    (library / "functions.hon").write_text("identity proc(p Point) Point { return p }\n")
+    (app / "main.hon").write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            p lib.Point := lib.Point { x = 40 }
+            q :: lib.identity(p)
+            p.x = 1
+            return q.x + q.y
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    types.write_text("Point :: struct { x i16, y i16 = 32767 + 1 }\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    trapped = run(str(HONEY), "run", str(app))
+    assert trapped.stderr.startswith(f"{types.resolve()}:1:".encode()), outcome(trapped)
+    return 2
 
 
 def check_dependency_provenance(temporary, executable):
@@ -688,6 +890,7 @@ def main():
             count += 1
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
+        count += check_record_packages(temporary, executable)
         count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))

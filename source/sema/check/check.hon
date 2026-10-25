@@ -7,25 +7,39 @@ import "@source/diagnostics"
 sema :: import "@source/sema"
 
 TypeKind :: enum {
-    none,
-    invalid,
-    int,
-    float,
-    bool,
-    string,
-    void,
-    function,
-    range,
-    array,
-    usize,
-    i8,
-    i16,
-    i32,
-    isize,
-    u8,
-    u16,
-    u32,
-    u64,
+    none
+    invalid
+    int
+    float
+    bool
+    string
+    void
+    function
+    range
+    array
+    record
+    type_value
+    u8, u16, u32, u64, usize
+    i8, i16, i32, isize
+}
+
+RecordId :: distinct u32
+no_record :: maxval!(RecordId)
+
+RecordField :: struct {
+    name ?ast.NodeId
+    type Type
+    default ?ast.NodeId
+}
+
+RecordType :: struct {
+    declaration ast.NodeId
+    fields []RecordField
+}
+
+@hide:file
+RecordInitializer :: struct {
+    fields []mut ast.NodeId
 }
 
 ArrayId :: distinct u32
@@ -43,17 +57,21 @@ Type :: struct {
     diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
     array_type ArrayId = no_array
     range_element TypeKind = .none
+    record_type RecordId = no_record
 }
 
 @hide:file
 Storage :: struct {
     types []mut Type
     arrays arraylist.ArrayList(ArrayType)
+    records arraylist.ArrayList(RecordType)
+    initializers arraylist.ArrayList(RecordInitializer)
+    slots []mut usize
     fallthroughs hashmap.AutoHashMap(ast.NodeId, diagnostics.DiagnosticId)
     allocator mem.Allocator
 }
 
-#! owns node-indexed types, interned array descriptors, and function fallthrough obligations; release with deinit.
+#! owns node-indexed types, aggregate descriptors, initializer mappings, and function fallthrough obligations; release with deinit.
 #! function IDs refer to the caller-owned AST; diagnostic IDs refer to the caller-owned store.
 Result :: struct { storage Storage }
 
@@ -104,6 +122,8 @@ Cell :: struct {
     literal ast.NodeId = ast.NodeId(maxval!(u32))
     producer ast.NodeId = ast.NodeId(maxval!(u32))
     capture ast.NodeId = ast.NodeId(maxval!(u32))
+    record_checking bool = false
+    nominal bool = false
     first_edge usize = no_index
     return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
 }
@@ -124,12 +144,15 @@ State :: struct {
     groups []mut GroupLink
     edges arraylist.ArrayList(Edge)
     arrays arraylist.ArrayList(ArrayType)
+    records arraylist.ArrayList(RecordType)
+    initializers arraylist.ArrayList(RecordInitializer)
+    slots []mut usize
     collecting_assignment bool = false
     has_assignments bool = false
 }
 
 #! borrows the AST, resolution, and diagnostic store only during checking.
-#! temporary constraints are freed on every exit; Result owns types, array descriptors, and fallthrough obligations.
+#! temporary constraints are freed on every exit; Result owns types, aggregate descriptors, initializer mappings, and fallthrough obligations.
 check proc(
     allocator mem.Allocator,
     tree @ast.Tree,
@@ -149,6 +172,9 @@ check proc(
     for (0..count) |i| groups[i].parent = i
     queue :: try mem.alloc(ast.NodeId, allocator, count)
     defer mem.free(allocator, queue)
+    slots :: try mem.alloc(usize, allocator, count)
+    errdefer mem.free(allocator, slots)
+    mem.set(slots, no_index)
     state := State{
         tree = tree,
         resolution = resolution,
@@ -158,9 +184,18 @@ check proc(
         groups = groups,
         edges = arraylist.init(allocator),
         arrays = arraylist.init(allocator),
+        records = arraylist.init(allocator),
+        initializers = arraylist.init(allocator),
+        slots = slots,
     }
     defer arraylist.deinit(&state.edges)
     errdefer arraylist.deinit(&state.arrays)
+    errdefer {
+        for (state.records.items) |record| mem.free(allocator, record.fields)
+        arraylist.deinit(&state.records)
+        for (state.initializers.items) |initializer| mem.free(allocator, initializer.fields)
+        arraylist.deinit(&state.initializers)
+    }
 
     for 0..ast.package_decl_count(tree) |i| {
         id :: ast.package_decl(tree, i)
@@ -195,6 +230,7 @@ check proc(
     for (0..count) |i| {
         id :: ast.NodeId(i)
         if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
+        if (cells[i].type.kind == .invalid) continue
         binding :: sema.binding(resolution, id)
         if (binding.kind != .declaration) continue
         target :: binding.data.declaration
@@ -207,6 +243,7 @@ check proc(
             join(&state, id, ast.statement_decl(tree, id).initializer)
         }
         if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
+        if (cells[i].type.kind == .invalid) continue
         binding :: sema.binding(resolution, id)
         if (binding.kind == .declaration and !cells[i].assignment_value and !cells[usize(binding.data.declaration)].fixed) {
             join(&state, id, binding.data.declaration)
@@ -225,6 +262,7 @@ check proc(
                     or cells[i].role != .expression
                     or !declaration_reference(tree, id)
                 ) continue
+                if (cells[i].type.kind == .invalid) continue
                 binding :: sema.binding(resolution, id)
                 if (binding.kind == .declaration) cells[i].type = types[usize(binding.data.declaration)]
             }
@@ -356,6 +394,11 @@ check proc(
         }
     }
     for (0..count) |i| try validate(&state, ast.NodeId(i))
+    for state.records.items |record| {
+        for record.fields |field| {
+            if (field.default) |value| try compatible(&state, value, field.type)
+        }
+    }
 
     # errors travel only from dependencies to users. A rejected use never poisons
     # an explicitly typed declaration, and body errors do not erase signatures.
@@ -401,6 +444,9 @@ check proc(
     return Result{ storage = Storage{
         types = types,
         arrays = state.arrays,
+        records = state.records,
+        initializers = state.initializers,
+        slots = slots,
         fallthroughs = fallthroughs,
         allocator = allocator,
     } }
@@ -427,11 +473,36 @@ array_type proc(result @Result, id ArrayId) ArrayType {
     return result.storage.arrays.items[usize(id)]
 }
 
+record_type_count proc(result @Result) usize {
+    return result.storage.records.items.len
+}
+
+record_type proc(result @Result, id RecordId) RecordType {
+    debug.assert(usize(id) < result.storage.records.items.len)
+    return result.storage.records.items[usize(id)]
+}
+
+field_index proc(result @Result, selection ast.NodeId) usize {
+    debug.assert(result.storage.slots[usize(selection)] != no_index)
+    return result.storage.slots[usize(selection)]
+}
+
+initializer_field proc(result @Result, literal ast.NodeId, index usize) ast.NodeId {
+    slot :: result.storage.slots[usize(literal)]
+    debug.assert(slot != no_index)
+    return result.storage.initializers.items[slot].fields[index]
+}
+
 #! releases type, descriptor, and fallthrough storage using the allocator retained by check.
 deinit proc(result @mut Result) void {
     mem.free(result.storage.allocator, result.storage.types)
     arraylist.deinit(&result.storage.arrays)
     hashmap.deinit(&result.storage.fallthroughs)
+    for (result.storage.records.items) |record| mem.free(result.storage.allocator, record.fields)
+    arraylist.deinit(&result.storage.records)
+    for (result.storage.initializers.items) |initializer| mem.free(result.storage.allocator, initializer.fields)
+    arraylist.deinit(&result.storage.initializers)
+    mem.free(result.storage.allocator, result.storage.slots)
 }
 
 @hide:file
@@ -518,6 +589,7 @@ join proc(state @mut State, left, right ast.NodeId) void {
     state.cells[a].numeric = state.cells[a].numeric or state.cells[b].numeric
     state.cells[a].anchored = state.cells[a].anchored or state.cells[b].anchored
     if (state.cells[a].demand == .none) state.cells[a].demand = state.cells[b].demand
+    if (state.cells[a].expected.kind == .none) state.cells[a].expected = state.cells[b].expected
     state.cells[a].conversion_unsigned = state.cells[a].conversion_unsigned or state.cells[b].conversion_unsigned
     if (state.cells[a].literal == ast.NodeId(maxval!(u32))) state.cells[a].literal = state.cells[b].literal
     if (state.cells[a].producer == ast.NodeId(maxval!(u32))) state.cells[a].producer = state.cells[b].producer
@@ -540,6 +612,12 @@ collect_invalid proc(state @mut State, id ast.NodeId) void {
 check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
     if (state.cells[usize(id)].role == .annotation) return state.types[usize(id)]
     state.cells[usize(id)].role = .annotation
+    if (ast.expr_kind(state.tree, id) == .record_type) {
+        type :: try check_record(state, id, false)
+        state.types[usize(id)] = type
+        state.cells[usize(id)].type = type
+        return type
+    }
     if (ast.expr_kind(state.tree, id) == .array_type) {
         view :: ast.array_type(state.tree, id)
         element := try check_annotation(state, view.element, true)
@@ -582,6 +660,20 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
                 type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_void_type, ast.node_span(state.tree, id)))
             }
         }
+        .declaration: {
+            target :: binding.data.declaration
+            role :: state.cells[usize(target)].role
+            if (role != .parameter and role != .loop_capture and ast.decl_kind(state.tree, target) == .statement) {
+                initializer :: ast.statement_decl(state.tree, target).initializer
+                if (ast.expr_kind(state.tree, initializer) == .record_type) {
+                    type = try check_record(state, initializer, true)
+                } else {
+                    type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
+                }
+            } else {
+                type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
+            }
+        }
         else: type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
     }
     state.types[usize(id)] = type
@@ -593,6 +685,9 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
 collect_declaration proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     declaration :: ast.statement_decl(state.tree, id)
     state.cells[usize(id)].role = .declaration
+    if (ast.expr_kind(state.tree, declaration.initializer) == .record_type) {
+        state.cells[usize(declaration.initializer)].nominal = true
+    }
     if (declaration.type) |type| {
         state.cells[usize(id)].fixed = true
         state.cells[usize(id)].type = try check_annotation(state, type, false)
@@ -604,6 +699,11 @@ collect_declaration proc(state @mut State, id ast.NodeId) void ! (mem.AllocError
         state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
     }
     try collect_expression(state, declaration.initializer)
+    if (ast.expr_kind(state.tree, declaration.initializer) == .record_type
+        and state.cells[usize(id)].type.kind != .invalid) {
+        state.cells[usize(id)].fixed = true
+        state.cells[usize(id)].type = state.cells[usize(declaration.initializer)].type
+    }
     try depend(state, declaration.initializer, id)
 }
 
@@ -772,6 +872,19 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
         .identifier, .selection: {
             binding :: sema.binding(state.resolution, id)
+            if (binding.kind == .none and ast.expr_kind(tree, id) == .selection) {
+                base :: ast.selection_expr(tree, id).base
+                try collect_expression(state, base)
+                try depend(state, base, id)
+            }
+            if (binding.kind == .declaration) {
+                target :: binding.data.declaration
+                role :: state.cells[usize(target)].role
+                if (role != .parameter and role != .loop_capture and ast.decl_kind(tree, target) == .statement
+                    and ast.expr_kind(tree, ast.statement_decl(tree, target).initializer) == .record_type) {
+                    state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
+                }
+            }
             match binding.kind {
                 .invalid: state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
                 .builtin: state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
@@ -838,6 +951,23 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         }
         .array_type: {
             state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
+        }
+        .record_type: {
+            type := try check_record(state, id, state.cells[usize(id)].nominal)
+            if (type.kind == .record) type.kind = .type_value
+            state.cells[usize(id)].type = type
+        }
+        .record_literal: {
+            state.cells[usize(id)].literal = id
+            if (ast.record_literal(tree, id).type) |annotation| {
+                state.cells[usize(id)].expected = try check_annotation(state, annotation, false)
+                try depend(state, annotation, id)
+            }
+            for 0..ast.record_field_count(tree, id) |i| {
+                value :: ast.field(tree, ast.record_field(tree, id, i)).value?
+                try collect_expression(state, value)
+                try depend(state, value, id)
+            }
         }
         .array_literal: {
             state.cells[usize(id)].literal = id
@@ -992,9 +1122,24 @@ numeric_constraint proc(state @mut State, expression, operand, operation ast.Nod
 demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Code) void ! (mem.AllocError | diagnostics.CapacityError) {
     if (state.types[usize(id)].kind == .invalid) return
     index :: root(state, usize(id))
+    if (expected.kind == .record) {
+        literal :: state.cells[index].literal
+        if (literal == ast.NodeId(maxval!(u32)) or ast.expr_kind(state.tree, literal) != .record_literal) return
+        if (ast.record_literal(state.tree, literal).type == null) {
+            previous :: state.cells[index].expected
+            if (previous.kind == .record and !same_type(state, previous, expected)) {
+                try fail(state, literal, code, ast.node_span(state.tree, literal))
+                return
+            }
+            state.cells[index].expected = expected
+        }
+        _ = try infer_record_literal(state, literal, index, false)
+        return
+    }
     if (expected.kind == .array) {
         literal :: state.cells[index].literal
         if (literal == ast.NodeId(maxval!(u32))) return
+        if (ast.expr_kind(state.tree, literal) != .array_literal) return
         previous :: state.cells[index].expected
         if (previous.kind == .array and !same_type(state, previous, expected)) {
             if (!has_inferred_count(state, previous) and !has_inferred_count(state, expected)) {
@@ -1049,6 +1194,11 @@ mutable_target proc(state @State, id ast.NodeId) bool {
         view :: ast.index_expr(state.tree, id)
         base :: state.types[usize(view.base)]
         return base.kind == .array and state.arrays.items[usize(base.array_type)].mutable and mutable_target(state, view.base)
+    }
+    if (ast.expr_kind(state.tree, id) == .selection
+        and sema.binding(state.resolution, id).kind == .none) {
+        view :: ast.selection_expr(state.tree, id)
+        return state.types[usize(view.base)].kind == .record and mutable_target(state, view.base)
     }
     binding :: sema.binding(state.resolution, id)
     if (binding.kind != .declaration) return false
@@ -1175,6 +1325,18 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         } else {
                             try compatible(state, child, element)
                         }
+                    }
+                    if (array_cells(state, actual) == null) try fail(state, id, .array_size_overflow, ast.node_span(tree, id))
+                }
+                .record_literal: {
+                    actual :: state.types[usize(id)]
+                    if (actual.kind != .record) return
+                    fields :: state.records.items[usize(actual.record_type)].fields
+                    slot :: state.slots[usize(id)]
+                    if (slot == no_index) return
+                    values :: state.initializers.items[slot].fields
+                    for fields |field, i| {
+                        if (values[i] != ast.NodeId(maxval!(u32))) try compatible(state, values[i], field.type)
                     }
                     if (array_cells(state, actual) == null) try fail(state, id, .array_size_overflow, ast.node_span(tree, id))
                 }
@@ -1334,6 +1496,7 @@ intern_array proc(state @mut State, descriptor ArrayType) Type ! mem.AllocError 
         if (existing.len == descriptor.len and existing.mutable == descriptor.mutable
             and existing.element.kind == descriptor.element.kind
             and existing.element.function == descriptor.element.function
+            and existing.element.record_type == descriptor.element.record_type
             and existing.element.array_type == descriptor.element.array_type) {
             return Type{ kind = .array, array_type = ArrayId(i) }
         }
@@ -1346,6 +1509,22 @@ intern_array proc(state @mut State, descriptor ArrayType) Type ! mem.AllocError 
 same_type proc(state @State, left, right Type) bool {
     if (left.kind != right.kind) return false
     if (left.kind == .function) return same_signature(state, left.function, right.function)
+    if (left.kind == .record or left.kind == .type_value) {
+        if (left.record_type == right.record_type) return true
+        a :: state.records.items[usize(left.record_type)]
+        b :: state.records.items[usize(right.record_type)]
+        if (a.declaration != ast.NodeId(maxval!(u32)) or b.declaration != ast.NodeId(maxval!(u32))
+            or a.fields.len != b.fields.len) return false
+        for a.fields |field, i| {
+            other :: b.fields[i]
+            if ((field.name == null) != (other.name == null)) return false
+            if (field.name) |name| {
+                if (ast.name_id(state.tree, name) != ast.name_id(state.tree, other.name?)) return false
+            }
+            if (!same_type(state, field.type, other.type)) return false
+        }
+        return true
+    }
     if (left.kind != .array) return true
     a :: state.arrays.items[usize(left.array_type)]
     b :: state.arrays.items[usize(right.array_type)]
@@ -1354,6 +1533,16 @@ same_type proc(state @State, left, right Type) bool {
 
 @hide:file
 array_cells proc(state @State, type Type) ?usize {
+    if (type.kind == .record) {
+        total := usize(0)
+        for state.records.items[usize(type.record_type)].fields |field| {
+            child := usize(0)
+            if (array_cells(state, field.type)) |value| child = value else return null
+            if (total > maxval!(usize) - child) return null
+            total += child
+        }
+        return total
+    }
     if (type.kind != .array) return usize(1)
     view :: state.arrays.items[usize(type.array_type)]
     if (view.len == no_index) return null
@@ -1366,7 +1555,7 @@ array_cells proc(state @State, type Type) ?usize {
 @hide:file
 array_origin proc(state @mut State, id ast.NodeId) ast.NodeId {
     origin :: state.cells[root(state, usize(id))].literal
-    if (origin != ast.NodeId(maxval!(u32))) return origin
+    if (origin != ast.NodeId(maxval!(u32)) and ast.expr_kind(state.tree, origin) == .array_literal) return origin
     if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .index) {
         base :: array_origin(state, ast.index_expr(state.tree, id).base)
         if (base != ast.NodeId(maxval!(u32)) and ast.array_element_count(state.tree, base) != 0) {
@@ -1396,8 +1585,8 @@ unify_elements proc(state @mut State, left, right ast.NodeId) void ! (mem.AllocE
     if (state.cells[left_root].numeric and state.cells[right_root].numeric) {
         try numeric_constraint(state, left, right, right)
     }
-    if (left_type.kind == .array) try demand(state, right, left_type, .type_mismatch)
-    if (right_type.kind == .array) try demand(state, left, right_type, .type_mismatch)
+    if (left_type.kind == .array or left_type.kind == .record) try demand(state, right, left_type, .type_mismatch)
+    if (right_type.kind == .array or right_type.kind == .record) try demand(state, left, right_type, .type_mismatch)
 }
 
 @hide:file
@@ -1413,6 +1602,48 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             seed(state, id, Type{ kind = destination })
             return group_type(state, id)
         }
+    }
+    if (state.cells[usize(id)].role == .expression
+        and ast.expr_kind(state.tree, id) == .selection
+        and sema.binding(state.resolution, id).kind == .none) {
+        view :: ast.selection_expr(state.tree, id)
+        base :: try infer_shape(state, view.base, defaults)
+        if (base.kind == .record) {
+            fields :: state.records.items[usize(base.record_type)].fields
+            slot :: selected_field(state, fields, view.member)
+            if (slot != no_index) {
+                state.slots[usize(id)] = slot
+                seed(state, id, fields[slot].type)
+                return fields[slot].type
+            }
+            try fail(state, id, .unknown_field, ast.node_span(state.tree, view.member))
+        } else if (base.kind == .invalid) {
+            seed(state, id, base)
+        } else if (base.kind != .none) {
+            try fail(state, id, .not_record, ast.node_span(state.tree, view.base))
+        }
+        if (base.kind == .none) {
+            origin :: state.cells[root(state, usize(view.base))].literal
+            if (origin != ast.NodeId(maxval!(u32)) and ast.expr_kind(state.tree, origin) == .record_literal) {
+                for 0..ast.record_field_count(state.tree, origin) |i| {
+                    field :: ast.field(state.tree, ast.record_field(state.tree, origin, i))
+                    matches := false
+                    if (field.name) |name| {
+                        matches = (
+                            ast.expr_kind(state.tree, view.member) == .identifier
+                            and ast.name_id(state.tree, name) == ast.name_id(state.tree, view.member)
+                        )
+                    } else if (constant_integer(state, view.member)) |ordinal| {
+                        matches = !ordinal.negative and ordinal.magnitude == u64(i)
+                    }
+                    if (!matches) continue
+                    child :: field.value?
+                    if (state.cells[root(state, usize(child))].numeric) try numeric_constraint(state, id, child, id)
+                    break
+                }
+            }
+        }
+        return group_type(state, id)
     }
     if (state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)) {
         binding :: sema.binding(state.resolution, id)
@@ -1431,6 +1662,9 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         }
     }
     literal :: state.cells[index].literal
+    if (literal != ast.NodeId(maxval!(u32)) and ast.expr_kind(state.tree, literal) == .record_literal) {
+        return try infer_record_literal(state, literal, index, defaults)
+    }
     if (literal != ast.NodeId(maxval!(u32))) {
         len :: ast.array_element_count(state.tree, literal)
         expected :: state.cells[index].expected
@@ -1495,6 +1729,14 @@ prepare_shapes proc(state @mut State, assignment_values, defaults bool) void ! (
 @hide:file
 apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
+    if (!assignment_values) {
+        for 0..(state.records.items.len) |i| {
+            record :: state.records.items[i]
+            for record.fields |field| {
+                if (field.default) |value| try context_demand(state, value, field.type, .type_mismatch, early)
+            }
+        }
+    }
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
         if (!assignment_values and state.cells[i].role == .declaration) {
@@ -1535,7 +1777,7 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
 
 @hide:file
 context_demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Code, early bool) void ! (mem.AllocError | diagnostics.CapacityError) {
-    if (early and expected.kind != .array and !integer_kind(expected.kind)) return
+    if (early and expected.kind != .array and expected.kind != .record and !integer_kind(expected.kind)) return
     try demand(state, id, expected, code)
 }
 
@@ -1653,4 +1895,221 @@ specialize_annotations proc(state @mut State) void ! (mem.AllocError | diagnosti
             seed(state, id, state.cells[usize(binding.data.declaration)].type)
         }
     }
+}
+
+@hide:file
+named_field proc(tree @ast.Tree, fields []RecordField, name ast.NodeId) usize {
+    for fields |field, i| {
+        if (field.name) |existing| {
+            if (ast.name_id(tree, existing) == ast.name_id(tree, name)) return i
+        }
+    }
+    return no_index
+}
+
+@hide:file
+selected_field proc(state @State, fields []RecordField, member ast.NodeId) usize {
+    if (ast.expr_kind(state.tree, member) == .identifier) return named_field(state.tree, fields, member)
+    value := usize(0)
+    for ast.source_text(state.tree, ast.node_span(state.tree, member)) |byte| {
+        if (byte < '0' or byte > '9') return no_index
+        digit :: usize(byte - '0')
+        if (value > divtrunc!(maxval!(usize) - digit, usize(10))) return no_index
+        value = value * 10 + digit
+    }
+    if (value >= fields.len or fields[value].name != null) return no_index
+    return value
+}
+
+@hide:file
+intern_record proc(state @mut State, declaration ast.NodeId, fields []mut RecordField) Type ! mem.AllocError {
+    for state.records.items |existing, i| {
+        if (existing.declaration != declaration or existing.fields.len != fields.len) continue
+        equal := true
+        same_defaults := true
+        for fields |field, j| {
+            slot := j
+            if (field.name) |name| slot = named_field(state.tree, existing.fields, name)
+            if (slot == no_index or (field.name == null and existing.fields[slot].name != null)
+                or !same_type(state, field.type, existing.fields[slot].type)) {
+                equal = false
+                break
+            }
+            other_default :: existing.fields[slot].default
+            if ((field.default == null) != (other_default == null)) {
+                same_defaults = false
+            } else if (field.default) |value| {
+                if (value != other_default?) same_defaults = false
+            }
+        }
+        if (equal and same_defaults) {
+            mem.free(state.records.allocator, fields)
+            return Type{ kind = .record, record_type = RecordId(i) }
+        }
+        if (equal) {
+            for existing.fields |field, j| {
+                if (field.name) |name| {
+                    slot :: named_field(state.tree, fields, name)
+                    saved :: fields[j]
+                    fields[j] = fields[slot]
+                    fields[slot] = saved
+                }
+            }
+        }
+    }
+    try arraylist.append(&state.records, RecordType{ declaration = declaration, fields = fields })
+    return Type{ kind = .record, record_type = RecordId(state.records.items.len - 1) }
+}
+
+@hide:file
+check_record proc(state @mut State, id ast.NodeId, nominal bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    cached := state.cells[usize(id)].type
+    if (cached.kind == .record or cached.kind == .type_value) {
+        cached.kind = .record
+        return cached
+    }
+    if (cached.kind == .invalid) return cached
+    if (state.cells[usize(id)].record_checking) {
+        type :: invalid_type(try diagnostics.add(state.diagnostics, .recursive_record, ast.node_span(state.tree, id)))
+        state.cells[usize(id)].type = type
+        return type
+    }
+    state.cells[usize(id)].record_checking = true
+    defer state.cells[usize(id)].record_checking = false
+    count :: ast.record_field_count(state.tree, id)
+    fields :: try mem.alloc(RecordField, state.records.allocator, count)
+    owned := true
+    defer {
+        if (owned) mem.free(state.records.allocator, fields)
+    }
+    failure := Type{}
+    for 0..count |i| {
+        node :: ast.record_field(state.tree, id, i)
+        view :: ast.field(state.tree, node)
+        type := try check_annotation(state, view.type?, false)
+        if (type.kind == .void or type.kind == .range or type.kind == .type_value or type.kind == .none) {
+            type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_record_field_type, view.span))
+        }
+        if (view.name) |name| {
+            if (named_field(state.tree, fields[0..i], name) != no_index) {
+                type = invalid_type(try diagnostics.add(state.diagnostics, .duplicate_field, ast.node_span(state.tree, name)))
+            }
+        }
+        fields[i] = RecordField{ name = view.name, type = type, default = view.value }
+        if (type.kind == .invalid) failure = type
+    }
+    if (failure.kind == .invalid) {
+        state.cells[usize(id)].type = failure
+        return failure
+    }
+    declaration :: if (nominal) id else ast.NodeId(maxval!(u32))
+    type :: try intern_record(state, declaration, fields)
+    owned = false
+    state.cells[usize(id)].type = type
+    state.cells[usize(id)].record_checking = false
+    saved_assignment :: state.collecting_assignment
+    state.collecting_assignment = false
+    defer state.collecting_assignment = saved_assignment
+    for 0..count |i| {
+        if (ast.field(state.tree, ast.record_field(state.tree, id, i)).value) |value| {
+            try collect_expression(state, value)
+        }
+    }
+    return type
+}
+
+@hide:file
+infer_record_literal proc(state @mut State, literal ast.NodeId, index usize, defaults bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.types[usize(literal)].kind == .invalid) return state.types[usize(literal)]
+    count :: ast.record_field_count(state.tree, literal)
+    expected := state.cells[index].expected
+    if (expected.kind == .none and state.cells[index].type.kind == .record) expected = state.cells[index].type
+    if (expected.kind == .invalid) {
+        seed(state, literal, expected)
+        return expected
+    }
+    if (expected.kind != .none and expected.kind != .record) {
+        try fail(state, literal, .expected_type, ast.node_span(state.tree, literal))
+        return state.types[usize(literal)]
+    }
+    if (expected.kind == .none) {
+        ready := true
+        for 0..count |i| {
+            value :: ast.field(state.tree, ast.record_field(state.tree, literal, i)).value?
+            actual :: try infer_shape(state, value, defaults)
+            if (actual.kind == .none) ready = false
+            if (actual.kind == .invalid) {
+                seed(state, literal, actual)
+                return actual
+            }
+        }
+        if (!ready) return Type{}
+        fields :: try mem.alloc(RecordField, state.records.allocator, count)
+        errdefer mem.free(state.records.allocator, fields)
+        for 0..count |i| {
+            view :: ast.field(state.tree, ast.record_field(state.tree, literal, i))
+            type := group_type(state, view.value?)
+            if (type.kind == .void or type.kind == .type_value or type.kind == .range) {
+                try fail(state, literal, .invalid_record_field_type, view.span)
+                mem.free(state.records.allocator, fields)
+                return state.types[usize(literal)]
+            }
+            if (view.name) |name| {
+                if (named_field(state.tree, fields[0..i], name) != no_index) {
+                    try fail(state, literal, .duplicate_field, ast.node_span(state.tree, name))
+                    mem.free(state.records.allocator, fields)
+                    return state.types[usize(literal)]
+                }
+            }
+            fields[i] = RecordField{ name = view.name, type = type, default = null }
+        }
+        expected = try intern_record(state, ast.NodeId(maxval!(u32)), fields)
+    }
+    fields :: state.records.items[usize(expected.record_type)].fields
+    slot := state.slots[usize(literal)]
+    fresh :: slot == no_index
+    if (slot == no_index) {
+        values :: try mem.alloc(ast.NodeId, state.initializers.allocator, fields.len)
+        errdefer mem.free(state.initializers.allocator, values)
+        try arraylist.append(&state.initializers, RecordInitializer{ fields = values })
+        slot = state.initializers.items.len - 1
+        state.slots[usize(literal)] = slot
+    }
+    values :: state.initializers.items[slot].fields
+    if (values.len != fields.len) {
+        try fail(state, literal, .type_mismatch, ast.node_span(state.tree, literal))
+        return state.types[usize(literal)]
+    }
+    mem.set(values, ast.NodeId(maxval!(u32)))
+    for 0..count |i| {
+        node :: ast.record_field(state.tree, literal, i)
+        view :: ast.field(state.tree, node)
+        field_slot := i
+        if (view.name) |name| field_slot = named_field(state.tree, fields, name)
+        if (field_slot >= fields.len) {
+            code :: if (view.name != null) diagnostics.Code.unknown_field else diagnostics.Code.tuple_arity_mismatch
+            try fail(state, literal, code, view.span)
+            continue
+        }
+        if (values[field_slot] != ast.NodeId(maxval!(u32))) {
+            try fail(state, literal, .duplicate_field, view.span)
+            continue
+        }
+        values[field_slot] = view.value?
+        try demand(state, view.value?, fields[field_slot].type, .type_mismatch)
+        _ = try infer_shape(state, view.value?, defaults)
+    }
+    for fields |field, i| {
+        if (values[i] != ast.NodeId(maxval!(u32))) continue
+        if (field.default) |value| {
+            values[i] = value
+            if (fresh) try depend(state, value, literal)
+        } else {
+            code :: if (field.name == null) diagnostics.Code.tuple_arity_mismatch else diagnostics.Code.missing_field
+            try fail(state, literal, code, ast.node_span(state.tree, literal))
+        }
+    }
+    if (state.types[usize(literal)].kind == .invalid) return state.types[usize(literal)]
+    state.cells[index].type = expected
+    return expected
 }
