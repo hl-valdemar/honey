@@ -77,7 +77,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
         defer deinit(&session)
         root :: try add_package(&session)
         bytes := try owned_text(
-            `identity proc($T type, value T) T { return value }
+            `identity proc($T type, value T) T {
+            `    if (T == i16) return value else return value.missing
+            `}
             `Box proc($T type) type { return struct { value T } }
             `count proc() usize {
             `    result := 0
@@ -87,6 +89,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `Fixed proc($N usize) type { return struct { values [N]i16 } }
             `data proc() [2]i16 { return [40, 2] }
             `main proc() i16 {
+            `    if $(i16 != i16) { return $(i8(128)) }
             `    values :: $(data())
             `    box Box(i16) :: { value = identity(i16, values[0]) }
             `    fixed Fixed(count()) :: { values = [box.value, 2] }

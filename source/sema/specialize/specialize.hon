@@ -189,6 +189,41 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     if (state.expanded.items[usize(id)] != 0) return
     state.expanded.items[usize(id)] = 1
     class :: ast.node_class(&state.tree, id)
+    if (class == .statement and ast.stmt_kind(&state.tree, id) == .if_stmt) {
+        conditional :: ast.if_stmt(&state.tree, id)
+        explicit :: ast.expr_kind(&state.tree, conditional.condition) == .comptime_expr
+        if (conditional.capture == null and (explicit or usize(id) >= state.original_count)) {
+            condition :: if (explicit) ast.comptime_operand(&state.tree, conditional.condition) else conditional.condition
+            try expand(state, condition)
+            if (explicit or branch_constant(state, condition, 0)) {
+                state.evaluation_diagnostic = diagnostics.no_diagnostic
+                boolean :: try builtin(state, condition, .bool)
+                value :: try evaluate_ir(state, condition, boolean)
+                if (explicit and value.kind == .invalid and state.evaluation_diagnostic == diagnostics.no_diagnostic)
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .comptime_argument_required, ast.node_span(&state.tree, condition))
+                if (state.evaluation_diagnostic != diagnostics.no_diagnostic) {
+                    invalid :: try ast.add_invalid_stmt(state.builder, ast.node_span(&state.tree, id),
+                        state.evaluation_diagnostic)
+                    try replace(state, id, invalid)
+                    try refresh(state)
+                    return
+                }
+                if (value.kind == .boolean) {
+                    branch := conditional.then_block
+                    if (!value.boolean) {
+                        if (conditional.else_block) |other| branch = other
+                        else branch = try ast.add_block(state.builder, ast.node_span(&state.tree, id), &[])
+                    }
+                    replacement :: try ast.add_block_stmt(state.builder, branch)
+                    try replace(state, id, replacement)
+                    try refresh(state)
+                    try expand(state, branch)
+                    return
+                }
+            }
+        }
+    }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .comptime_expr) {
         operand :: ast.comptime_operand(&state.tree, id)
         try arraylist.append(&state.rewrites.constraints, operand)
@@ -225,6 +260,17 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         child :: ast.child(&state.tree, id, i)
         try expand(state, child)
     }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .binary) {
+        view :: ast.binary_expr(&state.tree, id)
+        if (
+            (view.operator == .equal or view.operator == .not_equal)
+            and branch_constant(state, view.left, 0) and branch_constant(state, view.right, 0)
+        ) {
+            left :: try evaluate(state, view.left)
+            right :: try evaluate(state, view.right)
+            if (left.kind == .type and right.kind == .type) _ = try evaluate_binary(state, id)
+        }
+    }
     if (usize(id) >= state.original_count and class == .expression and ast.expr_kind(&state.tree, id) == .array_type) {
         view :: ast.array_type(&state.tree, id)
         if (view.count) |count_node| {
@@ -238,6 +284,48 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
                 try refresh(state)
             }
         }
+    }
+}
+
+# Only probe side-effect-free expressions. Ordinary calls stay runtime unless the
+# source requests evaluation with $(); probing must not execute FFI or emit traps.
+@hide:file
+branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    resolved :: binding(state, id)
+    if (resolved.kind == .builtin) return true
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        if (ast.node_class(&state.tree, target) == .function) return true
+        if (ast.node_class(&state.tree, target) != .statement) return false
+        declaration :: ast.statement_decl(&state.tree, target)
+        return (
+            declaration.mutability == .constant
+            and branch_constant(state, declaration.initializer, depth + 1)
+        )
+    }
+    match ast.expr_kind(&state.tree, id) {
+        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null: return true
+        .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
+        .unary: {
+            view :: ast.unary_expr(&state.tree, id)
+            return (
+                (view.operator == .negate or view.operator == .logical_not)
+                and branch_constant(state, view.operand, depth + 1)
+            )
+        }
+        .binary: {
+            view :: ast.binary_expr(&state.tree, id)
+            return (
+                branch_constant(state, view.left, depth + 1)
+                and branch_constant(state, view.right, depth + 1)
+            )
+        }
+        .pointer_type: return branch_constant(state, ast.pointer_type(&state.tree, id).element, depth + 1)
+        .optional_type, .alias_expr: return branch_constant(state, ast.type_operand(&state.tree, id), depth + 1)
+        .record_type, .union_type, .enum_type, .distinct_type, .array_type, .slice_type, .function_type,
+        .fallible_type, .sum_type: return true
+        else: return false
     }
 }
 
@@ -1022,6 +1110,19 @@ evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
     if (view.operator == .equal or view.operator == .not_equal) {
         if (left.kind != right.kind) return Value{}
         equal :: try value_equal(state, left, right)
+        if (left.kind == .type) {
+            operands [2]ast.NodeId :: [view.left, view.right]
+            for (operands) |operand| {
+                constraint :: try ast.add_type_operand(state.builder,
+                    ast.node_span(&state.tree, operand), operand, true)
+                try refresh(state)
+                try arraylist.append(&state.rewrites.constraints, constraint)
+            }
+            folded :: try ast.add_boolean(state.builder, ast.node_span(&state.tree, id),
+                equal == (view.operator == .equal))
+            try replace(state, id, folded)
+            try refresh(state)
+        }
         return Value{ kind = .boolean, node = id, boolean = equal == (view.operator == .equal) }
     }
     if (left.kind == .boolean and right.kind == .boolean) {
@@ -1078,6 +1179,8 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
         return x.kind == .builtin and y.kind == .builtin and builtin_identity(x.data.builtin) == builtin_identity(y.data.builtin)
     }
     kind :: ast.expr_kind(&state.tree, a)
+    if (kind == .sum_type or ast.expr_kind(&state.tree, b) == .sum_type)
+        return try type_subset(state, a, b) and try type_subset(state, b, a)
     if (kind != ast.expr_kind(&state.tree, b)) return false
     match kind {
         .pointer_type: {
@@ -1103,7 +1206,7 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
             return try same_type(state, p.element, q.element)
         }
         .optional_type: return try same_type(state, ast.type_operand(&state.tree, a), ast.type_operand(&state.tree, b))
-        .fallible_type, .sum_type: {
+        .fallible_type: {
             p :: ast.binary_expr(&state.tree, a)
             q :: ast.binary_expr(&state.tree, b)
             return try same_type(state, p.left, q.left) and try same_type(state, p.right, q.right)
@@ -1121,6 +1224,22 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
         }
         else: return false
     }
+}
+
+@hide:file
+type_subset proc(state @mut State, left, right ast.NodeId) bool ! Error {
+    a :: try canonical_type(state, left)
+    b :: try canonical_type(state, right)
+    if (a == no_node or b == no_node) return false
+    if (ast.expr_kind(&state.tree, a) == .sum_type) {
+        view :: ast.binary_expr(&state.tree, a)
+        return try type_subset(state, view.left, b) and try type_subset(state, view.right, b)
+    }
+    if (ast.expr_kind(&state.tree, b) == .sum_type) {
+        view :: ast.binary_expr(&state.tree, b)
+        return try type_subset(state, a, view.left) or try type_subset(state, a, view.right)
+    }
+    return try same_type(state, a, b)
 }
 
 @hide:file
@@ -1201,7 +1320,13 @@ type_hash proc(state @mut State, id ast.NodeId) usize ! Error {
             return mix(hash, try type_hash(state, view.element))
         }
         .optional_type: return mix(hash, try type_hash(state, ast.type_operand(&state.tree, node)))
-        .fallible_type, .sum_type: {
+        .sum_type: {
+            view :: ast.binary_expr(&state.tree, node)
+            # Set fingerprints must ignore ordering, grouping and repeated members.
+            # Colliding fingerprints still use full type equality in the cache chain.
+            return try type_hash(state, view.left) | try type_hash(state, view.right)
+        }
+        .fallible_type: {
             view :: ast.binary_expr(&state.tree, node)
             return mix(mix(hash, try type_hash(state, view.left)), try type_hash(state, view.right))
         }

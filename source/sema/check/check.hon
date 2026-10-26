@@ -3422,7 +3422,8 @@ type_syntax proc(kind ast.ExprKind) bool {
 
 @hide:file
 type_reference proc(state @State, id ast.NodeId) bool {
-    if (type_syntax(ast.expr_kind(state.tree, id))) return true
+    kind :: ast.expr_kind(state.tree, id)
+    if (type_syntax(kind) or kind == .array_type) return true
     binding :: sema.binding(state.resolution, id)
     if (binding.kind == .builtin) return true
     if (binding.kind != .declaration) return false

@@ -11,6 +11,150 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "comptime_composed_type_identity_is_order_independent_and_cached": (
+        """
+        Left :: enum { left }
+        Right :: enum { right }
+        Box proc($T type) type { return struct { value T } }
+        identical proc($A, $B type) bool { return A == B }
+        main proc() bool {
+            first Box(Left | Right) :: { value = .left }
+            same Box(Right | Left | Left) :: first
+            return (
+                identical(Left | Right, Right | Left | Left)
+                and identical(Left, Left | Left) and same.value == .left
+            )
+        }
+        """, b"true\n", None,
+    ),
+    "comptime_callback_branch_uses_optional_function_identity": (
+        """
+        Callback :: alias @proc(value i16) i16
+        increment proc(value i16) i16 { return value + 1 }
+        apply proc($callback ?Callback, value i16) i16 {
+            if $(callback == null) { return value }
+            else { return callback?(value) }
+        }
+        main proc() i16 { return apply(null, 40) + apply(increment, 1) }
+        """, b"42\n", None,
+    ),
+    "comptime_branch_rejects_runtime_guard_dependencies": (
+        """
+        answer proc(take bool) i16 {
+            if $(take) { return 42 } else { return 0 }
+        }
+        main proc() i16 { return answer(true) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_branch_checks_short_circuited_guard_operands": (
+        """
+        main proc() i16 {
+            if $(true or 1) { return 42 } else { return 0 }
+        }
+        """, b"", b"operator requires compatible operand types",
+    ),
+    "specialized_type_branches_check_only_selected_storage": (
+        """
+        count proc($T type, value T) i16 {
+            if (T == i16) return value else return value.count
+        }
+        Box :: struct { count i16 }
+        main proc() i16 { return count(i16, 40) + count(Box, Box { count = 2 }) }
+        """, b"42\n", None,
+    ),
+    "explicit_comptime_branch_without_templates": (
+        """
+        enabled proc() bool { return true }
+        main proc() i16 {
+            if $(enabled()) { return 42 } else { return false }
+        }
+        """, b"42\n", None,
+    ),
+    "specialized_branches_skip_recursive_instantiation_and_traps": (
+        """
+        answer proc($stop bool) i16 {
+            if (stop) return 42 else return answer(false)
+        }
+        main proc() i16 {
+            if $(false) { return $(i8(128)) }
+            return answer(true)
+        }
+        """, b"42\n", None,
+    ),
+    "specialized_branches_preserve_runtime_conditions": (
+        """
+        answer proc($T type, value T, take bool) i16 {
+            if (T != i16) return value.count
+            if (take) return value else return 2
+        }
+        main proc() i16 { return answer(i16, 40, true) + answer(i16, 99, false) }
+        """, b"42\n", None,
+    ),
+    "specialized_branch_keeps_scope_and_cleanup": (
+        """
+        change proc($take bool, value @mut i16) void {
+            if (take) {
+                defer value^ = value^ + 2
+                value^ = 40
+            }
+            else value^ = 0
+        }
+        main proc() i16 {
+            value i16 := 0
+            change(true, &value)
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_type_equality_preserves_aliases_and_nominal_identity": (
+        """
+        First :: struct { value i16 }
+        Second :: struct { value i16 }
+        Same :: alias First
+        identical proc($A, $B type) bool { return A == B }
+        main proc() bool {
+            return (
+                identical(First, Same) and !identical(First, Second)
+                and $(@mut i16 == @mut i16) and $(@mut i16 != @i16)
+                and $([2]i16 == [1 + 1]i16) and $([2]i16 != [2]u16)
+            )
+        }
+        """, b"true\n", None,
+    ),
+    "specialized_branch_retains_guard_type_errors": (
+        """
+        answer proc($take bool) i16 {
+            if (take or 1) return 42 else return false
+        }
+        main proc() i16 { return answer(true) }
+        """, b"", b"operator requires compatible operand types",
+    ),
+    "specialized_branch_retains_selected_body_errors": (
+        """
+        answer proc($T type, value T) i16 {
+            if (T == i16) return value.missing
+            return 42
+        }
+        main proc() i16 { return answer(i16, 0) }
+        """, b"", b"field selection requires a record or tuple",
+    ),
+    "ordinary_constant_branch_still_checks_both_arms": (
+        """
+        main proc() i16 {
+            if (true) return 42 else return false
+        }
+        """, b"42\n", b"return does not match",
+    ),
+    "specialized_branch_runtime_call_remains_reachable": (
+        """
+        fail proc(value i8) bool { return value + 1 == 0 }
+        answer proc($T type) i16 {
+            if (fail(127)) return 0
+            return 42
+        }
+        main proc() i16 { return answer(i16) }
+        """, b"", b"integer arithmetic overflow",
+    ),
     "comptime_contextual_aggregate_arguments_keep_dependent_types": (
         """
         sum proc(items [2]i16) i16 { return items[0] + items[1] }
