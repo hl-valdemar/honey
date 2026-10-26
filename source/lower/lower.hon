@@ -1768,6 +1768,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
     }
     if (typecheck.is_union_variant(state.checked, id)) return try lower_union(state, id)
     match ast.expr_kind(tree, id) {
+        .typed_constant: {
+            if (trap_type(state, id)) return ir.no_value
+            return try lower_as(state, ast.typed_constant(tree, id).value, typecheck.type_of(state.checked, id))
+        }
         .invalid: {
             invalid :: ast.invalid(tree, id)
             trap(state, invalid.diagnostic, invalid.span)
@@ -1849,7 +1853,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (trap_type(state, id)) return ir.no_value
             return try constant(state, ir.Value{
                 type = .bool,
-                data = ir.ValueData{ boolean = mem.eql(ast.source_text(tree, span), "true") },
+                data = ir.ValueData{ boolean = mem.eql(ast.literal_text(tree, id), "true") },
             }, span)
         }
         .literal_string: {
@@ -1959,7 +1963,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 })
             }
             if (expression.operator == .negate and ir.integer_bits(type) != 0 and !ir.unsigned_integer(type) and ast.expr_kind(tree, expression.operand) == .literal_int) {
-                text :: ast.source_text(tree, ast.node_span(tree, expression.operand))
+                text :: ast.literal_text(tree, expression.operand)
                 magnitude_limit :: ir.integer_max(type) + 1
                 if (integer_magnitude(text, magnitude_limit)) |magnitude| {
                     if (magnitude == magnitude_limit) {
@@ -2099,7 +2103,7 @@ exact_float_integer proc(text []u8, value f64) bool {
 @hide:file
 lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
-    text :: ast.source_text(state.tree, span)
+    text :: ast.literal_text(state.tree, id)
     type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
         if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
@@ -2130,14 +2134,6 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
 }
 
 @hide:file
-hex_digit proc(byte u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0'
-    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10
-    return null
-}
-
-@hide:file
 lower_string proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
     text :: ast.source_text(state.tree, span)
@@ -2147,56 +2143,13 @@ lower_string proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     length := usize(0)
     cursor := usize(1)
     end :: text.len - 1
-    valid := true
     while (cursor < end) {
-        byte := text[cursor]
-        cursor += 1
-        if (byte == '\\') {
-            if (cursor >= end) {
-                valid = false
-                break
-            }
-            escape :: text[cursor]
-            cursor += 1
-            match escape {
-                '\\': byte = '\\'
-                '"': byte = '"'
-                'n': byte = '\n'
-                'r': byte = '\r'
-                't': byte = '\t'
-                '0': byte = 0
-                'x': {
-                    if (end - cursor < 2) {
-                        valid = false
-                        break
-                    }
-                    high := u8(0)
-                    low := u8(0)
-                    if (hex_digit(text[cursor])) |digit| high = digit
-                    else {
-                        valid = false
-                        break
-                    }
-                    if (hex_digit(text[cursor + 1])) |digit| low = digit
-                    else {
-                        valid = false
-                        break
-                    }
-                    byte = high * 16 + low
-                    cursor += 2
-                }
-                else: {
-                    valid = false
-                    break
-                }
-            }
+        byte :: ast.string_next(text, &cursor) catch |_| {
+            trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
+            return ir.no_value
         }
         owned[length] = byte
         length += 1
-    }
-    if (!valid) {
-        trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
-        return ir.no_value
     }
     if (state.module.strings.items.len > usize(maxval!(ir.StringId)))
         return .out_of_memory

@@ -235,6 +235,17 @@ check proc(
     resolution @sema.Resolution,
     diagnostic_store @mut diagnostics.Store,
 ) Result ! (mem.AllocError | diagnostics.CapacityError) {
+    return try check_elaborated(allocator, tree, resolution, &[], diagnostic_store)
+}
+
+#! checks additional compile-time expressions retained when elaboration erased their calls.
+check_elaborated proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    constraints []ast.NodeId,
+    diagnostic_store @mut diagnostics.Store,
+) Result ! (mem.AllocError | diagnostics.CapacityError) {
     count :: ast.node_count(tree)
     types :: try mem.alloc(Type, allocator, count)
     errdefer mem.free(allocator, types)
@@ -304,6 +315,12 @@ check proc(
             .invalid: collect_invalid(&state, id)
             .import: {}
         }
+    }
+    for (constraints) |constraint| {
+        if (ast.node_class(tree, constraint) == .statement) {
+            state.cells[usize(constraint)].local = true
+            try collect_declaration(&state, constraint)
+        } else try collect_expression(&state, constraint)
     }
     # Preserve binding errors before RHS errors propagate. Indexed writability
     # waits for shapes; neither check poisons the target's type.
@@ -1127,6 +1144,14 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
     state.cells[usize(id)].in_cleanup = state.in_cleanup
     state.cells[usize(id)].narrowing_arm = state.narrowing_arm
     match ast.expr_kind(tree, id) {
+        .typed_constant: {
+            value :: ast.typed_constant(tree, id)
+            state.cells[usize(id)].fixed = true
+            state.cells[usize(id)].type = try check_annotation(state, value.type, false)
+            try collect_expression(state, value.value)
+            try depend(state, value.type, id)
+            try depend(state, value.value, id)
+        }
         .try_expr: {
             operand :: ast.type_operand(tree, id)
             try collect_expression(state, operand)
@@ -1371,6 +1396,7 @@ builtin_kind proc(type sema.BuiltinType) TypeKind {
         .string: .string
         .void: .void
         .anyopaque: .anyopaque
+        .type: .type_value
         .c_int: .i32
         .c_uint: .u32
         .c_long, .c_longlong: .int
@@ -1886,6 +1912,10 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
         }
         .expression: {
             match ast.expr_kind(tree, id) {
+                .typed_constant: {
+                    value :: ast.typed_constant(tree, id)
+                    try compatible(state, value.value, state.cells[usize(id)].type)
+                }
                 .try_expr, .catch_expr: try validate_fallible_expression(state, id)
                 .unary: {
                     expression :: ast.unary_expr(tree, id)
@@ -2114,8 +2144,9 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
     state.cells[usize(id)].constant_visiting = true
     defer state.cells[usize(id)].constant_visiting = false
     match ast.expr_kind(state.tree, id) {
+        .typed_constant: return evaluate_integer(state, ast.typed_constant(state.tree, id).value, allow_local)
         .literal_int: {
-            text :: ast.source_text(state.tree, ast.node_span(state.tree, id))
+            text :: ast.literal_text(state.tree, id)
             value := u64(0)
             for text |byte| {
                 if (byte < '0' or byte > '9') return null
@@ -2935,6 +2966,10 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
         if (state.cells[i].role == .expression and state.cells[i].assignment_value == assignment_values) {
+            if (ast.expr_kind(tree, id) == .typed_constant) {
+                value :: ast.typed_constant(tree, id)
+                try context_demand(state, value.value, state.cells[i].type, .type_mismatch, early)
+            }
             if (ast.expr_kind(tree, id) == .match_expr) _ = try infer_match(state, id, false)
             if (ast.expr_kind(tree, id) == .binary) {
                 expression :: ast.binary_expr(tree, id)
@@ -3945,7 +3980,7 @@ constant_order proc(left, right ConstantInteger) i32 {
 constant_real proc(state @mut State, id ast.NodeId) ?f64 ! mem.AllocError {
     missing ?f64 :: null
     if (ast.expr_kind(state.tree, id) == .literal_float) {
-        return strconv.parse_float(state.edges.allocator, ast.source_text(state.tree, ast.node_span(state.tree, id))) catch |err| {
+        return strconv.parse_float(state.edges.allocator, ast.literal_text(state.tree, id)) catch |err| {
             match err {
                 .out_of_memory: return err
                 .invalid_number, .out_of_range: return missing
@@ -3994,7 +4029,7 @@ pattern_interval proc(state @mut State, id ast.NodeId, key Type) ?PatternInterva
         if (try constant_real(state, high)) |value| interval.real_high = value else return missing
     } else if (key.kind == .bool) {
         if (ast.expr_kind(state.tree, low) != .literal_bool or low != high) return missing
-        value :: mem.eql(ast.source_text(state.tree, ast.node_span(state.tree, low)), "true")
+        value :: mem.eql(ast.literal_text(state.tree, low), "true")
         interval.low.magnitude = if (value) 1 else 0
         interval.high = interval.low
     } else {

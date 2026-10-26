@@ -11,7 +11,7 @@ reports_invalid_input_and_keeps_scanning test {
     state := init(mem.c_allocator)
     defer deinit(&state)
 
-    try scan(&state, "if name # comment\n$1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
+    try scan(&state, "if name # comment\n~1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
 
     try testing.expect_equal(9, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
@@ -30,6 +30,27 @@ reports_invalid_input_and_keeps_scanning test {
     )
     try testing.expect_equal(u32(3), state.tokens.items[1].span.start)
     try testing.expect_equal(u32(7), state.tokens.items[1].span.end)
+}
+
+scans_compile_time_parameter_markers test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "$T $K, $V type $N usize", &pool, &diagnostic_store)
+    expected [12]TokenKind :: [
+        .dollar, .ident, .dollar, .ident, .comma, .dollar, .ident, .ident,
+        .dollar, .ident, .ident, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(u32(0), state.tokens.items[0].span.start)
+    try testing.expect_equal(u32(1), state.tokens.items[0].span.end)
+    try testing.expect_equal(u32(15), state.tokens.items[8].span.start)
+    try testing.expect_equal(u32(16), state.tokens.items[8].span.end)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
 reserves_boolean_keywords_and_scans_comparisons test {
@@ -226,7 +247,7 @@ scans_import_keywords_and_preserves_source_in_tokens_and_diagnostics test {
     state := init(mem.c_allocator)
     defer deinit(&state)
     state.source_id = diagnostics.SourceId(7)
-    try scan(&state, "import test $\n1.\n\"unfinished", &pool, &diagnostic_store)
+    try scan(&state, "import test ~\n1.\n\"unfinished", &pool, &diagnostic_store)
     try testing.expect_equal(TokenKind.import, state.tokens.items[0].kind)
     try testing.expect_equal(TokenKind.test, state.tokens.items[1].kind)
     for (state.tokens.items) |token| try testing.expect_equal(state.source_id, token.span.source)

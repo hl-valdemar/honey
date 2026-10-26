@@ -40,6 +40,7 @@ exposes_typed_declaration_views test {
     try testing.expect_equal("value", source_text(&tree, statement.name))
 }
 
+
 exposes_array_type_literal_and_index_views test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)
@@ -111,4 +112,59 @@ removes_only_registered_source_without_allocating_builder test {
     try testing.expect_equal("", builder.source)
     replacement :: try set_source(&builder, "replacement.hon", "")
     try testing.expect_equal(diagnostics.SourceId(0), replacement)
+}
+
+
+owns_generated_literal_text_across_finish test {
+    tree Tree := undefined
+    {
+        builder := init_builder(mem.c_allocator, "")
+        defer deinit_builder(&builder)
+        source :: try set_source(&builder, "generated.hon", "input")
+        at :: Span{ start = 0, end = 5, source = source }
+        zero :: try add_integer(&builder, at, 0)
+        maximum :: try add_integer(&builder, at, maxval!(u64))
+        enabled :: try add_boolean(&builder, at, true)
+        disabled :: try add_boolean(&builder, at, false)
+        try testing.expect_equal(source, builder.source_id)
+        try testing.expect_equal("input", builder.source)
+        declarations [4]NodeId :: [zero, maximum, enabled, disabled]
+        root :: try add_package(&builder, at, declarations[..])
+        tree = finish(&builder, root)
+    }
+    defer deinit(&tree)
+    zero :: package_decl(&tree, 0)
+    maximum :: package_decl(&tree, 1)
+    enabled :: package_decl(&tree, 2)
+    disabled :: package_decl(&tree, 3)
+    try testing.expect_equal(ExprKind.literal_int, expr_kind(&tree, zero))
+    try testing.expect_equal("0", literal_text(&tree, zero))
+    try testing.expect_equal("18446744073709551615", literal_text(&tree, maximum))
+    try testing.expect_equal(ExprKind.literal_bool, expr_kind(&tree, enabled))
+    try testing.expect_equal("true", literal_text(&tree, enabled))
+    try testing.expect_equal("false", literal_text(&tree, disabled))
+    try testing.expect_equal(1, source_files(&tree).len)
+    try testing.expect_equal(diagnostics.SourceId(0), node_span(&tree, zero).source)
+    try testing.expect_equal(0, node_span(&tree, zero).start)
+    try testing.expect_equal(5, node_span(&tree, zero).end)
+    try testing.expect_equal("input", source_text(&tree, node_span(&tree, zero)))
+    try testing.expect_equal("generated.hon", source_files(&tree)[usize(node_span(&tree, zero).source)].path)
+    try testing.expect_equal("generated.hon", source_files(&tree)[usize(node_span(&tree, maximum).source)].path)
+}
+
+streams_decoded_string_literal_bytes test {
+    text :: "\"a\\\\\\\"\\n\\r\\t\\0\\x4a\\xFf\""
+    expected [9]u8 :: ['a', '\\', '"', '\n', '\r', '\t', 0, 'J', 255]
+    cursor := usize(1)
+    for (expected) |byte| try testing.expect_equal(byte, try string_next(text, &cursor))
+    try testing.expect_equal(text.len - 1, cursor)
+    malformed [6][]u8 :: ["\"\\q\"", "\"\\x\"", "\"\\x1\"", "\"\\xG0\"", "\"\\x0G\"", "\"\\\""]
+    for (malformed) |literal| {
+        cursor = 1
+        _ = string_next(literal, &cursor) catch |error| {
+            try testing.expect_equal(StringError.invalid_escape, error)
+            continue
+        }
+        try testing.expect(false)
+    }
 }

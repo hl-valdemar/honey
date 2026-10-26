@@ -11,6 +11,432 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "specialization_parameterless_type_producer_is_cached": (
+        """
+        Token proc() type { return struct { value i16 } }
+        main proc() i16 {
+            first Token() :: { value = 42 }
+            second Token() :: first
+            return second.value
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_explicit_identity_independent_widths": (
+        """
+        identity proc($T type, value T) T { return value }
+        main proc() i16 {
+            narrow u8 :: identity(u8, 40)
+            wide i16 :: identity(i16, 2)
+            return i16(narrow) + wide
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_inferred_identity_independent_widths": (
+        """
+        identity proc($T type, value T) T { return value }
+        main proc() i16 {
+            narrow u8 :: 40
+            wide i16 :: 2
+            first u8 :: identity(narrow)
+            second i16 :: identity(wide)
+            return i16(first) + second
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_cached_nominal_type_through_aliases": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        Element :: alias i16
+        First :: Box(Element)
+        Second :: alias Box(i16)
+        read proc(value Box(i16)) i16 { return value.value }
+        main proc() i16 {
+            first First :: { value = 40 }
+            second Second :: first
+            repeated Box(i16) :: second
+            return read(repeated) + 2
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_different_type_arguments_remain_nominally_distinct": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        main proc() i16 {
+            signed Box(i16) :: { value = 42 }
+            unsigned Box(u16) :: signed
+            return i16(unsigned.value)
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "specialization_generated_record_and_mutable_array_storage": (
+        """
+        Fixed proc($T type, $N usize) type {
+            return struct { values [N]mut T }
+        }
+        main proc() i16 {
+            fixed Fixed(i16, 2) := { values = [40, 0] }
+            fixed.values[1] = 2
+            copy Fixed(i16, 2) :: fixed
+            return copy.values[0] + copy.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_infers_generated_record_type_and_length": (
+        """
+        Fixed proc($T type, $N usize) type {
+            return struct { values [N]mut T }
+        }
+        first proc($T type, $N usize, value @Fixed(T, N)) T {
+            return value.values[0]
+        }
+        length proc($T type, $N usize, value @Fixed(T, N)) usize {
+            return N
+        }
+        main proc() i16 {
+            fixed Fixed(i16, 2) :: { values = [40, 1] }
+            return first(&fixed) + i16(length(&fixed))
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_infers_pointer_array_element_and_length": (
+        """
+        endpoints proc($T type, $N usize, values @[N]T) T {
+            return values[0] + values[N - 1]
+        }
+        main proc() i16 {
+            values [2]i16 :: [40, 2]
+            return endpoints(&values)
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_nested_runtime_calls": (
+        """
+        identity proc($T type, value T) T { return value }
+        forward proc($T type, value T) T { return identity(value) }
+        main proc() i16 { return forward(i16, 42) }
+        """, b"42\n", None,
+    ),
+    "specialization_nested_generated_types": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        Wrapped proc($T type) type { return struct { box Box(T) } }
+        main proc() i16 {
+            wrapped Wrapped(i16) :: { box = Box(i16){ value = 42 } }
+            return wrapped.box.value
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_recursive_runtime_call_reuses_instance": (
+        """
+        repeat proc($T type, value T, remaining usize) T {
+            if (remaining == 0) return value
+            return repeat(value, remaining - 1)
+        }
+        main proc() i16 { return repeat(i16, 42, 3) }
+        """, b"42\n", None,
+    ),
+    "specialization_immutable_scalar_arguments_and_expressions": (
+        """
+        base usize :: 1
+        Fixed proc($T type, $N usize) type {
+            return struct { values [N]mut T }
+        }
+        main proc() i16 {
+            count usize :: base + 1
+            fixed Fixed(i16, count) :: { values = [40, 2] }
+            same Fixed(i16, 2) :: fixed
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_rejects_mutable_compile_time_argument": (
+        """
+        value proc($N usize, result i16) i16 { return result }
+        main proc() i16 {
+            count usize := 2
+            return value(count, 42)
+        }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "specialization_rejects_runtime_compile_time_argument": (
+        """
+        value proc($N usize, result i16) i16 { return result }
+        runtime proc(count usize) i16 { return value(count, 42) }
+        main proc() i16 { return runtime(2) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "specialization_boolean_value_parameters": (
+        """
+        choose proc($enabled bool, value i16) i16 {
+            if (enabled) return value
+            return value + 2
+        }
+        main proc() i16 {
+            enabled :: true
+            if (choose(enabled, 40) != 40) return 0
+            return choose(false, 40)
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_string_value_parameters": (
+        """
+        offset proc($text string, value i16) i16 {
+            return value + i16(text.len)
+        }
+        main proc() i16 { return offset("ab", 40) }
+        """, b"42\n", None,
+    ),
+    "specialization_callback_value_parameters": (
+        """
+        increment proc(value i16) i16 { return value + 2 }
+        apply proc($T type, $callback proc(value T) T, value T) T {
+            return callback(value)
+        }
+        main proc() i16 { return apply(i16, increment, 40) }
+        """, b"42\n", None,
+    ),
+    "specialization_type_producer_conditional_returns": (
+        """
+        Choose proc($wide bool) type {
+            if (wide) return struct { value i64 }
+            return struct { value i16 }
+        }
+        main proc() i16 {
+            narrow Choose(false) :: { value = 40 }
+            wide Choose(true) :: { value = 2 }
+            return narrow.value + i16(wide.value)
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_type_producer_local_computed_storage_count": (
+        """
+        Fixed proc($T type, $N usize) type {
+            count usize :: N + 1
+            return struct { values [count]mut T }
+        }
+        main proc() i16 {
+            fixed Fixed(i16, 1) := { values = [40, 0] }
+            fixed.values[1] = 2
+            return fixed.values[0] + fixed.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_rejects_out_of_range_unused_value_argument": (
+        """
+        ignore proc($N u8) i16 { return 42 }
+        main proc() i16 { return ignore(256) }
+        """, b"", b"numeric literal is outside",
+    ),
+    "specialization_rejects_inconsistent_inferred_type": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() i16 {
+            left i16 :: 40
+            right u8 :: 2
+            return first(left, right)
+        }
+        """, b"", b"cannot infer consistent compile-time arguments",
+    ),
+    "specialization_recursive_generated_record_pointer": (
+        """
+        Node proc($T type) type {
+            return struct { value T, next ?@Node(T) }
+        }
+        main proc() i16 {
+            tail Node(i16) :: { value = 2, next = null }
+            head Node(i16) :: { value = 40, next = &tail }
+            if head.next |next| return head.value + next.value
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_phantom_type_arguments_remain_nominally_distinct": (
+        """
+        Phantom proc($T type) type { return struct { value i16 } }
+        main proc() i16 {
+            first Phantom(i16) :: { value = 42 }
+            second Phantom(u8) :: first
+            return second.value
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "specialization_phantom_value_arguments_remain_nominally_distinct": (
+        """
+        Tagged proc($N usize) type { return struct { value i16 } }
+        main proc() i16 {
+            first Tagged(1) :: { value = 42 }
+            second Tagged(2) :: first
+            return second.value
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "specialization_direct_array_type_return": (
+        """
+        Array proc($T type, $N usize) type { return [N]T }
+        Row :: alias Array(i16, 2)
+        main proc() i16 {
+            row Row :: [40, 2]
+            same Array(i16, 2) :: row
+            return same[0] + same[1]
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_value_parameter_preserves_narrow_arithmetic": (
+        """
+        add proc($N u8) i64 { return i64(N + 1) }
+        main proc() i64 { return add(255) }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "specialization_optional_value_null_capture_is_safe": (
+        """
+        read proc($value ?i16) i16 {
+            if value |present| return present
+            return 42
+        }
+        main proc() i16 { return read(null) }
+        """, b"42\n", None,
+    ),
+    "specialization_optional_value_null_unwrap_traps": (
+        """
+        read proc($value ?i16) i16 { return value? }
+        main proc() i16 { return read(null) }
+        """, b"", b"null",
+    ),
+    "specialization_optional_value_present_literal_capture": (
+        """
+        read proc($value ?i16) i16 {
+            if value |present| return present
+            return 0
+        }
+        main proc() i16 { return read(42) }
+        """, b"42\n", None,
+    ),
+    "specialization_optional_callback_unwrap_and_call": (
+        """
+        increment proc(value i16) i16 { return value + 2 }
+        invoke proc($callback ?proc(value i16) i16, value i16) i16 {
+            return callback?(value)
+        }
+        main proc() i16 { return invoke(increment, 40) }
+        """, b"42\n", None,
+    ),
+    "specialization_optional_callback_capture_and_null_comparison": (
+        """
+        increment proc(value i16) i16 { return value + 2 }
+        invoke proc($callback ?proc(value i16) i16, value i16) i16 {
+            if callback |present| return present(value)
+            if (callback == null) return value + 2
+            return 0
+        }
+        main proc() i16 {
+            if (invoke(increment, 40) != 42) return 0
+            return invoke(null, 40)
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_string_argument_preserves_slice_annotation": (
+        """
+        length proc($text []u8) usize { return text.len }
+        main proc() i16 { return 40 + i16(length("ab")) }
+        """, b"42\n", None,
+    ),
+    "specialization_cached_phantom_type_canonical_builtin_alias": (
+        """
+        Phantom proc($T type) type { return struct { value i16 } }
+        Element :: alias i64
+        main proc() i16 {
+            first Phantom(int) :: { value = 42 }
+            second Phantom(i64) :: first
+            third Phantom(Element) :: second
+            return third.value
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_infers_type_through_type_producer_wrapper": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        Wrapped proc($T type) type { return Box(T) }
+        read proc($T type, value @Wrapped(T)) T { return value.value }
+        main proc() i16 {
+            value Wrapped(i16) :: { value = 42 }
+            return read(&value)
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_string_cache_uses_decoded_value": (
+        """
+        Tag proc($text string) type { return struct { value i16 } }
+        main proc() i16 {
+            first Tag("a") :: { value = 42 }
+            second Tag("\\x61") :: first
+            return second.value
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_type_producer_rejects_runtime_parameters": (
+        """
+        Box proc($T type, ignored i16) type { return struct { value T } }
+        main proc() i16 {
+            value Box(i16, true) :: { value = 42 }
+            return value.value
+        }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "specialization_rejects_invalid_compile_time_comparison": (
+        """
+        ignore proc($flag bool) i16 { return 42 }
+        main proc() i16 { return ignore(1 == true) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "specialization_contextual_literal_after_typed_argument": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() i16 {
+            value i16 :: 42
+            result i16 :: first(value, 0)
+            return result
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_contextual_literal_before_typed_argument": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() i16 {
+            value i16 :: 42
+            result i16 :: first(0, value)
+            return result + 42
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_contextual_nested_integer_literal_expressions": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() i16 {
+            value i16 :: 40
+            left i16 :: first(-(1 + 1), value)
+            right i16 :: first(value, (3 * 4) + 2)
+            return left + right + 4
+        }
+        """, b"42\n", None,
+    ),
+    "specialization_contextual_literal_right_out_of_range": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() u8 {
+            value u8 :: 42
+            return first(value, 256)
+        }
+        """, b"", b"numeric literal is outside",
+    ),
+    "specialization_contextual_literal_left_out_of_range": (
+        """
+        first proc($T type, left T, right T) T { return left }
+        main proc() u8 {
+            value u8 :: 42
+            return first(256, value)
+        }
+        """, b"", b"numeric literal is outside",
+    ),
     "fallible_success_and_catch_short_circuit": (
         """
         Error :: enum { failed }
@@ -2128,6 +2554,49 @@ def check_data_model_packages(temporary, executable):
     return 3
 
 
+def check_specialization_packages(temporary, executable):
+    project = temporary / "specialization"
+    app, library = project / "app", project / "library"
+    app.mkdir(parents=True)
+    library.mkdir()
+    (library / "types.hon").write_text(textwrap.dedent("""
+        Box proc($T type) type { return struct { value T } }
+        Fixed proc($T type, $N usize) type {
+            return struct { values [N]mut T }
+        }
+    """).strip() + "\n")
+    (library / "functions.hon").write_text(textwrap.dedent("""
+        identity proc($T type, value T) T { return value }
+        first proc($T type, $N usize, value @Fixed(T, N)) T {
+            return value.values[0]
+        }
+    """).strip() + "\n")
+    source = app / "main.hon"
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Element :: alias i16
+        ImportedBox :: alias lib.Box(Element)
+        main proc() i16 {
+            imported ImportedBox :: { value = 40 }
+            copy lib.Box(i16) :: imported
+            fixed lib.Fixed(i16, 2) :: { values = [2, 0] }
+            return copy.value + lib.identity(lib.first(&fixed))
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Box proc($T type) type { return struct { value T } }
+        main proc() i16 {
+            imported lib.Box(i16) :: { value = 42 }
+            local Box(i16) :: imported
+            return local.value
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"incompatible value type"))
+    return 2
+
+
 def check_dependency_provenance(temporary, executable):
     project = temporary / "provenance"
     app = project / "app"
@@ -2368,6 +2837,7 @@ def main():
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
         count += check_data_model_packages(temporary, executable)
+        count += check_specialization_packages(temporary, executable)
         count += check_fallible_packages_and_entry(temporary, executable)
         count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"

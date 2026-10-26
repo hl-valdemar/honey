@@ -17,6 +17,9 @@ executed foreign calls remain diagnostic traps in the interpreter.
 explicit fallible channels, composed error sets, `try`/`catch` and scoped LIFO
 `defer`/`errdefer` run through both paths; source errors are values, not diagnostic
 traps or compiler infrastructure failures.
+cached generic specialization and type-producing procedures support explicit/inferred
+compile-time arguments and generated record/array storage through both paths;
+general compile-time execution/reflection and generic library acceptance remain open.
 the driver retains frontend storage and source provenance through
 `@source/compilation`, with compilation-wide AST node identities.
 file commands retain single-file behavior; directory commands compile the
@@ -53,6 +56,8 @@ test discovery and FFI remain outside these completed slices.
   - [x] mutable/sentinel slices with checked bounds, borrowed aliases and string views; optional values/pointers/callbacks, null checks, unwrap and conditional/loop captures; target layout, pointer/const casts and typed memory copy/set through interpreter/native execution. scalar/pointer C ABI declarations build/run allocator callbacks using `malloc`, `realloc`, `free` and `posix_memalign`; arbitrary interpreter FFI, generic standard-library compilation and native startup/IO remain with later gates.
 - [x] fallible results and cleanup: explicit `T ! E`, error-set composition, `try`/`catch`, `defer`/`errdefer`, error captures and matched error residuals through interpreter/native execution; infrastructure errors remain distinct from diagnostic traps. fallible `void` may complete on fallthrough; unhandled entry errors exit with status `1`. inferred `T!` signatures and yielding catch blocks remain with inference/value-control-flow work. examples: `source/main.hon`, `source/sema/check/check.hon`.
 - [ ] generic specialization and compile-time execution/reflection sufficient for existing `ArrayList`, hash maps, `enummap`, `meta` and `io.print`; include type/value parameters and compile-time generated storage.
+  - [x] specialization checkpoint: explicit/inferred type and integer/boolean/string/callback/null value parameters, cached concrete runtime calls, nominal type-producing procedures, generated record/array storage and recursive data pointers through interpreter/native execution. preserve declared value types, source diagnostics and repeatable compilation; runtime values cannot supply compile-time arguments.
+  - [ ] remaining gate: general compile-time procedure execution, compile-time branch/inline expansion and reflection (`typeinfo!`, `field!`, `struct_type!`, generated type/default arrays), plus existing-library acceptance. required collection/index iteration, expression-valued control flow, compound updates and formatting parsing may interleave with the next source-construct gate.
 - [ ] remaining source constructs: collection/index iteration, expression-valued control flow and `yield`, compound updates and multiline strings. examples: `source/parser/parse.hon`, `source/llvm/runtime.hon`.
 - [ ] standard-library milestone: compile/run a multi-package program exercising existing allocation and IO, including error cleanup; no replacement miniature standard library.
 - [ ] native driver integration: required C ABI declarations, `process.Init` startup arguments/IO, actual CLI exit statuses, file loading, temporary files and spawning Clang. Honey-generated programs currently accept only parameterless `main` and print its result; Bro's bootstrap startup support is not Honey backend support.

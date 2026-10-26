@@ -14,6 +14,7 @@ import "@source/lower"
 import "@source/loader"
 import "@source/ir"
 typecheck :: import "@source/sema/check"
+import "@source/sema/specialize"
 
 #! identities are valid only within their owning compilation.
 SourceId :: alias diagnostics.SourceId
@@ -350,7 +351,7 @@ compile proc(
     }
     imports := arraylist.init(sema.Import, compilation.allocator)
     defer arraylist.deinit(&imports)
-    tree :: ast.view(&compilation.builder, compilation.module_root?)
+    tree := ast.view(&compilation.builder, compilation.module_root?)
     for (compilation.imports.items) |link| {
         imported :: ast.import_decl(&tree, link.node)
         name := strpool.no_str
@@ -392,7 +393,10 @@ compile proc(
     }
     resolution := try sema.resolve_packages(compilation.allocator, &tree, roots.items, imports.items, &compilation.strings, diagnostic_store)
     defer sema.deinit(&resolution)
-    checked := try typecheck.check(compilation.allocator, &tree, &resolution, diagnostic_store)
+    elaborated := try specialize.elaborate(compilation.allocator, &compilation.builder, compilation.module_root?, &resolution, diagnostic_store)
+    defer specialize.deinit(&elaborated)
+    tree = ast.view(&compilation.builder, compilation.module_root?)
+    checked := try typecheck.check_elaborated(compilation.allocator, &tree, &resolution, elaborated.constraints.items, diagnostic_store)
     defer typecheck.deinit(&checked)
     return try lower.lower_package(compilation.allocator, &tree, &resolution, &checked, roots.items[usize(root_package)], diagnostic_store)
 }

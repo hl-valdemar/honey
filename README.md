@@ -79,6 +79,25 @@ the parser supports arithmetic expressions with nested parenthesized groups, suc
 
 function calls are postfix expressions: `f()`, `f(a, b)`, and `factory()(x)`. calls bind tighter than unary and binary arithmetic and can appear in initializers or as expression statements inside function bodies. argument lists allow newlines and a trailing comma; outside parentheses, newlines remain statement boundaries. type checking validates callable values, argument counts and argument types.
 
+generic procedures mark compile-time parameters with `$`, such as `identity proc($T type, value T) T`. pass all parameters explicitly (`identity(i16, 42)`) or omit every compile-time argument when runtime argument types determine them (`identity(value)`). inference follows pointers, arrays, slices, optionals and specialized record constructors, including array counts; conflicting or undetermined arguments are diagnosed. specializations are cached by declaration and compile-time arguments, retain nominal generated-record identity, and erase compile-time parameters from runtime calls.
+
+```hon
+Fixed proc($T type, $N usize) type {
+    return struct { values [N]mut T }
+}
+
+first proc($T type, $N usize, value @Fixed(T, N)) T {
+    return value.values[0]
+}
+
+main proc() i16 {
+    fixed Fixed(i16, 2) :: { values = [42, 0] }
+    return first(&fixed)
+}
+```
+
+the specialization checkpoint supports type arguments and constant integer, boolean, string, callback and null value arguments; declared value-parameter types survive specialization, including narrow checked arithmetic and optional captures/unwrap. integer arguments are range-checked even when unused, and erased argument expressions still receive ordinary checking. immutable constant expressions may use unary signs, `!`, `+`, `-`, `*`, comparisons and logical operators. type-producing procedures require compile-time parameters (or no parameters) and support immutable locals, conditional returns, nested type-producing calls and generated record/array storage, including pointer-recursive records. runtime values and mutable bindings cannot supply compile-time arguments. runaway specialization is diagnosed at 128 nested evaluation/specialization calls or 4096 instances. arbitrary compile-time procedure execution, reflection, `inline` iteration and full generic standard-library compilation remain outside this checkpoint.
+
 callback signatures use `@proc(value i16) i16`, including grouped parameter names and trailing commas. compatible named functions can initialize callbacks, which may be passed, returned, replaced and stored in records/arrays; `Callback :: alias @proc(value i16) i16` names a reusable signature. parameter/result types match structurally, retaining nominal record identity and exact pointer mutability. callback fields call directly, such as `allocator.vtable.alloc(context, size, alignment)` once the remaining argument types are supported. `@mut proc` and `*proc` are invalid; `@mut Callback` instead points to writable callback storage.
 
 `true` and `false` are boolean literals; `bool` is available for parameters, storage and results. `==`, `!=`, `<`, `<=`, `>` and `>=` compare compatible numeric operands and produce `bool`; `==` and `!=` also accept boolean operands. comparisons preserve contextual numeric inference without making their operands boolean. arithmetic binds tighter than relational comparisons, which bind tighter than equality; comparisons associate left to right. boolean arithmetic/ordering and string/function/void comparisons are invalid; there is no implicit numeric-to-boolean conversion.

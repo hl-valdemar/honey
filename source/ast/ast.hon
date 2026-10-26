@@ -1,10 +1,11 @@
 #! grammar:
-#! * type ..... -> type_sum ['!' type]; type_sum -> type_atom {'|' type_atom}; type_atom includes '(' type ')', identifier {'.' member}, '?' type_atom, ('@' | '*') ['mut'] type_atom, '@proc' '(' parameters ')' type, '[' (expr | '_') ']' ['mut'] type_atom, '[' [';' expr] ']' ['mut'] type_atom, record/enum/union declarations, and ('distinct' | 'alias') type.
+#! * type ..... -> type_sum ['!' type]; type_sum -> type_atom {'|' type_atom}; type_atom includes '(' type ')', identifier {'.' member | '(' [expr {',' expr} [',']] ')'}, '?' type_atom, ('@' | '*') ['mut'] type_atom, ['@'] 'proc' '(' parameters ')' type, '[' (expr | '_') ']' ['mut'] type_atom, '[' [';' expr] ']' ['mut'] type_atom, record/enum/union declarations, and ('distinct' | 'alias') type.
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false' | 'null'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
 #! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
+#! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
@@ -67,6 +68,7 @@ ExprKind :: enum {
     sum_type
     try_expr
     catch_expr
+    typed_constant
 }
 
 DeclKind :: enum {
@@ -169,6 +171,7 @@ NodeKind :: enum {
     stmt_defer
     stmt_errdefer
     stmt_block
+    expr_typed_constant
 }
 
 @hide:file
@@ -196,16 +199,17 @@ Storage :: struct {
     extra arraylist.ArrayList(u32)
     spans arraylist.ArrayList(Span)
     sources arraylist.ArrayList(diagnostics.Source)
+    generated arraylist.ArrayList([]mut u8)
 }
 
-#! owns node storage and source descriptors; borrows registered source paths and text.
+#! owns node storage, source descriptors, and generated text; borrows registered source paths and text.
 Builder :: struct {
     storage Storage
     source []u8
     source_id diagnostics.SourceId = diagnostics.SourceId(0)
 }
 
-#! owns storage after finish, or borrows it after view; registered source paths and text remain borrowed.
+#! owns storage after finish, or borrows it after view; source paths and non-generated text remain borrowed.
 Tree :: struct {
     storage Storage
     root NodeId
@@ -238,6 +242,7 @@ ParamView :: struct {
     span Span
     name Span
     type NodeId
+    comptime bool = false
 }
 
 UnaryExprView :: struct {
@@ -251,6 +256,11 @@ BinaryExprView :: struct {
     operator BinaryOperator
     left NodeId
     right NodeId
+}
+
+TypedConstantView :: struct {
+    type NodeId
+    value NodeId
 }
 
 CatchExprView :: struct {
@@ -390,6 +400,7 @@ init_builder proc(allocator mem.Allocator, source []u8) Builder {
             extra = arraylist.init(allocator),
             spans = arraylist.init(allocator),
             sources = arraylist.init(allocator),
+            generated = arraylist.init(allocator),
         },
         source = source,
     }
@@ -432,8 +443,10 @@ source_files proc(tree @Tree) []diagnostics.Source {
     return tree.storage.sources.items
 }
 
-#! releases owned AST and source-descriptor storage, without freeing source paths or text.
+#! releases owned AST, generated text, and source descriptors, without freeing borrowed sources.
 deinit_builder proc(builder @mut Builder) void {
+    for (builder.storage.generated.items) |text| mem.free(builder.storage.generated.allocator, text)
+    arraylist.deinit(&builder.storage.generated)
     arraylist.deinit(&builder.storage.nodes)
     arraylist.deinit(&builder.storage.extra)
     arraylist.deinit(&builder.storage.spans)
@@ -449,14 +462,17 @@ finish proc(builder @mut Builder, root NodeId) Tree {
         extra = arraylist.init(allocator),
         spans = arraylist.init(allocator),
         sources = arraylist.init(allocator),
+        generated = arraylist.init(allocator),
     }
     builder.source = &[]
     builder.source_id = diagnostics.SourceId(0)
     return tree
 }
 
-#! releases owned AST and source-descriptor storage, without freeing source paths or text.
+#! releases owned AST, generated text, and source descriptors, without freeing borrowed sources.
 deinit proc(tree @mut Tree) void {
+    for (tree.storage.generated.items) |text| mem.free(tree.storage.generated.allocator, text)
+    arraylist.deinit(&tree.storage.generated)
     arraylist.deinit(&tree.storage.nodes)
     arraylist.deinit(&tree.storage.extra)
     arraylist.deinit(&tree.storage.spans)
@@ -511,6 +527,17 @@ add_binary proc(
         data0 = NodeData{ node_id = left },
         data1 = NodeData{ node_id = right },
     }, span)
+}
+
+#! preserves a generated constant's declared type without introducing a runtime binding.
+add_typed_constant proc(
+    builder @mut Builder, at Span, type, value NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_typed_constant,
+        data0 = NodeData{ node_id = type },
+        data1 = NodeData{ node_id = value },
+    }, at)
 }
 
 add_binary_type proc(
@@ -936,6 +963,7 @@ add_param proc(
 ) NodeId ! mem.AllocError {
     extra :: try add_extra(builder, name.start)
     _ = try add_extra(builder, name.end)
+    _ = try add_extra(builder, 0)
     return try add_node(builder, Node{
         kind = .param_decl,
         main = NodeData{ extra = extra },
@@ -943,6 +971,13 @@ add_param proc(
         data1 = NodeData{ name_id = interned_name },
     }, span)
 }
+
+set_param_comptime proc(builder @mut Builder, id NodeId) void {
+    node :: builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .param_decl)
+    builder.storage.extra.items[usize(node.main.extra) + 2] = 1
+}
+
 
 add_function_decl proc(
     builder @mut Builder,
@@ -978,6 +1013,15 @@ function_external proc(tree @Tree, id NodeId) bool {
     node :: get_node(&tree.storage, id)
     if (node.kind != .func_decl) return false
     return tree.storage.extra.items[usize(node.data1.extra) - 1] != 0
+}
+
+function_generic proc(tree @Tree, id NodeId) bool {
+    node :: get_node(&tree.storage, id)
+    if (node.kind != .func_decl and node.kind != .expr_function_type) return false
+    for 0..function_param_count(tree, id) |index| {
+        if (param(tree, function_param(tree, id, index)).comptime) return true
+    }
+    return false
 }
 
 add_import_decl proc(
@@ -1279,6 +1323,7 @@ param proc(tree @Tree, id NodeId) ParamView {
         span = get_span(&tree.storage, id),
         name = span_from_extra(&tree.storage, usize(node.main.extra), get_span(&tree.storage, id).source),
         type = node.data0.node_id,
+        comptime = tree.storage.extra.items[usize(node.main.extra) + 2] != 0,
     }
 }
 
@@ -1339,6 +1384,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_sum_type: .sum_type
         .expr_try: .try_expr
         .expr_catch: .catch_expr
+        .expr_typed_constant: .typed_constant
         else: unreachable
     }
 }
@@ -1361,6 +1407,15 @@ binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
         operator = node.main.binary_operator,
         left = node.data0.node_id,
         right = node.data1.node_id,
+    }
+}
+
+typed_constant proc(tree @Tree, id NodeId) TypedConstantView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_typed_constant)
+    return TypedConstantView{
+        type = node.data0.node_id,
+        value = node.data1.node_id,
     }
 }
 
@@ -1687,4 +1742,372 @@ node_id proc(index usize) NodeId {
 maybe_node_id proc(value u32) ?NodeId {
     if (value == u32(no_node)) return null
     return NodeId(value)
+}
+
+NodeClass :: enum {
+    expression, statement, function, parameter, block, field, match_arm, package, import, invalid
+}
+
+@hide:file
+NodeLayout :: struct {
+    class NodeClass = .expression
+    direct_children u32 = 0
+    extra_pointers u32 = 0
+    extra_start usize = 0
+    extra_count usize = 0
+    extra_children u32 = 0
+    list_start usize = 0
+    list_end usize = 0
+}
+
+#! describes owned extra storage and child slots, excluding names, spans, and flags.
+@hide:file
+node_layout proc(node Node) NodeLayout {
+    layout := NodeLayout{}
+    match node.kind {
+        .literal_int, .literal_float, .literal_string, .literal_bool, .literal_null,
+        .expr_identifier, .invalid_expr: {}
+        .expr_unary: layout.direct_children = 2
+        .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant,
+        .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:
+            layout.direct_children = 6
+        .expr_pointer_type: layout.direct_children = 4
+        .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_enum_literal,
+        .expr_try: layout.direct_children = 1
+        .expr_call, .expr_builtin_call, .expr_function_type, .expr_array_literal,
+        .expr_record_type, .expr_record_literal, .expr_enum_type, .expr_match,
+        .block, .package: {
+            layout.extra_pointers = 6
+            layout.extra_start = usize(node.data0.extra)
+            layout.extra_count = usize(node.data1.extra - node.data0.extra)
+            layout.list_end = layout.extra_count
+            if (node.kind == .block) layout.class = .block
+            else if (node.kind == .package) layout.class = .package
+            else if (node.kind != .expr_array_literal and node.kind != .expr_record_type)
+                layout.direct_children = 1
+        }
+        .expr_union_type: {
+            layout.extra_pointers = 7
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = usize(node.data1.extra - node.main.extra)
+            layout.extra_children = 1
+            layout.list_start = 2
+            layout.list_end = layout.extra_count
+        }
+        .record_field: {
+            layout.class = .field
+            layout.direct_children = 7
+        }
+        .match_arm: {
+            layout.class = .match_arm
+            layout.direct_children = 1
+            layout.extra_pointers = 6
+            layout.extra_start = usize(node.data0.extra)
+            layout.extra_count = usize(node.data1.extra - node.data0.extra)
+            layout.extra_children = 1
+            layout.list_start = 3
+            layout.list_end = layout.extra_count
+        }
+        .expr_catch: {
+            layout.direct_children = 6
+            layout.extra_pointers = 1
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = 2
+            layout.extra_children = 1
+        }
+        .expr_slice: {
+            layout.direct_children = 1
+            layout.extra_pointers = 2
+            layout.extra_start = usize(node.data0.extra)
+            layout.extra_count = 3
+            layout.extra_children = 7
+        }
+        .stmt_expr, .stmt_return, .stmt_block, .stmt_defer, .stmt_errdefer: {
+            layout.class = .statement
+            layout.direct_children = 1
+            if (node.kind == .stmt_defer or node.kind == .stmt_errdefer)
+                layout.direct_children = 3
+        }
+        .stmt_break, .stmt_continue, .invalid_stmt: layout.class = .statement
+        .stmt_assignment: {
+            layout.class = .statement
+            layout.direct_children = 3
+        }
+        .stmt_while: {
+            layout.class = .statement
+            layout.direct_children = 7
+        }
+        .stmt_if: {
+            layout.class = .statement
+            layout.direct_children = 6
+            layout.extra_pointers = 1
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = 2
+            layout.extra_children = 3
+        }
+        .stmt_for: {
+            layout.class = .statement
+            layout.direct_children = 3
+            layout.extra_pointers = 4
+            layout.extra_start = usize(node.data1.extra)
+            layout.extra_count = 4
+            layout.extra_children = 3
+        }
+        .stmt_decl: {
+            layout.class = .statement
+            layout.extra_pointers = 1
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = 4
+            layout.extra_children = 12
+        }
+        .func_decl: {
+            layout.class = .function
+            layout.direct_children = 2
+            layout.extra_pointers = 5
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = usize(node.data1.extra - node.main.extra)
+            layout.extra_children = 4
+            layout.list_start = 4
+            layout.list_end = layout.extra_count - 1
+        }
+        .param_decl: {
+            layout.class = .parameter
+            layout.direct_children = 2
+            layout.extra_pointers = 1
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = 3
+        }
+        .import_decl: {
+            layout.class = .import
+            layout.extra_pointers = 1
+            layout.extra_start = usize(node.main.extra)
+            layout.extra_count = 2
+        }
+        .invalid_decl: layout.class = .invalid
+    }
+    return layout
+}
+
+@hide:file
+has_slot proc(mask u32, index usize) bool {
+    return (mask & (u32(1) << u32(index))) != 0
+}
+
+@hide:file
+node_word proc(node Node, index usize) NodeData {
+    return match index {
+        0: node.main
+        1: node.data0
+        2: node.data1
+        else: unreachable
+    }
+}
+
+@hide:file
+set_node_word proc(node @mut Node, index usize, word NodeData) void {
+    match index {
+        0: node.main = word
+        1: node.data0 = word
+        2: node.data1 = word
+        else: unreachable
+    }
+}
+
+node_class proc(tree @Tree, id NodeId) NodeClass {
+    return node_layout(get_node(&tree.storage, id)).class
+}
+
+#! counts actual AST children, excluding absent optional nodes and non-node metadata.
+child_count proc(tree @Tree, id NodeId) usize {
+    node :: get_node(&tree.storage, id)
+    layout :: node_layout(node)
+    count := layout.list_end - layout.list_start
+    for (0..usize(3)) |i| {
+        if (has_slot(layout.direct_children, i) and node_word(node, i).node_id != no_node)
+            count += 1
+    }
+    for (0..usize(4)) |i| {
+        if (!has_slot(layout.extra_children, i)) continue
+        if (NodeId(tree.storage.extra.items[layout.extra_start + i]) != no_node) count += 1
+    }
+    return count
+}
+
+#! returns a child in stable payload order; `index` must be less than child_count.
+child proc(tree @Tree, id NodeId, index usize) NodeId {
+    node :: get_node(&tree.storage, id)
+    layout :: node_layout(node)
+    remaining := index
+    for (0..usize(3)) |i| {
+        if (!has_slot(layout.direct_children, i)) continue
+        value :: node_word(node, i).node_id
+        if (value == no_node) continue
+        if (remaining == 0) return value
+        remaining -= 1
+    }
+    for (0..usize(4)) |i| {
+        if (!has_slot(layout.extra_children, i)) continue
+        value :: NodeId(tree.storage.extra.items[layout.extra_start + i])
+        if (value == no_node) continue
+        if (remaining == 0) return value
+        remaining -= 1
+    }
+    debug.assert(remaining < layout.list_end - layout.list_start)
+    return NodeId(tree.storage.extra.items[layout.extra_start + layout.list_start + remaining])
+}
+
+#! clones owned payload storage and preserves spans and interned names.
+#! `mapping` covers original nodes, initially maxval!(NodeId), with substitutions prefilled.
+#! nodes outside `mapping` are already concrete and returned unchanged.
+clone_subtree proc(
+    builder @mut Builder, root NodeId, mapping []mut NodeId,
+) NodeId ! mem.AllocError {
+    if (root == no_node or usize(root) >= mapping.len) return root
+    if (mapping[usize(root)] != no_node) return mapping[usize(root)]
+    original :: get_node(&builder.storage, root)
+    span :: get_span(&builder.storage, root)
+    layout :: node_layout(original)
+    cloned := original
+    start :: builder.storage.extra.items.len
+    for (0..layout.extra_count) |i| {
+        value :: builder.storage.extra.items[layout.extra_start + i]
+        _ = try add_extra(builder, value)
+    }
+    for (0..usize(3)) |i| {
+        if (has_slot(layout.extra_pointers, i)) {
+            offset :: usize(node_word(original, i).extra) - layout.extra_start
+            set_node_word(&cloned, i, NodeData{ extra = u32(start + offset) })
+        }
+        if (has_slot(layout.direct_children, i)) {
+            value :: try clone_subtree(builder, node_word(original, i).node_id, mapping)
+            set_node_word(&cloned, i, NodeData{ node_id = value })
+        }
+    }
+    for (0..layout.extra_count) |i| {
+        is_child :: (
+            (i < 4 and has_slot(layout.extra_children, i))
+            or (i >= layout.list_start and i < layout.list_end)
+        )
+        if (!is_child) continue
+        original_child :: NodeId(builder.storage.extra.items[layout.extra_start + i])
+        value :: try clone_subtree(builder, original_child, mapping)
+        builder.storage.extra.items[start + i] = u32(value)
+    }
+    result :: try add_node(builder, cloned, span)
+    mapping[usize(root)] = result
+    return result
+}
+
+#! shallow-copies the source kind and payload, retaining the target's diagnostic span.
+replace_node proc(builder @mut Builder, target, source NodeId) void {
+    builder.storage.nodes.items[usize(target)] = get_node(&builder.storage, source)
+}
+
+#! shallow-copies kind, payload, and span; extra storage remains shared.
+copy_node proc(builder @mut Builder, id NodeId) NodeId ! mem.AllocError {
+    node :: get_node(&builder.storage, id)
+    span :: get_span(&builder.storage, id)
+    return try add_node(builder, node, span)
+}
+
+#! replaces package children without changing its node identity or source span.
+set_package_declarations proc(
+    builder @mut Builder, root NodeId, declarations []NodeId,
+) void ! mem.AllocError {
+    debug.assert(get_node(&builder.storage, root).kind == .package)
+    start :: builder.storage.extra.items.len
+    for (declarations) |declaration| _ = try add_extra(builder, u32(declaration))
+    builder.storage.nodes.items[usize(root)].data0 = NodeData{ extra = u32(start) }
+    builder.storage.nodes.items[usize(root)].data1 = NodeData{ extra = u32(builder.storage.extra.items.len) }
+}
+
+#! retains generated decimal text until deinit_builder or ownership transfer through finish.
+#! generated literals retain `at` for diagnostics; read their spelling through literal_text.
+add_integer proc(builder @mut Builder, at Span, magnitude u64) NodeId ! mem.AllocError {
+    digits [20]mut u8 := undefined
+    start := digits.len
+    remaining := magnitude
+    while true {
+        start -= 1
+        digits[start] = '0' + u8(rem!(remaining, 10))
+        remaining = divtrunc!(remaining, 10)
+        if (remaining == 0) break
+    }
+    return try add_generated_literal(builder, at, .int, digits[start..])
+}
+
+#! retains generated boolean text with the same ownership and provenance rules as add_integer.
+add_boolean proc(builder @mut Builder, at Span, value bool) NodeId ! mem.AllocError {
+    text :: if (value) "true" else "false"
+    return try add_generated_literal(builder, at, .bool, text)
+}
+
+@hide:file
+add_generated_literal proc(
+    builder @mut Builder, at Span, kind LiteralKind, bytes []u8,
+) NodeId ! mem.AllocError {
+    debug.assert(usize(at.source) < builder.storage.sources.items.len)
+    allocator :: builder.storage.generated.allocator
+    text :: try mem.alloc(u8, allocator, bytes.len)
+    errdefer mem.free(allocator, text)
+    memcopy!(text, bytes)
+    index :: builder.storage.generated.items.len
+    debug.assert(u64(index) < u64(maxval!(u32)))
+    try arraylist.append(&builder.storage.generated, text)
+    errdefer _ = arraylist.pop(&builder.storage.generated)
+    id :: try add_literal(builder, kind, at)
+    builder.storage.nodes.items[usize(id)].main = NodeData{ extra = u32(index) }
+    builder.storage.nodes.items[usize(id)].data0 = NodeData{ extra = 1 }
+    return id
+}
+
+#! borrows a literal's spelling, independently of its diagnostic source span.
+literal_text proc(tree @Tree, id NodeId) []u8 {
+    node :: get_node(&tree.storage, id)
+    if (node.data0.extra == 1) return tree.storage.generated.items[usize(node.main.extra)]
+    return source_text(tree, get_span(&tree.storage, id))
+}
+
+StringError :: enum { invalid_escape }
+
+#! decodes one byte from quoted literal text without allocation.
+#! start `cursor` at one and call only while it is less than `text.len - 1`.
+string_next proc(text []u8, cursor @mut usize) u8 ! StringError {
+    debug.assert(text.len >= 2 and cursor^ >= 1 and cursor^ < text.len - 1)
+    end :: text.len - 1
+    byte := text[cursor^]
+    cursor^ += 1
+    if (byte != '\\') return byte
+    if (cursor^ >= end) return .invalid_escape
+    escape :: text[cursor^]
+    cursor^ += 1
+    match escape {
+        '\\': byte = '\\'
+        '"': byte = '"'
+        'n': byte = '\n'
+        'r': byte = '\r'
+        't': byte = '\t'
+        '0': byte = 0
+        'x': {
+            if (end - cursor^ < 2) return .invalid_escape
+            high := u8(0)
+            low := u8(0)
+            if (hex_digit(text[cursor^])) |digit| high = digit
+            else return .invalid_escape
+            if (hex_digit(text[cursor^ + 1])) |digit| low = digit
+            else return .invalid_escape
+            byte = high * 16 + low
+            cursor^ += 2
+        }
+        else: return .invalid_escape
+    }
+    return byte
+}
+
+@hide:file
+hex_digit proc(byte u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0'
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10
+    return null
 }

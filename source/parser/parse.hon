@@ -34,6 +34,13 @@ State :: struct {
     match_arm_body bool = false
 }
 
+@hide:file
+ParameterName :: struct {
+    token lexer.Token
+    start u32
+    comptime bool
+}
+
 #! borrows `tokens` and `source` while parsing; the returned Tree borrows `source` until ast.deinit.
 #! `allocator` supplies returned node storage and temporary lists released before return.
 #! the caller owns the Tree and must release it with ast.deinit.
@@ -178,13 +185,20 @@ parse_parameters proc(
     state @mut State, params @mut arraylist.ArrayList(ast.NodeId),
 ) void ! ParseError {
     skip_newlines(state)
-    names arraylist.ArrayList(lexer.Token) := arraylist.init(state.allocator)
+    names arraylist.ArrayList(ParameterName) := arraylist.init(state.allocator)
     defer arraylist.deinit(&names)
     while !next_is(state, .close_paren) {
         arraylist.clear(&names)
         while true {
+            start :: current(state).span.start
+            comptime :: next_is(state, .dollar)
+            if (comptime) state.next_token += 1
             token :: try consume(state, .ident)
-            try arraylist.append(&names, token)
+            try arraylist.append(&names, ParameterName{
+                token = token,
+                start = start,
+                comptime = comptime,
+            })
             if (starts_type(current(state).kind)) break
             _ = try consume(state, .comma)
         }
@@ -193,11 +207,12 @@ parse_parameters proc(
         for (names.items) |parameter_name| {
             param_id :: try ast.add_param(
                 state.builder,
-                ast.Span{ start = parameter_name.span.start, end = type_end, source = parameter_name.span.source },
-                parameter_name.span,
-                parameter_name.data.str_id,
+                ast.Span{ start = parameter_name.start, end = type_end, source = parameter_name.token.span.source },
+                parameter_name.token.span,
+                parameter_name.token.data.str_id,
                 type_id,
             )
+            if (parameter_name.comptime) ast.set_param_comptime(state.builder, param_id)
             try arraylist.append(params, param_id)
         }
         skip_newlines(state)
@@ -733,25 +748,7 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
         state.next_token += 1
         mutable :: next_is(state, .mut)
         if (mutable) state.next_token += 1
-        if (next_is(state, .proc)) {
-            state.next_token += 1
-            _ = try consume(state, .open_paren)
-            params := arraylist.init(ast.NodeId, state.allocator)
-            defer arraylist.deinit(&params)
-            try parse_parameters(state, &params)
-            _ = try consume(state, .close_paren)
-            result :: try parse_type(state)
-            span :: ast.Span{
-                start = token.span.start,
-                end = state.tokens[state.next_token - 1].span.end,
-                source = token.span.source,
-            }
-            if (mutable or token.kind == .star) {
-                diagnostic :: try diagnostics.add(state.diagnostics, .invalid_pointer_type, span)
-                return try ast.add_invalid_expr(state.builder, span, diagnostic)
-            }
-            return try ast.add_function_type(state.builder, span, result, params.items)
-        }
+        if (next_is(state, .proc)) return try parse_function_type(state, token.span, mutable or token.kind == .star)
         element :: try parse_type_atom(state)
         return try ast.add_pointer_type(state.builder, ast.Span{
             start = token.span.start,
@@ -799,13 +796,19 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
             count, element, mutable,
         )
     }
+    if next_is(state, .proc) return try parse_function_type(state, current(state).span, false)
     if next_is(state, .struct) return try parse_record_type(state)
     if next_is(state, .enum) return try parse_enum_type(state)
     if next_is(state, .union) return try parse_union_type(state)
     if (next_is(state, .distinct) or next_is(state, .alias)) return try parse_type_wrapper(state)
     token :: try consume(state, .ident)
     type := try ast.add_identifier(state.builder, token.span, token.data.str_id)
-    while next_is(state, .dot) {
+    while true {
+        if (next_is(state, .open_paren)) {
+            type = try parse_call(state, type, token.span.start, false)
+            continue
+        }
+        if (!next_is(state, .dot)) break
         state.next_token += 1
         member :: try consume_member(state, false)
         member_id :: try ast.add_identifier(state.builder, member.span, member.data.str_id)
@@ -819,11 +822,32 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
+parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.NodeId ! ParseError {
+    _ = try consume(state, .proc)
+    _ = try consume(state, .open_paren)
+    params := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&params)
+    try parse_parameters(state, &params)
+    _ = try consume(state, .close_paren)
+    result :: try parse_type(state)
+    span :: ast.Span{
+        start = start.start,
+        end = state.tokens[state.next_token - 1].span.end,
+        source = start.source,
+    }
+    if (invalid) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .invalid_pointer_type, span)
+        return try ast.add_invalid_expr(state.builder, span, diagnostic)
+    }
+    return try ast.add_function_type(state.builder, span, result, params.items)
+}
+
+@hide:file
 starts_type proc(kind lexer.TokenKind) bool {
     return (
         kind == .ident or kind == .open_bracket or kind == .struct
         or kind == .enum or kind == .union or kind == .distinct or kind == .alias
-        or kind == .at or kind == .star or kind == .question or kind == .open_paren
+        or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc
     )
 }
 
@@ -1576,7 +1600,7 @@ named_binding_starts proc(state @State) bool {
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
-        .at, .star, .question: return try parse_type(state)
+        .at, .star, .question, .proc: return try parse_type(state)
         .struct: return try parse_record_type(state)
         .enum: return try parse_enum_type(state)
         .union: return try parse_union_type(state)

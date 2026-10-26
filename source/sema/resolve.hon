@@ -17,6 +17,7 @@ BuiltinType :: enum {
     anyopaque
     c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
     c_char, c_uchar, c_short, c_ushort
+    type
 }
 
 @hide:file
@@ -55,6 +56,7 @@ builtins [_]Builtin :: [
     { name = "c_uchar", type = .c_uchar },
     { name = "c_short", type = .c_short },
     { name = "c_ushort", type = .c_ushort },
+    { name = "type", type = .type },
 ]
 
 @hide:file
@@ -275,6 +277,12 @@ binding proc(resolution @Resolution, id ast.NodeId) Binding {
     return resolution.storage.bindings[usize(id)]
 }
 
+#! replaces owned binding storage after AST elaboration; takes ownership of `bindings`.
+replace_bindings proc(resolution @mut Resolution, bindings []mut Binding) void {
+    mem.free(resolution.storage.allocator, resolution.storage.bindings)
+    resolution.storage.bindings = bindings
+}
+
 @hide:file
 lookup proc(state @State, scope ?@Scope, name strpool.StringId) ?Binding {
     if scope |current| {
@@ -335,13 +343,17 @@ resolve_function proc(
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     function :: ast.function_decl(tree, id)
-    # signatures cannot see parameters or body-local declarations.
-    try resolve_expr(state, package_scope, function.return_type)
+    # compile-time parameters are in scope for subsequent dependent annotations.
+    signature := Scope{ names = hashmap.init(state.allocator), parent = package_scope }
+    defer hashmap.deinit(&signature.names)
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
-        try resolve_expr(state, package_scope, ast.param(tree, parameter).type)
+        try resolve_expr(state, &signature, ast.param(tree, parameter).type)
+        if (ast.param(tree, parameter).comptime) {
+            try predeclare(state, &signature, parameter, ast.param(tree, parameter).name)
+        }
     }
-
+    try resolve_expr(state, &signature, function.return_type)
     scope := Scope{
         names = hashmap.init(state.allocator),
         parent = package_scope,
@@ -514,6 +526,11 @@ resolve_expr proc(
     if (state.bindings[usize(id)].kind != .none) return
     tree :: state.tree
     match ast.expr_kind(tree, id) {
+        .typed_constant: {
+            value :: ast.typed_constant(tree, id)
+            try resolve_expr(state, scope, value.type)
+            try resolve_expr(state, scope, value.value)
+        }
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null: {}
         .enum_literal: {}
         .distinct_type, .alias_expr, .optional_type, .try_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))

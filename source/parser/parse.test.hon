@@ -107,8 +107,93 @@ parses_function_structure_through_tree_views test {
     try testing.expect_equal("U", strpool.get_str(&strings, ast.name_id(&tree, third.type))?)
     try testing.expect_equal(first.type, second.type)
     try testing.expect(first.type != third.type)
+    try testing.expect(!first.comptime)
+    try testing.expect(!second.comptime)
+    try testing.expect(!third.comptime)
+    try testing.expect(!ast.function_generic(&tree, declaration))
     try testing.expect_equal(1, ast.block_statement_count(&tree, function.body))
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+parses_compile_time_parameter_groups_and_callbacks test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `generic proc($T type, $K, $V type, $N usize, $first, second T, $build proc(value T) T, legacy @proc(value T) T) T {}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    declaration :: ast.package_decl(&tree, 0)
+    try testing.expect(ast.function_generic(&tree, declaration))
+    expected [8]bool :: [true, true, true, true, true, false, true, false]
+    try testing.expect_equal(expected.len, ast.function_param_count(&tree, declaration))
+    for (expected) |comptime, index| {
+        parameter :: ast.param(&tree, ast.function_param(&tree, declaration, index))
+        try testing.expect_equal(comptime, parameter.comptime)
+    }
+    first :: ast.param(&tree, ast.function_param(&tree, declaration, 0))
+    key :: ast.param(&tree, ast.function_param(&tree, declaration, 1))
+    value :: ast.param(&tree, ast.function_param(&tree, declaration, 2))
+    count :: ast.param(&tree, ast.function_param(&tree, declaration, 3))
+    try testing.expect_equal("T", ast.source_text(&tree, first.name))
+    try testing.expect_equal("$T type", ast.source_text(&tree, first.span))
+    try testing.expect_equal("$K, $V type", ast.source_text(&tree, key.span))
+    try testing.expect_equal("$V type", ast.source_text(&tree, value.span))
+    try testing.expect_equal(key.type, value.type)
+    try testing.expect_equal("usize", ast.source_text(&tree, ast.node_span(&tree, count.type)))
+    callback :: ast.param(&tree, ast.function_param(&tree, declaration, 6)).type
+    legacy :: ast.param(&tree, ast.function_param(&tree, declaration, 7)).type
+    try testing.expect_equal(ast.ExprKind.function_type, ast.expr_kind(&tree, callback))
+    try testing.expect_equal(ast.ExprKind.function_type, ast.expr_kind(&tree, legacy))
+    try testing.expect_equal("proc(value T) T", ast.source_text(&tree, ast.node_span(&tree, callback)))
+    try testing.expect_equal("@proc(value T) T", ast.source_text(&tree, ast.node_span(&tree, legacy)))
+    try testing.expect_equal(1, ast.function_param_count(&tree, callback))
+    try testing.expect(!ast.param(&tree, ast.function_param(&tree, callback, 0)).comptime)
+}
+
+parses_dependent_type_calls_in_annotations_and_constructors test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `example proc($T type, $N usize, input library.Buffer(T, N)) library.ArrayList(T) {
+        `    direct library.Buffer(T, N) :: library.Buffer(T, N){}
+        `    chained library.Factory(T).Buffer(N) :: library.Factory(T).Buffer(N){}
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    declaration :: ast.package_decl(&tree, 0)
+    function :: ast.function_decl(&tree, declaration)
+    input :: ast.param(&tree, ast.function_param(&tree, declaration, 2))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, input.type))
+    try testing.expect_equal(2, ast.call_arg_count(&tree, input.type))
+    try testing.expect_equal("library.Buffer", ast.source_text(&tree, ast.node_span(&tree, ast.call_expr(&tree, input.type).callee)))
+    try testing.expect_equal("T", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, input.type, 0))))
+    try testing.expect_equal("N", ast.source_text(&tree, ast.node_span(&tree, ast.call_arg(&tree, input.type, 1))))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, function.return_type))
+    try testing.expect_equal(1, ast.call_arg_count(&tree, function.return_type))
+    direct :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, direct.type?))
+    constructor :: ast.record_literal(&tree, direct.initializer).type?
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, constructor))
+    try testing.expect_equal("library.Buffer(T, N)", ast.source_text(&tree, ast.node_span(&tree, constructor)))
+    chained :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1))
+    selected :: ast.selection_expr(&tree, ast.call_expr(&tree, chained.type?).callee)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, selected.base))
+    try testing.expect_equal("Buffer", ast.source_text(&tree, ast.node_span(&tree, selected.member)))
+    try testing.expect_equal(1, ast.call_arg_count(&tree, chained.type?))
 }
 
 recovers_invalid_declaration_and_preserves_sibling test {
@@ -1355,7 +1440,7 @@ preserves_array_error_ids_control_bodies_and_following_siblings test {
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `main proc() void {
-        `    bad [$]i64 :: [$, 2]
+        `    bad [~]i64 :: [~, 2]
         `    while (items[0) { break }
         `    for items[0 |i| { continue }
         `    unfinished :: [1,
