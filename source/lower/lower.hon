@@ -149,6 +149,7 @@ lower_type proc(state @State, type typecheck.Type) ir.Type {
         .u64: .u64
         .array: .array
         .record: .record
+        .pointer: .pointer
         .float: .float
         .bool: .bool
         .string: .string
@@ -590,6 +591,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
             if (ast.expr_kind(tree, assignment.target) == .index
+                or ast.expr_kind(tree, assignment.target) == .unary
                 or (ast.expr_kind(tree, assignment.target) == .selection
                     and sema.binding(state.resolution, assignment.target).kind == .none)) {
                 value :: try lower_expression(state, assignment.value)
@@ -924,10 +926,20 @@ lower_record_as proc(state @mut State, id ast.NodeId, type typecheck.Type) ir.Va
 @hide:file
 is_place proc(state @State, id ast.NodeId) bool {
     match ast.expr_kind(state.tree, id) {
-        .index: return is_place(state, ast.index_expr(state.tree, id).base)
+        .unary: return ast.unary_expr(state.tree, id).operator == .dereference
+        .index: {
+            base :: ast.index_expr(state.tree, id).base
+            return typecheck.type_of(state.checked, base).kind == .pointer or is_place(state, base)
+        }
         .selection: {
             if (sema.binding(state.resolution, id).kind == .none) {
-                return is_place(state, ast.selection_expr(state.tree, id).base)
+                base :: ast.selection_expr(state.tree, id).base
+                checked :: typecheck.type_of(state.checked, base)
+                if (checked.kind == .pointer) {
+                    pointer :: typecheck.pointer_type(state.checked, checked.pointer_type)
+                    return pointer.element.kind == .record
+                }
+                return is_place(state, base)
             }
             binding :: sema.binding(state.resolution, id)
             if (binding.kind != .declaration) return false
@@ -946,13 +958,36 @@ is_place proc(state @State, id ast.NodeId) bool {
 }
 
 @hide:file
+pointer_address proc(
+    state @mut State, pointer ir.ValueId, element typecheck.Type, span diagnostics.Span,
+) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    return try emit(state, ir.Instruction{
+        op = .pointer_address, type = .address, left = pointer,
+        pointee = lower_type(state, element), array_type = try array_shape(state, element), span = span,
+    })
+}
+
+@hide:file
 lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
     checked :: typecheck.type_of(state.checked, id)
+    if (ast.expr_kind(state.tree, id) == .unary) {
+        expression :: ast.unary_expr(state.tree, id)
+        pointer :: try lower_expression(state, expression.operand)
+        if (state.terminated or trap_type(state, id)) return ir.no_value
+        return try pointer_address(state, pointer, checked, span)
+    }
     if (ast.expr_kind(state.tree, id) == .selection
         and sema.binding(state.resolution, id).kind == .none) {
         expression :: ast.selection_expr(state.tree, id)
-        base :: try lower_place(state, expression.base)
+        base_type :: typecheck.type_of(state.checked, expression.base)
+        base := ir.no_value
+        if (base_type.kind == .pointer) {
+            pointer :: try lower_expression(state, expression.base)
+            if (state.terminated or trap_type(state, id)) return ir.no_value
+            element :: typecheck.pointer_type(state.checked, base_type.pointer_type).element
+            base = try pointer_address(state, pointer, element, span)
+        } else base = try lower_place(state, expression.base)
         if (state.terminated or trap_type(state, id)) return ir.no_value
         return try emit(state, ir.Instruction{
             op = .field_address,
@@ -966,7 +1001,23 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
     }
     if (ast.expr_kind(state.tree, id) == .index) {
         expression :: ast.index_expr(state.tree, id)
-        base :: try lower_place(state, expression.base)
+        base_type :: typecheck.type_of(state.checked, expression.base)
+        base := ir.no_value
+        if (base_type.kind == .pointer) {
+            pointer :: try lower_expression(state, expression.base)
+            if (state.terminated or trap_type(state, id)) return ir.no_value
+            descriptor :: typecheck.pointer_type(state.checked, base_type.pointer_type)
+            if (descriptor.many) {
+                index :: try lower_expression(state, expression.index)
+                if (state.terminated) return ir.no_value
+                offset :: try emit(state, ir.Instruction{
+                    op = .pointer_offset, type = .pointer, left = pointer, right = index,
+                    pointee = lower_type(state, checked), array_type = try array_shape(state, checked), span = span,
+                })
+                return try pointer_address(state, offset, checked, span)
+            }
+            base = try pointer_address(state, pointer, descriptor.element, span)
+        } else base = try lower_place(state, expression.base)
         if (state.terminated) return ir.no_value
         index :: try lower_expression(state, expression.index)
         if (state.terminated or trap_type(state, id)) return ir.no_value
@@ -1014,7 +1065,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             # ranges have no physical value; only lower_for decomposes an iterable.
             if (!trap_type(state, id)) unreachable
         }
-        .array_type, .record_type, .enum_type, .union_type, .distinct_type: {
+        .array_type, .pointer_type, .record_type, .enum_type, .union_type, .distinct_type: {
             if (!trap_type(state, id)) {
                 trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
             }
@@ -1091,6 +1142,27 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .identifier, .selection: {
             if (ast.expr_kind(tree, id) == .selection
                 and sema.binding(state.resolution, id).kind == .none) {
+                selection :: ast.selection_expr(tree, id)
+                base_type :: typecheck.type_of(state.checked, selection.base)
+                if (base_type.kind == .pointer) {
+                    descriptor :: typecheck.pointer_type(state.checked, base_type.pointer_type)
+                    if (!descriptor.many and descriptor.element.kind == .array) {
+                        pointer :: try lower_expression(state, selection.base)
+                        if (state.terminated or trap_type(state, id)) return ir.no_value
+                        member :: ast.source_text(tree, ast.node_span(tree, selection.member))
+                        array :: typecheck.array_type(state.checked, descriptor.element.array_type)
+                        if (mem.eql(member, "len")) return try constant(state, ir.Value{
+                            type = .usize, data = ir.ValueData{ unsigned = u64(array.len) },
+                        }, span)
+                        if (mem.eql(member, "ptr")) {
+                            zero :: try constant(state, ir.Value{ type = .usize, data = ir.ValueData{ unsigned = 0 } }, span)
+                            return try emit(state, ir.Instruction{
+                                op = .pointer_offset, type = .pointer, left = pointer, right = zero,
+                                pointee = lower_type(state, array.element), array_type = try array_shape(state, array.element), span = span,
+                            })
+                        }
+                    }
+                }
                 if (is_place(state, id)) {
                     address :: try lower_place(state, id)
                     if (state.terminated) return ir.no_value
@@ -1120,6 +1192,27 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .unary: {
             expression :: ast.unary_expr(tree, id)
+            if (expression.operator == .address_of) {
+                if (!is_place(state, expression.operand)) {
+                    _ = try lower_expression(state, expression.operand)
+                    if (!state.terminated) _ = trap_type(state, id)
+                    return ir.no_value
+                }
+                address :: try lower_place(state, expression.operand)
+                if (state.terminated or trap_type(state, id)) return ir.no_value
+                element :: typecheck.type_of(state.checked, expression.operand)
+                return try emit(state, ir.Instruction{
+                    op = .pointer_from_address, type = .pointer, left = address,
+                    pointee = lower_type(state, element), array_type = try array_shape(state, element), span = span,
+                })
+            }
+            if (expression.operator == .dereference) {
+                address :: try lower_place(state, id)
+                if (state.terminated) return ir.no_value
+                return try emit(state, ir.Instruction{
+                    op = .load_address, type = type, array_type = shape, left = address, span = span,
+                })
+            }
             if (expression.operator == .negate and ir.integer_bits(type) != 0 and !ir.unsigned_integer(type) and ast.expr_kind(tree, expression.operand) == .literal_int) {
                 text :: ast.source_text(tree, ast.node_span(tree, expression.operand))
                 magnitude_limit :: ir.integer_max(type) + 1
@@ -1134,6 +1227,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             op ir.Op :: match expression.operator {
                 .negate: .negate
                 .logical_not: .logical_not
+                .address_of, .dereference: unreachable
             }
             return try emit(state, ir.Instruction{ op = op, type = type, left = operand, span = span })
         }

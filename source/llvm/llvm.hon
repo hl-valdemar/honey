@@ -133,7 +133,7 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         .float: try io.write_all(output, "double")
         .bool: try io.write_all(output, "i1")
         .string: try io.write_all(output, "%string")
-        .function: try io.write_all(output, "ptr")
+        .function, .pointer: try io.write_all(output, "ptr")
         .address: try io.write_all(output, "%address")
         .array: {
             shape :: module.arrays.items[usize(type.shape)]
@@ -275,6 +275,7 @@ print_call proc(output io.Writer, module @ir.Module, type Type, operand usize) v
         .float: try io.print("  call void @print_float(double %r{})\n", output, {operand})
         .bool: try io.print("  call void @print_bool(i1 %r{})\n", output, {operand})
         .string: try io.print("  call void @print_string(%string %r{})\n", output, {operand})
+        .pointer: try io.write_all(output, "  call void @out(i32 1, ptr @pointer_text, i64 9)\n")
         .array, .record: {
             try io.print("  call void @print_array{}(", output, {u32(type.shape)})
             try write_type(output, module, type)

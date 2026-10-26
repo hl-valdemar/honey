@@ -24,6 +24,7 @@ Type :: enum {
     array
     record
     address
+    pointer
     i8, i16, i32, isize
     u8, u16, u32, u64, usize
 }
@@ -74,6 +75,7 @@ integer_min proc(type Type) i64 {
 
 ValueData :: union {
     integer i64
+    # source pointers use run-wide handles; internal addresses use frame-local IDs below.
     unsigned u64
     real f64
     boolean bool
@@ -141,6 +143,9 @@ Op :: enum {
     field_address
     load_address
     store_address
+    pointer_from_address
+    pointer_address
+    pointer_offset
     negate
     convert
     logical_not
@@ -160,6 +165,7 @@ Op :: enum {
 Instruction :: struct {
     op Op
     type Type = .void
+    # pointer operations describe their pointee here, not aggregate result storage.
     array_type ArrayId = no_array
     pointee Type = .invalid
     span diagnostics.Span = diagnostics.Span{ start = 0, end = 0 }
@@ -395,7 +401,7 @@ storage_alignment proc(module @Module, type Type, shape ArrayId) usize {
     if (aggregate(type)) return module.arrays.items[usize(shape)].alignment
     bits :: integer_bits(type)
     if (bits != 0) return divtrunc!(bits, 8)
-    return if (type == .float or type == .string or type == .function) 8 else 1
+    return if (type == .float or type == .string or type == .function or type == .pointer) 8 else 1
 }
 
 storage_size proc(module @Module, type Type, shape ArrayId) usize {
@@ -403,7 +409,7 @@ storage_size proc(module @Module, type Type, shape ArrayId) usize {
     bits :: integer_bits(type)
     if (bits != 0) return divtrunc!(bits, 8)
     return match type {
-        .float, .function: 8
+        .float, .function, .pointer: 8
         .string: 16
         .bool: 1
         .void: 0
@@ -457,6 +463,7 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
         .bool: bits = if (value.data.boolean) 1 else 0
         .string: bits = u64(value.data.string)
         .function: bits = u64(value.data.function)
+        .pointer: bits = value.data.unsigned
         .void: return
         else: bits = ptrcast!(@u64, &value.data.integer)^
     }

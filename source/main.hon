@@ -208,6 +208,7 @@ print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.
         .float: try io.print("{d}", output, {value.data.real})
         .bool: try io.print("{}", output, {value.data.boolean})
         .string: try io.print("{s}", output, {ir.string_bytes(module, value.data.string)})
+        .pointer: try io.write_all(output, "<pointer>")
         .array, .record: {
             shape :: module.arrays.items[usize(value.array_type)]
             count :: if (value.type == .array) shape.len else shape.fields.len

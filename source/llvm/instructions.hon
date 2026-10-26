@@ -168,6 +168,27 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
             try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
         }
+        .pointer_from_address: {
+            address :: try load(state, instruction.left)
+            flag :: fresh(state)
+            position :: location(state.line_starts, instruction.span)
+            try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, address})
+            try io.print("  call void @check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
+            try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {result, address})
+        }
+        .pointer_address: {
+            pointer :: try load(state, instruction.left)
+            address :: fresh(state)
+            try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
+            try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
+        }
+        .pointer_offset: {
+            pointer :: try load(state, instruction.left)
+            index :: try load(state, instruction.right)
+            try io.print("  %r{} = getelementptr ", output, {result})
+            try write_type(output, state.module, Type{ kind = instruction.pointee, shape = instruction.array_type })
+            try io.print(", ptr %r{}, i64 %r{}\n", output, {pointer, index})
+        }
         .load_address, .store_address: {
             address :: try load(state, instruction.left)
             pointer :: fresh(state)

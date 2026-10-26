@@ -9,7 +9,8 @@ selection through the interpreter and native backend. concrete 8/16/32/64-bit
 integers, checked numeric conversions, records/tuples, construction/defaults,
 enums, distinct/alias types, overlapping untagged/tagged unions, field reads/writes
 and exhaustive statement/value matching work through both execution paths.
-the driver retains frontend storage
+source data pointers/references now support aliasing, mutation, calls and aggregate
+storage through both execution paths. the driver retains frontend storage
 and source provenance through `@source/compilation`, with compilation-wide AST node identities.
 file commands retain single-file behavior; directory commands compile the
 package's production files and load its dependencies in separate scopes.
@@ -40,6 +41,8 @@ test discovery and FFI remain outside these completed slices.
   - [x] records/tuples, typed/contextual/anonymous construction, field defaults and reads/writes, nested aggregate value copies, imported record types and constructors through interpreter/native execution.
   - [x] nominal enums and distinct types, transparent declaration/type aliases, overlapping untagged/tagged unions, contextual payload construction, active-field checks and exhaustive scalar/enum/tagged-union matching through interpreter/native execution. pointer captures, inline specialization, sum composition and yielding value blocks remain with their respective later gates.
 - [ ] memory representation: source pointers/references, mutable and sentinel slices, optionals, layout/cast builtins and allocator-required libc calls. internal IR array addresses are not source pointers. examples: `std/mem/mem.hon`, `std/arraylist/arraylist.hon`.
+  - [x] source data pointers/references: `@T`/`*T`, `mut`, address-taking and dereference, pointer-aware fields/indexing, array `.len`/`.ptr`, readonly weakening, location equality, recursive pointer-linked records and shared pointees across interpreter/native calls and aggregate copies.
+  - [ ] function-pointer signatures and general pointer arithmetic; mutable/sentinel slices, optionals, layout/cast builtins and allocator-required libc calls.
 - [ ] fallible results and cleanup: error-set composition, `try`/`catch`, `defer`/`errdefer`; infrastructure errors remain distinct from diagnostic traps. examples: `source/main.hon:41`, `source/sema/check/check.hon:117`.
 - [ ] generic specialization and compile-time execution/reflection sufficient for existing `ArrayList`, hash maps, `enummap`, `meta` and `io.print`; include type/value parameters and compile-time generated storage.
 - [ ] remaining source constructs: collection/index iteration, expression-valued control flow and `yield`, compound updates and multiline strings. examples: `source/parser/parse.hon`, `source/llvm/runtime.hon`.

@@ -11,6 +11,245 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "pointer_assignment_evaluates_rhs_first_once": (
+        """
+        Box :: struct { value i16, count i16 }
+        target proc(p @mut Box) @mut Box {
+            p.count = p.count + 1
+            return p
+        }
+        input proc(p @mut Box) i16 {
+            p.count = p.count + 10
+            return p.count
+        }
+        main proc() [2]i16 {
+            box Box := { value = 0, count = 0 }
+            target(&box).value = input(&box)
+            return [box.value, box.count]
+        }
+        """, b"[10, 11]\n", None,
+    ),
+    "pointer_recursive_record_type": (
+        """
+        Node :: struct { value i16, next @Node }
+        read_next proc(p @Node) i16 { return p.next.value }
+        main proc() i16 { return 42 }
+        """, b"42\n", None,
+    ),
+    "pointer_many_dereference": (
+        """
+        read proc(p *i16) i16 { return p^ }
+        main proc() i16 {
+            values [1]mut i16 := [42]
+            return read((&values).ptr)
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_many_from_array_element": (
+        """
+        main proc() i16 {
+            values [3]mut i16 := [1, 2, 3]
+            pointer *mut i16 :: &values[0]
+            pointer[2] = 42
+            return values[2]
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_readonly_child_type_rejected": (
+        "read proc(p @u16) u16 { return p^ }\nmain proc() u16 { value i16 := 42\nreturn read(&value) }",
+        b"", b"incompatible value type",
+    ),
+    "pointer_scalar_alias_across_calls": (
+        """
+        identity proc(p @mut i16) @mut i16 { return p }
+        update proc(p @mut i16) void { p^ = p^ + 2 }
+        main proc() i16 {
+            value i16 := 40
+            pointer :: identity(&value)
+            update(pointer)
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_readonly_parameter": (
+        """
+        read proc(p @i16) i16 { return p^ }
+        main proc() i16 {
+            value i16 := 42
+            return read(&value)
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_record_alias_and_value_copy": (
+        """
+        Point :: struct { x i16, y i16 }
+        set proc(p @mut Point) void { p.x = 40 }
+        main proc() i16 {
+            point Point := { x = 1, y = 2 }
+            pointer :: &point
+            copy :: pointer^
+            set(pointer)
+            if (copy.x != 1) return -1
+            return point.x + pointer.y
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_array_and_many_index": (
+        """
+        update proc(p @mut [3]mut i16) void {
+            p[1] = p[0] + 2
+            values :: p.ptr
+            values[2] = values[1]
+        }
+        main proc() i16 {
+            values [3]mut i16 := [40, 0, 0]
+            update(&values)
+            if ((&values).len != 3) return -1
+            return values[2]
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_aggregate_copy_keeps_alias": (
+        """
+        Holder :: struct { pointer @mut i16 }
+        identity proc(h Holder) Holder { return h }
+        main proc() i16 {
+            value i16 := 40
+            first :: Holder { pointer = &value }
+            second :: identity(first)
+            pointers [2]@mut i16 :: [first.pointer, second.pointer]
+            pointers[1]^ = pointers[0]^ + 2
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_global_returned_from_callee": (
+        """
+        value i16 :: 42
+        address proc() @i16 { return &value }
+        recurse proc(p @i16, n i16) i16 {
+            if (n == 0) return p^
+            return recurse(p, n - 1)
+        }
+        main proc() i16 { return recurse(address(), 20) }
+        """, b"42\n", None,
+    ),
+    "pointer_location_identity": (
+        """
+        Point :: struct { x i16, y i16 }
+        identity proc(p @mut i16) @mut i16 { return p }
+        main proc() bool {
+            point Point := { x = 40, y = 2 }
+            values [2]mut i16 := [40, 2]
+            first :: &point
+            second :: &point
+            return (
+                first == second
+                and identity(&point.x) == &point.x
+                and &point.x != &point.y
+                and (&values).ptr == (&values).ptr
+            )
+        }
+        """, b"true\n", None,
+    ),
+    "pointer_union_roundtrip": (
+        """
+        Storage :: union { pointer @mut i16, same @mut i16 }
+        main proc() i16 {
+            value i16 := 40
+            storage :: Storage { pointer = &value }
+            pointer :: storage.same
+            pointer^ = pointer^ + 2
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_nested_array_aggregate": (
+        """
+        Point :: struct { x i16, y i16 }
+        main proc() i16 {
+            values [2]mut Point := [Point { x = 40, y = 2 }, Point { x = 0, y = 0 }]
+            pointer :: (&values).ptr
+            pointer[1] = pointer[0]
+            pointer[0].x = 9
+            return values[1].x + values[1].y
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_to_pointer": (
+        """
+        set proc(p @mut @mut i16) void { p^^ = 42 }
+        main proc() i16 {
+            value i16 := 0
+            pointer := &value
+            set(&pointer)
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_repeated_address_in_loop": (
+        """
+        main proc() i16 {
+            value i16 := 0
+            for 0..42 |i| {
+                pointer :: &value
+                pointer^ = i16(i) + 1
+            }
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_zero_sized_array_elements": (
+        """
+        Empty :: struct {}
+        main proc() bool {
+            values [2]mut Empty := [Empty {}, Empty {}]
+            pointer :: (&values).ptr
+            pointer[1] = pointer[0]
+            return (&values).len == 2
+        }
+        """, b"true\n", None,
+    ),
+    "pointer_array_bounds_trap": (
+        "main proc() i16 { values [1]mut i16 := [42]\nreturn (&values)[1] }",
+        b"", b"index out of bounds",
+    ),
+    "pointer_address_before_initialization": (
+        "main proc() i16 { pointer :: &value\nvalue i16 := 42\nreturn pointer^ }",
+        b"", b"read before initialization",
+    ),
+    "pointer_constant_is_readonly": (
+        "main proc() i16 { value i16 :: 40\npointer :: &value\npointer^ = 42\nreturn value }",
+        b"", b"",
+    ),
+    "pointer_readonly_parameter_write_rejected": (
+        "set proc(p @i16) void { p^ = 42 }\nmain proc() i16 { value i16 := 0\nset(&value)\nreturn value }",
+        b"", b"",
+    ),
+    "pointer_array_readonly_elements": (
+        "main proc() i16 { values [1]i16 := [40]\npointer :: &values\npointer[0] = 42\nreturn values[0] }",
+        b"", b"",
+    ),
+    "pointer_readonly_not_mutable_argument": (
+        "set proc(p @mut i16) void { p^ = 42 }\nmain proc() i16 { value i16 :: 0\nset(&value)\nreturn value }",
+        b"", b"incompatible value type",
+    ),
+    "pointer_nonpointer_dereference_rejected": (
+        "main proc() i16 { value i16 :: 42\nreturn value^ }",
+        b"", b"dereference requires",
+    ),
+    "pointer_void_pointee_rejected": (
+        "unused proc(p @void) void {}\nmain proc() int { return 42 }",
+        b"42\n", b"pointer requires",
+    ),
+    "pointer_temporary_address_rejected": (
+        "main proc() i16 { pointer :: &(40 + 2)\nreturn pointer^ }",
+        b"", b"address-of requires",
+    ),
+    "pointer_unused_invalid_path": (
+        "unused proc() int { return 42^ }\nmain proc() int { return 42 }",
+        b"42\n", b"dereference requires",
+    ),
     "match_float_ranges": (
         """
         score proc(n f64) i16 {
@@ -1000,11 +1239,25 @@ def check_record_packages(temporary, executable):
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
+    (library / "functions.hon").write_text(
+        "set proc(p @mut Point) void { p.x = 40 }\n"
+        "identity proc(p @mut Point) @mut Point { return p }\n"
+    )
+    (app / "main.hon").write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            p lib.Point := { x = 1 }
+            pointer :: lib.identity(&p)
+            lib.set(pointer)
+            return pointer.x + p.y
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
     types.write_text("Point :: struct { x i16, y i16 = 32767 + 1 }\n")
     check(app, executable, (b"", b"integer arithmetic overflow"))
     trapped = run(str(HONEY), "run", str(app))
     assert trapped.stderr.startswith(f"{types.resolve()}:1:".encode()), outcome(trapped)
-    return 2
+    return 3
 
 
 def check_data_model_packages(temporary, executable):
@@ -1105,6 +1358,13 @@ def check_dependency_provenance(temporary, executable):
                 return a[1]
             }
         """, 5, 12, False),
+        ("""
+            fail proc() int {
+                a :: [42]
+                pointer :: &a
+                return pointer[1]
+            }
+        """, 6, 12, False),
         ("""
             fail proc() int {
                 before :: after

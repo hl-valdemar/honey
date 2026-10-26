@@ -240,6 +240,8 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
             or next_n_is(state, 1, .struct)
             or next_n_is(state, 1, .enum) or next_n_is(state, 1, .union)
             or next_n_is(state, 1, .distinct)
+            or next_n_is(state, 1, .at)
+            or (next_n_is(state, 1, .star) and pointer_binding_starts(state))
             or (next_n_is(state, 1, .open_bracket) and array_starts_type(state))
             or next_n_is(state, 1, .double_colon)
             or next_n_is(state, 1, .colon_equal)
@@ -254,7 +256,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .return: return try parse_return(state, allow_else)
         .break, .continue: return try parse_loop_control(state, allow_else)
         .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket, .open_curly, .struct,
-        .enum, .union, .distinct, .alias, .dot, .match: {
+        .enum, .union, .distinct, .alias, .dot, .match, .ampersand, .at, .star: {
             expression :: try parse_expr(state)
             if next_is(state, .equal) return try parse_assignment(state, expression, allow_else)
             return try ast.add_expression_stmt(state.builder, expression)
@@ -603,6 +605,18 @@ parse_statement_decl proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_type proc(state @mut State) ast.NodeId ! ParseError {
+    if (next_is(state, .at) or next_is(state, .star)) {
+        token :: current(state)
+        state.next_token += 1
+        mutable :: next_is(state, .mut)
+        if (mutable) state.next_token += 1
+        element :: try parse_type(state)
+        return try ast.add_pointer_type(state.builder, ast.Span{
+            start = token.span.start,
+            end = ast.builder_span(state.builder, element).end,
+            source = token.span.source,
+        }, element, mutable, token.kind == .star)
+    }
     if next_is(state, .open_bracket) {
         open :: try consume(state, .open_bracket)
         count ?ast.NodeId := null
@@ -653,6 +667,7 @@ starts_type proc(kind lexer.TokenKind) bool {
     return (
         kind == .ident or kind == .open_bracket or kind == .struct
         or kind == .enum or kind == .union or kind == .distinct or kind == .alias
+        or kind == .at or kind == .star
     )
 }
 
@@ -979,11 +994,7 @@ parse_record_field proc(state @mut State, declaration bool) ast.NodeId ! ParseEr
     value ?ast.NodeId := null
     named :: member_name(current(state).kind) and (
         (!declaration and next_n_is(state, 1, .equal))
-        or (declaration and (
-            next_n_is(state, 1, .ident) or next_n_is(state, 1, .open_bracket)
-            or next_n_is(state, 1, .struct) or next_n_is(state, 1, .enum)
-            or next_n_is(state, 1, .union) or next_n_is(state, 1, .distinct)
-        ))
+        or (declaration and starts_type(state.tokens[state.next_token + 1].kind))
     )
     if (named) {
         token :: if (declaration) try consume(state, .ident) else try consume_member(state, false)
@@ -1067,7 +1078,11 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
         operand_span :: ast.builder_span(state.builder, operand)
-        operator ast.UnaryOperator :: if (token.kind == .bang) .logical_not else .negate
+        operator ast.UnaryOperator :: match token.kind {
+            .bang: .logical_not
+            .ampersand: .address_of
+            else: .negate
+        }
         yield try ast.add_unary(
             state.builder,
             ast.Span{
@@ -1086,6 +1101,16 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     while true {
         skip_continuation_newlines(state)
         token = current(state)
+        if (token.kind == .caret) {
+            state.next_token += 1
+            left = try ast.add_unary(state.builder, ast.Span{
+                start = state.tokens[expression_start].span.start,
+                end = token.span.end,
+                source = token.span.source,
+            }, .dereference, left)
+            left_grouped = false
+            continue
+        }
         if (token.kind == .open_paren) {
             left = try parse_call(state, left, state.tokens[expression_start].span.start)
             left_grouped = false
@@ -1325,12 +1350,31 @@ invalid_array_literal proc(state @mut State, start, end u32) ast.NodeId ! ParseE
 }
 
 @hide:file
+pointer_binding_starts proc(state @State) bool {
+    depth := usize(0)
+    for (state.next_token + 2)..(state.tokens.len) |i| {
+        kind :: state.tokens[i].kind
+        if (kind == .open_curly or kind == .open_bracket or kind == .open_paren) depth += 1
+        if (kind == .close_curly or kind == .close_bracket or kind == .close_paren) {
+            if (depth == 0) return false
+            depth -= 1
+        }
+        if (depth != 0) continue
+        if (kind == .double_colon or kind == .colon_equal) return true
+        if (kind == .newline or kind == .eof or kind == .equal) return false
+    }
+    return false
+}
+
+@hide:file
 named_binding_starts proc(state @State) bool {
     return (
         next_is(state, .ident)
         and (
             next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
             or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc)
+            or next_n_is(state, 1, .at)
+            or (next_n_is(state, 1, .star) and pointer_binding_starts(state))
         )
     )
 }
@@ -1339,6 +1383,7 @@ named_binding_starts proc(state @State) bool {
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
+        .at, .star: return try parse_type(state)
         .struct: return try parse_record_type(state)
         .enum: return try parse_enum_type(state)
         .union: return try parse_union_type(state)
@@ -1620,7 +1665,7 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 @hide:file
 prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
     return match kind {
-        .minus, .bang: BindingPowerScalar(50)
+        .minus, .bang, .ampersand: BindingPowerScalar(50)
         else: null
     }
 }

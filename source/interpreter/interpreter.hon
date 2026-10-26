@@ -42,6 +42,19 @@ Address :: struct {
     scalar ?@mut ir.Value = null
     initialized ?@mut bool = null
     raw bool = false
+    # source handles retain root identity and native offsets, never frame-local address IDs.
+    root ?@mut ir.Value = null
+    root_type ir.Type = .invalid
+    root_array ir.ArrayId = ir.no_array
+    byte_offset usize = 0
+}
+
+@hide:file
+Pointer :: struct {
+    root @mut ir.Value
+    root_type ir.Type
+    root_array ir.ArrayId
+    byte_offset usize
 }
 
 @hide:file
@@ -90,6 +103,8 @@ run proc(
         globals[i].value = aggregate_view(global.type, global.array_type, aggregate_globals[global_offset..global_offset + cells])
         global_offset += cells
     }
+    pointers := arraylist.init(Pointer, allocator)
+    defer arraylist.deinit(&pointers)
     frames := arraylist.init(Frame, allocator)
     defer {
         for (frames.items) |frame| free_frame(allocator, frame)
@@ -261,6 +276,9 @@ run proc(
                     cells = &[],
                     initialized = &local.initialized,
                 }
+                address.root = &local.value
+                address.root_type = address.type
+                address.root_array = address.array_type
                 if (ir.aggregate(address.type)) address.cells = local.value.data.elements
                 else address.scalar = &local.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
@@ -287,6 +305,9 @@ run proc(
                     array_type = instruction.array_type,
                     cells = &[],
                 }
+                address.root = &global.value
+                address.root_type = address.type
+                address.root_array = address.array_type
                 if (ir.aggregate(address.type)) address.cells = global.value.data.elements
                 else address.scalar = &global.value
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
@@ -305,10 +326,12 @@ run proc(
                 }
                 width :: if (base.raw) ir.storage_size(module, shape.element, shape.element_array) else element_cells(module, shape)
                 start :: usize(index) * width
-                address := Address{
-                    type = instruction.pointee, array_type = instruction.array_type,
-                    cells = base.cells[start..start + width], initialized = base.initialized, raw = base.raw,
-                }
+                address := base
+                address.type = instruction.pointee
+                address.array_type = instruction.array_type
+                address.cells = base.cells[start..start + width]
+                address.scalar = null
+                address.byte_offset += usize(index) * ir.storage_size(module, shape.element, shape.element_array)
                 if (!address.raw and !ir.aggregate(address.type)) address.scalar = &address.cells[0]
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
@@ -329,13 +352,69 @@ run proc(
                 raw :: base.raw or shape.is_union
                 width :: if (raw) ir.storage_size(module, field.type, field.array_type) else if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
                 start :: if (raw) field.byte_offset else field.offset
-                address := Address{
-                    type = instruction.pointee, array_type = instruction.array_type,
-                    cells = base.cells[start..start + width], initialized = base.initialized, raw = raw,
-                }
+                address := base
+                address.type = instruction.pointee
+                address.array_type = instruction.array_type
+                address.cells = base.cells[start..start + width]
+                address.scalar = null
+                address.raw = raw
+                address.byte_offset += field.byte_offset
                 if (!raw and !ir.aggregate(address.type)) address.scalar = &address.cells[0]
                 frames.items[frame_index].addresses[usize(instruction.destination)] = address
                 value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+            }
+            .pointer_from_address: {
+                id :: frames.items[frame_index].values[usize(instruction.left)].data.address
+                address :: frames.items[frame_index].addresses[usize(id)]
+                if address.initialized |initialized| {
+                    if (!initialized^) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
+                }
+                value = try pointer_value(&pointers, Pointer{
+                    root = address.root?,
+                    root_type = address.root_type,
+                    root_array = address.root_array,
+                    byte_offset = address.byte_offset,
+                })
+            }
+            .pointer_address: {
+                handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (handle >= u64(pointers.items.len)) {
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                }
+                location :: pointers.items[usize(handle)]
+                root := Address{
+                    type = location.root_type,
+                    array_type = location.root_array,
+                    cells = &[],
+                    root = location.root,
+                    root_type = location.root_type,
+                    root_array = location.root_array,
+                }
+                if (ir.aggregate(root.type)) root.cells = root.root?^.data.elements
+                else root.scalar = root.root
+                if (project_pointer(module, root, location.byte_offset, instruction.pointee, instruction.array_type)) |address| {
+                    frames.items[frame_index].addresses[usize(instruction.destination)] = address
+                    value = ir.Value{ type = .address, data = ir.ValueData{ address = u32(instruction.destination) } }
+                } else {
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                }
+            }
+            .pointer_offset: {
+                handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (handle >= u64(pointers.items.len)) {
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                }
+                address := pointers.items[usize(handle)]
+                index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                stride :: ir.storage_size(module, instruction.pointee, instruction.array_type)
+                if (stride != 0 and index > u64(divtrunc!(maxval!(usize) - address.byte_offset, stride))) {
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                }
+                address.byte_offset += usize(index) * stride
+                if (address.byte_offset > ir.storage_size(module, address.root_type, address.root_array)) {
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                }
+                value = try pointer_value(&pointers, address)
             }
             .load_address, .store_address: {
                 id :: frames.items[frame_index].values[usize(instruction.left)].data.address
@@ -447,6 +526,11 @@ run proc(
                         .not_equal: left.data.boolean != right.data.boolean
                         else: unreachable
                     }
+                    .pointer: result = match instruction.op {
+                        .equal: left.data.unsigned == right.data.unsigned
+                        .not_equal: left.data.unsigned != right.data.unsigned
+                        else: unreachable
+                    }
                     else: unreachable
                 }
                 value = ir.Value{ type = .bool, data = ir.ValueData{ boolean = result } }
@@ -457,6 +541,77 @@ run proc(
         }
     }
     unreachable
+}
+
+@hide:file
+pointer_value proc(pointers @mut arraylist.ArrayList(Pointer), address Pointer) ir.Value ! mem.AllocError {
+    # ponytail: linear location interning; use a location-keyed map if distinct-address workloads grow.
+    root_bits :: ptrcast!(@usize, &address.root)^
+    for (pointers.items) |location, handle| {
+        if (ptrcast!(@usize, &location.root)^ == root_bits and location.byte_offset == address.byte_offset) {
+            # refresh metadata if a later invocation reused a released frame's allocation.
+            pointers.items[handle] = address
+            return ir.Value{ type = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
+        }
+    }
+    handle :: pointers.items.len
+    try arraylist.append(pointers, address)
+    return ir.Value{ type = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
+}
+
+@hide:file
+project_pointer proc(
+    module @ir.Module,
+    base Address,
+    offset usize,
+    type ir.Type,
+    array_type ir.ArrayId,
+) ?Address {
+    if (offset == 0 and base.type == type and base.array_type == array_type) return base
+    if (!ir.aggregate(base.type)) return null
+    shape :: module.arrays.items[usize(base.array_type)]
+    if (base.raw or shape.is_union) {
+        width :: ir.storage_size(module, type, array_type)
+        if (offset > base.cells.len or width > base.cells.len - offset) return null
+        address := base
+        address.type = type
+        address.array_type = array_type
+        address.cells = base.cells[offset..offset + width]
+        address.scalar = null
+        address.raw = true
+        address.byte_offset += offset
+        return address
+    }
+    if (shape.kind == .array) {
+        stride :: ir.storage_size(module, shape.element, shape.element_array)
+        index :: if (stride == 0) usize(0) else divtrunc!(offset, stride)
+        if (index >= shape.len) return null
+        width :: element_cells(module, shape)
+        start :: index * width
+        child := base
+        child.type = shape.element
+        child.array_type = shape.element_array
+        child.cells = base.cells[start..start + width]
+        child.scalar = null
+        child.byte_offset += index * stride
+        if (!ir.aggregate(child.type)) child.scalar = &child.cells[0]
+        return project_pointer(module, child, offset - index * stride, type, array_type)
+    }
+    for (shape.fields) |field| {
+        if (offset < field.byte_offset) continue
+        relative :: offset - field.byte_offset
+        if (relative > ir.storage_size(module, field.type, field.array_type)) continue
+        width :: if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
+        child := base
+        child.type = field.type
+        child.array_type = field.array_type
+        child.cells = base.cells[field.offset..field.offset + width]
+        child.scalar = null
+        child.byte_offset += field.byte_offset
+        if (!ir.aggregate(child.type)) child.scalar = &child.cells[0]
+        if (project_pointer(module, child, relative, type, array_type)) |address| return address
+    }
+    return null
 }
 
 @hide:file
