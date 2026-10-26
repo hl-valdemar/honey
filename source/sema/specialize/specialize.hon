@@ -360,17 +360,15 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
+    # A type result has no runtime call: every input participates in specialization.
+    type_result :: is_type(state, ast.function_decl(&state.tree, function).return_type)
     runtime := usize(0)
     for (0..count) |i| {
-        if (!ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
-    }
-    if (runtime != 0 and is_type(state, ast.function_decl(&state.tree, function).return_type)) {
-        try reject(state, call, .comptime_argument_required)
-        return
+        if (!type_result and !ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
     }
     supplied :: ast.call_arg_count(&state.tree, call)
     explicit :: supplied == count
-    if (!explicit and supplied != runtime) {
+    if (!explicit and (type_result or supplied != runtime)) {
         try reject(state, call, .argument_count_mismatch)
         return
     }
@@ -387,7 +385,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
         argument :: ast.call_arg(&state.tree, call, position)
         position += 1
         try expand(state, argument)
-        if (view.comptime) {
+        if (type_result or view.comptime) {
             state.evaluation_diagnostic = diagnostics.no_diagnostic
             annotation := view.type
             if (contextual_literal(state, argument))
@@ -507,7 +505,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
         for (0..count) |i| {
             parameter :: ast.function_param(&state.tree, signature, i)
             view :: ast.param(&state.tree, parameter)
-            if (!view.comptime or is_type(state, view.type)) continue
+            if ((!type_result and !view.comptime) or is_type(state, view.type)) continue
             original :: ast.call_arg(&state.tree, call, i)
             constraint :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, original), view.type, original)
             try refresh(state)
@@ -528,6 +526,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
 @hide:file
 instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     function :: state.instances.items[index].function
+    type_result :: is_type(state, ast.function_decl(&state.tree, function).return_type)
     count :: state.original_count
     clone_start :: ast.node_count(&state.tree)
     mapping :: state.mapping
@@ -535,7 +534,7 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     parameters :: ast.function_param_count(&state.tree, function)
     for (0..parameters) |i| {
         parameter :: ast.function_param(&state.tree, function, i)
-        if (!ast.param(&state.tree, parameter).comptime) continue
+        if (!type_result and !ast.param(&state.tree, parameter).comptime) continue
         value :: state.instances.items[index].arguments[i]
         replacement := value.node
         annotation :: ast.param(&state.tree, parameter).type
@@ -571,7 +570,7 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     for (0..parameters) |i| {
         parameter :: ast.function_param(&state.tree, clone, i)
         annotation :: ast.param(&state.tree, parameter).type
-        if (ast.param(&state.tree, parameter).comptime and !is_type(state, annotation)) {
+        if ((type_result or ast.param(&state.tree, parameter).comptime) and !is_type(state, annotation)) {
             if (!try valid_value(state, annotation, state.instances.items[index].arguments[i])) {
                 value :: state.instances.items[index].arguments[i]
                 code :: if (value.kind == .integer and try integer_type(state, annotation))

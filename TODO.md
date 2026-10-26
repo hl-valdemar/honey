@@ -22,8 +22,9 @@ compile-time arguments and generated record/array storage through both paths.
 ordinary procedures can compute scalar and nested record/array compile-time values
 using mutable locals, loops and recursive calls; explicit `$()` expressions use
 the same constant evaluation path. compile-time `if` selection and type comparisons
-specialize only the selected body; general type-valued execution, reflection and
-generic library acceptance remain open.
+specialize only the selected body. type-producing procedures also accept ordinary
+constant inputs, cached and erased like explicit compile-time arguments; general
+type-valued execution, reflection and generic library acceptance remain open.
 the driver retains frontend storage and source provenance through
 `@source/compilation`, with compilation-wide AST node identities.
 file commands retain single-file behavior; directory commands compile the
@@ -64,6 +65,7 @@ test discovery and FFI remain outside these completed slices.
   - [x] compile-time execution checkpoint: ordinary procedure calls with constant inputs and integer/boolean/string results reuse checking, typed IR and bounded interpreter execution. mutable scalar locals, range/while loops, break/continue, nested/generic/recursive calls, exact numeric types, runtime traps and dependency-file provenance survive argument erasure through interpreter/native execution. runtime parameters and mutable global dependencies are rejected; recompilation retains no prior execution state.
   - [x] aggregate/explicit-expression checkpoint: computed nested records/tuples and fixed arrays, contextual/dependent aggregate value parameters, normalized specialization caching and explicit `$()` expressions through interpreter/native execution. preserve by-value isolation, zero-cell shapes, integer widths, string ownership, enum/optional fields and exact IEEE float bits; reject runtime dependencies and values that would retain temporary interpreter storage. repeatable compilation restores erased expressions.
   - [x] conditional specialization checkpoint: explicit compile-time `if` guards and side-effect-free constant guards in concrete generic procedures select a body before specialization/checking. type equality retains aliases, nominal identity and structural signatures; composed error-set identity/cache keys ignore ordering, grouping and repetition. guard checking, selected-body diagnostics, scoped cleanup, runtime guards and repeatable compilation work through interpreter/native execution; both arms remain parsed and name-resolved.
+  - [x] constant-input type-procedure checkpoint: type-producing procedures accept ordinary parameters alongside `$` parameters, require every argument explicitly and evaluate/cache/erase all inputs. generated record/array storage, nominal cache identity, nested calls, dependent contextual aggregate inputs, exact erased-argument checking, source diagnostics, imported producers and repeatable compilation work through interpreter/native execution. mutable type-valued execution remains open.
   - [ ] remaining gate: general type-valued compile-time execution, compile-time match/inline expansion and reflection (`typeinfo!`, `field!`, `struct_type!`, generated type/default arrays), broader constant materialization (including unions, fallible results and storage-bearing values), plus existing-library acceptance. required collection/index iteration, expression-valued control flow, compound updates, formatting parsing and imported C-binding support may interleave with later gates.
 - [ ] remaining source constructs: collection/index iteration, expression-valued control flow and `yield`, compound updates and multiline strings. examples: `source/parser/parse.hon`, `source/llvm/runtime.hon`.
 - [ ] standard-library milestone: compile/run a multi-package program exercising existing allocation and IO, including error cleanup; no replacement miniature standard library.

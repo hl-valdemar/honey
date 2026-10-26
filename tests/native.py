@@ -11,6 +11,115 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_producer_ordinary_inputs_generate_storage_and_cache_identity": (
+        """
+        Fixed proc(T type, count usize) type { return struct { values [count]T } }
+        main proc() i16 {
+            value Fixed(i16, 2) :: { values = [40, 2] }
+            same Fixed(i16, 1 + 1) :: value
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "type_producer_mixes_explicit_and_ordinary_constant_inputs": (
+        """
+        Fixed proc($T type, count usize) type { return [count]T }
+        Choose proc(wide bool) type {
+            if (wide) return Fixed(i16, 2)
+            return Fixed(i8, 2)
+        }
+        main proc() i16 {
+            wide Choose(true) :: [40, 2]
+            narrow Choose(false) :: [1, 1]
+            return wide[0] + wide[1] + i16(narrow[0] - narrow[1])
+        }
+        """, b"42\n", None,
+    ),
+    "type_producer_computed_ordinary_inputs_reuse_typed_execution": (
+        """
+        count proc(seed usize) usize {
+            result := seed
+            while (result < 2) result = result + 1
+            return result
+        }
+        Fixed proc(size usize) type { return struct { values [size]i16 } }
+        main proc() i16 {
+            first Fixed(count(0)) :: { values = [40, 2] }
+            same Fixed(2) :: first
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "type_producer_ordinary_inputs_preserve_nominal_separation": (
+        """
+        Tag proc(value usize) type { return struct { value i16 } }
+        main proc() bool { return $(Tag(1) != Tag(2)) }
+        """, b"true\n", None,
+    ),
+    "type_producer_dependent_contextual_ordinary_input": (
+        """
+        Fixed proc($T type, $N usize, data [N]T) type {
+            return struct { values [N]T = data }
+        }
+        main proc() i16 {
+            value Fixed(i16, 2, [40, 2]) :: {}
+            same Fixed(i16, 2, [20 + 20, 2]) :: value
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "type_producer_rejects_runtime_dependency": (
+        """
+        Fixed proc(size usize) type { return [size]i16 }
+        read proc(size usize) i16 {
+            data Fixed(size) :: [40, 2]
+            return data[0] + data[1]
+        }
+        main proc() i16 { return read(2) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "type_producer_checks_unused_ordinary_input_range": (
+        """
+        Tag proc(ignored u8) type { return struct { value i16 } }
+        main proc() i16 {
+            value Tag(256) :: { value = 42 }
+            return value.value
+        }
+        """, b"", b"numeric literal is outside",
+    ),
+    "type_producer_checks_erased_ordinary_input_exact_type": (
+        """
+        Tag proc(ignored i16) type { return struct { value i16 } }
+        main proc() i16 {
+            wrong u16 :: 1
+            first Tag(1) :: { value = 42 }
+            same Tag(wrong) :: first
+            return same.value
+        }
+        """, b"42\n", b"incompatible value type",
+    ),
+    "type_producer_requires_all_ordinary_inputs": (
+        """
+        Tag proc(ignored i16) type { return struct { value i16 } }
+        main proc() i16 {
+            value Tag() :: { value = 42 }
+            return value.value
+        }
+        """, b"", b"argument count does not match",
+    ),
+    "type_producer_ordinary_input_trap_keeps_original_diagnostic": (
+        """
+        count proc() usize {
+            high usize :: 18446744073709551615
+            return high + 1
+        }
+        Fixed proc(size usize) type { return [size]i16 }
+        main proc() i16 {
+            value Fixed(count()) :: [40, 2]
+            return value[0] + value[1]
+        }
+        """, b"", b"integer arithmetic overflow",
+    ),
     "comptime_composed_type_identity_is_order_independent_and_cached": (
         """
         Left :: enum { left }
@@ -786,15 +895,6 @@ CASES = {
             return second.value
         }
         """, b"42\n", None,
-    ),
-    "specialization_type_producer_rejects_runtime_parameters": (
-        """
-        Box proc($T type, ignored i16) type { return struct { value T } }
-        main proc() i16 {
-            value Box(i16, true) :: { value = 42 }
-            return value.value
-        }
-        """, b"", b"generic argument must be a compile-time value",
     ),
     "specialization_rejects_invalid_compile_time_comparison": (
         """
@@ -2974,8 +3074,8 @@ def check_specialization_packages(temporary, executable):
     app.mkdir(parents=True)
     library.mkdir()
     (library / "types.hon").write_text(textwrap.dedent("""
-        Box proc($T type) type { return struct { value T } }
-        Fixed proc($T type, $N usize) type {
+        Box proc(T type) type { return struct { value T } }
+        Fixed proc($T type, N usize) type {
             return struct { values [N]mut T }
         }
     """).strip() + "\n")
