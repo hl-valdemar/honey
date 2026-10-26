@@ -90,10 +90,13 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    Element := i8
             `    length usize := 0
             `    while (length < N) {
-            `        Element = i16
+            `        match length { 0: Element = i16, else: Element = i16 }
             `        length = length + 1
             `    }
-            `    return struct { values [length]Element }
+            `    return match length {
+            `        2: struct { values [length]Element },
+            `        else: i8(128),
+            `    }
             `}
             `data proc() [2]i16 { return [40, 2] }
             `main proc() i16 {

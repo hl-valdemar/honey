@@ -11,6 +11,171 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_match_enum_storage_and_cache_identity": (
+        """
+        Mode :: enum { tiny, pair, wide }
+        pair proc() Mode { return .pair }
+        Storage proc(mode Mode) type {
+            Result := i8
+            match mode {
+                .tiny: Result = i8,
+                .pair, .wide: {
+                    Element :: i16
+                    Result = [2]Element
+                }
+            }
+            return struct { values Result }
+        }
+        main proc() i16 {
+            value Storage(.pair) :: { values = [40, 2] }
+            cached Storage(pair()) :: value
+            tiny Storage(.tiny) :: { values = 1 }
+            return cached.values[0] + cached.values[1] + i16(tiny.values - 1)
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_ranges_transfers_and_mutable_subject": (
+        """
+        Storage proc() type {
+            Result := i8
+            size usize := 0
+            for (0..usize(5)) |index| {
+                match index {
+                    0: continue,
+                    1..=2: {
+                        Result = [1]Result
+                        size = size + 1
+                    }
+                    else: break,
+                }
+            }
+            match size {
+                0..2: return bool,
+                else: return struct { values Result, bias i16 = i16(size) },
+            }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [[40]] }
+            return i16(value.values[0][0]) + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_type_expressions_and_untaken_bodies": (
+        """
+        Select proc(wide bool) type {
+            Result := match wide {
+                true: match wide { true: i16, false: i8(128) },
+                false: i8,
+            }
+            Result = match wide { true: [2]Result, false: bool }
+            return match wide {
+                true: struct { values Result },
+                false: struct { value Result },
+            }
+        }
+        main proc() i16 {
+            wide Select(true) :: { values = [40, 2] }
+            narrow Select(false) :: { value = true }
+            if (narrow.value) return wide.values[0] + wide.values[1]
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_float_and_unsigned_boundaries": (
+        """
+        Select proc() type {
+            Result := i8
+            match u64(18446744073709551615) {
+                0..18446744073709551615: Result = bool,
+                18446744073709551615: Result = i16,
+                else: Result = i8,
+            }
+            match -1.5 {
+                (-2.0)..(-1.0): return Result,
+                else: return bool,
+            }
+        }
+        main proc() Select() { return 42 }
+        """, b"42\n", None,
+    ),
+    "type_match_checks_nonexhaustive_patterns": (
+        """
+        Bad proc() type {
+            match true { true: return i16 }
+            return i8
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"match is not exhaustive",
+    ),
+    "type_match_checks_overlapping_patterns": (
+        """
+        Bad proc() type {
+            match u8(2) {
+                0..=2: return i16,
+                2..4: return i8,
+                else: return bool,
+            }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"duplicate or overlapping match pattern",
+    ),
+    "type_match_checks_unreachable_arms": (
+        """
+        Bad proc() type {
+            return match true { else: i16, false: i8 }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"match arm is unreachable",
+    ),
+    "type_match_checks_pattern_types": (
+        """
+        Bad proc() type {
+            match u8(2) { true: return i16, else: return i8 }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_match_checks_subject_types": (
+        """
+        Bad proc() type {
+            return match "text" { else: i16 }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"match subject",
+    ),
+    "type_match_checks_selected_body": (
+        """
+        Bad proc() type {
+            match false {
+                true: return i16,
+                false: {
+                    count u8 := 255
+                    count = count + 1
+                    return [count]i16
+                }
+            }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_match_resolves_untaken_bodies": (
+        """
+        Bad proc() type {
+            return match true { true: i16, false: missing }
+        }
+        main proc() Bad() { return 42 }
+        """, b"42\n", b"unknown name",
+    ),
+    "type_match_remains_bounded": (
+        """
+        Bad proc() type {
+            while (true) {
+                match true { true: continue, false: return i16 }
+            }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
     "type_execution_retains_existing_nominal_type_identity": (
         """
         Original :: struct { value i16 }
@@ -3237,6 +3402,9 @@ def check_specialization_packages(temporary, executable):
     library.mkdir()
     (library / "types.hon").write_text(textwrap.dedent("""
         Box proc(T type) type { return struct { value T } }
+        Selected proc(wide bool) type {
+            return match wide { true: i16, false: u8 }
+        }
         Fixed proc($T type, N usize) type {
             Element := i8
             length usize := 0
@@ -3261,7 +3429,7 @@ def check_specialization_packages(temporary, executable):
     source = app / "main.hon"
     source.write_text(textwrap.dedent("""
         lib :: import "../library"
-        Element :: alias i16
+        Element :: alias lib.Selected(true)
         ImportedBox :: alias lib.Box(Element)
         main proc() i16 {
             imported ImportedBox :: { value = 40 }
@@ -3302,7 +3470,20 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:12: ".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 3
+    sizing.write_text(textwrap.dedent("""
+        Bad proc() type {
+            return match true { true: i16, true: i8, else: bool }
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() lib.Bad() { return 42 }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"duplicate or overlapping match pattern"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:2:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 4
 
 
 def check_dependency_provenance(temporary, executable):

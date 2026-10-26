@@ -1056,8 +1056,59 @@ nominal_type_value proc(state @State, id ast.NodeId) bool {
     return kind == .record_type or kind == .union_type or kind == .enum_type or kind == .distinct_type
 }
 
+# Select with ordinary checked IR so patterns, overlap and exhaustiveness have
+# the same rules as runtime matching, without checking unexecuted type bodies.
 @hide:file
-type_execution_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
+    arms := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&arms)
+    patterns := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&patterns)
+    for (0..ast.match_arm_count(&state.tree, id)) |i| {
+        arm_id :: ast.match_arm(&state.tree, id, i)
+        arm :: ast.match_arm_view(&state.tree, arm_id)
+        if (i > 0 and arm.expression != ast.match_arm_view(&state.tree,
+            ast.match_arm(&state.tree, id, 0)).expression) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .type_mismatch, ast.node_span(&state.tree, arm_id))
+            return no_index
+        }
+        patterns.items = patterns.items[..0]
+        for (0..ast.match_pattern_count(&state.tree, arm_id)) |j|
+            try arraylist.append(&patterns, ast.match_pattern(&state.tree, arm_id, j))
+        span :: ast.node_span(&state.tree, arm_id)
+        index :: try ast.add_integer(state.builder, span, u64(i))
+        selector :: try ast.add_match_arm(state.builder, span, patterns.items,
+            arm.capture, index, true, arm.catch_all)
+        try refresh(state)
+        try arraylist.append(&arms, selector)
+    }
+    selector :: try ast.add_match(state.builder, ast.node_span(&state.tree, id),
+        ast.match_expr(&state.tree, id).subject, arms.items)
+    try refresh(state)
+    selected :: try evaluate_ir(state, selector, try builtin(state, id, .usize))
+    if (selected.kind != .integer) return no_index
+    return usize(selected.magnitude)
+}
+
+@hide:file
+type_value_expression proc(state @mut State, input ast.NodeId) ast.NodeId ! Error {
+    expression := input
+    while (ast.expr_kind(&state.tree, expression) == .match_expr) {
+        if (!try type_step(state, expression)) return no_node
+        index :: try type_match_arm(state, expression)
+        if (index == no_index) return no_node
+        arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, expression, index))
+        if (!arm.expression or arm.capture != null) return no_node
+        expression = arm.body
+    }
+    return expression
+}
+
+@hide:file
+type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.NodeId ! Error {
+    expression :: try type_value_expression(state, input)
+    if (expression == no_node) return no_node
     # A recursive record needs its cached declaration before expanding its fields.
     if (is_type(state, annotation) and nominal_type_value(state, expression)) {
         concrete :: try materialize(state, Value{ kind = .type, node = expression })
@@ -1120,7 +1171,9 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
         }
         .declaration: {
             declaration :: ast.statement_decl(&state.tree, statement)
-            expression :: try type_snapshot(state, execution, declaration.initializer)
+            snapshot :: try type_snapshot(state, execution, declaration.initializer)
+            expression :: try type_value_expression(state, snapshot)
+            if (expression == no_node) return .invalid
             annotation := no_node
             if (declaration.type) |type| annotation = try type_snapshot(state, execution, type)
             else if (nominal_type_value(state, expression)) annotation = try builtin(state, expression, .type)
@@ -1197,6 +1250,21 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
                 if (!looping or flow == .returned or flow == .invalid) return flow
                 if (flow == .break) return .next
             }
+        }
+        .expression: {
+            expression :: ast.statement_expr(&state.tree, statement)
+            if (ast.expr_kind(&state.tree, expression) != .match_expr) return .invalid
+            snapshot :: try type_snapshot(state, execution, expression)
+            index :: try type_match_arm(state, snapshot)
+            if (index == no_index) return .invalid
+            arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, expression, index))
+            if (arm.capture != null) return .invalid
+            if (!arm.expression) return try execute_type_block(state, execution, arm.body)
+            value :: try type_value_expression(state, ast.match_arm_view(&state.tree,
+                ast.match_arm(&state.tree, snapshot, index)).body)
+            if (value == no_node) return .invalid
+            annotation :: try expression_type(state, value, 0)
+            if (try type_execution_value(state, value, annotation) == no_node) return .invalid
         }
         .for_stmt: return try execute_type_for(state, execution, statement)
         .block_stmt: return try execute_type_block(state, execution, ast.statement_block(&state.tree, statement))
