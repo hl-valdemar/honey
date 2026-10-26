@@ -90,6 +90,8 @@ State :: struct {
     mapping []mut ast.NodeId
     resolution @mut sema.Resolution
     evaluation_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
+    type_execution_depth usize = 0
+    type_execution_remaining usize = 0
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned arena.
@@ -582,7 +584,8 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     }
     if (is_type(state, view.return_type)) {
         state.evaluation_diagnostic = diagnostics.no_diagnostic
-        returned :: try return_type_value(state, view.body)
+        constraints_start :: state.rewrites.constraints.items.len
+        returned :: try return_type_value(state, view.body, ast.NodeId(clone_start))
         if (returned == no_node) {
             try reject_evaluation(state, call)
             return
@@ -601,6 +604,8 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         state.bindings.items[usize(declaration)] = sema.Binding{ kind = .declaration, data = sema.BindingData{ declaration = declaration } }
         try arraylist.append(&state.declarations, declaration)
         try expand(state, declaration)
+        constraint_count :: state.rewrites.constraints.items.len
+        for (constraints_start..constraint_count) |i| try expand(state, state.rewrites.constraints.items[i])
     } else {
         runtime := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&runtime)
@@ -947,47 +952,308 @@ evaluate_ir proc(state @mut State, expression, result_type ast.NodeId) Value ! E
 }
 
 @hide:file
-return_type_value proc(state @mut State, block ast.NodeId) ast.NodeId ! Error {
-    count :: ast.block_statement_count(&state.tree, block)
-    for (0..count) |i| {
-        statement :: ast.block_statement(&state.tree, block, i)
-        match ast.stmt_kind(&state.tree, statement) {
-            .return_stmt: {
-                if (ast.return_stmt(&state.tree, statement).value) |value| return value
-                return no_node
+TypeLocal :: struct {
+    declaration ast.NodeId
+    value ast.NodeId
+    annotation ast.NodeId
+}
+
+@hide:file
+TypeExecution :: struct {
+    locals arraylist.ArrayList(TypeLocal)
+    mapping []mut ast.NodeId
+    first_owned ast.NodeId
+    returned ast.NodeId = no_node
+    loop_depth usize = 0
+}
+
+@hide:file
+TypeFlow :: enum { next, returned, break, continue, invalid }
+
+# Type values cannot enter runtime IR. Execute their control flow here, substituting
+# owned constants into snapshots; ordinary value operations still use checked IR.
+@hide:file
+return_type_value proc(state @mut State, block, first_owned ast.NodeId) ast.NodeId ! Error {
+    # ponytail: snapshots recheck scalar IR; cap type-control work at 4096 steps
+    # until type values can share one persistent checked execution frame.
+    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+    state.type_execution_depth += 1
+    defer state.type_execution_depth -= 1
+    execution := TypeExecution{
+        locals = arraylist.init(state.allocator),
+        mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
+        first_owned = first_owned,
+    }
+    defer arraylist.deinit(&execution.locals)
+    defer mem.free(state.allocator, execution.mapping)
+    mem.set(execution.mapping, no_node)
+    if (try execute_type_block(state, &execution, block) != .returned) return no_node
+    return execution.returned
+}
+
+@hide:file
+type_step proc(state @mut State, at ast.NodeId) bool ! Error {
+    if (state.type_execution_remaining == 0) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .comptime_execution_limit, ast.node_span(&state.tree, at))
+        return false
+    }
+    state.type_execution_remaining -= 1
+    return true
+}
+
+@hide:file
+prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) void {
+    if (usize(id) >= execution.mapping.len) return
+    # Substituted arguments belong to the caller, including nominal type identity.
+    if (id < execution.first_owned) {
+        execution.mapping[usize(id)] = id
+        return
+    }
+    execution.mapping[usize(id)] = no_node
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        for (execution.locals.items) |local| {
+            if (local.declaration == resolved.data.declaration) {
+                execution.mapping[usize(id)] = local.value
+                return
             }
-            .declaration: {
-                declaration :: ast.statement_decl(&state.tree, statement)
-                if (declaration.mutability != .constant) return no_node
-                value :: try evaluate(state, declaration.initializer)
-                if (value.kind == .invalid) return no_node
-                try arraylist.append(&state.rewrites.constraints, statement)
-            }
-            .if_stmt: {
-                conditional :: ast.if_stmt(&state.tree, statement)
-                boolean :: try builtin(state, conditional.condition, .bool)
-                constraint :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, conditional.condition),
-                    boolean, conditional.condition)
-                try refresh(state)
-                try arraylist.append(&state.rewrites.constraints, constraint)
-                value :: try evaluate(state, conditional.condition)
-                if (value.kind != .boolean) return no_node
-                branch := no_node
-                if (value.boolean) branch = conditional.then_block
-                else if (conditional.else_block) |other| branch = other
-                if (branch != no_node) {
-                    result :: try return_type_value(state, branch)
-                    if (result != no_node) return result
-                }
-            }
-            .block_stmt: {
-                result :: try return_type_value(state, ast.statement_block(&state.tree, statement))
-                if (result != no_node) return result
-            }
-            else: return no_node
         }
     }
-    return no_node
+    for (0..ast.child_count(&state.tree, id)) |i|
+        prepare_type_snapshot(state, execution, ast.child(&state.tree, id, i))
+}
+
+@hide:file
+bind_type_snapshot proc(state @mut State, execution @TypeExecution, id, start ast.NodeId) void {
+    if (usize(id) >= execution.mapping.len) return
+    target :: execution.mapping[usize(id)]
+    if (target == no_node or target < start) return
+    resolved := binding(state, id)
+    if (resolved.kind == .declaration) {
+        declaration :: resolved.data.declaration
+        if (usize(declaration) < execution.mapping.len and execution.mapping[usize(declaration)] != no_node)
+            resolved.data.declaration = execution.mapping[usize(declaration)]
+    }
+    state.bindings.items[usize(target)] = resolved
+    for (0..ast.child_count(&state.tree, id)) |i|
+        bind_type_snapshot(state, execution, ast.child(&state.tree, id, i), start)
+}
+
+@hide:file
+type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
+    prepare_type_snapshot(state, execution, id)
+    start :: ast.NodeId(ast.node_count(&state.tree))
+    result :: try ast.clone_subtree(state.builder, id, execution.mapping)
+    try refresh(state)
+    bind_type_snapshot(state, execution, id, start)
+    return result
+}
+
+@hide:file
+nominal_type_value proc(state @State, id ast.NodeId) bool {
+    kind :: ast.expr_kind(&state.tree, id)
+    return kind == .record_type or kind == .union_type or kind == .enum_type or kind == .distinct_type
+}
+
+@hide:file
+type_execution_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+    # A recursive record needs its cached declaration before expanding its fields.
+    if (is_type(state, annotation) and nominal_type_value(state, expression)) {
+        concrete :: try materialize(state, Value{ kind = .type, node = expression })
+        constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, expression), concrete.node, true)
+        try refresh(state)
+        try arraylist.append(&state.rewrites.constraints, constraint)
+        return concrete.node
+    }
+    try expand(state, expression)
+    resolved :: binding(state, expression)
+    if (resolved.kind == .invalid) {
+        state.evaluation_diagnostic = resolved.data.diagnostic
+        return no_node
+    }
+    if (is_type(state, annotation)) {
+        value :: try evaluate(state, expression)
+        if (value.kind != .type) {
+            if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .type_mismatch, ast.node_span(&state.tree, expression))
+            return no_node
+        }
+        concrete :: try materialize(state, value)
+        constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, expression), concrete.node, true)
+        try refresh(state)
+        try arraylist.append(&state.rewrites.constraints, constraint)
+        return concrete.node
+    }
+    value :: try evaluate_ir(state, expression, annotation)
+    if (value.kind == .invalid) return no_node
+    concrete :: try materialize(state, value)
+    result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), annotation, concrete.node)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
+    saved :: execution.locals.items.len
+    defer execution.locals.items = execution.locals.items[..saved]
+    for (0..ast.block_statement_count(&state.tree, block)) |i| {
+        statement :: ast.block_statement(&state.tree, block, i)
+        if (!try type_step(state, statement)) return .invalid
+        flow :: try execute_type_statement(state, execution, statement)
+        if (flow != .next) return flow
+    }
+    return .next
+}
+
+@hide:file
+execute_type_statement proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
+    match ast.stmt_kind(&state.tree, statement) {
+        .return_stmt: {
+            if (ast.return_stmt(&state.tree, statement).value) |value| {
+                expression :: try type_snapshot(state, execution, value)
+                execution.returned = try type_execution_value(state, expression, try builtin(state, expression, .type))
+                if (execution.returned != no_node) return .returned
+            }
+            return .invalid
+        }
+        .declaration: {
+            declaration :: ast.statement_decl(&state.tree, statement)
+            expression :: try type_snapshot(state, execution, declaration.initializer)
+            annotation := no_node
+            if (declaration.type) |type| annotation = try type_snapshot(state, execution, type)
+            else if (nominal_type_value(state, expression)) annotation = try builtin(state, expression, .type)
+            else {
+                try expand(state, expression)
+                annotation = try expression_type(state, expression, 0)
+                if (annotation == no_node) {
+                    value :: try evaluate(state, expression)
+                    if (value.kind == .type) annotation = try builtin(state, expression, .type)
+                }
+            }
+            if (annotation == no_node) return .invalid
+            value :: try type_execution_value(state, expression, annotation)
+            if (value == no_node) return .invalid
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = statement, value = value, annotation = annotation,
+            })
+        }
+        .assignment_stmt: {
+            assignment :: ast.assignment_stmt(&state.tree, statement)
+            resolved :: binding(state, assignment.target)
+            index := no_index
+            if (resolved.kind == .declaration) {
+                for (execution.locals.items) |local, i| {
+                    if (local.declaration == resolved.data.declaration) index = i
+                }
+            }
+            if (index == no_index
+                or ast.node_class(&state.tree, execution.locals.items[index].declaration) != .statement
+                or ast.statement_decl(&state.tree, execution.locals.items[index].declaration).mutability != .variable) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .invalid_assignment_target, ast.node_span(&state.tree, assignment.target))
+                return .invalid
+            }
+            expression :: try type_snapshot(state, execution, assignment.value)
+            value :: try type_execution_value(state, expression, execution.locals.items[index].annotation)
+            if (value == no_node) return .invalid
+            execution.locals.items[index].value = value
+        }
+        .if_stmt, .while_stmt: {
+            looping :: ast.stmt_kind(&state.tree, statement) == .while_stmt
+            condition := no_node
+            body := no_node
+            other := no_node
+            if (looping) {
+                view :: ast.while_stmt(&state.tree, statement)
+                if (view.capture != null) return .invalid
+                condition = view.condition
+                body = view.body
+            } else {
+                view :: ast.if_stmt(&state.tree, statement)
+                if (view.capture != null) return .invalid
+                condition = view.condition
+                body = view.then_block
+                if (view.else_block) |branch| other = branch
+            }
+            if (looping) execution.loop_depth += 1
+            defer if (looping) execution.loop_depth -= 1
+            invariant :: branch_constant(state, condition, 0)
+            value := Value{}
+            while (true) {
+                if (!try type_step(state, condition)) return .invalid
+                if (!invariant or value.kind == .invalid) {
+                    expression :: try type_snapshot(state, execution, condition)
+                    boolean :: try builtin(state, expression, .bool)
+                    value = try evaluate_ir(state, expression, boolean)
+                }
+                if (value.kind != .boolean) return .invalid
+                if (!value.boolean) {
+                    if (!looping and other != no_node) return try execute_type_block(state, execution, other)
+                    return .next
+                }
+                flow :: try execute_type_block(state, execution, body)
+                if (!looping or flow == .returned or flow == .invalid) return flow
+                if (flow == .break) return .next
+            }
+        }
+        .for_stmt: return try execute_type_for(state, execution, statement)
+        .block_stmt: return try execute_type_block(state, execution, ast.statement_block(&state.tree, statement))
+        .break_stmt, .continue_stmt: {
+            if (execution.loop_depth == 0) {
+                code :: if (ast.stmt_kind(&state.tree, statement) == .break_stmt)
+                    diagnostics.Code.break_outside_loop else diagnostics.Code.continue_outside_loop
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, code, ast.node_span(&state.tree, statement))
+                return .invalid
+            }
+            return if (ast.stmt_kind(&state.tree, statement) == .break_stmt) TypeFlow.break else TypeFlow.continue
+        }
+        else: return .invalid
+    }
+    return .next
+}
+
+@hide:file
+execute_type_for proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
+    loop :: ast.for_stmt(&state.tree, statement)
+    if (loop.pointer_capture or loop.index_capture or ast.expr_kind(&state.tree, loop.iterable) != .range) return .invalid
+    bounds :: ast.range_expr(&state.tree, loop.iterable)
+    start :: try type_snapshot(state, execution, bounds.start)
+    end :: try type_snapshot(state, execution, bounds.end)
+    typed_bound :: if (flexible(state, start)) end else start
+    annotation :: try expression_type(state, typed_bound, 0)
+    if (annotation == no_node or !try integer_type(state, annotation)) return .invalid
+    current := try type_execution_value(state, start, annotation)
+    limit :: try type_execution_value(state, end, annotation)
+    if (current == no_node or limit == no_node) return .invalid
+    saved :: execution.locals.items.len
+    defer execution.locals.items = execution.locals.items[..saved]
+    if (loop.capture) |capture| try arraylist.append(&execution.locals, TypeLocal{
+        declaration = capture, value = current, annotation = annotation,
+    })
+    execution.loop_depth += 1
+    defer execution.loop_depth -= 1
+    while (true) {
+        if (!try type_step(state, statement)) return .invalid
+        span :: ast.node_span(&state.tree, statement)
+        operator ast.BinaryOperator :: if (bounds.inclusive) .less_equal else .less
+        comparison :: try ast.add_binary(state.builder, span, operator, current, limit)
+        try refresh(state)
+        keep :: try evaluate(state, comparison)
+        if (keep.kind != .boolean) return .invalid
+        if (!keep.boolean) return .next
+        if (loop.capture != null) execution.locals.items[saved].value = current
+        flow :: try execute_type_block(state, execution, loop.body)
+        if (flow == .returned or flow == .invalid) return flow
+        if (flow == .break) return .next
+        if (try value_equal(state, try evaluate(state, current), try evaluate(state, limit))) return .next
+        one :: try ast.add_integer(state.builder, span, 1)
+        increment :: try ast.add_binary(state.builder, span, .add, current, one)
+        try refresh(state)
+        current = try type_execution_value(state, increment, annotation)
+        if (current == no_node) return .invalid
+    }
 }
 
 @hide:file
@@ -1586,6 +1852,17 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
 materialize proc(state @mut State, value Value) Value ! Error {
     result := value
     span :: ast.node_span(&state.tree, value.node)
+    if (value.kind == .type and nominal_type_value(state, value.node)) {
+        # Refer to declared nominal types, rather than reusing their definition as
+        # an annotation and turning its value-role checker cell into an annotation.
+        for (state.declarations.items) |declaration| {
+            if (ast.node_class(&state.tree, declaration) == .statement
+                and ast.statement_decl(&state.tree, declaration).initializer == value.node) {
+                result.node = try reference(state, value.node, declaration)
+                return result
+            }
+        }
+    }
     if (value.kind == .integer) {
         result.node = try ast.add_integer(state.builder, span, value.magnitude)
         if (value.negative) result.node = try ast.add_unary(state.builder, span, .negate, result.node)

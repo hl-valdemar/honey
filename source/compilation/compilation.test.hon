@@ -86,7 +86,15 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    while (result < 2) result = result + 1
             `    return result
             `}
-            `Fixed proc(N usize) type { return struct { values [N]i16 } }
+            `Fixed proc(N usize) type {
+            `    Element := i8
+            `    length usize := 0
+            `    while (length < N) {
+            `        Element = i16
+            `        length = length + 1
+            `    }
+            `    return struct { values [length]Element }
+            `}
             `data proc() [2]i16 { return [40, 2] }
             `main proc() i16 {
             `    if $(i16 != i16) { return $(i8(128)) }

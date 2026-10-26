@@ -11,6 +11,168 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_execution_retains_existing_nominal_type_identity": (
+        """
+        Original :: struct { value i16 }
+        Identity proc(T type) type {
+            Result := T
+            Same :: Result
+            return Same
+        }
+        Box proc(T type) type { return struct { value T } }
+        main proc() i16 {
+            first Original :: { value = 42 }
+            same Identity(Original) :: first
+            boxed Box(Identity(Original)) :: { value = same }
+            cached Box(Original) :: boxed
+            return cached.value.value
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_mutable_types_and_nested_producers": (
+        """
+        Nest proc(T type, depth usize) type {
+            Result type := T
+            count usize := 0
+            while (count < depth) {
+                Result = [2]Result
+                count = count + 1
+            }
+            return Result
+        }
+        Box proc(T type) type { return struct { value T } }
+        main proc() i16 {
+            value Box(Nest(i16, 2)) :: { value = [[20, 20], [1, 1]] }
+            same Box(Nest(i16, 1 + 1)) :: value
+            return same.value[0][0] + same.value[0][1] + same.value[1][0] + same.value[1][1]
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_range_captures_scope_and_transfers": (
+        """
+        Storage proc() type {
+            Result := i8
+            size usize := 0
+            for (0..usize(5)) |index| {
+                if (index == 0) continue
+                if (index == 3) break
+                next :: [index]Result
+                Result = next
+                size = size + 1
+            }
+            while (size < 3) {
+                size = size + 1
+                if (size == 3) continue
+                Result = bool
+            }
+            return struct { values Result, bias i16 = i16(size) }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [[19], [20]] }
+            return i16(value.values[0][0]) + i16(value.values[1][0]) + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_early_return_and_recursive_calls": (
+        """
+        Nest proc(T type, depth usize) type {
+            if (depth == 0) return T
+            return [2]Nest(T, depth - 1)
+        }
+        Select proc(wide bool) type {
+            Result := i8
+            if (wide) {
+                Result = Nest(i16, 1)
+                return Result
+            } else { Result = [2]Result }
+            return Result
+        }
+        main proc() i16 {
+            wide Select(true) :: [40, 2]
+            narrow Select(false) :: [1, 1]
+            return wide[0] + wide[1] + i16(narrow[0] - narrow[1])
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_inclusive_narrow_range_does_not_overflow": (
+        """
+        Storage proc() type {
+            count usize := 0
+            for (u8(254)..=u8(255)) |_| count = count + 1
+            for (i8(2)..i8(-2)) |_| count = 99
+            return [count]i16
+        }
+        main proc() i16 {
+            values Storage() :: [40, 2]
+            return values[0] + values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_rejects_constant_assignment": (
+        """
+        Bad proc() type {
+            T :: i16
+            T = bool
+            return T
+        }
+        main proc() i16 {
+            value Bad() :: 42
+            return value
+        }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "type_execution_rejects_value_in_type_local": (
+        """
+        Bad proc() type {
+            T := i16
+            T = 42
+            return T
+        }
+        main proc() i16 {
+            value Bad() :: 42
+            return value
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "type_execution_preserves_scalar_type_and_overflow": (
+        """
+        Bad proc() type {
+            count u8 := 255
+            count = count + 1
+            return [count]i16
+        }
+        main proc() i16 {
+            value Bad() :: 42
+            return value
+        }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_execution_checks_guard_operands": (
+        """
+        Bad proc() type {
+            T := i16
+            while (false and 1) T = bool
+            return T
+        }
+        main proc() i16 {
+            value Bad() :: 42
+            return value
+        }
+        """, b"", b"operator requires compatible operand types",
+    ),
+    "type_execution_is_bounded": (
+        """
+        Bad proc() type {
+            counter usize := 0
+            while (counter >= 0) counter = counter + 1
+            return i16
+        }
+        main proc() i16 {
+            value Bad() :: 42
+            return value
+        }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
     "type_producer_ordinary_inputs_generate_storage_and_cache_identity": (
         """
         Fixed proc(T type, count usize) type { return struct { values [count]T } }
@@ -3076,7 +3238,13 @@ def check_specialization_packages(temporary, executable):
     (library / "types.hon").write_text(textwrap.dedent("""
         Box proc(T type) type { return struct { value T } }
         Fixed proc($T type, N usize) type {
-            return struct { values [N]mut T }
+            Element := i8
+            length usize := 0
+            while (length < N) {
+                Element = T
+                length = length + 1
+            }
+            return struct { values [length]mut Element }
         }
     """).strip() + "\n")
     (library / "functions.hon").write_text(textwrap.dedent("""
