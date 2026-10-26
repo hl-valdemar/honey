@@ -4,7 +4,12 @@ import "@std/hashmap"
 import "@source/ast"
 import "@source/diagnostics"
 import "@source/strpool"
+import "@source/lower"
+import "@source/interpreter"
+import "@source/ir"
+
 sema :: import "@source/sema"
+typecheck :: import "@source/sema/check"
 
 @hide:file no_node :: maxval!(ast.NodeId)
 @hide:file no_index :: maxval!(usize)
@@ -81,6 +86,8 @@ State :: struct {
     original_count usize
     rewrites @mut Result
     mapping []mut ast.NodeId
+    resolution @mut sema.Resolution
+    evaluation_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned arena.
@@ -117,6 +124,7 @@ elaborate proc(
         original_count = ast.node_count(&original),
         rewrites = &result,
         mapping = mapping,
+        resolution = resolution,
     }
     defer arraylist.deinit(&state.bindings)
     defer arraylist.deinit(&state.declarations)
@@ -268,9 +276,10 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
         position += 1
         try expand(state, argument)
         if (view.comptime) {
+            state.evaluation_diagnostic = diagnostics.no_diagnostic
             arguments[i] = try evaluate(state, argument)
             if (arguments[i].kind == .invalid) {
-                try reject(state, call, .comptime_argument_required)
+                try reject_evaluation(state, call)
                 return
             }
             if (is_type(state, view.type) != (arguments[i].kind == .type)) {
@@ -458,9 +467,10 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
     }
     if (is_type(state, view.return_type)) {
+        state.evaluation_diagnostic = diagnostics.no_diagnostic
         returned :: try return_type_value(state, view.body)
         if (returned == no_node) {
-            try reject(state, call, .comptime_argument_required)
+            try reject_evaluation(state, call)
             return
         }
         result := returned
@@ -493,6 +503,136 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         try arraylist.append(&state.declarations, clone)
         try expand(state, clone)
     }
+}
+
+@hide:file
+reject_evaluation proc(state @mut State, call ast.NodeId) void ! Error {
+    diagnostic :: state.evaluation_diagnostic
+    if (diagnostic == diagnostics.no_diagnostic) {
+        try reject(state, call, .comptime_argument_required)
+        return
+    }
+    invalid :: try ast.add_invalid_expr(state.builder, ast.node_span(&state.tree, call), diagnostic)
+    try replace(state, call, invalid)
+    try refresh(state)
+    state.bindings.items[usize(call)] = sema.Binding{ kind = .invalid, data = sema.BindingData{ diagnostic = diagnostic } }
+}
+
+@hide:file
+evaluation_dependencies proc(
+    state @mut State, id ast.NodeId, flags []mut u8, declarations @mut arraylist.ArrayList(ast.NodeId),
+) bool ! Error {
+    if ((flags[usize(id)] & 4) != 0) return true
+    flags[usize(id)] = flags[usize(id)] | 4
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        if ((flags[usize(target)] & 1) != 0 and (flags[usize(target)] & 2) == 0) {
+            if (ast.node_class(&state.tree, target) == .statement
+                and ast.statement_decl(&state.tree, target).mutability == .variable) return false
+            flags[usize(target)] = flags[usize(target)] | 2
+            try arraylist.append(declarations, target)
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (!try evaluation_dependencies(state, ast.child(&state.tree, id, i), flags, declarations)) return false
+    }
+    return true
+}
+
+@hide:file
+evaluate_call proc(state @mut State, call ast.NodeId) Value ! Error {
+    callee :: try evaluate(state, ast.call_expr(&state.tree, call).callee)
+    if (callee.kind != .function and callee.kind != .type) return Value{}
+    result_type := callee.node
+    if (callee.kind == .function) {
+        resolved :: binding(state, callee.node)
+        if (resolved.kind != .declaration) return Value{}
+        result_type = ast.function_decl(&state.tree, resolved.data.declaration).return_type
+    }
+    arguments := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&arguments)
+    for (0..ast.call_arg_count(&state.tree, call)) |i| {
+        value :: try evaluate(state, ast.call_arg(&state.tree, call, i))
+        if (value.kind == .invalid) return Value{}
+        concrete := try materialize(state, value)
+        if (value.annotation != no_node) {
+            concrete.node = try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, value.node),
+                value.annotation, concrete.node)
+            try refresh(state)
+        }
+        try arraylist.append(&arguments, concrete.node)
+    }
+    # Reuse checking, typed IR and the interpreter: compile-time arithmetic and local
+    # inference must have exactly the same semantics as an ordinary runtime call.
+    span :: ast.node_span(&state.tree, call)
+    invocation :: try ast.add_call(state.builder, span, callee.node, arguments.items)
+    returned :: try ast.add_return_stmt(state.builder, span, invocation)
+    statements [1]ast.NodeId :: [returned]
+    body :: try ast.add_block(state.builder, span, statements[..])
+    wrapper :: try ast.add_function_decl(state.builder, span, span, strpool.no_str, result_type, &[], body)
+    try refresh(state)
+    declarations := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&declarations)
+    try arraylist.append(&declarations, wrapper)
+    flags := arraylist.init(u8, state.allocator)
+    defer arraylist.deinit(&flags)
+    index := usize(0)
+    registered := usize(0)
+    while (index < declarations.items.len) {
+        declaration :: declarations.items[index]
+        try expand(state, declaration)
+        while (flags.items.len < ast.node_count(&state.tree)) try arraylist.append(&flags, u8(0))
+        while (registered < state.declarations.items.len) {
+            target :: state.declarations.items[registered]
+            flags.items[usize(target)] = flags.items[usize(target)] | 1
+            registered += 1
+        }
+        flags.items[usize(declaration)] = flags.items[usize(declaration)] | 2
+        if (!try evaluation_dependencies(state, declaration, flags.items, &declarations)) return Value{}
+        index += 1
+    }
+    root :: try ast.add_package(state.builder, span, declarations.items)
+    try refresh(state)
+    bindings :: try mem.alloc(sema.Binding, state.allocator, state.bindings.items.len)
+    memcopy!(bindings, state.bindings.items)
+    sema.replace_bindings(state.resolution, bindings)
+    tree :: ast.view(state.builder, root)
+    diagnostic_store := diagnostics.init(state.allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    # Resolution's existing diagnostic IDs remain valid in this temporary store.
+    for (state.diagnostics.list.items) |diagnostic| try arraylist.append(&diagnostic_store.list, diagnostic)
+    original_diagnostics :: diagnostics.count(&diagnostic_store)
+    checked := try typecheck.check(state.allocator, &tree, state.resolution, &diagnostic_store)
+    defer typecheck.deinit(&checked)
+    if (diagnostics.count(&diagnostic_store) != original_diagnostics) return Value{}
+    module := try lower.lower_evaluation(state.allocator, &tree, state.resolution, &checked, wrapper, &diagnostic_store)
+    defer ir.deinit(&module)
+    outcome := try interpreter.run_evaluation(state.allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    if (outcome.trap) |trap| {
+        if (usize(trap) < original_diagnostics) state.evaluation_diagnostic = trap
+        else {
+            diagnostic :: diagnostics.get(&diagnostic_store, trap)?
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, diagnostic.code, diagnostic.span)
+        }
+        return Value{}
+    }
+    value :: outcome.value
+    if (ir.integer_bits(value.type) != 0) {
+        negative :: !ir.unsigned_integer(value.type) and value.data.integer < 0
+        magnitude :: if (negative) u64(-(value.data.integer + 1)) + 1 else value.data.unsigned
+        return Value{ kind = .integer, node = call, magnitude = magnitude, negative = negative, annotation = result_type }
+    }
+    if (value.type == .bool) return Value{
+        kind = .boolean, node = call, boolean = value.data.boolean, annotation = result_type,
+    }
+    if (value.type == .string) {
+        literal :: try ast.add_string(state.builder, span, ir.string_bytes(&module, value.data.string))
+        try refresh(state)
+        return Value{ kind = .string, node = literal, annotation = result_type }
+    }
+    return Value{}
 }
 
 @hide:file
@@ -616,6 +756,7 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
             return value
         }
         .binary: return try evaluate_binary(state, id)
+        .call: return try evaluate_call(state, id)
         else: return Value{}
     }
 }
@@ -624,6 +765,7 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
 evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
     view :: ast.binary_expr(&state.tree, id)
     left :: try evaluate(state, view.left)
+    if (left.kind == .invalid) return Value{}
     if (left.kind == .boolean) {
         if (view.operator == .logical_and and !left.boolean) return Value{ kind = .boolean, node = id, boolean = false }
         if (view.operator == .logical_or and left.boolean) return Value{ kind = .boolean, node = id, boolean = true }

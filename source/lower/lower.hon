@@ -73,6 +73,32 @@ lower_package proc(
     root_package ast.NodeId,
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
+    return try lower_module(allocator, tree, resolution, checked, root_package, null, diagnostic_store)
+}
+
+#! lowers an isolated compile-time call wrapper without applying program entry-name rules.
+#! the caller supplies a checked parameterless function and owns the returned IR.
+lower_evaluation proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    checked @typecheck.Result,
+    entry ast.NodeId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
+    return try lower_module(allocator, tree, resolution, checked, tree.root, entry, diagnostic_store)
+}
+
+@hide:file
+lower_module proc(
+    allocator mem.Allocator,
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    checked @typecheck.Result,
+    root_package ast.NodeId,
+    entry ?ast.NodeId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
     module := ir.init(allocator)
     errdefer ir.deinit(&module)
     storage :: try mem.alloc(Storage, allocator, ast.node_count(tree))
@@ -123,7 +149,8 @@ lower_package proc(
             .import, .invalid: {}
         }
     }
-    try find_entry(&state, root_package)
+    if (entry) |function| module.entry = ir.FunctionId(storage[usize(function)].index)
+    else try find_entry(&state, root_package)
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
         match ast.decl_kind(tree, id) {
@@ -2136,7 +2163,7 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
 @hide:file
 lower_string proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
-    text :: ast.source_text(state.tree, span)
+    text :: ast.literal_text(state.tree, id)
     owned :: try mem.alloc(u8, state.module.allocator, text.len - 2)
     transferred := false
     defer if (!transferred) mem.free(state.module.allocator, owned)

@@ -2042,6 +2042,25 @@ add_boolean proc(builder @mut Builder, at Span, value bool) NodeId ! mem.AllocEr
     return try add_generated_literal(builder, at, .bool, text)
 }
 
+#! copies arbitrary bytes into owned quoted spelling, retaining `at` for diagnostics.
+add_string proc(builder @mut Builder, at Span, bytes []u8) NodeId ! mem.AllocError {
+    if (bytes.len > divtrunc!(maxval!(usize) - 2, usize(4))) return .out_of_memory
+    allocator :: builder.storage.generated.allocator
+    text :: try mem.alloc(u8, allocator, bytes.len * 4 + 2)
+    errdefer mem.free(allocator, text)
+    text[0] = '"'
+    digits :: "0123456789abcdef"
+    for (bytes) |byte, index| {
+        start :: index * 4 + 1
+        text[start] = '\\'
+        text[start + 1] = 'x'
+        text[start + 2] = digits[usize(divtrunc!(byte, u8(16)))]
+        text[start + 3] = digits[usize(rem!(byte, u8(16)))]
+    }
+    text[text.len - 1] = '"'
+    return try add_owned_literal(builder, at, .string, text)
+}
+
 @hide:file
 add_generated_literal proc(
     builder @mut Builder, at Span, kind LiteralKind, bytes []u8,
@@ -2051,6 +2070,14 @@ add_generated_literal proc(
     text :: try mem.alloc(u8, allocator, bytes.len)
     errdefer mem.free(allocator, text)
     memcopy!(text, bytes)
+    return try add_owned_literal(builder, at, kind, text)
+}
+
+@hide:file
+add_owned_literal proc(
+    builder @mut Builder, at Span, kind LiteralKind, text []mut u8,
+) NodeId ! mem.AllocError {
+    debug.assert(usize(at.source) < builder.storage.sources.items.len)
     index :: builder.storage.generated.items.len
     debug.assert(u64(index) < u64(maxval!(u32)))
     try arraylist.append(&builder.storage.generated, text)

@@ -79,9 +79,17 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
         bytes := try owned_text(
             `identity proc($T type, value T) T { return value }
             `Box proc($T type) type { return struct { value T } }
+            `count proc() usize {
+            `    result := 0
+            `    while (result < 2) result = result + 1
+            `    return result
+            `}
+            `Fixed proc($N usize) type { return struct { values [N]i16 } }
             `main proc() i16 {
             `    box Box(i16) :: { value = identity(i16, 40) }
-            `    return identity(box.value) + 2
+            `    fixed Fixed(count()) :: { values = [box.value, 2] }
+            `    same Fixed(2) :: fixed
+            `    return identity(same.values[0]) + same.values[1]
             `}
             ,
         )

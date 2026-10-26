@@ -88,6 +88,28 @@ run proc(
     module @ir.Module,
     diagnostic_store @mut diagnostics.Store,
 ) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
+    return try execute(false, allocator, module, diagnostic_store, null)
+}
+
+#! executes an isolated compile-time module with bounded work and stack depth.
+#! ownership and diagnostic identities follow run.
+run_evaluation proc(
+    allocator mem.Allocator,
+    module @ir.Module,
+    diagnostic_store @mut diagnostics.Store,
+) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
+    remaining := usize(100000)
+    return try execute(true, allocator, module, diagnostic_store, &remaining)
+}
+
+@hide:file
+execute proc(
+    $bounded bool,
+    allocator mem.Allocator,
+    module @ir.Module,
+    diagnostic_store @mut diagnostics.Store,
+    remaining ?@mut usize,
+) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
     entry ir.FunctionId := ir.FunctionId(0)
     if module.entry |function| {
         entry = function
@@ -157,6 +179,15 @@ run proc(
         function :: &module.functions.items[usize(frames.items[frame_index].function)]
         block :: &function.blocks.items[usize(frames.items[frame_index].block)]
         instruction_index :: frames.items[frame_index].next_instruction
+        if $(bounded) {
+            budget :: remaining?
+            if (budget^ == 0 or frames.items.len > 128) {
+                span :: if (instruction_index < block.instructions.items.len)
+                    block.instructions.items[instruction_index].span else block.terminator.span
+                return try runtime_trap(diagnostic_store, .comptime_execution_limit, span)
+            }
+            budget^ -= 1
+        }
         if instruction_index == block.instructions.items.len {
             terminator :: block.terminator
             if (terminator.kind == .trap) return Outcome{ trap = terminator.diagnostic }

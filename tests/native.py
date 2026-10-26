@@ -11,6 +11,131 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "comptime_calls_share_runtime_inference_loops_and_recursion": (
+        """
+        length proc() usize {
+            result := 0
+            while (result < 2) result = result + 1
+            return result
+        }
+        factorial proc(count usize) usize {
+            if (count == 0) return 1
+            return count * factorial(count - 1)
+        }
+        sum proc(count usize) usize {
+            result := 0
+            for (0..count) |index| {
+                if (index == 1) continue
+                if (index == 4) break
+                result = result + index
+            }
+            return result
+        }
+        identity proc($T type, value T) T { return value }
+        Fixed proc($N usize) type { return struct { values [N]i16 } }
+        main proc() i16 {
+            first Fixed(identity(usize, length())) :: { values = [40, 2] }
+            same Fixed(factorial(3) - sum(6) + 1) :: first
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_call_string_result_owns_escaped_bytes": (
+        r"""
+        choose proc(take bool, text string) string {
+            if (take) return text
+            return "unused"
+        }
+        offset proc($text string, value i16) i16 { return value + i16(text.len) }
+        main proc() i16 { return offset(choose(true, "a\"\\\x00é"), 36) }
+        """, b"42\n", None,
+    ),
+    "comptime_calls_preserve_checked_narrow_intermediates": (
+        """
+        overflow proc(seed i8) i8 {
+            result := seed
+            result = result + 1
+            return result - 1
+        }
+        answer proc($N i8) i16 { return 42 }
+        main proc() i16 { return answer(overflow(127)) }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "comptime_calls_preserve_unsigned_and_signed_boundaries": (
+        """
+        unsigned proc(value u64) u64 { return value }
+        signed proc(value i64) i64 { return value }
+        answer proc($high u64, $low i64) i16 {
+            if (high == 18446744073709551615 and low == -9223372036854775808) return 42
+            return 0
+        }
+        main proc() i16 {
+            return answer(unsigned(18446744073709551615), signed(-9223372036854775808))
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_call_cannot_promote_runtime_parameter": (
+        """
+        identity proc(value usize) usize { return value }
+        answer proc($N usize) i16 { return 42 }
+        runtime proc(value usize) i16 { return answer(identity(value)) }
+        main proc() i16 { return runtime(2) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_call_cannot_read_mutable_global": (
+        """
+        state usize := 2
+        read proc() usize { return state }
+        answer proc($N usize) i16 { return 42 }
+        main proc() i16 { return answer(read()) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_call_cannot_mutate_runtime_storage": (
+        """
+        state usize := 0
+        write proc() usize {
+            state = 2
+            return state
+        }
+        answer proc($N usize) i16 { return 42 }
+        main proc() i16 { return answer(write()) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_call_keeps_uninitialized_local_traps": (
+        """
+        premature proc() usize {
+            before :: after
+            after :: 2
+            return before
+        }
+        answer proc($N usize) i16 { return 42 }
+        main proc() i16 { return answer(premature()) }
+        """, b"", b"local value was read before initialization",
+    ),
+    "comptime_call_bounds_empty_loops": (
+        """
+        forever proc() usize {
+            while true {}
+            return 2
+        }
+        answer proc($N usize) i16 { return 42 }
+        main proc() i16 { return answer(forever()) }
+        """, b"", b"compile-time execution exceeds",
+    ),
+    "comptime_call_bounds_recursive_frames": (
+        """
+        forever proc(value usize) usize { return forever(value) }
+        answer proc($N usize) i16 { return 42 }
+        main proc() i16 { return answer(forever(2)) }
+        """, b"", b"compile-time execution exceeds",
+    ),
+    "comptime_call_foreign_execution_remains_a_source_trap": (
+        """
+        getpid c_func() c_int
+        answer proc($N c_int) i16 { return 42 }
+        main proc() i16 { return answer(getpid()) }
+        """, b"", b"foreign function calls are unsupported",
+    ),
     "specialization_parameterless_type_producer_is_cached": (
         """
         Token proc() type { return struct { value i16 } }
@@ -2570,6 +2695,11 @@ def check_specialization_packages(temporary, executable):
         first proc($T type, $N usize, value @Fixed(T, N)) T {
             return value.values[0]
         }
+        count proc() usize {
+            result := 0
+            while (result < 2) result = result + 1
+            return result
+        }
     """).strip() + "\n")
     source = app / "main.hon"
     source.write_text(textwrap.dedent("""
@@ -2579,7 +2709,7 @@ def check_specialization_packages(temporary, executable):
         main proc() i16 {
             imported ImportedBox :: { value = 40 }
             copy lib.Box(i16) :: imported
-            fixed lib.Fixed(i16, 2) :: { values = [2, 0] }
+            fixed lib.Fixed(i16, lib.count()) :: { values = [2, 0] }
             return copy.value + lib.identity(lib.first(&fixed))
         }
     """).strip() + "\n")
@@ -2594,7 +2724,28 @@ def check_specialization_packages(temporary, executable):
         }
     """).strip() + "\n")
     check(app, executable, (b"", b"incompatible value type"))
-    return 2
+    sizing = library / "sizing.hon"
+    sizing.write_text(textwrap.dedent("""
+        size proc() usize {
+            high usize :: 18446744073709551615
+            return high + 1
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            if (false) {
+                fixed lib.Fixed(i16, lib.size()) :: { values = [40, 2] }
+                return fixed.values[0]
+            }
+            return 42
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:12: ".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 3
 
 
 def check_dependency_provenance(temporary, executable):
