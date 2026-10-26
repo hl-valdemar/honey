@@ -14,6 +14,9 @@ BuiltinType :: enum {
     f64, usize,
     i8, i16, i32, isize,
     u8, u16, u32, u64, uint,
+    anyopaque
+    c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
+    c_char, c_uchar, c_short, c_ushort
 }
 
 @hide:file
@@ -41,6 +44,17 @@ builtins [_]Builtin :: [
     { name = "u32", type = .u32 },
     { name = "u64", type = .u64 },
     { name = "uint", type = .uint },
+    { name = "anyopaque", type = .anyopaque },
+    { name = "c_int", type = .c_int },
+    { name = "c_uint", type = .c_uint },
+    { name = "c_long", type = .c_long },
+    { name = "c_ulong", type = .c_ulong },
+    { name = "c_longlong", type = .c_longlong },
+    { name = "c_ulonglong", type = .c_ulonglong },
+    { name = "c_char", type = .c_char },
+    { name = "c_uchar", type = .c_uchar },
+    { name = "c_short", type = .c_short },
+    { name = "c_ushort", type = .c_ushort },
 ]
 
 @hide:file
@@ -371,7 +385,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 try resolve_expr(state, scope, conditional.condition)
-                try resolve_arm(state, scope, conditional.then_block)
+                try resolve_capture_arm(state, scope, conditional.then_block, conditional.capture)
                 if (conditional.else_block) |other| try resolve_arm(state, scope, other)
             }
             .assignment_stmt: {
@@ -382,7 +396,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .while_stmt: {
                 loop :: ast.while_stmt(tree, statement)
                 try resolve_expr(state, scope, loop.condition)
-                try resolve_arm(state, scope, loop.body)
+                try resolve_capture_arm(state, scope, loop.body, loop.capture)
             }
             .for_stmt: {
                 loop :: ast.for_stmt(tree, statement)
@@ -403,6 +417,14 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .invalid: resolve_invalid(state, statement)
         }
     }
+}
+
+@hide:file
+resolve_capture_arm proc(state @mut State, scope @Scope, block ast.NodeId, capture ?ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    child := Scope{ names = hashmap.init(state.allocator), parent = scope }
+    defer hashmap.deinit(&child.names)
+    if (capture) |id| try predeclare(state, &child, id, ast.node_span(state.tree, id))
+    try resolve_block(state, &child, block)
 }
 
 @hide:file
@@ -487,9 +509,9 @@ resolve_expr proc(
     if (state.bindings[usize(id)].kind != .none) return
     tree :: state.tree
     match ast.expr_kind(tree, id) {
-        .literal_int, .literal_float, .literal_bool, .literal_string: {}
+        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null: {}
         .enum_literal: {}
-        .distinct_type, .alias_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))
+        .distinct_type, .alias_expr, .optional_type: try resolve_expr(state, scope, ast.type_operand(tree, id))
         .enum_type: {
             if (ast.enum_type(tree, id).backing) |backing| try resolve_expr(state, scope, backing)
             for (0..ast.enum_member_count(tree, id)) |i| {
@@ -570,6 +592,21 @@ resolve_expr proc(
             for (0..ast.call_arg_count(tree, id)) |i| {
                 try resolve_expr(state, scope, ast.call_arg(tree, id, i))
             }
+        }
+        .builtin_call: {
+            for (0..ast.call_arg_count(tree, id)) |i| try resolve_expr(state, scope, ast.call_arg(tree, id, i))
+        }
+        .slice: {
+            expression :: ast.slice_expr(tree, id)
+            try resolve_expr(state, scope, expression.base)
+            if (expression.start) |node| try resolve_expr(state, scope, node)
+            if (expression.end) |node| try resolve_expr(state, scope, node)
+            if (expression.sentinel) |node| try resolve_expr(state, scope, node)
+        }
+        .slice_type: {
+            type :: ast.slice_type(tree, id)
+            try resolve_expr(state, scope, type.element)
+            if (type.sentinel) |node| try resolve_expr(state, scope, node)
         }
         .pointer_type: try resolve_expr(state, scope, ast.pointer_type(tree, id).element)
         .function_type: {

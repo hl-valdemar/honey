@@ -1,17 +1,17 @@
 #! grammar:
-#! * type ..... -> identifier {'.' member} | ('@' | '*') ['mut'] type | '@proc' '(' parameters ')' type | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
+#! * type ..... -> identifier {'.' member} | '?' type | ('@' | '*') ['mut'] type | '@proc' '(' parameters ')' type | '[' (expr | '_') ']' ['mut'] type | '[' [';' expr] ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
 #! * binding ... -> :: | :=
-#! * literal .. -> int | float | string | 'true' | 'false'
+#! * literal .. -> int | float | string | 'true' | 'false' | 'null'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&') expr | expr '^' | expr op expr | expr '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}'
-#! * decl ..... -> identifier [type] binding expr | ['test'] [identifier '::'] 'import' string
+#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}'
+#! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr arm ['else' arm] | 'while' expr arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
-#! braceless guards/iterables require parentheses unless they are calls; else binds to the nearest if.
-#! precedence (tightest first): calls/indices/selections/dereference, unary -/!/& higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
+#! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! braceless guards/iterables require parentheses unless they are calls or optional captures; else binds to the nearest if.
+#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/& higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -30,7 +30,7 @@ NodeId :: distinct u32
 no_node :: maxval!(NodeId)
 
 LiteralKind :: enum {
-    int, float, string, bool
+    int, float, string, bool, null
 }
 
 ExprKind :: enum {
@@ -58,6 +58,11 @@ ExprKind :: enum {
     index
     selection
     invalid
+    slice_type
+    optional_type
+    slice
+    builtin_call
+    literal_null
 }
 
 DeclKind :: enum {
@@ -89,6 +94,7 @@ UnaryOperator :: enum {
     logical_not
     address_of
     dereference
+    unwrap
 }
 
 BinaryOperator :: enum {
@@ -144,6 +150,11 @@ NodeKind :: enum {
     invalid_expr
     invalid_stmt
     invalid_decl
+    expr_slice_type
+    expr_optional_type
+    expr_slice
+    expr_builtin_call
+    literal_null
 }
 
 @hide:file
@@ -246,6 +257,21 @@ PointerTypeView :: struct {
     many bool
 }
 
+SliceTypeView :: struct {
+    element NodeId
+    mutable bool
+    sentinel ?NodeId
+}
+
+SliceView :: struct {
+    base NodeId
+    start ?NodeId
+    end ?NodeId
+    sentinel ?NodeId
+}
+
+BuiltinCallView :: struct { name NodeId }
+
 RecordLiteralView :: struct {
     span Span
     type ?NodeId
@@ -290,6 +316,7 @@ IfView :: struct {
     condition NodeId
     then_block NodeId
     else_block ?NodeId
+    capture ?NodeId = null
 }
 
 AssignmentView :: struct {
@@ -302,6 +329,7 @@ WhileView :: struct {
     span Span
     condition NodeId
     body NodeId
+    capture ?NodeId = null
 }
 
 RangeView :: struct {
@@ -413,6 +441,7 @@ add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem
         .float: .literal_float
         .string: .literal_string
         .bool: .literal_bool
+        .null: .literal_null
     }
     return try add_node(builder, Node{ kind = node_kind }, span)
 }
@@ -481,6 +510,39 @@ add_call proc(
         main = NodeData{ node_id = callee },
         data0 = NodeData{ extra = u32(start) },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
+    }, span)
+}
+
+add_builtin_call proc(builder @mut Builder, span Span, name NodeId, arguments []NodeId) NodeId ! mem.AllocError {
+    id :: try add_call(builder, span, name, arguments)
+    builder.storage.nodes.items[usize(id)].kind = .expr_builtin_call
+    return id
+}
+
+add_optional_type proc(builder @mut Builder, span Span, element NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{ kind = .expr_optional_type, main = NodeData{ node_id = element } }, span)
+}
+
+add_slice_type proc(builder @mut Builder, span Span, element NodeId, mutable bool, sentinel ?NodeId) NodeId ! mem.AllocError {
+    flag u32 :: if (mutable) 1 else 0
+    raw_sentinel :: if (sentinel) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = .expr_slice_type,
+        main = NodeData{ extra = flag },
+        data0 = NodeData{ node_id = raw_sentinel },
+        data1 = NodeData{ node_id = element },
+    }, span)
+}
+
+add_slice proc(builder @mut Builder, span Span, base NodeId, start, end, sentinel ?NodeId) NodeId ! mem.AllocError {
+    raw_start :: if (start) |id| u32(id) else u32(no_node)
+    raw_end :: if (end) |id| u32(id) else u32(no_node)
+    raw_sentinel :: if (sentinel) |id| u32(id) else u32(no_node)
+    extra :: try add_extra(builder, raw_start)
+    _ = try add_extra(builder, raw_end)
+    _ = try add_extra(builder, raw_sentinel)
+    return try add_node(builder, Node{
+        kind = .expr_slice, main = NodeData{ node_id = base }, data0 = NodeData{ extra = extra },
     }, span)
 }
 
@@ -697,9 +759,11 @@ add_if_stmt proc(
     else_block ?NodeId,
 ) NodeId ! mem.AllocError {
     alternative :: if (else_block) |id| id else no_node
+    extra :: try add_extra(builder, u32(condition))
+    _ = try add_extra(builder, u32(no_node))
     return try add_node(builder, Node{
         kind = .stmt_if,
-        main = NodeData{ node_id = condition },
+        main = NodeData{ extra = extra },
         data0 = NodeData{ node_id = then_block },
         data1 = NodeData{ node_id = alternative },
     }, span)
@@ -729,6 +793,15 @@ add_while_stmt proc(
         main = NodeData{ node_id = condition },
         data0 = NodeData{ node_id = body },
     }, span)
+}
+
+set_capture proc(builder @mut Builder, id NodeId, capture NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    if (node.kind == .stmt_if) builder.storage.extra.items[usize(node.main.extra) + 1] = u32(capture)
+    else {
+        debug.assert(node.kind == .stmt_while)
+        node.data1.node_id = capture
+    }
 }
 
 add_for_stmt proc(
@@ -804,12 +877,25 @@ add_function_decl proc(
     _ = try add_extra(builder, u32(return_type))
     _ = try add_extra(builder, u32(interned_name))
     for (params) |parameter| _ = try add_extra(builder, u32(parameter))
+    _ = try add_extra(builder, 0)
     return try add_node(builder, Node{
         kind = .func_decl,
         main = NodeData{ extra = u32(start) },
         data0 = NodeData{ node_id = body },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
     }, span)
+}
+
+set_function_external proc(builder @mut Builder, id NodeId) void {
+    node :: builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .func_decl)
+    builder.storage.extra.items[usize(node.data1.extra) - 1] = 1
+}
+
+function_external proc(tree @Tree, id NodeId) bool {
+    node :: get_node(&tree.storage, id)
+    if (node.kind != .func_decl) return false
+    return tree.storage.extra.items[usize(node.data1.extra) - 1] != 0
 }
 
 add_import_decl proc(
@@ -980,9 +1066,10 @@ if_stmt proc(tree @Tree, id NodeId) IfView {
     debug.assert(node.kind == .stmt_if)
     return IfView{
         span = get_span(&tree.storage, id),
-        condition = node.main.node_id,
+        condition = NodeId(tree.storage.extra.items[usize(node.main.extra)]),
         then_block = node.data0.node_id,
         else_block = maybe_node_id(u32(node.data1.node_id)),
+        capture = maybe_node_id(tree.storage.extra.items[usize(node.main.extra) + 1]),
     }
 }
 
@@ -1003,6 +1090,7 @@ while_stmt proc(tree @Tree, id NodeId) WhileView {
         span = get_span(&tree.storage, id),
         condition = node.main.node_id,
         body = node.data0.node_id,
+        capture = maybe_node_id(u32(node.data1.node_id)),
     }
 }
 
@@ -1071,14 +1159,15 @@ function_param_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .func_decl or node.kind == .expr_function_type)
     start :: if (node.kind == .func_decl) node.main.extra + 4 else node.data0.extra
-    return usize(node.data1.extra - start)
+    suffix :: if (node.kind == .func_decl) u32(1) else u32(0)
+    return usize(node.data1.extra - start - suffix)
 }
 
 function_param proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .func_decl or node.kind == .expr_function_type)
     start :: if (node.kind == .func_decl) node.main.extra + 4 else node.data0.extra
-    debug.assert(index < usize(node.data1.extra - start))
+    debug.assert(index < function_param_count(tree, id))
     return NodeId(tree.storage.extra.items[usize(start) + index])
 }
 
@@ -1140,6 +1229,11 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_index: .index
         .expr_selection: .selection
         .invalid_expr: .invalid
+        .expr_slice_type: .slice_type
+        .expr_optional_type: .optional_type
+        .expr_slice: .slice
+        .expr_builtin_call: .builtin_call
+        .literal_null: .literal_null
         else: unreachable
     }
 }
@@ -1187,13 +1281,13 @@ call_expr proc(tree @Tree, id NodeId) CallExprView {
 
 call_arg_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_call)
+    debug.assert(node.kind == .expr_call or node.kind == .expr_builtin_call)
     return usize(node.data1.extra - node.data0.extra)
 }
 
 call_arg proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_call)
+    debug.assert(node.kind == .expr_call or node.kind == .expr_builtin_call)
     debug.assert(index < usize(node.data1.extra - node.data0.extra))
     return NodeId(tree.storage.extra.items[usize(node.data0.extra) + index])
 }
@@ -1217,6 +1311,33 @@ pointer_type proc(tree @Tree, id NodeId) PointerTypeView {
         mutable = node.main.extra != 0,
         many = node.data0.extra != 0,
     }
+}
+
+slice_type proc(tree @Tree, id NodeId) SliceTypeView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_slice_type)
+    return SliceTypeView{
+        element = node.data1.node_id, mutable = node.main.extra != 0,
+        sentinel = maybe_node_id(u32(node.data0.node_id)),
+    }
+}
+
+slice_expr proc(tree @Tree, id NodeId) SliceView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_slice)
+    extra :: usize(node.data0.extra)
+    return SliceView{
+        base = node.main.node_id,
+        start = maybe_node_id(tree.storage.extra.items[extra]),
+        end = maybe_node_id(tree.storage.extra.items[extra + 1]),
+        sentinel = maybe_node_id(tree.storage.extra.items[extra + 2]),
+    }
+}
+
+builtin_call proc(tree @Tree, id NodeId) BuiltinCallView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_builtin_call)
+    return BuiltinCallView{ name = node.main.node_id }
 }
 
 array_element_count proc(tree @Tree, id NodeId) usize {
@@ -1282,7 +1403,7 @@ union_type proc(tree @Tree, id NodeId) UnionTypeView {
 
 type_operand proc(tree @Tree, id NodeId) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias)
+    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias or node.kind == .expr_optional_type)
     return node.main.node_id
 }
 

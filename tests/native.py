@@ -11,6 +11,279 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "slice_mutation_alias_calls": (
+        """
+        update proc(values []mut i16) []mut i16 {
+            values[1] = values[0] + 2
+            return values[1..]
+        }
+        main proc() i16 {
+            values [4]mut i16 := [0, 40, 0, 0]
+            view :: update(values[1..3])
+            copy :: view
+            copy[0] = copy[0] + 1
+            return values[2] - i16(view.len)
+        }
+        """, b"42\n", None,
+    ),
+    "slice_empty_one_past_and_pointer_identity": (
+        """
+        main proc() bool {
+            values [2]mut i16 := [40, 2]
+            all :: values[..]
+            empty :: all[2..2]
+            return empty.len == 0 and empty.ptr == all.ptr + 2
+        }
+        """, b"true\n", None,
+    ),
+    "slice_nested_record_storage": (
+        """
+        Row :: struct { values []mut i16 }
+        identity proc(row Row) Row { return row }
+        main proc() i16 {
+            values [2]mut i16 := [40, 2]
+            rows [1]Row :: [{ values = values[..] }]
+            selected :: identity(rows[0])
+            selected.values[0] = selected.values[0] + selected.values[1]
+            return values[0]
+        }
+        """, b"42\n", None,
+    ),
+    "slice_empty_mutable_literal": (
+        "main proc() usize { values []mut i16 :: &[]\nreturn values.len }",
+        b"0\n", None,
+    ),
+    "slice_string_sentinel": (
+        """
+        read proc(text [;0]u8) u8 {
+            suffix :: text[1..;0]
+            return suffix.ptr[suffix.len] + suffix[0]
+        }
+        main proc() u8 { return read("!*") }
+        """, b"42\n", None,
+    ),
+    "slice_checked_sentinel": (
+        """
+        main proc() u8 {
+            values [3]mut u8 := [40, 2, 0]
+            pointer *mut u8 :: &values[0]
+            text [;0]mut u8 :: pointer[..2;0]
+            text[0] = text[0] + text[1]
+            plain []u8 :: text
+            return plain[0]
+        }
+        """, b"42\n", None,
+    ),
+    "slice_reversed_bounds": (
+        "main proc() usize { a :: [1, 2]\nreturn a[2..1].len }",
+        b"", b"slice",
+    ),
+    "slice_excessive_bounds": (
+        "main proc() usize { a :: [1, 2]\nreturn a[..3].len }",
+        b"", b"slice",
+    ),
+    "slice_index_at_length": (
+        "main proc() i64 { a :: [40, 2]\ns :: a[..]\nreturn s[s.len] }",
+        b"", b"slice",
+    ),
+    "slice_sentinel_mismatch": (
+        "main proc() usize { a :: [1, 2, 3]\nreturn a[..2;0].len }",
+        b"", b"sentinel",
+    ),
+    "slice_readonly_write_rejected": (
+        "main proc() int { a :: [40, 2]\ns :: a[..]\ns[0] = 42\nreturn 42 }",
+        b"", b"writable",
+    ),
+    "optional_values_storage_calls": (
+        """
+        Box :: struct { value ?i16 }
+        choose proc(value ?i16) ?i16 { return value }
+        main proc() i16 {
+            box Box := { value = 40 }
+            options [2]mut ?i16 := [null, 2]
+            options[0] = choose(box.value)
+            return options[0]? + options[1]?
+        }
+        """, b"42\n", None,
+    ),
+    "optional_capture_and_null_transition": (
+        """
+        main proc() i16 {
+            value ?i16 := 40
+            total i16 := 0
+            while value |payload| {
+                total = total + payload
+                value = null
+                continue
+            }
+            if value |unused| return unused
+            if (value != null) return 0
+            value = 2
+            if value |payload| return total + payload
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "optional_pointer_identity_and_mutation": (
+        """
+        main proc() i16 {
+            value i16 := 40
+            pointer ?@mut i16 := &value
+            if pointer |present| present^ = present^ + 2
+            readonly ?@i16 :: pointer
+            if (readonly == null) return 0
+            return readonly?^
+        }
+        """, b"42\n", None,
+    ),
+    "optional_null_unwrap": (
+        "main proc() i16 { value ?i16 :: null\nreturn value? }",
+        b"", b"null",
+    ),
+    "optional_untaken_unwrap": (
+        "main proc() i16 { value ?i16 :: null\nif (false) return value?\nreturn 42 }",
+        b"42\n", None,
+    ),
+    "memory_layout_padded_aggregates": (
+        """
+        Padded :: struct { tag u8, value u64 }
+        Empty :: struct {}
+        main proc() bool {
+            return (
+                sizeof!(Padded) == 16 and alignof!(Padded) == 8
+                and sizeof!([3]Padded) == 48 and sizeof!([]u8) == 16
+                and sizeof!(?@i16) == 8 and sizeof!(Empty) == 0
+            )
+        }
+        """, b"true\n", None,
+    ),
+    "memory_pointer_cast_byte_alias": (
+        """
+        main proc() u16 {
+            value u16 := 40
+            bytes *mut u8 :: ptrcast!(&value)
+            bytes[0] = bytes[0] + 2
+            whole @mut u16 :: ptrcast!(bytes)
+            return whole^
+        }
+        """, b"42\n", None,
+    ),
+    "memory_constcast_slice": (
+        """
+        main proc() i16 {
+            values [2]mut i16 := [40, 2]
+            readonly []i16 :: values[..]
+            writable []mut i16 :: constcast!(readonly)
+            writable[0] = writable[0] + writable[1]
+            return values[0]
+        }
+        """, b"42\n", None,
+    ),
+    "memory_typed_copy_and_set": (
+        """
+        Pair :: struct { number i16, ready bool }
+        main proc() i16 {
+            source [2]Pair :: [{ number = 40, ready = true }, { number = 2, ready = false }]
+            target [2]mut Pair := [{ number = 0, ready = false }, { number = 0, ready = false }]
+            memcopy!(target[..], source[..])
+            saved :: target[0]
+            memset!(target[..], { number = 21, ready = true })
+            if (!saved.ready or !target[1].ready) return 0
+            return target[0].number + target[1].number
+        }
+        """, b"42\n", None,
+    ),
+    "memory_copy_overlap": (
+        "main proc() int { a [3]mut i16 := [1, 2, 3]\nmemcopy!(a[1..], a[..2])\nreturn 42 }",
+        b"", b"overlap",
+    ),
+    "memory_copy_length_mismatch": (
+        "main proc() int { a [3]mut i16 := [1, 2, 3]\nmemcopy!(a[..1], a[1..])\nreturn 42 }",
+        b"", b"slice",
+    ),
+    "memory_empty_copy_and_set": (
+        "main proc() int { a [0]mut i16 := []\nmemcopy!(a[..], a[..])\nmemset!(a[..], 42)\nreturn 42 }",
+        b"42\n", None,
+    ),
+    "optional_nested_presence": (
+        "main proc() i16 { value ??i16 :: 42\nreturn value?? }", b"42\n", None,
+    ),
+    "optional_callback_capture_from_call": (
+        """
+        increment proc(value i16) i16 { return value + 2 }
+        factory proc() ?@proc(value i16) i16 { return increment }
+        main proc() i16 {
+            if factory() |callback| return callback(40)
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "slice_recursive_record": (
+        """
+        Node :: struct { value i16, children []Node }
+        main proc() i16 {
+            children [0]Node :: []
+            node Node :: { value = 42, children = children[..] }
+            return node.value + i16(node.children.len)
+        }
+        """, b"42\n", None,
+    ),
+    "slice_full_width_sentinel": (
+        """
+        main proc() usize {
+            values [2]u64 :: [42, 18446744073709551615]
+            sentinel [;18446744073709551615]u64 :: values[..1;18446744073709551615]
+            return sentinel.len
+        }
+        """, b"1\n", None,
+    ),
+    "memory_pointer_cast_preserves_readonly": (
+        "main proc() int { value i16 :: 40\npointer *mut u8 :: ptrcast!(&value)\nreturn 42 }",
+        b"", b"operator requires",
+    ),
+    "slice_sentinel_strengthening_rejected": (
+        "main proc() int { a :: [1, 0]\ns []i64 :: a[..1]\nt [;0]i64 :: s\nreturn 42 }",
+        b"", b"incompatible",
+    ),
+    "slice_fixed_signed_index_rejected": (
+        "main proc() i64 { a :: [42]\ns :: a[..]\ni i16 :: 0\nreturn s[i] }",
+        b"", b"index",
+    ),
+    "optional_nonoptional_capture_rejected": (
+        "main proc() int { if true |payload| return 1\nreturn 42 }",
+        b"", b"condition",
+    ),
+    "memory_foreign_main_rejected": (
+        "main c_func() i16", b"", b"main must",
+    ),
+    "memory_opaque_dereference_rejected": (
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer^\nreturn 42 }",
+        b"", b"dereference",
+    ),
+    "memory_opaque_index_rejected": (
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer[0]\nreturn 42 }",
+        b"", b"indexing",
+    ),
+    "memory_opaque_slice_rejected": (
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer[..1]\nreturn 42 }",
+        b"", b"operator requires",
+    ),
+    "memory_opaque_arithmetic_rejected": (
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer + 1\nreturn 42 }",
+        b"", b"operator requires",
+    ),
+    "slice_contextual_borrow_preserves_readonly": (
+        "main proc() i16 { values [1]i16 :: [40]\nview []mut i16 :: &values\nview[0] = 42\nreturn values[0] }",
+        b"", b"incompatible",
+    ),
+    "slice_contextual_scalar_borrow_rejected": (
+        "main proc() i16 { value i16 := 42\nview []mut i16 :: &value\nreturn view[0] }",
+        b"", b"incompatible",
+    ),
+    "slice_implicit_borrow_preserves_binding_mutability": (
+        "main proc() i16 { values [1]mut i16 :: [40]\nview []mut i16 :: values\nview[0] = 42\nreturn values[0] }",
+        b"", b"incompatible",
+    ),
     "callback_concrete_vtable": (
         """
         VTable :: struct { run @proc(context @mut State, amount i16) i16 }
@@ -1657,6 +1930,66 @@ def check_dependency_provenance(temporary, executable):
                     executable.unlink()
     return len(cases) * 2
 
+def check_allocator_libc(temporary, executable):
+    source = temporary / "allocator_libc.hon"
+    source.write_text(textwrap.dedent("""
+        malloc c_func(size c_ulong) ?*mut anyopaque
+        realloc c_func(memory ?*mut anyopaque, size c_ulong) ?*mut anyopaque
+        free c_func(memory ?*mut anyopaque) void
+        posix_memalign c_func(output *mut ?*mut anyopaque, alignment c_ulong, size c_ulong) c_int
+        VTable :: struct {
+            alloc @proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8
+            release @proc(context ?@mut anyopaque, memory ?*mut u8) void
+        }
+        Allocator :: struct { context ?@mut anyopaque, vtable @VTable }
+        allocate proc(_ ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+            if (alignment <= 16) return ptrcast!(malloc(c_ulong(size)))
+            output [1]mut ?*mut anyopaque := [null]
+            status :: posix_memalign((&output).ptr, c_ulong(alignment), c_ulong(size))
+            if (status != 0) return null
+            return ptrcast!(output[0])
+        }
+        release proc(_ ?@mut anyopaque, memory ?*mut u8) void { free(memory) }
+        table VTable :: { alloc = allocate, release = release }
+        main proc() i16 {
+            allocator Allocator :: { context = null, vtable = &table }
+            memory :: allocator.vtable.alloc(allocator.context, 4, 8)
+            if memory |bytes| {
+                values *mut i16 :: ptrcast!(bytes)
+                values[0] = 40
+                values[1] = 2
+                resized ?*mut i16 :: ptrcast!(realloc(bytes, 8))
+                if resized |items| {
+                    aligned :: allocator.vtable.alloc(null, 8, 64)
+                    if aligned |other| {
+                        target *mut i16 :: ptrcast!(other)
+                        memcopy!(target[..2], items[..2])
+                        answer :: target[0] + target[1]
+                        allocator.vtable.release(null, other)
+                        free(items)
+                        return answer
+                    }
+                    free(items)
+                    return -1
+                }
+                free(bytes)
+                return -2
+            }
+            return -3
+        }
+    """).strip() + "\n")
+    interpreted = run(str(HONEY), "run", str(source))
+    assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+    assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    for optimization in ("-O0", "-O2"):
+        built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+        assert outcome(built) == (0, b"", b""), outcome(built)
+        assert outcome(run(str(executable))) == (0, b"42\n", b""), optimization
+        executable.unlink()
+    return 1
+
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
@@ -1671,6 +2004,7 @@ def main():
             source.write_text(textwrap.dedent(text).strip() + "\n")
             check(source, executable, (stdout, error))
             count += 1
+        allocator_count = check_allocator_libc(temporary, executable)
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -1694,7 +2028,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count} native allocator program, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":

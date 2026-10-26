@@ -178,6 +178,9 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         }
         .pointer_address: {
             pointer :: try load(state, instruction.left)
+            missing :: fresh(state)
+            try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {missing, pointer})
+            try check_failure(state, missing, .invalid_pointer_access, instruction.span)
             address :: fresh(state)
             try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
             try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
@@ -188,6 +191,56 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print("  %r{} = getelementptr ", output, {result})
             try write_type(output, state.module, Type{ kind = instruction.pointee, shape = instruction.array_type })
             try io.print(", ptr %r{}, i64 %r{}\n", output, {pointer, index})
+        }
+        .pointer_cast: result = try load(state, instruction.left)
+        .string_pointer, .string_length: {
+            string :: try load(state, instruction.left)
+            field usize :: if (instruction.op == .string_pointer) 0 else 1
+            try io.print("  %r{} = extractvalue %string %r{}, {}\n", output, {result, string, field})
+        }
+        .optional_check: {
+            operand :: try load(state, instruction.left)
+            failed :: fresh(state)
+            if (state.values[usize(instruction.left)].kind == .bool) {
+                try io.print("  %r{} = xor i1 %r{}, true\n", output, {failed, operand})
+            } else try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {failed, operand})
+            try check_failure(state, failed, .null_unwrap, instruction.span)
+            return
+        }
+        .slice_check: {
+            start :: try load(state, instruction.left)
+            end :: try load(state, instruction.right)
+            reversed :: fresh(state)
+            try io.print("  %r{} = icmp ugt i64 %r{}, %r{}\n", output, {reversed, start, end})
+            failed := reversed
+            if (instruction.extra != ir.no_value) {
+                bound :: try load(state, instruction.extra)
+                outside :: fresh(state)
+                failed = fresh(state)
+                try io.print("  %r{} = icmp ugt i64 %r{}, %r{}\n", output, {outside, end, bound})
+                try io.print("  %r{} = or i1 %r{}, %r{}\n", output, {failed, reversed, outside})
+            }
+            try check_failure(state, failed, .invalid_slice_bounds, instruction.span)
+            return
+        }
+        .sentinel_check: {
+            pointer :: try load(state, instruction.left)
+            expected :: try load(state, instruction.right)
+            missing :: fresh(state)
+            try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {missing, pointer})
+            try check_failure(state, missing, .invalid_pointer_access, instruction.span)
+            actual :: fresh(state)
+            element :: Type{ kind = instruction.pointee, shape = instruction.array_type }
+            try io.print("  %r{} = load ", output, {actual})
+            try write_type(output, state.module, element)
+            try io.print(", ptr %r{}, align 1\n", output, {pointer})
+            failed :: try sentinel_difference(state, element, actual, expected)
+            try check_failure(state, failed, .sentinel_mismatch, instruction.span)
+            return
+        }
+        .memory_copy, .memory_set: {
+            try emit_memory(state, instruction)
+            return
         }
         .load_address, .store_address: {
             address :: try load(state, instruction.left)
@@ -204,7 +257,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             }
             try io.print("  %r{} = load ", output, {result})
             try write_type(output, state.module, type)
-            try io.print(", ptr %r{}\n", output, {pointer})
+            try io.print(", ptr %r{}, align 1\n", output, {pointer})
         }
         .call: {
             callee :: try load(state, instruction.left)
@@ -216,12 +269,12 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             }
             if (instruction.type != .void) try io.print("  %r{} = call ", output, {result})
             else try io.write_all(output, "  call ")
-            try write_type(output, state.module, type)
+            try write_abi_result(output, state.module, type)
             try io.print(" %r{}(", output, {callee})
             for (0..instruction.arguments_count) |index| {
                 if (index != 0) try io.write_all(output, ", ")
                 operand :: block.arguments.items[instruction.arguments_start + index]
-                try write_type(output, state.module, state.values[usize(operand)])
+                try write_abi_parameter(output, state.module, state.values[usize(operand)])
                 try io.print(" %r{}", output, {first_argument + index})
             }
             try io.write_all(output, ")\n")
@@ -314,6 +367,130 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
     try store(state, instruction.destination, result)
 }
 
+#! compares the complete sentinel value, including nested aggregate fields.
+@hide:file
+sentinel_difference proc(state @mut State, type Type, actual, expected usize) usize ! io.WriteError {
+    output :: state.output
+    if (ir.aggregate(type.kind)) {
+        shape :: state.module.arrays.items[usize(type.shape)]
+        count usize :: if (shape.is_union) divtrunc!(shape.byte_size, 8) else if (shape.kind == .record) shape.fields.len else shape.len
+        result := fresh(state)
+        try io.print("  %r{} = icmp ne i1 false, false\n", output, {result})
+        for (0..count) |index| {
+            child :: if (shape.is_union) Type{ kind = .u64 } else if (shape.kind == .record) Type{ kind = shape.fields[index].type, shape = shape.fields[index].array_type } else Type{ kind = shape.element, shape = shape.element_array }
+            left :: fresh(state)
+            right :: fresh(state)
+            try io.print("  %r{} = extractvalue ", output, {left})
+            try write_type(output, state.module, type)
+            try io.print(" %r{}, ", output, {actual})
+            if (shape.is_union) try io.write_all(output, "0, ")
+            try io.print("{}\n  %r{} = extractvalue ", output, {index, right})
+            try write_type(output, state.module, type)
+            try io.print(" %r{}, ", output, {expected})
+            if (shape.is_union) try io.write_all(output, "0, ")
+            try io.print("{}\n", output, {index})
+            different :: try sentinel_difference(state, child, left, right)
+            combined :: fresh(state)
+            try io.print("  %r{} = or i1 %r{}, %r{}\n", output, {combined, result, different})
+            result = combined
+        }
+        return result
+    }
+    if (type.kind == .string) {
+        left_pointer :: fresh(state)
+        right_pointer :: fresh(state)
+        left_length :: fresh(state)
+        right_length :: fresh(state)
+        try io.print("  %r{} = extractvalue %string %r{}, 0\n", output, {left_pointer, actual})
+        try io.print("  %r{} = extractvalue %string %r{}, 0\n", output, {right_pointer, expected})
+        try io.print("  %r{} = extractvalue %string %r{}, 1\n", output, {left_length, actual})
+        try io.print("  %r{} = extractvalue %string %r{}, 1\n", output, {right_length, expected})
+        pointer_difference :: try sentinel_difference(state, Type{ kind = .pointer }, left_pointer, right_pointer)
+        length_difference :: try sentinel_difference(state, Type{ kind = .usize }, left_length, right_length)
+        result :: fresh(state)
+        try io.print("  %r{} = or i1 %r{}, %r{}\n", output, {result, pointer_difference, length_difference})
+        return result
+    }
+    result :: fresh(state)
+    if (type.kind == .void) {
+        try io.print("  %r{} = icmp ne i1 false, false\n", output, {result})
+        return result
+    }
+    opcode []u8 :: if (type.kind == .float) "fcmp une" else "icmp ne"
+    try io.print("  %r{} = {s} ", output, {result, opcode})
+    try write_type(output, state.module, type)
+    try io.print(" %r{}, %r{}\n", output, {actual, expected})
+    return result
+}
+
+@hide:file
+emit_memory proc(state @mut State, instruction ir.Instruction) void ! io.WriteError {
+    output :: state.output
+    element :: Type{ kind = instruction.pointee, shape = instruction.array_type }
+    width :: ir.storage_size(state.module, element.kind, element.shape)
+    if (width == 0) return
+    destination :: try load(state, instruction.left)
+    operand :: try load(state, instruction.right)
+    count :: try load(state, instruction.extra)
+    size := count
+    if (width != 1) {
+        pair :: fresh(state)
+        overflow :: fresh(state)
+        size = fresh(state)
+        try io.print("  %r{} = call {{ i64, i1 }} @llvm.umul.with.overflow.i64(i64 %r{}, i64 {})\n", output, {pair, count, width})
+        try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 1\n", output, {overflow, pair})
+        try check_failure(state, overflow, .integer_overflow, instruction.span)
+        try io.print("  %r{} = extractvalue {{ i64, i1 }} %r{}, 0\n", output, {size, pair})
+    }
+    nonempty :: fresh(state)
+    destination_null :: fresh(state)
+    try io.print("  %r{} = icmp ne i64 %r{}, 0\n", output, {nonempty, count})
+    try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {destination_null, destination})
+    missing := destination_null
+    if (instruction.op == .memory_copy) {
+        source_null :: fresh(state)
+        missing = fresh(state)
+        try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {source_null, operand})
+        try io.print("  %r{} = or i1 %r{}, %r{}\n", output, {missing, destination_null, source_null})
+    }
+    invalid :: fresh(state)
+    try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {invalid, nonempty, missing})
+    try check_failure(state, invalid, .invalid_pointer_access, instruction.span)
+    if (instruction.op == .memory_copy) {
+        destination_bits :: fresh(state)
+        source_bits :: fresh(state)
+        ordered :: fresh(state)
+        forward :: fresh(state)
+        backward :: fresh(state)
+        distance :: fresh(state)
+        overlap :: fresh(state)
+        try io.print("  %r{} = ptrtoint ptr %r{} to i64\n", output, {destination_bits, destination})
+        try io.print("  %r{} = ptrtoint ptr %r{} to i64\n", output, {source_bits, operand})
+        try io.print("  %r{} = icmp uge i64 %r{}, %r{}\n", output, {ordered, destination_bits, source_bits})
+        try io.print("  %r{} = sub i64 %r{}, %r{}\n", output, {forward, destination_bits, source_bits})
+        try io.print("  %r{} = sub i64 %r{}, %r{}\n", output, {backward, source_bits, destination_bits})
+        try io.print("  %r{} = select i1 %r{}, i64 %r{}, i64 %r{}\n", output, {distance, ordered, forward, backward})
+        try io.print("  %r{} = icmp ult i64 %r{}, %r{}\n", output, {overlap, distance, size})
+        try check_failure(state, overlap, .overlapping_memory_copy, instruction.span)
+        try io.print("  call void @llvm.memcpy.p0.p0.i64(ptr %r{}, ptr %r{}, i64 %r{}, i1 false)\n", output, {destination, operand, size})
+        return
+    }
+    label :: fresh(state)
+    index :: fresh(state)
+    next :: fresh(state)
+    active :: fresh(state)
+    pointer :: fresh(state)
+    try io.print("  br label %set_start{}\nset_start{}:\n  br label %set_test{}\nset_test{}:\n", output, {label, label, label, label})
+    try io.print("  %r{} = phi i64 [ 0, %set_start{} ], [ %r{}, %set_body{} ]\n", output, {index, label, next, label})
+    try io.print("  %r{} = icmp ult i64 %r{}, %r{}\n", output, {active, index, count})
+    try io.print("  br i1 %r{}, label %set_body{}, label %set_end{}\nset_body{}:\n", output, {active, label, label, label})
+    try io.print("  %r{} = getelementptr ", output, {pointer})
+    try write_type(output, state.module, element)
+    try io.print(", ptr %r{}, i64 %r{}\n", output, {destination, index})
+    try store_payload(state, element, operand, pointer)
+    try io.print("  %r{} = add i64 %r{}, 1\n  br label %set_test{}\nset_end{}:\n", output, {next, index, label, label})
+}
+
 @hide:file
 check_union proc(state @mut State, pointer usize, shape ir.ArrayType, field usize, span diagnostics.Span) void ! io.WriteError {
     if (shape.tag_type == .void) return
@@ -351,7 +528,7 @@ store_payload proc(state @mut State, type Type, value, pointer usize) void ! io.
     }
     try io.write_all(state.output, "  store ")
     try write_type(state.output, state.module, type)
-    try io.print(" %r{}, ptr %r{}\n", state.output, {value, pointer})
+    try io.print(" %r{}, ptr %r{}, align 1\n", state.output, {value, pointer})
 }
 
 @hide:file

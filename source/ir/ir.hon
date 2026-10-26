@@ -146,6 +146,14 @@ Op :: enum {
     pointer_from_address
     pointer_address
     pointer_offset
+    pointer_cast
+    string_pointer
+    string_length
+    slice_check
+    sentinel_check
+    optional_check
+    memory_copy
+    memory_set
     negate
     convert
     logical_not
@@ -172,6 +180,7 @@ Instruction :: struct {
     destination ValueId = no_value
     left ValueId = no_value
     right ValueId = no_value
+    extra ValueId = no_value
     slot u32 = 0
     constant Value = Value{}
     arguments_start usize = 0
@@ -205,6 +214,8 @@ Block :: struct {
 #! producers use add_local, add_parameter, and emit; derived metadata is read-only to callers.
 Function :: struct {
     parameters arraylist.ArrayList(Type)
+    # owned by the module allocator; empty for interpreted/native-defined functions.
+    external_name []u8 = ""
     locals arraylist.ArrayList(Type)
     result Type = .void
     result_array_type ArrayId = no_array
@@ -435,7 +446,7 @@ read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, r
         .float: data = ValueData{ real = ptrcast!(@f64, &bits)^ }
         .bool: data = ValueData{ boolean = (bits & 1) != 0 }
         .string: data = ValueData{ string = StringId(bits) }
-        .function: data = ValueData{ function = FunctionId(bits) }
+        .function: data = ValueData{ unsigned = bits }
         .void: return Value{}
         else: {}
     }
@@ -462,7 +473,7 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
         .float: bits = ptrcast!(@u64, &value.data.real)^
         .bool: bits = if (value.data.boolean) 1 else 0
         .string: bits = u64(value.data.string)
-        .function: bits = u64(value.data.function)
+        .function: bits = if (value.data.function == maxval!(FunctionId)) maxval!(u64) else u64(value.data.function)
         .pointer: bits = value.data.unsigned
         .void: return
         else: bits = ptrcast!(@u64, &value.data.integer)^
@@ -568,6 +579,11 @@ emit proc(
         and operation.op != .assign_local
         and operation.op != .reset_local
         and operation.op != .store_address
+        and operation.op != .slice_check
+        and operation.op != .sentinel_check
+        and operation.op != .optional_check
+        and operation.op != .memory_copy
+        and operation.op != .memory_set
     )
     count := body.value_count
     if (produces_value) {
@@ -618,6 +634,7 @@ deinit proc(module @mut Module) void {
         arraylist.deinit(&function.locals)
         arraylist.deinit(&function.blocks)
         arraylist.deinit(&function.array_storage)
+        if (function.external_name.len != 0) mem.free(module.allocator, function.external_name)
     }
     for (module.strings.items) |string|
         mem.free(module.allocator, string.allocation)

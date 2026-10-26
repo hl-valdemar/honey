@@ -46,7 +46,7 @@ emit proc(
     try io.write_all(output, runtime)
     for (sources) |source, index| {
         try io.print("\n@p{} = private constant ", output, {index})
-        try bytes_constant(output, source.path)
+        try bytes_constant(output, source.path, false)
     }
     try io.print("\n@paths = private constant [{} x %string] [", output, {sources.len})
     for (sources) |source, index| {
@@ -54,14 +54,23 @@ emit proc(
         try io.print("%string {{ ptr @p{}, i64 {} }}", output, {index, source.path.len})
     }
     try io.write_all(output, "]\n")
-    for (module.strings.items) |_, index| {
+    for (module.strings.items) |string, index| {
         try io.print("@s{} = private constant ", output, {index})
-        try bytes_constant(output, ir.string_bytes(module, ir.StringId(index)))
+        try bytes_constant(output, string.allocation[..string.len], true)
         try io.write_all(output, "\n")
     }
     for (diagnostic_store.list.items) |diagnostic, index| {
         try io.print("@d{} = private constant ", output, {index})
-        try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?)
+        try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?, false)
+        try io.write_all(output, "\n")
+    }
+    memory_codes [6]diagnostics.Code :: [
+        .null_unwrap, .invalid_slice_bounds, .sentinel_mismatch,
+        .overlapping_memory_copy, .unsupported_foreign_call, .invalid_pointer_access,
+    ]
+    for (memory_codes) |code| {
+        try io.print("@memory_{s} = private constant ", output, {memory_symbol(code)})
+        try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?, false)
         try io.write_all(output, "\n")
     }
     try emit_reporting(output, diagnostic_store, line_starts.items, sources, primary)
@@ -77,6 +86,14 @@ emit proc(
         else try emit_array_printer(output, module, ir.ArrayId(index))
     }
     for (module.functions.items) |function, index| {
+        if (function.external_name.len != 0) {
+            duplicate := false
+            for (module.functions.items[..index]) |previous| {
+                if (mem.eql(previous.external_name, function.external_name)) duplicate = true
+            }
+            if (duplicate or mem.eql(function.external_name, "write") or mem.eql(function.external_name, "__error")
+                or mem.eql(function.external_name, "snprintf") or mem.eql(function.external_name, "exit")) continue
+        }
         values :: try mem.alloc(Type, allocator, function.value_count)
         defer mem.free(allocator, values)
         mem.set(values, Type{})
@@ -97,8 +114,10 @@ emit proc(
         if (result.kind != .void) try io.write_all(output, "  %r0 = ")
         else try io.write_all(output, "  ")
         try io.write_all(output, "call ")
-        try write_type(output, module, result)
-        try io.print(" @f{}()\n", output, {u32(entry)})
+        try write_abi_result(output, module, result)
+        try io.write_all(output, " ")
+        try function_symbol(output, module, entry)
+        try io.write_all(output, "()\n")
         if (result.kind != .void and result.kind != .invalid) {
             try print_call(output, module, result, 0)
             try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
@@ -113,13 +132,15 @@ emit proc(
 }
 
 @hide:file
-bytes_constant proc(output io.Writer, bytes []u8) void ! io.WriteError {
-    try io.print("[{} x i8] c\"", output, {bytes.len})
+bytes_constant proc(output io.Writer, bytes []u8, terminated bool) void ! io.WriteError {
+    size usize :: if (terminated) bytes.len + 1 else bytes.len
+    try io.print("[{} x i8] c\"", output, {size})
     digits :: "0123456789ABCDEF"
     for (bytes) |byte| {
         escaped [3]u8 :: ['\\', digits[usize(divtrunc!(byte, 16))], digits[usize(rem!(byte, 16))]]
         try io.write_all(output, (&escaped)[..])
     }
+    if (terminated) try io.write_all(output, "\\00")
     try io.write_all(output, "\"")
 }
 
@@ -159,6 +180,45 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         # invalid storage only belongs to recovery paths that trap before reading it.
         .invalid: try io.write_all(output, "i8")
     }
+}
+
+@hide:file
+abi_extension proc(kind ir.Type) []u8 {
+    return match kind {
+        .i8, .i16: "signext"
+        .u8, .u16, .bool: "zeroext"
+        else: ""
+    }
+}
+
+@hide
+write_abi_result proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
+    extension :: abi_extension(type.kind)
+    if (extension.len != 0) try io.print("{s} ", output, {extension})
+    try write_type(output, module, type)
+}
+
+@hide
+write_abi_parameter proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
+    try write_type(output, module, type)
+    extension :: abi_extension(type.kind)
+    if (extension.len != 0) try io.print(" {s}", output, {extension})
+}
+
+@hide
+function_symbol proc(output io.Writer, module @ir.Module, id ir.FunctionId) void ! io.WriteError {
+    name :: module.functions.items[usize(id)].external_name
+    if (name.len == 0) {
+        try io.print("@f{}", output, {u32(id)})
+        return
+    }
+    try io.write_all(output, "@\"")
+    digits :: "0123456789ABCDEF"
+    for (name) |byte| {
+        escaped [3]u8 :: ['\\', digits[usize(divtrunc!(byte, 16))], digits[usize(rem!(byte, 16))]]
+        try io.write_all(output, (&escaped)[..])
+    }
+    try io.write_all(output, "\"")
 }
 
 @hide:file
@@ -252,7 +312,7 @@ emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index us
         try io.print("  call void @f{}()\n", output, {u32(global.initializer)})
     } else {
         try io.write_all(output, "  %value = call ")
-        try write_type(output, module, type)
+        try write_abi_result(output, module, type)
         try io.print(" @f{}()\n  store ", output, {u32(global.initializer)})
         try write_type(output, module, type)
         try io.print(" %value, ptr @g{}\n", output, {index})
@@ -407,17 +467,33 @@ check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void 
 }
 
 @hide:file
+memory_symbol proc(code diagnostics.Code) []u8 {
+    return match code {
+        .null_unwrap: "null_unwrap"
+        .invalid_slice_bounds: "invalid_slice_bounds"
+        .sentinel_mismatch: "sentinel_mismatch"
+        .overlapping_memory_copy: "overlapping_memory_copy"
+        .unsupported_foreign_call: "unsupported_foreign_call"
+        .invalid_pointer_access: "invalid_pointer_access"
+        else: unreachable
+    }
+}
+
+@hide:file
 trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.WriteError {
     position :: location(state.line_starts, span)
     symbol []u8 :: match code {
         .integer_overflow: "overflow"
         .index_out_of_bounds: "bounds"
         .inactive_union_field: "inactive_union"
-        else: unreachable
+        else: ""
     }
     message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
     length :: message.len
-    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @{s}, i64 {})\n  unreachable\n", state.output, {usize(span.source), position.line, position.column, symbol, length})
+    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @", state.output, {usize(span.source), position.line, position.column})
+    if (symbol.len != 0) try io.write_all(state.output, symbol)
+    else try io.print("memory_{s}", state.output, {memory_symbol(code)})
+    try io.print(", i64 {})\n  unreachable\n", state.output, {length})
 }
 
 @hide
@@ -439,7 +515,14 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
         }
         .bool: try io.print("{}", output, {value.data.boolean})
         .string: try io.print("{{ ptr @s{}, i64 {} }}", output, {u32(value.data.string), ir.string_bytes(module, value.data.string).len})
-        .function: try io.print("@f{}", output, {u32(value.data.function)})
+        .pointer: {
+            if (value.data.unsigned == maxval!(u64)) try io.write_all(output, "null")
+            else unreachable
+        }
+        .function: {
+            if (value.data.function == maxval!(ir.FunctionId)) try io.write_all(output, "null")
+            else try function_symbol(output, module, value.data.function)
+        }
         .array: {
             shape :: module.arrays.items[usize(value.array_type)]
             try io.write_all(output, "[")
@@ -482,13 +565,20 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
 @hide:file
 emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.WriteError {
     output :: state.output
-    try io.write_all(output, "define internal ")
-    try write_type(output, state.module, Type{ kind = function.result, shape = function.result_array_type })
-    try io.print(" @f{}(", output, {id})
+    if (function.external_name.len != 0) try io.write_all(output, "declare ")
+    else try io.write_all(output, "define internal ")
+    try write_abi_result(output, state.module, Type{ kind = function.result, shape = function.result_array_type })
+    try io.write_all(output, " ")
+    try function_symbol(output, state.module, ir.FunctionId(id))
+    try io.write_all(output, "(")
     for (function.parameters.items) |_, index| {
         if (index != 0) try io.write_all(output, ", ")
-        try write_type(output, state.module, local_type(function, index))
+        try write_abi_parameter(output, state.module, local_type(function, index))
         try io.print(" %p{}", output, {index})
+    }
+    if (function.external_name.len != 0) {
+        try io.write_all(output, ")\n")
+        return
     }
     try io.write_all(output, ") {\nentry:\n")
     for (function.locals.items) |_, index| {
