@@ -187,9 +187,19 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
     defer ir.deinit(&module)
     outcome := try interpreter.run(allocator, &module, &diagnostic_store)
     defer interpreter.deinit(&outcome)
-    if (outcome.trap == null) try print_result(io.stdout(runtime), &module, outcome.value)
+    value := outcome.value
+    failed := false
+    if (outcome.trap == null) {
+        if (module.entry) |entry| {
+            if (module.functions.items[usize(entry)].result_fallible) {
+                failed = ir.union_active(&module, value, 1)
+                if (!failed) value = ir.aggregate_item(&module, value, 0)
+            }
+        }
+        if (!failed) try print_result(io.stdout(runtime), &module, value)
+    }
     try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, outcome.trap)
-    if (outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
+    if (failed or outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return 0
 }
 

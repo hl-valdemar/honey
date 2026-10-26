@@ -382,6 +382,11 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
                 if (ast.return_stmt(tree, statement).value) |value| try resolve_expr(state, scope, value)
             }
             .break_stmt, .continue_stmt: {}
+            .block_stmt: try resolve_arm(state, scope, ast.statement_block(tree, statement))
+            .defer_stmt, .errdefer_stmt: {
+                cleanup :: ast.cleanup_stmt(tree, statement)
+                try resolve_capture_arm(state, scope, cleanup.body, cleanup.capture)
+            }
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 try resolve_expr(state, scope, conditional.condition)
@@ -511,7 +516,7 @@ resolve_expr proc(
     match ast.expr_kind(tree, id) {
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null: {}
         .enum_literal: {}
-        .distinct_type, .alias_expr, .optional_type: try resolve_expr(state, scope, ast.type_operand(tree, id))
+        .distinct_type, .alias_expr, .optional_type, .try_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))
         .enum_type: {
             if (ast.enum_type(tree, id).backing) |backing| try resolve_expr(state, scope, backing)
             for (0..ast.enum_member_count(tree, id)) |i| {
@@ -533,6 +538,17 @@ resolve_expr proc(
                 if (arm.expression) try resolve_expr(state, &arm_scope, arm.body)
                 else try resolve_block(state, &arm_scope, arm.body)
             }
+        }
+        .catch_expr: {
+            expression :: ast.catch_expr(tree, id)
+            try resolve_expr(state, scope, expression.operand)
+            handler_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+            defer hashmap.deinit(&handler_scope.names)
+            if (expression.capture) |capture| {
+                try predeclare(state, &handler_scope, capture, ast.node_span(tree, capture))
+            }
+            if (expression.handler_is_block) try resolve_block(state, &handler_scope, expression.handler)
+            else try resolve_expr(state, &handler_scope, expression.handler)
         }
         .identifier: {
             span :: ast.node_span(tree, id)
@@ -577,7 +593,7 @@ resolve_expr proc(
             state.bindings[usize(expression.member)] = value
         }
         .unary: try resolve_expr(state, scope, ast.unary_expr(tree, id).operand)
-        .binary: {
+        .binary, .fallible_type, .sum_type: {
             expression :: ast.binary_expr(tree, id)
             try resolve_expr(state, scope, expression.left)
             try resolve_expr(state, scope, expression.right)

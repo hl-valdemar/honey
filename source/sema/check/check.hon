@@ -28,6 +28,7 @@ TypeKind :: enum {
     optional
     null
     anyopaque
+    fallible
 }
 
 RecordId :: distinct u32
@@ -47,6 +48,7 @@ EnumType :: struct {
     backing TypeKind
     explicit_backing bool = false
     members []EnumMember
+    composed bool = false
 }
 
 RecordField :: struct {
@@ -61,6 +63,7 @@ RecordType :: struct {
     is_union bool = false
     tag_type Type = Type{}
     declared_tag_type Type = Type{}
+    composed bool = false
 }
 
 @hide:file
@@ -77,6 +80,7 @@ ArrayType :: struct {
     mutable bool = false
     kind TypeKind = .array
     sentinel ?i64 = null
+    error_type Type = Type{}
 }
 
 PointerId :: distinct u32
@@ -103,6 +107,7 @@ Type :: struct {
 
 @hide:file
 Storage :: struct {
+    tree @ast.Tree
     types []mut Type
     arrays arraylist.ArrayList(ArrayType)
     pointers arraylist.ArrayList(PointerType)
@@ -118,7 +123,7 @@ Storage :: struct {
 }
 
 #! owns node-indexed types, aggregate descriptors, initializer mappings, and function fallthrough obligations; release with deinit.
-#! function IDs refer to the caller-owned AST; diagnostic IDs refer to the caller-owned store.
+#! borrows the caller-owned AST for signature comparisons; diagnostic IDs refer to the caller-owned store.
 Result :: struct { storage Storage }
 
 @hide:file
@@ -141,6 +146,7 @@ Role :: enum {
     for_stmt,
     loop_capture,
     loop_control,
+    cleanup,
 }
 
 @hide:file
@@ -174,6 +180,11 @@ Cell :: struct {
     match_pattern bool = false
     first_edge usize = no_index
     return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
+    in_cleanup bool = false
+    narrowing_arm ast.NodeId = ast.NodeId(maxval!(u32))
+    enclosing_arm ast.NodeId = ast.NodeId(maxval!(u32))
+    match_owner ast.NodeId = ast.NodeId(maxval!(u32))
+    narrowed_type Type = Type{}
 }
 
 @hide:file
@@ -208,13 +219,15 @@ State :: struct {
     variant_slots []mut usize
     return_annotation ast.NodeId = ast.NodeId(maxval!(u32))
     in_loop bool = false
+    in_cleanup bool = false
+    narrowing_arm ast.NodeId = ast.NodeId(maxval!(u32))
     slots []mut usize
     collecting_assignment bool = false
     has_assignments bool = false
     pointer_depth usize = 0
 }
 
-#! borrows the AST, resolution, and diagnostic store only during checking.
+#! borrows resolution and diagnostics during checking; Result retains the AST borrow for signature comparisons.
 #! temporary constraints are freed on every exit; Result owns types, aggregate descriptors, initializer mappings, and fallthrough obligations.
 check proc(
     allocator mem.Allocator,
@@ -327,7 +340,8 @@ check proc(
         if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
         if (cells[i].type.kind == .invalid) continue
         binding :: sema.binding(resolution, id)
-        if (binding.kind == .declaration and !cells[i].assignment_value and !cells[usize(binding.data.declaration)].fixed) {
+        if (binding.kind == .declaration and !cells[i].assignment_value
+            and !cells[usize(binding.data.declaration)].fixed and !has_narrowing(&state, id)) {
             join(&state, id, binding.data.declaration)
         }
     }
@@ -535,6 +549,7 @@ check proc(
         function :: ast.function_decl(tree, id)
         result :: types[usize(function.return_type)]
         if (result.kind == .void or result.kind == .invalid or types[usize(id)].kind == .invalid) continue
+        if (result.kind == .fallible and state.arrays.items[usize(result.array_type)].element.kind == .void) continue
         if (block_falls_through(&state, function.body)) {
             # fallthrough is independent of errors in paths that may not execute.
             diagnostic :: try diagnostics.add(diagnostic_store, .missing_return, ast.node_span(tree, function.body))
@@ -547,6 +562,7 @@ check proc(
         }
     }
     return Result{ storage = Storage{
+        tree = tree,
         types = types,
         arrays = state.arrays,
         pointers = state.pointers,
@@ -968,6 +984,9 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 state.cells[usize(statement)].role = .return_stmt
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 state.cells[usize(statement)].return_annotation = return_annotation
+                if (state.in_cleanup) state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
+                    state.diagnostics, .cleanup_control_flow, ast.node_span(tree, statement),
+                ))
                 if (ast.return_stmt(tree, statement).value) |value| {
                     try collect_expression(state, value)
                     try depend(state, value, statement)
@@ -1051,11 +1070,38 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 try collect_block(state, loop.body, return_annotation, true)
                 try depend(state, loop.body, id)
             }
+            .block_stmt: {
+                body :: ast.statement_block(tree, statement)
+                state.cells[usize(statement)].role = .body
+                try collect_block(state, body, return_annotation, in_loop)
+                try depend(state, body, statement)
+            }
+            .defer_stmt, .errdefer_stmt: {
+                cleanup :: ast.cleanup_stmt(tree, statement)
+                state.cells[usize(statement)].role = .cleanup
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                result :: state.types[usize(return_annotation)]
+                if (ast.stmt_kind(tree, statement) == .errdefer_stmt and result.kind != .fallible and result.kind != .invalid) {
+                    state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
+                        state.diagnostics, .errdefer_outside_fallible, cleanup.span,
+                    ))
+                }
+                if (cleanup.capture) |capture| {
+                    try collect_capture(state, capture, cleanup.body)
+                    state.cells[usize(capture)].type = if (result.kind == .fallible)
+                        state.arrays.items[usize(result.array_type)].error_type else result
+                }
+                saved_cleanup :: state.in_cleanup
+                state.in_cleanup = true
+                try collect_block(state, cleanup.body, return_annotation, false)
+                state.in_cleanup = saved_cleanup
+            }
             .break_stmt, .continue_stmt: {
                 state.cells[usize(statement)].role = .loop_control
                 state.cells[usize(statement)].type = Type{ kind = .void }
                 if (!in_loop) {
-                    code :: if (ast.stmt_kind(tree, statement) == .break_stmt)
+                    code :: if (state.in_cleanup) diagnostics.Code.cleanup_control_flow
+                    else if (ast.stmt_kind(tree, statement) == .break_stmt)
                         diagnostics.Code.break_outside_loop
                     else
                         diagnostics.Code.continue_outside_loop
@@ -1077,7 +1123,27 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
     tree :: state.tree
     state.cells[usize(id)].role = .expression
     state.cells[usize(id)].assignment_value = state.collecting_assignment
+    state.cells[usize(id)].return_annotation = state.return_annotation
+    state.cells[usize(id)].in_cleanup = state.in_cleanup
+    state.cells[usize(id)].narrowing_arm = state.narrowing_arm
     match ast.expr_kind(tree, id) {
+        .try_expr: {
+            operand :: ast.type_operand(tree, id)
+            try collect_expression(state, operand)
+            try depend(state, operand, id)
+        }
+        .catch_expr: {
+            expression :: ast.catch_expr(tree, id)
+            try collect_expression(state, expression.operand)
+            try depend(state, expression.operand, id)
+            if (expression.capture) |capture| {
+                try collect_capture(state, capture, expression.handler)
+                state.cells[usize(capture)].type = Type{}
+            }
+            if (expression.handler_is_block) {
+                try collect_block(state, expression.handler, state.return_annotation, state.in_loop)
+            } else try collect_expression(state, expression.handler)
+        }
         .literal_int: {
             state.cells[usize(id)].numeric = true
             state.cells[usize(id)].anchored = true
@@ -1203,7 +1269,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
         }
         .record_type, .union_type, .enum_type, .distinct_type,
-        .pointer_type, .function_type, .slice_type, .optional_type: {
+        .pointer_type, .function_type, .slice_type, .optional_type, .fallible_type, .sum_type: {
             type := try check_type_expression(state, id, state.cells[usize(id)].nominal)
             if (type.kind != .invalid) {
                 type.value_kind = type.kind
@@ -1437,6 +1503,35 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
             return
         }
     }
+    if (expected.kind == .fallible) {
+        descriptor :: state.arrays.items[usize(expected.array_type)]
+        actual := group_type(state, id)
+        if (state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)
+            and has_narrowing(state, id)) actual = try infer_shape(state, id, false)
+        if (actual.kind == .fallible) return
+        target := descriptor.element
+        literal :: state.cells[index].literal
+        if (actual.kind == .none and state.cells[index].expected.kind != .none) actual = state.cells[index].expected
+        if (literal != ast.NodeId(maxval!(u32))) {
+            name := ast.NodeId(maxval!(u32))
+            if (ast.expr_kind(state.tree, literal) == .enum_literal) name = ast.enum_literal(state.tree, literal)
+            if (ast.expr_kind(state.tree, literal) == .record_literal) {
+                if (ast.record_literal(state.tree, literal).type) |annotation| {
+                    if (ast.expr_kind(state.tree, annotation) == .enum_literal) name = ast.enum_literal(state.tree, annotation)
+                }
+                if (name == ast.NodeId(maxval!(u32)) and actual.kind == .none
+                    and descriptor.element.kind != .record and descriptor.error_type.kind == .record
+                    and !state.records.items[usize(descriptor.error_type.record_type)].is_union) target = descriptor.error_type
+            }
+            if (name != ast.NodeId(maxval!(u32)) and type_has_variant(state, descriptor.error_type, name)
+                and !type_has_variant(state, descriptor.element, name)) target = descriptor.error_type
+            else if (actual.kind != .none and !assignable_type(state, actual, target)
+                and assignable_type(state, actual, descriptor.error_type)) target = descriptor.error_type
+        } else if (actual.kind != .none and !assignable_type(state, actual, target)
+            and assignable_type(state, actual, descriptor.error_type)) target = descriptor.error_type
+        try demand(state, id, target, code)
+        return
+    }
     if (expected.kind == .optional) {
         if (group_type(state, id).kind != .optional and group_type(state, id).kind != .null) {
             try demand(state, id, state.arrays.items[usize(expected.array_type)].element, code)
@@ -1661,6 +1756,22 @@ same_signature proc(state @State, left, right ast.NodeId) bool {
 @hide:file
 assignable_type proc(state @State, actual, expected Type) bool {
     if (same_type(state, actual, expected)) return true
+    if (expected.kind == .fallible) {
+        target :: state.arrays.items[usize(expected.array_type)]
+        if (actual.kind == .fallible) {
+            source :: state.arrays.items[usize(actual.array_type)]
+            return (
+                assignable_type(state, source.element, target.element)
+                and error_subset(state.records.items, state.enums.items, source.error_type, target.error_type)
+            )
+        }
+        return (
+            assignable_type(state, actual, target.element)
+            or error_subset(state.records.items, state.enums.items, actual, target.error_type)
+        )
+    }
+    if ((composed_type(state, actual) or composed_type(state, expected))
+        and error_subset(state.records.items, state.enums.items, actual, expected)) return true
     if (expected.kind == .optional) {
         child :: state.arrays.items[usize(expected.array_type)].element
         if (actual.kind == .null) return true
@@ -1689,6 +1800,13 @@ assignable_type proc(state @State, actual, expected Type) bool {
     if (b.element.kind == .anyopaque) return true
     if (b.mutable) return same_type(state, a.element, b.element)
     return assignable_type(state, a.element, b.element)
+}
+
+@hide:file
+composed_type proc(state @State, type Type) bool {
+    if (type.kind == .enumeration) return state.enums.items[usize(type.enum_type)].composed
+    if (type.kind == .record) return state.records.items[usize(type.record_type)].composed
+    return false
 }
 
 @hide:file
@@ -1752,6 +1870,7 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
             statement :: ast.return_stmt(tree, id)
             expected :: state.types[usize(state.cells[usize(id)].return_annotation)]
             if (expected.kind == .invalid) return
+            if (state.types[usize(id)].kind == .invalid) return
             if (statement.value) |value| {
                 actual :: state.types[usize(value)]
                 if (actual.kind == .invalid) {
@@ -1760,12 +1879,14 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     try fail(state, value, .return_type_mismatch, ast.node_span(tree, value))
                     state.types[usize(id)] = state.types[usize(value)]
                 }
-            } else if (expected.kind != .void) {
+            } else if (expected.kind != .void
+                and !(expected.kind == .fallible and state.arrays.items[usize(expected.array_type)].element.kind == .void)) {
                 try fail(state, id, .return_type_mismatch, statement.span)
             }
         }
         .expression: {
             match ast.expr_kind(tree, id) {
+                .try_expr, .catch_expr: try validate_fallible_expression(state, id)
                 .unary: {
                     expression :: ast.unary_expr(tree, id)
                     if (expression.operator == .logical_not) {
@@ -1952,6 +2073,7 @@ block_falls_through proc(state @State, id ast.NodeId) bool {
         if (state.types[usize(source)].kind == .invalid) return false
         match kind {
             .return_stmt, .break_stmt, .continue_stmt, .invalid: return false
+            .block_stmt: if (!block_falls_through(state, ast.statement_block(tree, statement))) return false
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 then_falls :: block_falls_through(state, conditional.then_block)
@@ -2128,7 +2250,8 @@ check_function_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
 intern_array proc(state @mut State, descriptor ArrayType) Type ! mem.AllocError {
     for state.arrays.items |existing, i| {
         if (existing.kind == descriptor.kind and existing.len == descriptor.len and existing.mutable == descriptor.mutable
-            and same_sentinel(existing.sentinel, descriptor.sentinel) and same_type(state, existing.element, descriptor.element)) {
+            and same_sentinel(existing.sentinel, descriptor.sentinel) and same_type(state, existing.element, descriptor.element)
+            and same_type(state, existing.error_type, descriptor.error_type)) {
             return Type{ kind = descriptor.kind, array_type = ArrayId(i) }
         }
     }
@@ -2341,7 +2464,14 @@ infer_builtin proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.A
 same_type proc(state @State, left, right Type) bool {
     if (left.kind != right.kind) return false
     if (left.nominal != right.nominal) return false
-    if (left.kind == .enumeration) return left.enum_type == right.enum_type
+    if (left.kind == .enumeration) {
+        if (left.enum_type == right.enum_type) return true
+        if (!state.enums.items[usize(left.enum_type)].composed and !state.enums.items[usize(right.enum_type)].composed) return false
+        return (
+            error_subset(state.records.items, state.enums.items, left, right)
+            and error_subset(state.records.items, state.enums.items, right, left)
+        )
+    }
     if (left.kind == .pointer) {
         a :: state.pointers.items[usize(left.pointer_type)]
         b :: state.pointers.items[usize(right.pointer_type)]
@@ -2359,6 +2489,10 @@ same_type proc(state @State, left, right Type) bool {
         if (left.record_type == right.record_type) return true
         a :: state.records.items[usize(left.record_type)]
         b :: state.records.items[usize(right.record_type)]
+        if (a.composed or b.composed) return (
+            error_subset(state.records.items, state.enums.items, left, right)
+            and error_subset(state.records.items, state.enums.items, right, left)
+        )
         if (a.is_union or b.is_union) return false
         if (a.declaration != ast.NodeId(maxval!(u32)) or b.declaration != ast.NodeId(maxval!(u32))
             or a.fields.len != b.fields.len) return false
@@ -2372,10 +2506,13 @@ same_type proc(state @State, left, right Type) bool {
         }
         return true
     }
-    if (left.kind != .array and left.kind != .slice and left.kind != .optional) return true
+    if (left.kind != .array and left.kind != .slice and left.kind != .optional and left.kind != .fallible) return true
     a :: state.arrays.items[usize(left.array_type)]
     b :: state.arrays.items[usize(right.array_type)]
-    return a.len == b.len and a.mutable == b.mutable and same_sentinel(a.sentinel, b.sentinel) and same_type(state, a.element, b.element)
+    return (
+        a.len == b.len and a.mutable == b.mutable and same_sentinel(a.sentinel, b.sentinel)
+        and same_type(state, a.element, b.element) and same_type(state, a.error_type, b.error_type)
+    )
 }
 
 @hide:file
@@ -2397,6 +2534,16 @@ sentinel_bits proc(value ConstantInteger) i64 {
 @hide:file
 array_cells proc(state @State, type Type) ?usize {
     if (type.kind == .void) return usize(0)
+    if (type.kind == .fallible) {
+        descriptor :: state.arrays.items[usize(type.array_type)]
+        success := usize(0)
+        failure := usize(0)
+        if (array_cells(state, descriptor.element)) |count| success = count else return null
+        if (array_cells(state, descriptor.error_type)) |count| failure = count else return null
+        payload :: if (success > failure) success else failure
+        if (payload == maxval!(usize)) return null
+        return payload + 1
+    }
     if (type.kind == .slice) return usize(2)
     if (type.kind == .optional) {
         child :: state.arrays.items[usize(type.array_type)].element
@@ -2480,6 +2627,14 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     defer state.cells[index].visiting = false
     if (state.cells[usize(id)].role == .expression) {
         kind :: ast.expr_kind(state.tree, id)
+        if (declaration_reference(state.tree, id) and has_narrowing(state, id)) {
+            narrowed :: try narrow_reference(state, id)
+            if (narrowed.kind != .none) {
+                seed(state, id, narrowed)
+                return narrowed
+            }
+        }
+        if (kind == .try_expr or kind == .catch_expr) return try infer_fallible_expression(state, id, defaults)
         if (kind == .builtin_call) return try infer_builtin(state, id, defaults)
         if (kind == .slice) return try infer_slice(state, id, defaults)
         if (kind == .unary and ast.unary_expr(state.tree, id).operator == .unwrap) {
@@ -2727,6 +2882,11 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
 
 @hide:file
 prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    for 0..(state.cells.len) |i| {
+        if (state.cells[i].role == .expression and ast.expr_kind(state.tree, ast.NodeId(i)) == .catch_expr) {
+            _ = try infer_shape(state, ast.NodeId(i), defaults)
+        }
+    }
     for (0..(state.cells.len)) |i| {
         capture :: state.cells[i].capture
         if (capture == ast.NodeId(maxval!(u32)) or state.cells[i].role != .expression) continue
@@ -2738,7 +2898,8 @@ prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.Allo
         for (0..(state.cells.len)) |j| {
             if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
             binding :: sema.binding(state.resolution, ast.NodeId(j))
-            if (binding.kind == .declaration and binding.data.declaration == capture) seed(state, ast.NodeId(j), child)
+            if (binding.kind == .declaration and binding.data.declaration == capture
+                and !has_narrowing(state, ast.NodeId(j))) seed(state, ast.NodeId(j), child)
         }
     }
 }
@@ -2832,7 +2993,7 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
 @hide:file
 context_demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Code, early bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     if (early and expected.kind != .array and expected.kind != .record
-        and expected.kind != .pointer and expected.kind != .slice and expected.kind != .optional
+        and expected.kind != .pointer and expected.kind != .slice and expected.kind != .optional and expected.kind != .fallible
         and expected.kind != .enumeration and !integer_kind(expected.kind)) return
     try demand(state, id, expected, code)
 }
@@ -2887,7 +3048,8 @@ prepare_ranges proc(state @mut State, assignment_values, constrain bool) void ! 
             or !declaration_reference(tree, id)
         ) continue
         binding :: sema.binding(state.resolution, id)
-        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture) {
+        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture
+            and !has_narrowing(state, id)) {
             seed(state, id, group_type(state, binding.data.declaration))
         }
     }
@@ -2948,7 +3110,8 @@ specialize_annotations proc(state @mut State) void ! (mem.AllocError | diagnosti
             or !declaration_reference(state.tree, id)
         ) continue
         binding :: sema.binding(state.resolution, id)
-        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].fixed) {
+        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].fixed
+            and !has_narrowing(state, id)) {
             seed(state, id, state.cells[usize(binding.data.declaration)].type)
         }
     }
@@ -3217,6 +3380,7 @@ type_syntax proc(kind ast.ExprKind) bool {
         kind == .record_type or kind == .union_type or kind == .enum_type
         or kind == .distinct_type or kind == .alias_expr
         or kind == .pointer_type or kind == .function_type or kind == .slice_type or kind == .optional_type
+        or kind == .fallible_type or kind == .sum_type
     )
 }
 
@@ -3248,6 +3412,8 @@ check_type_expression proc(state @mut State, id ast.NodeId, nominal bool) Type !
     if (kind == .pointer_type) return try check_pointer_type(state, id)
     if (kind == .function_type) return try check_function_type(state, id)
     if (kind == .slice_type or kind == .optional_type) return try check_container_type(state, id)
+    if (kind == .fallible_type) return try check_fallible_type(state, id)
+    if (kind == .sum_type) return try check_sum_type(state, id)
     if (kind == .union_type) {
         type :: try check_union(state, id, nominal)
         state.cells[usize(id)].type = type
@@ -3662,11 +3828,16 @@ collect_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
             if (binding.kind == .invalid) state.cells[usize(capture)].type = invalid_type(binding.data.diagnostic)
             try depend(state, capture, arm.body)
         }
+        saved_arm :: state.narrowing_arm
+        state.cells[usize(arm_id)].enclosing_arm = saved_arm
+        state.cells[usize(arm_id)].match_owner = id
+        state.narrowing_arm = arm_id
         if (arm.expression) {
             try collect_expression(state, arm.body)
         } else {
             try collect_block(state, arm.body, state.return_annotation, state.in_loop)
         }
+        state.narrowing_arm = saved_arm
     }
 }
 
@@ -3733,7 +3904,8 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
                 for 0..(state.cells.len) |j| {
                     if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
                     binding :: sema.binding(state.resolution, ast.NodeId(j))
-                    if (binding.kind == .declaration and binding.data.declaration == capture) seed(state, ast.NodeId(j), payload)
+                    if (binding.kind == .declaration and binding.data.declaration == capture
+                        and !has_narrowing(state, ast.NodeId(j))) seed(state, ast.NodeId(j), payload)
                 }
             }
         }
@@ -3939,4 +4111,397 @@ global_variant proc(state @mut State, name ast.NodeId, payload Type) u64 ! mem.A
     }
     try arraylist.append(&state.variants, Variant{ name = name, payload = payload })
     return u64(state.variants.items.len)
+}
+
+#! applies the same value-type coercion rules used for storage, arguments, and returns.
+value_assignable proc(result @Result, actual, expected Type) bool {
+    # assignability reads only descriptors, signature annotations, and the borrowed AST.
+    state State := undefined
+    state.tree = result.storage.tree
+    state.types = result.storage.types
+    state.arrays = result.storage.arrays
+    state.pointers = result.storage.pointers
+    state.records = result.storage.records
+    state.enums = result.storage.enums
+    return assignable_type(&state, actual, expected)
+}
+
+#! tests source-error subset membership using the descriptors retained by checking.
+error_assignable proc(result @Result, actual, expected Type) bool {
+    return error_subset(result.storage.records.items, result.storage.enums.items, actual, expected)
+}
+
+@hide:file
+error_subset proc(records []RecordType, enums []EnumType, actual, expected Type) bool {
+    if (actual.nominal != expected.nominal) return false
+    if (actual.kind == .record and expected.kind == .record and actual.record_type == expected.record_type) return true
+    if (actual.kind == .enumeration and expected.kind == .enumeration and actual.enum_type == expected.enum_type) return true
+    target := expected
+    if (expected.kind == .record) {
+        descriptor :: records[usize(expected.record_type)]
+        if (!descriptor.is_union or descriptor.tag_type.kind != .enumeration) return false
+        if (descriptor.composed and actual.kind == .record and !records[usize(actual.record_type)].is_union) {
+            for descriptor.fields |field| {
+                if (field.type.kind == .record and field.type.record_type == actual.record_type
+                    and field.type.nominal == actual.nominal) return true
+            }
+            return false
+        }
+        target = descriptor.tag_type
+    }
+    if (target.kind != .enumeration) return false
+    destination :: enums[usize(target.enum_type)]
+    source := actual
+    if (actual.kind == .record) {
+        descriptor :: records[usize(actual.record_type)]
+        if (!descriptor.is_union or descriptor.tag_type.kind != .enumeration) return false
+        source = descriptor.tag_type
+    }
+    if (source.kind != .enumeration) return false
+    origin :: enums[usize(source.enum_type)]
+    if (origin.explicit_backing or destination.explicit_backing) {
+        if (!origin.explicit_backing or !destination.explicit_backing
+            or origin.declaration != destination.declaration or origin.backing != destination.backing) return false
+    }
+    for origin.members |member| {
+        found := false
+        for destination.members |other| {
+            if (member.magnitude == other.magnitude and member.negative == other.negative) found = true
+        }
+        if (!found) return false
+    }
+    return true
+}
+
+@hide:file
+type_has_variant proc(state @State, type Type, name ast.NodeId) bool {
+    if (type.kind == .enumeration) return enum_member_slot(state, state.enums.items[usize(type.enum_type)], name) != no_index
+    if (type.kind != .record) return false
+    descriptor :: state.records.items[usize(type.record_type)]
+    return (
+        descriptor.is_union and descriptor.tag_type.kind == .enumeration
+        and named_field(state.tree, descriptor.fields, name) != no_index
+    )
+}
+
+@hide:file
+check_fallible_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    cached := state.cells[usize(id)].type
+    if (cached.kind == .type_value) cached.kind = cached.value_kind
+    if (cached.kind != .none) return cached
+    expression :: ast.binary_expr(state.tree, id)
+    success :: try check_annotation(state, expression.left, true)
+    failure :: try check_annotation(state, expression.right, false)
+    if (success.kind == .invalid) return success
+    if (failure.kind == .invalid) return failure
+    valid_error :: failure.kind == .enumeration or (failure.kind == .record
+        and (!state.records.items[usize(failure.record_type)].is_union
+            or state.records.items[usize(failure.record_type)].tag_type.kind == .enumeration))
+    if (!valid_error or success.kind == .none or success.kind == .range or success.kind == .type_value
+        or success.kind == .anyopaque or has_inferred_count(state, success)) {
+        return invalid_type(try diagnostics.add(state.diagnostics, .invalid_fallible_type, ast.node_span(state.tree, id)))
+    }
+    type :: try intern_array(state, ArrayType{ kind = .fallible, element = success, error_type = failure })
+    state.cells[usize(id)].type = type
+    return type
+}
+
+@hide:file
+SumVariant :: struct {
+    name ast.NodeId
+    payload Type
+    tag u64
+}
+
+@hide:file
+append_sum_variants proc(state @mut State, variants @mut arraylist.ArrayList(SumVariant), type Type) bool ! mem.AllocError {
+    if (type.kind == .enumeration) {
+        descriptor :: state.enums.items[usize(type.enum_type)]
+        if (descriptor.explicit_backing) return false
+        for (descriptor.members) |member| try arraylist.append(variants, SumVariant{
+            name = member.name, payload = Type{ kind = .void }, tag = member.magnitude,
+        })
+        return true
+    }
+    if (type.kind != .record or type.nominal != ast.NodeId(maxval!(u32))) return false
+    descriptor :: state.records.items[usize(type.record_type)]
+    if (descriptor.is_union) {
+        if (descriptor.tag_type.kind != .enumeration) return false
+        members :: state.enums.items[usize(descriptor.tag_type.enum_type)].members
+        for (descriptor.fields) |field, i| try arraylist.append(variants, SumVariant{
+            name = field.name?, payload = field.type, tag = members[i].magnitude,
+        })
+        return true
+    }
+    name := ast.NodeId(maxval!(u32))
+    for 0..ast.package_decl_count(state.tree) |i| {
+        declaration :: ast.package_decl(state.tree, i)
+        if (ast.decl_kind(state.tree, declaration) == .statement
+            and ast.statement_decl(state.tree, declaration).initializer == descriptor.declaration) name = declaration
+    }
+    if (name == ast.NodeId(maxval!(u32))) {
+        for 0..(state.cells.len) |i| {
+            if (state.cells[i].role != .declaration) continue
+            if (ast.statement_decl(state.tree, ast.NodeId(i)).initializer == descriptor.declaration) name = ast.NodeId(i)
+        }
+    }
+    if (name == ast.NodeId(maxval!(u32))) return false
+    try arraylist.append(variants, SumVariant{ name = name, payload = type, tag = try global_variant(state, name, type) })
+    return true
+}
+
+@hide:file
+check_sum_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    cached := state.cells[usize(id)].type
+    if (cached.kind == .type_value) cached.kind = cached.value_kind
+    if (cached.kind != .none) return cached
+    if (state.cells[usize(id)].record_checking) {
+        return invalid_type(try diagnostics.add(state.diagnostics, .recursive_record, ast.node_span(state.tree, id)))
+    }
+    state.cells[usize(id)].record_checking = true
+    defer state.cells[usize(id)].record_checking = false
+    expression :: ast.binary_expr(state.tree, id)
+    left :: try check_annotation(state, expression.left, false)
+    right :: try check_annotation(state, expression.right, false)
+    if (left.kind == .invalid) return left
+    if (right.kind == .invalid) return right
+    variants arraylist.ArrayList(SumVariant) := arraylist.init(state.records.allocator)
+    defer arraylist.deinit(&variants)
+    valid := try append_sum_variants(state, &variants, left)
+    if (valid) valid = try append_sum_variants(state, &variants, right)
+    if (!valid) {
+        return invalid_type(try diagnostics.add(state.diagnostics, .invalid_sum_type, ast.node_span(state.tree, id)))
+    }
+    count := usize(0)
+    all_void := true
+    for 0..(variants.items.len) |i| {
+        variant :: variants.items[i]
+        duplicate := false
+        for variants.items[0..count] |previous| {
+            if (ast.name_id(state.tree, previous.name) != ast.name_id(state.tree, variant.name)) continue
+            if (previous.tag != variant.tag) {
+                return invalid_type(try diagnostics.add(state.diagnostics, .invalid_sum_type, ast.node_span(state.tree, id)))
+            }
+            duplicate = true
+        }
+        if (duplicate) continue
+        variants.items[count] = variant
+        count += 1
+        if (variant.payload.kind != .void) all_void = false
+    }
+    members :: try mem.alloc(EnumMember, state.enums.allocator, count)
+    members_owned := true
+    defer if (members_owned) mem.free(state.enums.allocator, members)
+    for variants.items[0..count] |variant, i| {
+        if (variant.tag > u64(maxval!(u16))) {
+            return invalid_type(try diagnostics.add(state.diagnostics, .invalid_sum_type, ast.node_span(state.tree, id)))
+        }
+        members[i] = EnumMember{ name = variant.name, magnitude = variant.tag }
+    }
+    try arraylist.append(&state.enums, EnumType{ declaration = id, backing = .u16, members = members, composed = true })
+    members_owned = false
+    tag :: Type{ kind = .enumeration, enum_type = EnumId(state.enums.items.len - 1) }
+    type := tag
+    if (!all_void) {
+        fields :: try mem.alloc(RecordField, state.records.allocator, count)
+        errdefer mem.free(state.records.allocator, fields)
+        for (variants.items[0..count]) |variant, i| fields[i] = RecordField{
+            name = variant.name, type = variant.payload, default = null,
+        }
+        try arraylist.append(&state.records, RecordType{
+            declaration = id, fields = fields, is_union = true, tag_type = tag, composed = true,
+        })
+        type = Type{ kind = .record, record_type = RecordId(state.records.items.len - 1) }
+    }
+    state.cells[usize(id)].type = type
+    return type
+}
+
+@hide:file
+seed_capture proc(state @mut State, capture ast.NodeId, type Type) void {
+    seed(state, capture, type)
+    for 0..(state.cells.len) |i| {
+        if (state.cells[i].role != .expression or !declaration_reference(state.tree, ast.NodeId(i))) continue
+        binding :: sema.binding(state.resolution, ast.NodeId(i))
+        if (binding.kind == .declaration and binding.data.declaration == capture
+            and !has_narrowing(state, ast.NodeId(i))) seed(state, ast.NodeId(i), type)
+    }
+}
+
+@hide:file
+infer_fallible_expression proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    catching :: ast.expr_kind(state.tree, id) == .catch_expr
+    operand :: if (catching) ast.catch_expr(state.tree, id).operand else ast.type_operand(state.tree, id)
+    source :: try infer_shape(state, operand, defaults)
+    if (source.kind == .invalid) {
+        seed(state, id, source)
+        return source
+    }
+    if (source.kind != .fallible) {
+        if (defaults and source.kind != .none) {
+            try fail(state, id, .invalid_fallible_operand, ast.node_span(state.tree, operand))
+            seed(state, id, state.types[usize(id)])
+        }
+        return group_type(state, id)
+    }
+    descriptor :: state.arrays.items[usize(source.array_type)]
+    seed(state, id, descriptor.element)
+    if (catching) {
+        expression :: ast.catch_expr(state.tree, id)
+        if (expression.capture) |capture| seed_capture(state, capture, descriptor.error_type)
+        if (!expression.handler_is_block) {
+            try demand(state, expression.handler, descriptor.element, .catch_type_mismatch)
+            _ = try infer_shape(state, expression.handler, defaults)
+        }
+    }
+    return group_type(state, id)
+}
+
+@hide:file
+validate_fallible_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    catching :: ast.expr_kind(state.tree, id) == .catch_expr
+    operand :: if (catching) ast.catch_expr(state.tree, id).operand else ast.type_operand(state.tree, id)
+    source :: state.types[usize(operand)]
+    if (source.kind == .invalid) return
+    if (source.kind != .fallible) {
+        try fail(state, id, .invalid_fallible_operand, ast.node_span(state.tree, operand))
+        return
+    }
+    descriptor :: state.arrays.items[usize(source.array_type)]
+    if (catching) {
+        expression :: ast.catch_expr(state.tree, id)
+        if (expression.handler_is_block) {
+            if (descriptor.element.kind != .void and block_falls_through(state, expression.handler)) {
+                try fail(state, expression.handler, .catch_type_mismatch, ast.node_span(state.tree, expression.handler))
+            }
+        } else {
+            actual :: state.types[usize(expression.handler)]
+            if (actual.kind != .invalid and !assignable_value(state, expression.handler, actual, descriptor.element)) {
+                try fail(state, expression.handler, .catch_type_mismatch, ast.node_span(state.tree, expression.handler))
+            }
+        }
+        return
+    }
+    if (state.cells[usize(id)].in_cleanup) {
+        try fail(state, id, .cleanup_control_flow, ast.node_span(state.tree, id))
+        return
+    }
+    annotation :: state.cells[usize(id)].return_annotation
+    if (annotation == ast.NodeId(maxval!(u32))) {
+        try fail(state, id, .try_outside_fallible, ast.node_span(state.tree, id))
+        return
+    }
+    result :: state.types[usize(annotation)]
+    if (result.kind == .invalid) return
+    if (result.kind != .fallible) {
+        try fail(state, id, .try_outside_fallible, ast.node_span(state.tree, id))
+    } else if (!error_subset(state.records.items, state.enums.items, descriptor.error_type,
+        state.arrays.items[usize(result.array_type)].error_type)) {
+        try fail(state, id, .incompatible_propagated_error, ast.node_span(state.tree, id))
+    }
+}
+
+@hide:file
+matching_narrowing_arm proc(state @State, id ast.NodeId) ast.NodeId {
+    binding :: sema.binding(state.resolution, id)
+    if (binding.kind != .declaration) return ast.NodeId(maxval!(u32))
+    target :: binding.data.declaration
+    if (state.cells[usize(target)].role == .declaration
+        and ast.statement_decl(state.tree, target).mutability == .variable) return ast.NodeId(maxval!(u32))
+    arm := state.cells[usize(id)].narrowing_arm
+    while (arm != ast.NodeId(maxval!(u32))) {
+        owner :: state.cells[usize(arm)].match_owner
+        subject :: ast.match_expr(state.tree, owner).subject
+        original :: sema.binding(state.resolution, subject)
+        if (original.kind == .declaration and original.data.declaration == binding.data.declaration) return arm
+        arm = state.cells[usize(arm)].enclosing_arm
+    }
+    return ast.NodeId(maxval!(u32))
+}
+
+@hide:file
+has_narrowing proc(state @State, id ast.NodeId) bool {
+    return matching_narrowing_arm(state, id) != ast.NodeId(maxval!(u32))
+}
+
+@hide:file
+arm_names_variant proc(state @State, arm, name ast.NodeId) bool {
+    for 0..ast.match_pattern_count(state.tree, arm) |i| {
+        pattern :: ast.match_pattern(state.tree, arm, i)
+        if (ast.expr_kind(state.tree, pattern) == .enum_literal
+            and ast.name_id(state.tree, ast.enum_literal(state.tree, pattern)) == ast.name_id(state.tree, name)) return true
+    }
+    return false
+}
+
+@hide:file
+arm_keeps_variant proc(state @State, owner, arm, name ast.NodeId) bool {
+    if (!ast.match_arm_view(state.tree, arm).catch_all) return arm_names_variant(state, arm, name)
+    for 0..ast.match_arm_count(state.tree, owner) |i| {
+        previous :: ast.match_arm(state.tree, owner, i)
+        if (previous == arm) break
+        if (ast.match_arm_view(state.tree, previous).catch_all or arm_names_variant(state, previous, name)) return false
+    }
+    return true
+}
+
+@hide:file
+narrow_reference proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    arm :: matching_narrowing_arm(state, id)
+    if (arm == ast.NodeId(maxval!(u32))) return Type{}
+    cached :: state.cells[usize(arm)].narrowed_type
+    if (cached.kind != .none) return cached
+    owner :: state.cells[usize(arm)].match_owner
+    subject :: ast.match_expr(state.tree, owner).subject
+    source :: try infer_shape(state, subject, false)
+    key := source
+    if (source.kind == .record) {
+        descriptor :: state.records.items[usize(source.record_type)]
+        if (!descriptor.is_union) return source
+        key = descriptor.tag_type
+    }
+    if (key.kind != .enumeration) return source
+    descriptor :: state.enums.items[usize(key.enum_type)]
+    count := usize(0)
+    for descriptor.members |member| {
+        if (arm_keeps_variant(state, owner, arm, member.name)) count += 1
+    }
+    if (count == descriptor.members.len) {
+        state.cells[usize(arm)].narrowed_type = source
+        return source
+    }
+    members :: try mem.alloc(EnumMember, state.enums.allocator, count)
+    members_owned := true
+    defer if (members_owned) mem.free(state.enums.allocator, members)
+    next := usize(0)
+    for descriptor.members |member| {
+        if (!arm_keeps_variant(state, owner, arm, member.name)) continue
+        members[next] = member
+        next += 1
+    }
+    try arraylist.append(&state.enums, EnumType{
+        declaration = descriptor.declaration, backing = descriptor.backing,
+        explicit_backing = descriptor.explicit_backing, members = members, composed = true,
+    })
+    members_owned = false
+    tag :: Type{ kind = .enumeration, enum_type = EnumId(state.enums.items.len - 1) }
+    narrowed := tag
+    if (source.kind == .record) {
+        original :: state.records.items[usize(source.record_type)]
+        fields :: try mem.alloc(RecordField, state.records.allocator, count)
+        errdefer mem.free(state.records.allocator, fields)
+        next = 0
+        for original.fields |field| {
+            if (!arm_keeps_variant(state, owner, arm, field.name?)) continue
+            fields[next] = field
+            next += 1
+        }
+        try arraylist.append(&state.records, RecordType{
+            declaration = ast.NodeId(maxval!(u32)), fields = fields, is_union = true,
+            tag_type = tag, composed = true,
+        })
+        narrowed = Type{ kind = .record, record_type = RecordId(state.records.items.len - 1) }
+    }
+    state.cells[usize(arm)].narrowed_type = narrowed
+    return narrowed
 }

@@ -1,17 +1,17 @@
 #! grammar:
-#! * type ..... -> identifier {'.' member} | '?' type | ('@' | '*') ['mut'] type | '@proc' '(' parameters ')' type | '[' (expr | '_') ']' ['mut'] type | '[' [';' expr] ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
+#! * type ..... -> type_sum ['!' type]; type_sum -> type_atom {'|' type_atom}; type_atom includes '(' type ')', identifier {'.' member}, '?' type_atom, ('@' | '*') ['mut'] type_atom, '@proc' '(' parameters ')' type, '[' (expr | '_') ']' ['mut'] type_atom, '[' [';' expr] ']' ['mut'] type_atom, record/enum/union declarations, and ('distinct' | 'alias') type.
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false' | 'null'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}'
+#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls or optional captures; else binds to the nearest if.
-#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/& higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges. compound range endpoints require their own parentheses.
+#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/&/try higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -63,6 +63,10 @@ ExprKind :: enum {
     slice
     builtin_call
     literal_null
+    fallible_type
+    sum_type
+    try_expr
+    catch_expr
 }
 
 DeclKind :: enum {
@@ -82,6 +86,9 @@ StmtKind :: enum {
     if_stmt
     while_stmt
     for_stmt
+    defer_stmt
+    errdefer_stmt
+    block_stmt
     invalid
 }
 
@@ -155,6 +162,13 @@ NodeKind :: enum {
     expr_slice
     expr_builtin_call
     literal_null
+    expr_fallible_type
+    expr_sum_type
+    expr_try
+    expr_catch
+    stmt_defer
+    stmt_errdefer
+    stmt_block
 }
 
 @hide:file
@@ -237,6 +251,20 @@ BinaryExprView :: struct {
     operator BinaryOperator
     left NodeId
     right NodeId
+}
+
+CatchExprView :: struct {
+    span Span
+    operand NodeId
+    capture ?NodeId
+    handler NodeId
+    handler_is_block bool
+}
+
+CleanupView :: struct {
+    span Span
+    body NodeId
+    capture ?NodeId
 }
 
 CallExprView :: struct {
@@ -482,6 +510,41 @@ add_binary proc(
         main = NodeData{ binary_operator = operator },
         data0 = NodeData{ node_id = left },
         data1 = NodeData{ node_id = right },
+    }, span)
+}
+
+add_binary_type proc(
+    builder @mut Builder, span Span, left, right NodeId, fallible bool,
+) NodeId ! mem.AllocError {
+    kind NodeKind :: if (fallible) .expr_fallible_type else .expr_sum_type
+    return try add_node(builder, Node{
+        kind = kind,
+        main = NodeData{ binary_operator = .add },
+        data0 = NodeData{ node_id = left },
+        data1 = NodeData{ node_id = right },
+    }, span)
+}
+
+add_try_expr proc(builder @mut Builder, span Span, operand NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_try,
+        main = NodeData{ node_id = operand },
+    }, span)
+}
+
+add_catch_expr proc(
+    builder @mut Builder, span Span, operand NodeId, capture ?NodeId,
+    handler NodeId, handler_is_block bool,
+) NodeId ! mem.AllocError {
+    capture_id :: if (capture) |id| u32(id) else u32(no_node)
+    block_flag :: if (handler_is_block) u32(1) else u32(0)
+    extra :: try add_extra(builder, capture_id)
+    _ = try add_extra(builder, block_flag)
+    return try add_node(builder, Node{
+        kind = .expr_catch,
+        main = NodeData{ extra = extra },
+        data0 = NodeData{ node_id = operand },
+        data1 = NodeData{ node_id = handler },
     }, span)
 }
 
@@ -733,6 +796,25 @@ add_expression_stmt proc(builder @mut Builder, expression NodeId) NodeId ! mem.A
         kind = .stmt_expr,
         main = NodeData{ node_id = expression },
     }, builder_span(builder, expression))
+}
+
+add_cleanup_stmt proc(
+    builder @mut Builder, span Span, body NodeId, capture ?NodeId, error_only bool,
+) NodeId ! mem.AllocError {
+    kind NodeKind :: if (error_only) .stmt_errdefer else .stmt_defer
+    capture_id :: if (capture) |id| id else no_node
+    return try add_node(builder, Node{
+        kind = kind,
+        main = NodeData{ node_id = body },
+        data0 = NodeData{ node_id = capture_id },
+    }, span)
+}
+
+add_block_stmt proc(builder @mut Builder, body NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .stmt_block,
+        main = NodeData{ node_id = body },
+    }, builder_span(builder, body))
 }
 
 add_return_stmt proc(builder @mut Builder, span Span, value ?NodeId) NodeId ! mem.AllocError {
@@ -1041,6 +1123,9 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_assignment: .assignment_stmt
         .stmt_while: .while_stmt
         .stmt_for: .for_stmt
+        .stmt_defer: .defer_stmt
+        .stmt_errdefer: .errdefer_stmt
+        .stmt_block: .block_stmt
         .invalid_stmt: .invalid
         else: unreachable
     }
@@ -1049,6 +1134,22 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
 statement_expr proc(tree @Tree, id NodeId) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .stmt_expr)
+    return node.main.node_id
+}
+
+cleanup_stmt proc(tree @Tree, id NodeId) CleanupView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_defer or node.kind == .stmt_errdefer)
+    return CleanupView{
+        span = get_span(&tree.storage, id),
+        body = node.main.node_id,
+        capture = maybe_node_id(u32(node.data0.node_id)),
+    }
+}
+
+statement_block proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_block)
     return node.main.node_id
 }
 
@@ -1234,6 +1335,10 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_slice: .slice
         .expr_builtin_call: .builtin_call
         .literal_null: .literal_null
+        .expr_fallible_type: .fallible_type
+        .expr_sum_type: .sum_type
+        .expr_try: .try_expr
+        .expr_catch: .catch_expr
         else: unreachable
     }
 }
@@ -1250,12 +1355,25 @@ unary_expr proc(tree @Tree, id NodeId) UnaryExprView {
 
 binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_binary)
+    debug.assert(node.kind == .expr_binary or node.kind == .expr_fallible_type or node.kind == .expr_sum_type)
     return BinaryExprView{
         span = get_span(&tree.storage, id),
         operator = node.main.binary_operator,
         left = node.data0.node_id,
         right = node.data1.node_id,
+    }
+}
+
+catch_expr proc(tree @Tree, id NodeId) CatchExprView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_catch)
+    extra :: usize(node.main.extra)
+    return CatchExprView{
+        span = get_span(&tree.storage, id),
+        operand = node.data0.node_id,
+        capture = maybe_node_id(tree.storage.extra.items[extra]),
+        handler = node.data1.node_id,
+        handler_is_block = tree.storage.extra.items[extra + 1] != 0,
     }
 }
 
@@ -1403,7 +1521,7 @@ union_type proc(tree @Tree, id NodeId) UnionTypeView {
 
 type_operand proc(tree @Tree, id NodeId) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias or node.kind == .expr_optional_type)
+    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias or node.kind == .expr_optional_type or node.kind == .expr_try)
     return node.main.node_id
 }
 

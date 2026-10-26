@@ -11,6 +11,317 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "fallible_success_and_catch_short_circuit": (
+        """
+        Error :: enum { failed }
+        good proc() i16 ! Error { return 42 }
+        bad_fallback proc() i16 { value i16 :: 32767
+        return value + 1 }
+        main proc() i16 { return good() catch bad_fallback() }
+        """, b"42\n", None,
+    ),
+    "fallible_try_composed_errors_and_capture": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        leaf proc() i16 ! Second { return .second }
+        middle proc() i16 ! (First | Second) { return try leaf() }
+        main proc() i16 {
+            return middle() catch |err| match err {
+                .first: 0,
+                .second: 42,
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_matched_error_residual_return": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        broad proc() i16 ! (First | Second) { return .second }
+        narrow proc() i16 ! Second {
+            broad() catch |err| {
+                match err {
+                    .first: return 0,
+                    else: return err,
+                }
+            }
+            return 0
+        }
+        main proc() i16 { return narrow() catch 42 }
+        """, b"42\n", None,
+    ),
+    "fallible_matched_tagged_error_residual_return": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { failed i16 }
+        broad proc() i16 ! (Missing | Detail) { return .failed{42} }
+        narrow proc() i16 ! Detail {
+            broad() catch |err| {
+                match err {
+                    .missing: return 0,
+                    else: return err,
+                }
+            }
+            return 0
+        }
+        main proc() i16 {
+            return narrow() catch |err| match err { .failed |code|: code }
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_storage_arrays_and_callbacks": (
+        """
+        Error :: enum { failed }
+        Callback :: alias @proc(value i16) i16 ! Error
+        Box :: struct { callback Callback, result i16 ! Error }
+        maybe proc(value i16) i16 ! Error {
+            if (value == 0) return .failed
+            return value
+        }
+        main proc() i16 {
+            box Box :: { callback = maybe, result = 40 }
+            values [2](i16 ! Error) :: [box.result, .failed]
+            first :: values[0] catch 0
+            second :: values[1] catch 2
+            return box.callback(first + second) catch 0
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_struct_error_payload": (
+        """
+        Failure :: struct { code i16 }
+        fail proc() i16 ! Failure { return Failure { code = 42 } }
+        main proc() i16 { return fail() catch |err| err.code }
+        """, b"42\n", None,
+    ),
+    "fallible_tagged_error_payload": (
+        """
+        Error :: union(enum) { failed i16, empty void }
+        fail proc() i16 ! Error { return .failed{42} }
+        main proc() i16 {
+            return fail() catch |err| match err {
+                .failed |code|: code,
+                .empty: 0,
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_composed_tagged_payload_propagation": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { failed i16, empty void }
+        leaf proc() i16 ! Detail { return .failed{42} }
+        forward proc() i16 ! (Missing | Detail) { return try leaf() }
+        main proc() i16 {
+            return forward() catch |err| match err {
+                .missing: 0,
+                .failed |code|: code,
+                .empty: 0,
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_terminal_catch_block": (
+        """
+        Error :: enum { failed }
+        fail proc() i16 ! Error { return .failed }
+        main proc() i16 {
+            return fail() catch |err| {
+                if (err == Error.failed) return 42
+                return 0
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_void_catch_and_fallthrough": (
+        """
+        Error :: enum { failed }
+        good proc(value @mut i16) void ! Error { value^ = 40 }
+        fail proc() void ! Error { return .failed }
+        main proc() i16 {
+            value i16 := 0
+            good(&value) catch { value = 0 }
+            fail() catch { value = value + 2 }
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "cleanup_scope_lifo_and_live_values": (
+        """
+        main proc() int {
+            value := 0
+            {
+                defer value = value * 10 + 2
+                defer value = value * 10 + 4
+            }
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "cleanup_return_payload_before_mutation": (
+        """
+        Pair :: struct { a i16, b i16 }
+        get proc() Pair {
+            value Pair := { a = 40, b = 2 }
+            defer value.a = 0
+            return value
+        }
+        main proc() i16 { value :: get()
+        return value.a + value.b }
+        """, b"42\n", None,
+    ),
+    "cleanup_loop_exited_scopes": (
+        """
+        main proc() int {
+            value := 0
+            for 0..4 |i| {
+                defer value = value + 1
+                if (i == 0) continue
+                {
+                    defer value = value + 10
+                    break
+                }
+            }
+            return value
+        }
+        """, b"12\n", None,
+    ),
+    "cleanup_only_reached_registrations": (
+        """
+        write proc(value @mut i64) void {
+            defer value^ = value^ + 40
+            if (true) return
+            defer value^ = 0
+        }
+        main proc() int { value := 2
+        write(&value)
+        return value }
+        """, b"42\n", None,
+    ),
+    "cleanup_errdefer_capture_and_order": (
+        """
+        Error :: enum { failed }
+        fail proc(value @mut i64) int ! Error {
+            defer value^ = value^ * 10 + 2
+            errdefer |err| if (err == Error.failed) value^ = value^ * 10 + 4
+            return .failed
+        }
+        main proc() int { value := 0
+        ignored :: fail(&value) catch 0
+        return value + ignored }
+        """, b"42\n", None,
+    ),
+    "cleanup_errdefer_skip_on_success_and_scope_exit": (
+        """
+        Error :: enum { failed }
+        good proc(value @mut i64) int ! Error {
+            errdefer value^ = 0
+            { errdefer value^ = 0 }
+            defer value^ = value^ + 2
+            return 1
+        }
+        main proc() int { value := 40
+        ignored :: good(&value) catch 0
+        return value }
+        """, b"42\n", None,
+    ),
+    "cleanup_try_propagation": (
+        """
+        Error :: enum { failed }
+        leaf proc() void ! Error { return .failed }
+        outer proc(value @mut i64) void ! Error {
+            defer value^ = value^ + 2
+            errdefer value^ = value^ + 40
+            try leaf()
+            value^ = 0
+        }
+        main proc() int { value := 0
+        outer(&value) catch {}
+        return value }
+        """, b"42\n", None,
+    ),
+    "cleanup_direct_fallible_return_and_expired_scope": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        leaf proc() i16 ! Second { return .second }
+        forward proc(value @mut i64) i16 ! (First | Second) {
+            { errdefer value^ = 0 }
+            errdefer value^ = value^ + 40
+            defer value^ = value^ + 2
+            return leaf()
+        }
+        main proc() int { value := 0
+        ignored :: forward(&value) catch 0
+        return value }
+        """, b"42\n", None,
+    ),
+    "fallible_aggregate_success_copy": (
+        """
+        Error :: enum { failed }
+        Pair :: struct { left i16, right i16 }
+        read proc() Pair ! Error {
+            value Pair := { left = 40, right = 2 }
+            defer value.left = 0
+            return value
+        }
+        main proc() i16 {
+            value :: read() catch Pair { left = 0, right = 0 }
+            return value.left + value.right
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_borrowed_slice_success": (
+        """
+        Error :: enum { failed }
+        borrow proc(values []mut i16) []mut i16 ! Error { return values }
+        main proc() i16 {
+            values [2]mut i16 := [40, 2]
+            view :: borrow(values[..]) catch &[]
+            view[0] = view[0] + view[1]
+            return values[0]
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_optional_pointer_success": (
+        """
+        Error :: enum { failed }
+        borrow proc(value @mut i16) ?@mut i16 ! Error { return value }
+        main proc() i16 {
+            value i16 := 40
+            pointer :: borrow(&value) catch null
+            if pointer |present| present^ = present^ + 2
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_trap_is_not_caught": (
+        """
+        Error :: enum { failed }
+        bad proc() int ! Error { value :: [1]
+        return value[2] }
+        main proc() int { return bad() catch 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "fallible_try_requires_channel": (
+        "main proc() int { return try 42 }", b"", b"",
+    ),
+    "fallible_incompatible_propagation": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        leaf proc() int ! First { return .first }
+        bad proc() int ! Second { return try leaf() }
+        main proc() int { return bad() catch 42 }
+        """, b"", b"",
+    ),
+    "cleanup_return_rejected": (
+        "main proc() int { defer return 0\nreturn 42 }", b"", b"",
+    ),
+    "cleanup_errdefer_requires_fallible_function": (
+        "main proc() int { errdefer main()\nreturn 42 }", b"", b"",
+    ),
     "slice_mutation_alias_calls": (
         """
         update proc(values []mut i16) []mut i16 {
@@ -1991,6 +2302,54 @@ def check_allocator_libc(temporary, executable):
 
 
 
+def check_fallible_packages_and_entry(temporary, executable):
+    project = temporary / "fallible_packages"
+    app = project / "app"
+    library = project / "library"
+    app.mkdir(parents=True)
+    library.mkdir()
+    dependency = library / "error.hon"
+    dependency.write_text(
+        "Error :: enum { unavailable }\n"
+        "read proc() i16 ! Error { return .unavailable }\n"
+    )
+    source = app / "main.hon"
+    source.write_text(textwrap.dedent("""
+        library :: import "../library"
+        LocalError :: enum { local }
+        read proc() i16 ! (LocalError | library.Error) {
+            return try library.read()
+        }
+        main proc() i16 {
+            return read() catch |err| match err {
+                .local: 0,
+                .unavailable: 42,
+            }
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    count = 1
+    for result, body, expected in (
+        ("i16", "return 42", (0, b"42\n", b"")),
+        ("void", "return", (0, b"", b"")),
+        ("void", "", (0, b"", b"")),
+        ("i16", "return .failed", (1, b"", b"")),
+        ("void", "return .failed", (1, b"", b"")),
+    ):
+        source.write_text(
+            f"Error :: enum {{ failed }}\n"
+            f"main proc() {result} ! Error {{ {body} }}\n"
+        )
+        assert outcome(run(str(HONEY), "run", str(source))) == expected
+        for optimization in ("-O0", "-O2"):
+            built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+            assert outcome(built) == (0, b"", b""), outcome(built)
+            assert outcome(run(str(executable))) == expected, optimization
+            executable.unlink()
+        count += 1
+    return count
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -2009,6 +2368,7 @@ def main():
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
         count += check_data_model_packages(temporary, executable)
+        count += check_fallible_packages_and_entry(temporary, executable)
         count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"
         emitted = run(str(HONEY), "emit-llvm", str(source))

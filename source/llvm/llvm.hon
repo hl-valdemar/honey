@@ -118,8 +118,32 @@ emit proc(
         try io.write_all(output, " ")
         try function_symbol(output, module, entry)
         try io.write_all(output, "()\n")
-        if (result.kind != .void and result.kind != .invalid) {
-            try print_call(output, module, result, 0)
+        printable := result
+        operand usize := 0
+        if (function.result_fallible) {
+            shape :: module.arrays.items[usize(result.shape)]
+            success :: shape.fields[0]
+            try io.write_all(output, "  %result = alloca ")
+            try write_type(output, module, result)
+            try io.write_all(output, "\n  store ")
+            try write_type(output, module, result)
+            try io.write_all(output, " %r0, ptr %result\n  %tag = load ")
+            try write_type(output, module, Type{ kind = shape.tag_type })
+            try io.write_all(output, ", ptr %result\n  %success = icmp eq ")
+            try write_type(output, module, Type{ kind = shape.tag_type })
+            try io.write_all(output, " %tag, ")
+            try write_constant(output, module, success.tag)
+            try io.write_all(output, "\n  br i1 %success, label %ok, label %error\nerror:\n  call void @report(i64 -1)\n  ret i32 1\nok:\n")
+            printable = Type{ kind = success.type, shape = success.array_type }
+            operand = 1
+            if (printable.kind != .void) {
+                try io.print("  %payload = getelementptr i8, ptr %result, i64 {}\n  %r1 = load ", output, {shape.payload_offset})
+                try write_type(output, module, printable)
+                try io.write_all(output, ", ptr %payload\n")
+            }
+        }
+        if (printable.kind != .void and printable.kind != .invalid) {
+            try print_call(output, module, printable, operand)
             try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
         }
         try io.write_all(output, "  call void @report(i64 -1)\n")

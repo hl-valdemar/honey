@@ -21,6 +21,7 @@ Storage :: struct {
 LoopTargets :: struct {
     continue_target ir.BlockId
     exit ir.BlockId
+    cleanup_depth usize
 }
 
 @hide:file
@@ -33,12 +34,15 @@ State :: struct {
     storage []mut Storage
     arrays []mut ir.ArrayId
     arguments arraylist.ArrayList(ir.ValueId)
+    cleanups arraylist.ArrayList(ast.NodeId)
     records []mut ir.ArrayId
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
     loop ?LoopTargets = null
     return_type typecheck.Type = typecheck.Type{}
+    fallthrough_block ?ast.NodeId = null
+    fallthrough_diagnostic ?diagnostics.DiagnosticId = null
 }
 
 #! lowers checked source into caller-owned executable storage; release with ir.deinit.
@@ -90,8 +94,10 @@ lower_package proc(
         arrays = arrays,
         records = records,
         arguments = arraylist.init(ir.ValueId, allocator),
+        cleanups = arraylist.init(ast.NodeId, allocator),
     }
     defer arraylist.deinit(&state.arguments)
+    defer arraylist.deinit(&state.cleanups)
 
     # allocate every package identity before lowering any initializer or body.
     for (0..ast.package_decl_count(tree)) |i| {
@@ -138,6 +144,7 @@ lower_type proc(state @State, type typecheck.Type) ir.Type {
         return lower_type(state, typecheck.Type{ kind = typecheck.enum_type(state.checked, type.enum_type).backing })
     }
     if (type.kind == .slice) return .record
+    if (type.kind == .fallible) return .record
     if (type.kind == .optional) return lower_optional_type(state, typecheck.array_type(state.checked, type.array_type).element)
     return match type.kind {
         .int: .int
@@ -160,7 +167,7 @@ lower_type proc(state @State, type typecheck.Type) ir.Type {
         .function: .function
         .enumeration: unreachable
         .none, .invalid, .range, .type_value, .null, .anyopaque: .invalid
-        .slice, .optional: unreachable
+        .slice, .optional, .fallible: unreachable
     }
 }
 
@@ -173,7 +180,7 @@ lower_optional_type proc(state @State, child typecheck.Type) ir.Type {
 @hide:file
 array_shape proc(state @mut State, type typecheck.Type) ir.ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
     if (type.kind == .record) return try prepare_record(state, type.record_type)
-    if (type.kind == .slice or type.kind == .optional) return try prepare_container(state, type)
+    if (type.kind == .slice or type.kind == .optional or type.kind == .fallible) return try prepare_container(state, type)
     if (type.kind != .array) return ir.no_array
     # checker history includes unresolved shapes; materialize only final used types.
     return try prepare_array(state, type.array_type)
@@ -202,6 +209,23 @@ prepare_container proc(state @mut State, type typecheck.Type) ir.ArrayId ! (mem.
     if (type.kind == .optional and (descriptor.element.kind == .pointer or descriptor.element.kind == .function)) return ir.no_array
     index :: usize(type.array_type)
     if (state.arrays[index] != ir.no_array) return state.arrays[index]
+    if (type.kind == .fallible) {
+        fields [2]ir.RecordField :: [
+            {
+                type = lower_type(state, descriptor.element),
+                array_type = try array_shape(state, descriptor.element),
+                tag = ir.Value{ type = .int, data = ir.ValueData{ integer = 0 } },
+            },
+            {
+                type = lower_type(state, descriptor.error_type),
+                array_type = try array_shape(state, descriptor.error_type),
+                tag = ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } },
+            },
+        ]
+        shape :: try ir.add_union(state.module, fields[..], true)
+        state.arrays[index] = shape
+        return shape
+    }
     fields [2]mut ir.RecordField := [{ type = .pointer }, { type = .usize }]
     if (type.kind == .optional) {
         fields[0] = ir.RecordField{ type = .bool }
@@ -354,9 +378,13 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     state.function = usize(state.storage[usize(id)].index)
     state.block = ir.BlockId(0)
     state.terminated = false
+    state.loop = null
+    state.fallthrough_block = declaration.body
+    state.fallthrough_diagnostic = typecheck.fallthrough_diagnostic(state.checked, id)
     state.return_type = typecheck.type_of(state.checked, declaration.return_type)
     state.module.functions.items[state.function].result = lower_type(state, typecheck.type_of(state.checked, declaration.return_type))
     state.module.functions.items[state.function].result_array_type = try array_shape(state, typecheck.type_of(state.checked, declaration.return_type))
+    state.module.functions.items[state.function].result_fallible = state.return_type.kind == .fallible
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
         type :: typecheck.type_of(state.checked, parameter)
@@ -389,7 +417,9 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
         trap(state, diagnostic, ast.node_span(tree, declaration.body))
         return
     }
-    finish(state, ir.no_value, ast.node_span(tree, declaration.body))
+    value := ir.no_value
+    if (state.return_type.kind == .fallible) value = try wrap_fallible(state, value, state.return_type, false, ast.node_span(tree, declaration.body))
+    finish(state, value, ast.node_span(tree, declaration.body))
 }
 
 @hide:file
@@ -433,6 +463,12 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
                 }
                 try predeclare_locals(state, loop.body)
             }
+            .block_stmt: try predeclare_locals(state, ast.statement_block(state.tree, statement))
+            .defer_stmt, .errdefer_stmt: {
+                cleanup :: ast.cleanup_stmt(state.tree, statement)
+                if (cleanup.capture) |capture| try predeclare_capture(state, capture)
+                try predeclare_locals(state, cleanup.body)
+            }
             else: {}
         }
     }
@@ -453,6 +489,8 @@ store_capture proc(state @mut State, capture ast.NodeId, value ir.ValueId, optio
 
 @hide:file
 lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    cleanup_depth :: state.cleanups.items.len
+    defer state.cleanups.items = state.cleanups.items.ptr[..cleanup_depth]
     # reset every direct declaration before control can return or trap within the scope.
     if (fresh_scope) {
         for (0..ast.block_statement_count(state.tree, block)) |i| {
@@ -471,6 +509,76 @@ lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (m
         if (state.terminated) return
         try lower_statement(state, ast.block_statement(state.tree, block, i))
     }
+    if (!state.terminated) {
+        if (state.fallthrough_block) |function_body| {
+            if (function_body == block) {
+                if (state.fallthrough_diagnostic) |diagnostic| {
+                    trap(state, diagnostic, ast.node_span(state.tree, block))
+                    return
+                }
+            }
+        }
+    }
+    if (!state.terminated) try lower_cleanups(state, cleanup_depth, ir.no_value)
+}
+
+@hide:file
+lower_cleanups proc(state @mut State, depth usize, error_value ir.ValueId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    index := state.cleanups.items.len
+    while (index > depth) {
+        index -= 1
+        id :: state.cleanups.items[index]
+        if (ast.stmt_kind(state.tree, id) == .errdefer_stmt and error_value == ir.no_value) continue
+        cleanup :: ast.cleanup_stmt(state.tree, id)
+        if (cleanup.capture) |capture| {
+            _ = try emit(state, ir.Instruction{
+                op = .store_local, left = error_value, slot = state.storage[usize(capture)].index, span = cleanup.span,
+            })
+        }
+        try lower_block(state, cleanup.body, true)
+        if (state.terminated) return
+    }
+}
+
+@hide:file
+wrap_fallible proc(state @mut State, value ir.ValueId, type typecheck.Type, failed bool, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    slot :: if (failed) u32(1) else u32(0)
+    shape :: try array_shape(state, type)
+    return try emit(state, ir.Instruction{
+        op = .union_literal, type = .record, array_type = shape, slot = slot,
+        left = value, constant = state.module.arrays.items[usize(shape)].fields[usize(slot)].tag, span = span,
+    })
+}
+
+@hide:file
+fallible_failed proc(state @mut State, value ir.ValueId, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    tag :: try emit(state, ir.Instruction{ op = .union_tag, type = .int, left = value, span = span })
+    error_tag :: try constant(state, ir.Value{ type = .int, data = ir.ValueData{ integer = 1 } }, span)
+    return try emit(state, ir.Instruction{ op = .equal, type = .bool, left = tag, right = error_tag, span = span })
+}
+
+@hide:file
+lower_return proc(state @mut State, value ir.ValueId, span diagnostics.Span) void ! (mem.AllocError | diagnostics.CapacityError) {
+    if (state.return_type.kind != .fallible) {
+        try lower_cleanups(state, 0, ir.no_value)
+        if (!state.terminated) finish(state, value, span)
+        return
+    }
+    failed :: try fallible_failed(state, value, span)
+    success :: try add_block(state)
+    failure :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = failed, target = failure, alternative = success, span = span,
+    }
+    state.block = failure
+    error_type :: typecheck.array_type(state.checked, state.return_type.array_type).error_type
+    error_value :: try project(state, value, lower_type(state, error_type), try array_shape(state, error_type), 1, span)
+    try lower_cleanups(state, 0, error_value)
+    if (!state.terminated) finish(state, value, span)
+    state.block = success
+    state.terminated = false
+    try lower_cleanups(state, 0, ir.no_value)
+    if (!state.terminated) finish(state, value, span)
 }
 
 @hide:file
@@ -551,7 +659,7 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
         span = ast.node_span(state.tree, loop.condition),
     }
     previous_loop :: state.loop
-    state.loop = LoopTargets{ continue_target = guard, exit = exit }
+    state.loop = LoopTargets{ continue_target = guard, exit = exit, cleanup_depth = state.cleanups.items.len }
     defer state.loop = previous_loop
     state.block = body
     if (loop.capture) |capture| try store_capture(state, capture, value, typecheck.type_of(state.checked, loop.condition), loop.span)
@@ -598,7 +706,7 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
         kind = .branch, value = condition_value, target = body, alternative = exit, span = interval.span,
     }
     previous_loop :: state.loop
-    state.loop = LoopTargets{ continue_target = update, exit = exit }
+    state.loop = LoopTargets{ continue_target = update, exit = exit, cleanup_depth = state.cleanups.items.len }
     defer state.loop = previous_loop
     state.block = body
     if (loop.capture) |capture| _ = trap_binding(state, capture)
@@ -633,6 +741,11 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
 lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     match ast.stmt_kind(tree, id) {
+        .block_stmt: try lower_block(state, ast.statement_block(tree, id), true)
+        .defer_stmt, .errdefer_stmt: {
+            if (trap_type(state, id)) return
+            try arraylist.append(&state.cleanups, id)
+        }
         .if_stmt: try lower_if(state, id)
         .while_stmt: try lower_while(state, id)
         .for_stmt: try lower_for(state, id)
@@ -642,6 +755,8 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
                 target := targets.exit
                 # each loop supplies its own guard or guarded-update entry.
                 if (ast.stmt_kind(tree, id) == .continue_stmt) target = targets.continue_target
+                try lower_cleanups(state, targets.cleanup_depth, ir.no_value)
+                if (state.terminated) return
                 state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
                     kind = .jump, target = target, span = ast.node_span(tree, id),
                 }
@@ -712,7 +827,10 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             value := ir.no_value
             if (statement.value) |expression| value = try lower_as(state, expression, state.return_type)
             if (state.terminated or trap_type(state, id)) return
-            finish(state, value, statement.span)
+            if (statement.value == null and state.return_type.kind == .fallible) {
+                value = try wrap_fallible(state, value, state.return_type, false, statement.span)
+            }
+            try lower_return(state, value, statement.span)
         }
     }
 }
@@ -1127,6 +1245,14 @@ lower_as proc(state @mut State, id ast.NodeId, expected typecheck.Type) ir.Value
     actual :: typecheck.type_of(state.checked, id)
     span :: ast.node_span(state.tree, id)
     if (actual.kind == .invalid or expected.kind == .invalid) return try lower_expression(state, id)
+    if (expected.kind == .fallible and actual.kind != .fallible) {
+        descriptor :: typecheck.array_type(state.checked, expected.array_type)
+        failed :: !typecheck.value_assignable(state.checked, actual, descriptor.element)
+        channel :: if (failed) descriptor.error_type else descriptor.element
+        payload :: try lower_as(state, id, channel)
+        if (state.terminated) return ir.no_value
+        return try wrap_fallible(state, payload, expected, failed, span)
+    }
     if (expected.kind == .optional and actual.kind != .optional) {
         child :: typecheck.array_type(state.checked, expected.array_type).element
         runtime :: lower_type(state, child)
@@ -1144,7 +1270,245 @@ lower_as proc(state @mut State, id ast.NodeId, expected typecheck.Type) ir.Value
         if (state.terminated) return ir.no_value
         return try record_pair(state, try array_shape(state, expected), parts.pointer, parts.bound, span)
     }
-    return try lower_expression(state, id)
+    value :: try lower_expression(state, id)
+    if (state.terminated) return ir.no_value
+    return try convert_value(state, value, actual, expected, span)
+}
+
+@hide:file
+convert_value proc(state @mut State, value ir.ValueId, actual, expected typecheck.Type, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (actual.kind == .fallible and expected.kind == .fallible) {
+        if (actual.array_type == expected.array_type) return value
+        source :: typecheck.array_type(state.checked, actual.array_type)
+        destination :: typecheck.array_type(state.checked, expected.array_type)
+        shape :: try array_shape(state, expected)
+        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .record, shape))
+        failed :: try fallible_failed(state, value, span)
+        success :: try add_block(state)
+        failure :: try add_block(state)
+        join :: try add_block(state)
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .branch, value = failed, target = failure, alternative = success, span = span,
+        }
+        for (0..2) |i| {
+            state.block = if (i == 0) success else failure
+            child :: if (i == 0) source.element else source.error_type
+            target :: if (i == 0) destination.element else destination.error_type
+            payload := ir.no_value
+            if (child.kind != .void) payload = try project(state, value, lower_type(state, child), try array_shape(state, child), u32(i), span)
+            converted :: try convert_value(state, payload, child, target, span)
+            wrapped :: try wrap_fallible(state, converted, expected, i == 1, span)
+            _ = try emit(state, ir.Instruction{ op = .store_local, left = wrapped, slot = slot, span = span })
+            state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                kind = .jump, target = join, span = span,
+            }
+        }
+        state.block = join
+        return try emit(state, ir.Instruction{ op = .load_local, type = .record, array_type = shape, slot = slot, span = span })
+    }
+    if (expected.kind == .optional and actual.kind != .optional) {
+        child :: typecheck.array_type(state.checked, expected.array_type).element
+        runtime :: lower_type(state, child)
+        nullable :: child.kind == .pointer or child.kind == .function
+        if (actual.kind == .null and nullable) return try null_constant(state, runtime, span)
+        payload := ir.no_value
+        if (actual.kind == .null) payload = try zero_value(state, runtime, try array_shape(state, child), span)
+        else payload = try convert_value(state, value, actual, child, span)
+        if (nullable) return payload
+        present :: try constant(state, ir.Value{ type = .bool, data = ir.ValueData{ boolean = actual.kind != .null } }, span)
+        return try record_pair(state, try array_shape(state, expected), present, payload, span)
+    }
+    if (actual.kind == .optional and expected.kind == .optional and actual.array_type != expected.array_type) {
+        source :: typecheck.array_type(state.checked, actual.array_type).element
+        child :: typecheck.array_type(state.checked, expected.array_type).element
+        if (source.kind == .pointer or source.kind == .function) return value
+        shape :: try array_shape(state, expected)
+        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .record, shape))
+        present :: try optional_present(state, value, actual, span)
+        some :: try add_block(state)
+        none :: try add_block(state)
+        join :: try add_block(state)
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .branch, value = present, target = some, alternative = none, span = span,
+        }
+        state.block = some
+        payload :: try optional_payload(state, value, actual, span)
+        converted :: try convert_value(state, payload, source, child, span)
+        wrapped :: try record_pair(state, shape, present, converted, span)
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = wrapped, slot = slot, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = span,
+        }
+        state.block = none
+        absent :: try zero_value(state, .record, shape, span)
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = absent, slot = slot, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = span,
+        }
+        state.block = join
+        return try emit(state, ir.Instruction{ op = .load_local, type = .record, array_type = shape, slot = slot, span = span })
+    }
+    if (expected.kind == .slice and actual.kind == .string) {
+        pointer :: try emit(state, ir.Instruction{ op = .string_pointer, type = .pointer, left = value, span = span })
+        length :: try emit(state, ir.Instruction{ op = .string_length, type = .usize, left = value, span = span })
+        return try record_pair(state, try array_shape(state, expected), pointer, length, span)
+    }
+    if (expected.kind == .slice and actual.kind == .array) {
+        source_shape :: try array_shape(state, actual)
+        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .array, source_shape))
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = value, slot = slot, span = span })
+        address :: try emit(state, ir.Instruction{
+            op = .address_local, type = .address, pointee = .array, array_type = source_shape, slot = slot, span = span,
+        })
+        pointer :: try emit(state, ir.Instruction{
+            op = .pointer_from_address, type = .pointer, left = address, pointee = .array, array_type = source_shape, span = span,
+        })
+        length :: try usize_constant(state, typecheck.array_type(state.checked, actual.array_type).len, span)
+        return try record_pair(state, try array_shape(state, expected), pointer, length, span)
+    }
+    if (!typecheck.error_assignable(state.checked, actual, expected)
+        and !typecheck.error_assignable(state.checked, expected, actual)) return value
+    source_union := false
+    if (actual.kind == .record) source_union = typecheck.record_type(state.checked, actual.record_type).is_union
+    if (expected.kind == .enumeration) {
+        if (!source_union) return value
+        return try emit(state, ir.Instruction{ op = .union_tag, type = lower_type(state, expected), left = value, span = span })
+    }
+    if (expected.kind != .record) return value
+    destination :: typecheck.record_type(state.checked, expected.record_type)
+    if (!destination.is_union) return value
+    if (actual.kind == .record and actual.record_type == expected.record_type) return value
+    shape :: try array_shape(state, expected)
+    if (actual.kind == .record and !source_union) {
+        for destination.fields |field, i| {
+            if (field.type.kind != .record or field.type.record_type != actual.record_type or field.type.nominal != actual.nominal) continue
+            return try emit(state, ir.Instruction{
+                op = .union_literal, type = .record, array_type = shape, slot = u32(i), left = value,
+                constant = state.module.arrays.items[usize(shape)].fields[i].tag, span = span,
+            })
+        }
+        unreachable
+    }
+    discriminant := value
+    source_shape := ir.no_array
+    if (source_union) {
+        source_shape = try array_shape(state, actual)
+        tag_type :: typecheck.record_type(state.checked, actual.record_type).tag_type
+        discriminant = try emit(state, ir.Instruction{ op = .union_tag, type = lower_type(state, tag_type), left = value, span = span })
+    }
+    slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .record, shape))
+    join :: try add_block(state)
+    for destination.fields |field, i| {
+        selected :: try add_block(state)
+        next :: try add_block(state)
+        tag :: state.module.arrays.items[usize(shape)].fields[i].tag
+        expected_tag :: try constant(state, tag, span)
+        condition :: try emit(state, ir.Instruction{ op = .equal, type = .bool, left = discriminant, right = expected_tag, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .branch, value = condition, target = selected, alternative = next, span = span,
+        }
+        state.block = selected
+        payload := ir.no_value
+        if (source_union and field.type.kind != .void) {
+            source_fields :: state.module.arrays.items[usize(source_shape)].fields
+            for source_fields |source_field, j| {
+                if (source_field.tag.data.unsigned != tag.data.unsigned) continue
+                payload = try project(state, value, source_field.type, source_field.array_type, u32(j), span)
+                break
+            }
+        }
+        wrapped :: try emit(state, ir.Instruction{
+            op = .union_literal, type = .record, array_type = shape, slot = u32(i), left = payload, constant = tag, span = span,
+        })
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = wrapped, slot = slot, span = span })
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = span,
+        }
+        state.block = next
+    }
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{ kind = .unreachable, span = span }
+    state.block = join
+    return try emit(state, ir.Instruction{ op = .load_local, type = .record, array_type = shape, slot = slot, span = span })
+}
+
+@hide:file
+lower_try proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    operand :: ast.type_operand(state.tree, id)
+    value :: try lower_expression(state, operand)
+    if (state.terminated or trap_type(state, id)) return ir.no_value
+    span :: ast.node_span(state.tree, id)
+    descriptor :: typecheck.array_type(state.checked, typecheck.type_of(state.checked, operand).array_type)
+    failed :: try fallible_failed(state, value, span)
+    success :: try add_block(state)
+    failure :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = failed, target = failure, alternative = success, span = span,
+    }
+    state.block = failure
+    payload :: try project(state, value, lower_type(state, descriptor.error_type), try array_shape(state, descriptor.error_type), 1, span)
+    target_error :: typecheck.array_type(state.checked, state.return_type.array_type).error_type
+    converted :: try convert_value(state, payload, descriptor.error_type, target_error, span)
+    result :: try wrap_fallible(state, converted, state.return_type, true, span)
+    try lower_cleanups(state, 0, converted)
+    if (!state.terminated) finish(state, result, span)
+    state.block = success
+    state.terminated = false
+    if (descriptor.element.kind == .void) return ir.no_value
+    return try project(state, value, lower_type(state, descriptor.element), try array_shape(state, descriptor.element), 0, span)
+}
+
+@hide:file
+lower_catch proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    expression :: ast.catch_expr(state.tree, id)
+    value :: try lower_expression(state, expression.operand)
+    if (state.terminated or trap_type(state, id)) return ir.no_value
+    span :: expression.span
+    descriptor :: typecheck.array_type(state.checked, typecheck.type_of(state.checked, expression.operand).array_type)
+    type :: typecheck.type_of(state.checked, id)
+    runtime :: lower_type(state, type)
+    shape :: try array_shape(state, type)
+    slot := u32(0)
+    if (runtime != .void) slot = u32(try ir.add_local(state.module, ir.FunctionId(state.function), runtime, shape))
+    failed :: try fallible_failed(state, value, span)
+    success :: try add_block(state)
+    failure :: try add_block(state)
+    join :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = failed, target = failure, alternative = success, span = span,
+    }
+    state.block = success
+    if (runtime != .void) {
+        payload :: try project(state, value, lower_type(state, descriptor.element), try array_shape(state, descriptor.element), 0, span)
+        converted :: try convert_value(state, payload, descriptor.element, type, span)
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = converted, slot = slot, span = span })
+    }
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = join, span = span,
+    }
+    state.block = failure
+    if (expression.capture) |capture| {
+        try predeclare_capture(state, capture)
+        payload :: try project(state, value, lower_type(state, descriptor.error_type), try array_shape(state, descriptor.error_type), 1, span)
+        _ = try emit(state, ir.Instruction{ op = .store_local, left = payload, slot = state.storage[usize(capture)].index, span = span })
+    }
+    if (!trap_type(state, expression.handler)) {
+        if (expression.handler_is_block) {
+            try predeclare_locals(state, expression.handler)
+            try lower_block(state, expression.handler, true)
+        } else {
+            fallback :: try lower_as(state, expression.handler, type)
+            if (!state.terminated and runtime != .void) _ = try emit(state, ir.Instruction{
+                op = .store_local, left = fallback, slot = slot, span = span,
+            })
+        }
+    }
+    if (!state.terminated) state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = join, span = span,
+    }
+    state.block = join
+    state.terminated = false
+    if (runtime == .void) return ir.no_value
+    return try emit(state, ir.Instruction{ op = .load_local, type = runtime, array_type = shape, slot = slot, span = span })
 }
 
 @hide:file
@@ -1412,7 +1776,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             # ranges have no physical value; only lower_for decomposes an iterable.
             if (!trap_type(state, id)) unreachable
         }
-        .array_type, .pointer_type, .function_type, .record_type, .enum_type, .union_type, .distinct_type, .slice_type, .optional_type: {
+        .array_type, .pointer_type, .function_type, .record_type, .enum_type, .union_type, .distinct_type, .slice_type, .optional_type, .fallible_type, .sum_type: {
             if (!trap_type(state, id)) {
                 trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
             }
@@ -1422,6 +1786,8 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (!trap_type(state, id)) unreachable
         }
         .match_expr: return try lower_match(state, id)
+        .try_expr: return try lower_try(state, id)
+        .catch_expr: return try lower_catch(state, id)
         .literal_null: return try null_constant(state, .pointer, span)
         .slice: return try lower_slice(state, id)
         .builtin_call: return try lower_builtin(state, id)
@@ -1544,8 +1910,15 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     type = .function,
                     data = ir.ValueData{ function = ir.FunctionId(location.index) },
                 }, span)
-                .global: return try emit(state, ir.Instruction{ op = .load_global, type = type, array_type = shape, slot = location.index, span = span })
-                .local: return try emit(state, ir.Instruction{ op = .load_local, type = type, array_type = shape, slot = location.index, span = span })
+                .global, .local: {
+                    declaration_type :: typecheck.type_of(state.checked, binding.data.declaration)
+                    operation :: if (location.kind == .global) ir.Op.load_global else ir.Op.load_local
+                    value :: try emit(state, ir.Instruction{
+                        op = operation, type = lower_type(state, declaration_type),
+                        array_type = try array_shape(state, declaration_type), slot = location.index, span = span,
+                    })
+                    return try convert_value(state, value, declaration_type, typecheck.type_of(state.checked, id), span)
+                }
                 .none: unreachable
             }
         }

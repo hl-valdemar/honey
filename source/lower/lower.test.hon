@@ -1924,3 +1924,36 @@ empty_array_entry_results_need_no_escaped_allocation test {
     interpreter.deinit(&outcome)
     try testing.expect_equal(usize(0), state.live)
 }
+
+fallible_source_handlers_do_not_catch_runtime_allocation_failures test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Error :: enum { out_of_memory }
+        `fail proc() int ! Error { return .out_of_memory }
+        `main proc() int { return fail() catch 42 }
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(usize(0), diagnostics.count(&diagnostic_store))
+    succeeded := false
+    failures := usize(0)
+    for (usize(0)..usize(128)) |limit| {
+        state := AllocationState{ remaining = limit }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        outcome := interpreter.run(allocator, &module, &diagnostic_store) catch |error| {
+            try testing.expect(error == .out_of_memory)
+            failures += 1
+            try testing.expect_equal(usize(0), state.live)
+            try testing.expect_equal(usize(0), diagnostics.count(&diagnostic_store))
+            continue
+        }
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+        interpreter.deinit(&outcome)
+        try testing.expect_equal(usize(0), state.live)
+        succeeded = true
+        break
+    }
+    try testing.expect(succeeded and failures > 0)
+}
