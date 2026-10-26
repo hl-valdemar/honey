@@ -149,33 +149,7 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
 
     params arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&params)
-    names arraylist.ArrayList(lexer.Token) := arraylist.init(state.allocator)
-    defer arraylist.deinit(&names)
-
-    while !next_is(state, .close_paren) {
-        arraylist.clear(&names)
-        while true {
-            token :: try consume(state, .ident)
-            try arraylist.append(&names, token)
-            if (starts_type(current(state).kind)) break
-            _ = try consume(state, .comma)
-        }
-
-        type_id :: try parse_type(state)
-        type_span :: ast.builder_span(state.builder, type_id)
-        for (names.items) |parameter_name| {
-            param_id :: try ast.add_param(
-                state.builder,
-                ast.Span{ start = parameter_name.span.start, end = type_span.end, source = parameter_name.span.source },
-                parameter_name.span,
-                parameter_name.data.str_id,
-                type_id,
-            )
-            try arraylist.append(&params, param_id)
-        }
-        if next_is(state, .comma) _ = try consume(state, .comma)
-    }
-
+    try parse_parameters(state, &params)
     _ = try consume(state, .close_paren)
     return_type :: try parse_type(state)
     body :: try parse_block(state)
@@ -193,6 +167,36 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
         params.items,
         body,
     )
+}
+
+@hide:file
+parse_parameters proc(
+    state @mut State, params @mut arraylist.ArrayList(ast.NodeId),
+) void ! ParseError {
+    names arraylist.ArrayList(lexer.Token) := arraylist.init(state.allocator)
+    defer arraylist.deinit(&names)
+    while !next_is(state, .close_paren) {
+        arraylist.clear(&names)
+        while true {
+            token :: try consume(state, .ident)
+            try arraylist.append(&names, token)
+            if (starts_type(current(state).kind)) break
+            _ = try consume(state, .comma)
+        }
+        type_id :: try parse_type(state)
+        type_span :: ast.builder_span(state.builder, type_id)
+        for (names.items) |parameter_name| {
+            param_id :: try ast.add_param(
+                state.builder,
+                ast.Span{ start = parameter_name.span.start, end = type_span.end, source = parameter_name.span.source },
+                parameter_name.span,
+                parameter_name.data.str_id,
+                type_id,
+            )
+            try arraylist.append(params, param_id)
+        }
+        if next_is(state, .comma) _ = try consume(state, .comma)
+    }
 }
 
 @hide:file
@@ -610,6 +614,25 @@ parse_type proc(state @mut State) ast.NodeId ! ParseError {
         state.next_token += 1
         mutable :: next_is(state, .mut)
         if (mutable) state.next_token += 1
+        if (next_is(state, .proc)) {
+            state.next_token += 1
+            _ = try consume(state, .open_paren)
+            params := arraylist.init(ast.NodeId, state.allocator)
+            defer arraylist.deinit(&params)
+            try parse_parameters(state, &params)
+            _ = try consume(state, .close_paren)
+            result :: try parse_type(state)
+            span :: ast.Span{
+                start = token.span.start,
+                end = ast.builder_span(state.builder, result).end,
+                source = token.span.source,
+            }
+            if (mutable or token.kind == .star) {
+                diagnostic :: try diagnostics.add(state.diagnostics, .invalid_pointer_type, span)
+                return try ast.add_invalid_expr(state.builder, span, diagnostic)
+            }
+            return try ast.add_function_type(state.builder, span, result, params.items)
+        }
         element :: try parse_type(state)
         return try ast.add_pointer_type(state.builder, ast.Span{
             start = token.span.start,

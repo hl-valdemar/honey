@@ -11,6 +11,143 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "callback_concrete_vtable": (
+        """
+        VTable :: struct { run @proc(context @mut State, amount i16) i16 }
+        State :: struct { value i16, vtable @VTable }
+        add proc(context @mut State, amount i16) i16 {
+            context.value = context.value + amount
+            return context.value
+        }
+        table VTable :: { run = add }
+        main proc() i16 {
+            state State := { value = 40, vtable = &table }
+            return state.vtable.run(&state, 2)
+        }
+        """, b"42\n", None,
+    ),
+    "callback_pass_return_store_replace": (
+        """
+        Callback :: alias @proc(value i16) i16
+        Holder :: struct { run Callback }
+        increment proc(value i16) i16 { return value + 1 }
+        twice proc(value i16) i16 { return value + value }
+        choose proc(first Callback, second Callback, flag bool) Callback {
+            if (flag) return first
+            return second
+        }
+        apply proc(callback Callback, value i16) i16 { return callback(value) }
+        main proc() i16 {
+            callback @proc(n i16) i16 := increment
+            callback = twice
+            holder Holder := { run = increment }
+            holder.run = callback
+            callbacks [2]mut Callback := [increment, twice]
+            callbacks[0] = choose(holder.run, increment, true)
+            return apply(callbacks[0], 21)
+        }
+        """, b"42\n", None,
+    ),
+    "callback_nested_aggregate_arguments_and_result": (
+        """
+        Payload :: struct { values [2]i16, pointer @mut i16 }
+        Callback :: alias @proc(input Payload, rows [2][2]i16) Payload
+        transform proc(input Payload, rows [2][2]i16) Payload {
+            input.pointer^ = input.pointer^ + rows[1][0]
+            return { values = [input.values[0] + rows[0][1], rows[1][1]], pointer = input.pointer }
+        }
+        select proc(callback Callback) Callback { return callback }
+        main proc() [3]i16 {
+            value i16 := 40
+            callback Callback :: select(transform)
+            result :: callback({ values = [40, 0], pointer = &value }, [[0, 2], [2, 42]])
+            return [result.values[0], result.values[1], result.pointer^]
+        }
+        """, b"[42, 42, 42]\n", None,
+    ),
+    "callback_storage_address_is_data_pointer": (
+        """
+        Callback :: alias @proc(value i16) i16
+        increment proc(value i16) i16 { return value + 1 }
+        twice proc(value i16) i16 { return value + value }
+        replace proc(slot @mut Callback, callback Callback) void { slot^ = callback }
+        main proc() i16 {
+            callback Callback := increment
+            replace(&callback, twice)
+            return (&callback)^(21)
+        }
+        """, b"42\n", None,
+    ),
+    "callback_structural_inline_aggregate_signature": (
+        """
+        identity proc(value struct { values [2]i16, pointer @i16 }) struct { values [2]i16, pointer @i16 } {
+            return value
+        }
+        main proc() i16 {
+            number i16 :: 2
+            callback @proc(input struct { values [2]i16, pointer @i16 }) struct { values [2]i16, pointer @i16 } :: identity
+            result :: callback({ values = [40, 0], pointer = &number })
+            return result.values[0] + result.pointer^
+        }
+        """, b"42\n", None,
+    ),
+    "callback_parameter_signature_mismatch": (
+        "wrong proc(value u16) i16 { return 42 }\nmain proc() i16 { callback @proc(value i16) i16 :: wrong\nreturn callback(1) }",
+        b"", b"incompatible value type",
+    ),
+    "callback_result_signature_mismatch": (
+        "wrong proc(value i16) u16 { return 42 }\nmain proc() i16 { callback @proc(value i16) i16 :: wrong\nreturn callback(1) }",
+        b"", b"incompatible value type",
+    ),
+    "callback_nested_signature_mismatch": (
+        """
+        wrong proc(value struct { rows [2][2]u16 }) i16 { return 42 }
+        main proc() i16 {
+            callback @proc(value struct { rows [2][2]i16 }) i16 :: wrong
+            return 42
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "callback_pointer_mutability_signature_mismatch": (
+        "wrong proc(value @mut i16) i16 { return value^ }\nmain proc() i16 { callback @proc(value @i16) i16 :: wrong\nreturn 42 }",
+        b"", b"incompatible value type",
+    ),
+    "callback_wrong_argument_type": (
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callback @proc(value i16) i16 :: identity\nreturn callback(true) }",
+        b"", b"incompatible value type",
+    ),
+    "callback_wrong_argument_count": (
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callback @proc(value i16) i16 :: identity\nreturn callback() }",
+        b"", b"argument count does not match",
+    ),
+    "callback_readonly_vtable_assignment": (
+        """
+        VTable :: struct { run @proc(value i16) i16 }
+        identity proc(value i16) i16 { return value }
+        replace proc(table @VTable) void { table.run = identity }
+        main proc() i16 {
+            table VTable := { run = identity }
+            replace(&table)
+            return 42
+        }
+        """, b"", b"pointer assignment requires a mutable pointee",
+    ),
+    "callback_readonly_array_assignment": (
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callbacks [1]@proc(value i16) i16 := [identity]\ncallbacks[0] = identity\nreturn 42 }",
+        b"", b"indexed assignment requires a writable array element",
+    ),
+    "callback_invalid_annotation_recovery": (
+        "bad proc(callback @proc(value void) i16) void {}\nmain proc() i16 { return 42 }",
+        b"42\n", b"void cannot be stored",
+    ),
+    "callback_mutable_signature_rejected": (
+        "bad proc(callback @mut proc(value i16) i16) void {}\nmain proc() i16 { return 42 }",
+        b"42\n", b"pointer requires a supported concrete pointee type",
+    ),
+    "callback_many_signature_rejected": (
+        "bad proc(callback *proc(value i16) i16) void {}\nmain proc() i16 { return 42 }",
+        b"42\n", b"pointer requires a supported concrete pointee type",
+    ),
     "pointer_assignment_evaluates_rhs_first_once": (
         """
         Box :: struct { value i16, count i16 }
@@ -249,6 +386,87 @@ CASES = {
     "pointer_unused_invalid_path": (
         "unused proc() int { return 42^ }\nmain proc() int { return 42 }",
         b"42\n", b"dereference requires",
+    ),
+    "pointer_addition_preserves_alias_and_mutability": (
+        """
+        advance proc(p *mut i16, count usize) *mut i16 { return p + count }
+        main proc() [3]i16 {
+            values [3]mut i16 := [1, 2, 3]
+            pointer :: advance((&values).ptr, 1)
+            pointer^ = 40
+            (pointer + 1)^ = pointer^ + 2
+            return [values[0], values[1], values[2]]
+        }
+        """, b"[1, 40, 42]\n", None,
+    ),
+    "pointer_addition_aggregate_stride_and_identity": (
+        """
+        Point :: struct { x i16, y i64 }
+        main proc() bool {
+            values [3]mut Point := [
+                Point { x = 1, y = 2 }, Point { x = 3, y = 4 }, Point { x = 5, y = 6 },
+            ]
+            pointer :: (&values).ptr
+            next :: pointer + (1 + 1)
+            next.y = 42
+            last *mut Point :: &values[2]
+            return (next == last and values[2].y == 42
+                and pointer + 3 == next + 1)
+        }
+        """, b"true\n", None,
+    ),
+    "pointer_addition_evaluates_operands_once_in_order": (
+        """
+        first proc(count @mut usize, values *mut i16) *mut i16 {
+            count^ = count^ + 1
+            return values
+        }
+        second proc(count @mut usize) usize {
+            previous :: count^
+            count^ = count^ + 1
+            return previous
+        }
+        main proc() [2]i16 {
+            count usize := 0
+            values [2]mut i16 := [1, 42]
+            pointer :: first(&count, (&values).ptr) + second(&count)
+            return [pointer^, i16(count)]
+        }
+        """, b"[42, 2]\n", None,
+    ),
+    "pointer_addition_zero_sized_elements": (
+        """
+        Empty :: struct {}
+        main proc() bool {
+            values [2]mut Empty := [Empty {}, Empty {}]
+            pointer :: (&values).ptr
+            return pointer + 2 == pointer
+        }
+        """, b"true\n", None,
+    ),
+    "pointer_addition_requires_usize_offset": (
+        "main proc() i16 { values [2]mut i16 := [1, 42]\noffset i16 :: 1\nreturn ((&values).ptr + offset)^ }",
+        b"", b"",
+    ),
+    "pointer_addition_single_pointer_rejected": (
+        "main proc() i16 { value i16 := 42\nreturn (&value + 1)^ }",
+        b"", b"",
+    ),
+    "pointer_subtraction_rejected": (
+        "main proc() i16 { values [2]mut i16 := [1, 42]\nreturn ((&values).ptr - 1)^ }",
+        b"", b"",
+    ),
+    "pointer_reversed_addition_rejected": (
+        "main proc() i16 { values [2]mut i16 := [1, 42]\nreturn (1 + (&values).ptr)^ }",
+        b"", b"",
+    ),
+    "pointer_addition_preserves_readonly_pointee": (
+        "main proc() i16 { values [2]i16 := [1, 42]\npointer :: (&values).ptr + 1\npointer^ = 7\nreturn values[1] }",
+        b"", b"",
+    ),
+    "pointer_addition_unused_error_recovers": (
+        "bad proc(p *i16) *i16 { return p + true }\nmain proc() i16 { return 42 }",
+        b"42\n", b"",
     ),
     "match_float_ranges": (
         """
@@ -1257,7 +1475,28 @@ def check_record_packages(temporary, executable):
     check(app, executable, (b"", b"integer arithmetic overflow"))
     trapped = run(str(HONEY), "run", str(app))
     assert trapped.stderr.startswith(f"{types.resolve()}:1:".encode()), outcome(trapped)
-    return 3
+    types.write_text(
+        "Point :: struct { x i16, y i16 = 2 }\n"
+        "Callback :: alias @proc(p @mut Point, amount i16) i16\n"
+        "VTable :: struct { run Callback }\n"
+    )
+    (library / "functions.hon").write_text(
+        "increment proc(p @mut Point, amount i16) i16 { p.x = p.x + amount\nreturn p.x + p.y }\n"
+        "invoke proc(table VTable, values *mut Point) i16 { return table.run(&(values + 1)^, 40) }\n"
+    )
+    (app / "main.hon").write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            values [2]mut lib.Point := [lib.Point { x = 7 }, lib.Point { x = 0 }]
+            callback lib.Callback :: lib.increment
+            table :: lib.VTable { run = callback }
+            result :: lib.invoke(table, (&values).ptr)
+            if (values[0].x != 7 or values[1].x != 40) return -1
+            return result
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    return 4
 
 
 def check_data_model_packages(temporary, executable):

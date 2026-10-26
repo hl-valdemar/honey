@@ -572,6 +572,13 @@ resolve_expr proc(
             }
         }
         .pointer_type: try resolve_expr(state, scope, ast.pointer_type(tree, id).element)
+        .function_type: {
+            try resolve_expr(state, scope, ast.callable_result(tree, id))
+            for 0..ast.function_param_count(tree, id) |i| {
+                parameter :: ast.function_param(tree, id, i)
+                try resolve_expr(state, scope, ast.param(tree, parameter).type)
+            }
+        }
         .array_type: {
             type :: ast.array_type(tree, id)
             if (type.count) |count| try resolve_expr(state, scope, count)

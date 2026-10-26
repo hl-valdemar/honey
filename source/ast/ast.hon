@@ -1,5 +1,5 @@
 #! grammar:
-#! * type ..... -> identifier {'.' member} | ('@' | '*') ['mut'] type | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
+#! * type ..... -> identifier {'.' member} | ('@' | '*') ['mut'] type | '@proc' '(' parameters ')' type | '[' (expr | '_') ']' ['mut'] type | 'struct' '{' fields '}' | 'enum' ['(' type ')'] '{' members '}' | 'union' ['(' (type | 'enum') ')'] '{' fields '}' | ('distinct' | 'alias') type
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false'
 #! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
@@ -45,6 +45,7 @@ ExprKind :: enum {
     range
     array_type
     pointer_type
+    function_type
     array_literal
     record_type
     record_literal
@@ -112,6 +113,7 @@ NodeKind :: enum {
     expr_range
     expr_array_type
     expr_pointer_type
+    expr_function_type
     expr_array_literal
     expr_record_type
     expr_record_literal
@@ -508,6 +510,19 @@ add_pointer_type proc(
         main = NodeData{ extra = mutable_flag },
         data0 = NodeData{ extra = many_flag },
         data1 = NodeData{ node_id = element },
+    }, span)
+}
+
+add_function_type proc(
+    builder @mut Builder, span Span, result NodeId, params []NodeId,
+) NodeId ! mem.AllocError {
+    start :: builder.storage.extra.items.len
+    for (params) |parameter| _ = try add_extra(builder, u32(parameter))
+    return try add_node(builder, Node{
+        kind = .expr_function_type,
+        main = NodeData{ node_id = result },
+        data0 = NodeData{ extra = u32(start) },
+        data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
     }, span)
 }
 
@@ -1032,6 +1047,13 @@ function_decl proc(tree @Tree, id NodeId) FunctionDeclView {
     }
 }
 
+callable_result proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    if (node.kind == .func_decl) return function_decl(tree, id).return_type
+    debug.assert(node.kind == .expr_function_type)
+    return node.main.node_id
+}
+
 import_decl proc(tree @Tree, id NodeId) ImportView {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .import_decl)
@@ -1047,15 +1069,17 @@ import_decl proc(tree @Tree, id NodeId) ImportView {
 
 function_param_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .func_decl)
-    return usize(node.data1.extra - node.main.extra - 4)
+    debug.assert(node.kind == .func_decl or node.kind == .expr_function_type)
+    start :: if (node.kind == .func_decl) node.main.extra + 4 else node.data0.extra
+    return usize(node.data1.extra - start)
 }
 
 function_param proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .func_decl)
-    debug.assert(index < usize(node.data1.extra - node.main.extra - 4))
-    return NodeId(tree.storage.extra.items[usize(node.main.extra) + 4 + index])
+    debug.assert(node.kind == .func_decl or node.kind == .expr_function_type)
+    start :: if (node.kind == .func_decl) node.main.extra + 4 else node.data0.extra
+    debug.assert(index < usize(node.data1.extra - start))
+    return NodeId(tree.storage.extra.items[usize(start) + index])
 }
 
 param proc(tree @Tree, id NodeId) ParamView {
@@ -1103,6 +1127,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_range: .range
         .expr_array_type: .array_type
         .expr_pointer_type: .pointer_type
+        .expr_function_type: .function_type
         .expr_array_literal: .array_literal
         .expr_record_type: .record_type
         .expr_record_literal: .record_literal
