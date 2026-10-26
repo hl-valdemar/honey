@@ -19,9 +19,10 @@ explicit fallible channels, composed error sets, `try`/`catch` and scoped LIFO
 traps or compiler infrastructure failures.
 cached generic specialization and type-producing procedures support explicit/inferred
 compile-time arguments and generated record/array storage through both paths.
-ordinary procedures can compute integer/boolean/string compile-time arguments using
-mutable locals, loops and recursive calls; general aggregate/type-valued execution,
-reflection and generic library acceptance remain open.
+ordinary procedures can compute scalar and nested record/array compile-time values
+using mutable locals, loops and recursive calls; explicit `$()` expressions use
+the same constant evaluation path. general type-valued execution, reflection and
+generic library acceptance remain open.
 the driver retains frontend storage and source provenance through
 `@source/compilation`, with compilation-wide AST node identities.
 file commands retain single-file behavior; directory commands compile the
@@ -60,7 +61,8 @@ test discovery and FFI remain outside these completed slices.
 - [ ] generic specialization and compile-time execution/reflection sufficient for existing `ArrayList`, hash maps, `enummap`, `meta` and `io.print`; include type/value parameters and compile-time generated storage.
   - [x] specialization checkpoint: explicit/inferred type and integer/boolean/string/callback/null value parameters, cached concrete runtime calls, nominal type-producing procedures, generated record/array storage and recursive data pointers through interpreter/native execution. preserve declared value types, source diagnostics and repeatable compilation; runtime values cannot supply compile-time arguments.
   - [x] compile-time execution checkpoint: ordinary procedure calls with constant inputs and integer/boolean/string results reuse checking, typed IR and bounded interpreter execution. mutable scalar locals, range/while loops, break/continue, nested/generic/recursive calls, exact numeric types, runtime traps and dependency-file provenance survive argument erasure through interpreter/native execution. runtime parameters and mutable global dependencies are rejected; recompilation retains no prior execution state.
-  - [ ] remaining gate: general aggregate/type-valued compile-time execution, explicit compile-time expressions, compile-time branch/inline expansion and reflection (`typeinfo!`, `field!`, `struct_type!`, generated type/default arrays), plus existing-library acceptance. required collection/index iteration, expression-valued control flow, compound updates, formatting parsing and imported C-binding support may interleave with later gates.
+  - [x] aggregate/explicit-expression checkpoint: computed nested records/tuples and fixed arrays, contextual/dependent aggregate value parameters, normalized specialization caching and explicit `$()` expressions through interpreter/native execution. preserve by-value isolation, zero-cell shapes, integer widths, string ownership, enum/optional fields and exact IEEE float bits; reject runtime dependencies and values that would retain temporary interpreter storage. repeatable compilation restores erased expressions.
+  - [ ] remaining gate: general type-valued compile-time execution, compile-time branch/inline expansion and reflection (`typeinfo!`, `field!`, `struct_type!`, generated type/default arrays), broader constant materialization (including unions, fallible results and storage-bearing values), plus existing-library acceptance. required collection/index iteration, expression-valued control flow, compound updates, formatting parsing and imported C-binding support may interleave with later gates.
 - [ ] remaining source constructs: collection/index iteration, expression-valued control flow and `yield`, compound updates and multiline strings. examples: `source/parser/parse.hon`, `source/llvm/runtime.hon`.
 - [ ] standard-library milestone: compile/run a multi-package program exercising existing allocation and IO, including error cleanup; no replacement miniature standard library.
 - [ ] native driver integration: required C ABI declarations, `process.Init` startup arguments/IO, actual CLI exit statuses, file loading, temporary files and spawning Clang. Honey-generated programs currently accept only parameterless `main` and print its result; Bro's bootstrap startup support is not Honey backend support.

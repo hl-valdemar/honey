@@ -11,6 +11,151 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "comptime_contextual_aggregate_arguments_keep_dependent_types": (
+        """
+        sum proc(items [2]i16) i16 { return items[0] + items[1] }
+        answer proc($T type, $N usize, $items [N]T) T { return items[0] + items[1] }
+        main proc() i16 { return answer(i16, 2, [20, 20]) + $(sum([1, 1])) }
+        """, b"42\n", None,
+    ),
+    "comptime_zero_cell_aggregates_keep_logical_lengths": (
+        """
+        Empty :: struct {}
+        Storage :: struct { items [3]Empty, empty [0]i16 }
+        make proc() Storage { return Storage { items = [{}, {}, {}], empty = [] } }
+        main proc() usize {
+            value :: $(make())
+            return value.items.len + value.empty.len
+        }
+        """, b"3\n", None,
+    ),
+    "explicit_comptime_float_arithmetic_keeps_ieee_equality": (
+        """
+        main proc() bool { return $(1.5 + 2.5) == 4.0 and $(-0.0 == 0.0) and $(4 / 2) == 2.0 }
+        """, b"true\n", None,
+    ),
+    "comptime_aggregate_specialization_uses_normalized_values": (
+        """
+        Config :: struct { count usize, bias i16 = 2 }
+        config proc() Config {
+            result Config := { count = 0 }
+            while (result.count < 2) result.count = result.count + 1
+            return result
+        }
+        Fixed proc($settings Config) type {
+            return struct { values [settings.count]i16 }
+        }
+        main proc() i16 {
+            first Fixed(config()) :: { values = [40, 2] }
+            same Fixed({ bias = 2, count = 2 }) :: first
+            return same.values[0] + same.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_array_arguments_and_explicit_copy_isolation": (
+        """
+        values proc() [2]mut i16 {
+            result [2]mut i16 := [0, 2]
+            for (0..usize(2)) |index| result[index] = result[index] + 20
+            return result
+        }
+        sum proc($items [2]mut i16) i16 { return items[0] + items[1] }
+        main proc() i16 {
+            first := $(values())
+            copy := first
+            first[0] = 99
+            return sum(values()) + copy[0] - 20
+        }
+        """, b"42\n", None,
+    ),
+    "explicit_comptime_without_templates_preserves_nested_values": (
+        r"""
+        Kind :: enum { ready, empty }
+        Inner :: struct { text string, count ?i16 }
+        Packet :: struct { rows [2]mut Inner, kind Kind, weight f64 }
+        make proc() Packet {
+            result Packet := {
+                rows = [{ text = "a\"\\\x00é", count = 20 }, { text = "ok", count = null }],
+                kind = .ready, weight = 2.5,
+            }
+            result.rows[0].count = 40
+            return result
+        }
+        main proc() i16 {
+            packet := $(make())
+            copy :: packet
+            packet.rows[0].text = "changed"
+            if (copy.kind != .ready or copy.weight != 2.5 or copy.rows[1].count != null) return 0
+            return copy.rows[0].count? + i16(copy.rows[1].text.len)
+        }
+        """, b"42\n", None,
+    ),
+    "explicit_comptime_composes_and_supplies_array_lengths": (
+        """
+        size proc() usize { return 2 }
+        main proc() i16 {
+            amount :: 40
+            values [$(size())]i16 :: [$(amount + 1), $(1)]
+            return values[$(usize(0))] + values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "explicit_comptime_cannot_read_runtime_parameters": (
+        """
+        select proc(value i16) i16 { return $(value + 1) }
+        main proc() i16 { return select(41) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_aggregate_cannot_read_mutable_globals": (
+        """
+        state i16 := 42
+        make proc() [1]i16 { return [state] }
+        main proc() i16 { return $(make())[0] }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "comptime_aggregate_keeps_narrow_overflow": (
+        """
+        Counter :: struct { value i8 }
+        make proc() Counter {
+            result Counter := { value = 127 }
+            result.value = result.value + 1
+            return result
+        }
+        main proc() i8 { return $(make()).value }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "comptime_aggregate_rejects_pointer_escape": (
+        """
+        Borrow :: struct { pointer @i16 }
+        make proc() Borrow {
+            value i16 :: 42
+            return Borrow { pointer = &value }
+        }
+        main proc() i16 { return $(make()).pointer^ }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_aggregate_rejects_slice_escape": (
+        """
+        make proc() [1][]u8 { return ["borrowed"] }
+        main proc() usize { return $(make())[0].len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_float_bits_survive_aggregate_materialization": (
+        """
+        Floats :: struct { zero f64, nan f64 }
+        make proc() Floats {
+            bits u64 :: 9221120237041090626
+            return Floats { zero = -0.0, nan = ptrcast!(@f64, &bits)^ }
+        }
+        main proc() bool {
+            values :: $(make())
+            return (
+                ptrcast!(@u64, &values.zero)^ == 9223372036854775808
+                and ptrcast!(@u64, &values.nan)^ == 9221120237041090626
+            )
+        }
+        """, b"true\n", None,
+    ),
     "comptime_calls_share_runtime_inference_loops_and_recursion": (
         """
         length proc() usize {

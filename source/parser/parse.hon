@@ -1606,6 +1606,21 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         .union: return try parse_union_type(state)
         .distinct, .alias: return try parse_type_wrapper(state)
         .match: return try parse_match(state)
+        .dollar: {
+            state.next_token += 1
+            _ = try consume(state, .open_paren)
+            previous :: state.allow_record_literals
+            state.allow_record_literals = true
+            defer state.allow_record_literals = previous
+            state.paren_depth += 1
+            defer state.paren_depth -= 1
+            expression :: try parse_expr(state)
+            skip_operand_newlines(state)
+            close :: try consume(state, .close_paren)
+            return try ast.add_comptime_expr(state.builder, ast.Span{
+                start = token.span.start, end = close.span.end, source = token.span.source,
+            }, expression)
+        }
         .dot: {
             state.next_token += 1
             member :: try consume_member(state, false)

@@ -6,6 +6,7 @@
 #! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
+#! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
@@ -69,6 +70,7 @@ ExprKind :: enum {
     try_expr
     catch_expr
     typed_constant
+    comptime_expr
 }
 
 DeclKind :: enum {
@@ -172,6 +174,8 @@ NodeKind :: enum {
     stmt_errdefer
     stmt_block
     expr_typed_constant
+    expr_comptime
+    literal_float_value
 }
 
 @hide:file
@@ -537,6 +541,23 @@ add_typed_constant proc(
         kind = .expr_typed_constant,
         data0 = NodeData{ node_id = type },
         data1 = NodeData{ node_id = value },
+    }, at)
+}
+
+add_comptime_expr proc(builder @mut Builder, at Span, operand NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_comptime,
+        main = NodeData{ node_id = operand },
+    }, at)
+}
+
+#! retains the exact IEEE representation, including signed zero and NaN payloads.
+add_float proc(builder @mut Builder, at Span, value f64) NodeId ! mem.AllocError {
+    bits :: ptrcast!(@u64, &value)^
+    return try add_node(builder, Node{
+        kind = .literal_float_value,
+        data0 = NodeData{ extra = u32(bits & 4294967295) },
+        data1 = NodeData{ extra = u32(bits >> 32) },
     }, at)
 }
 
@@ -1385,6 +1406,8 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_try: .try_expr
         .expr_catch: .catch_expr
         .expr_typed_constant: .typed_constant
+        .expr_comptime: .comptime_expr
+        .literal_float_value: .literal_float
         else: unreachable
     }
 }
@@ -1408,6 +1431,20 @@ binary_expr proc(tree @Tree, id NodeId) BinaryExprView {
         left = node.data0.node_id,
         right = node.data1.node_id,
     }
+}
+
+comptime_operand proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_comptime)
+    return node.main.node_id
+}
+
+#! generated IEEE literals have no textual spelling; parsed float literals return null.
+float_value proc(tree @Tree, id NodeId) ?f64 {
+    node :: get_node(&tree.storage, id)
+    if (node.kind != .literal_float_value) return null
+    bits :: u64(node.data0.extra) | (u64(node.data1.extra) << 32)
+    return ptrcast!(@f64, &bits)^
 }
 
 typed_constant proc(tree @Tree, id NodeId) TypedConstantView {
@@ -1765,7 +1802,7 @@ NodeLayout :: struct {
 node_layout proc(node Node) NodeLayout {
     layout := NodeLayout{}
     match node.kind {
-        .literal_int, .literal_float, .literal_string, .literal_bool, .literal_null,
+        .literal_int, .literal_float, .literal_float_value, .literal_string, .literal_bool, .literal_null,
         .expr_identifier, .invalid_expr: {}
         .expr_unary: layout.direct_children = 2
         .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant,
@@ -1773,7 +1810,7 @@ node_layout proc(node Node) NodeLayout {
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
         .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_enum_literal,
-        .expr_try: layout.direct_children = 1
+        .expr_try, .expr_comptime: layout.direct_children = 1
         .expr_call, .expr_builtin_call, .expr_function_type, .expr_array_literal,
         .expr_record_type, .expr_record_literal, .expr_enum_type, .expr_match,
         .block, .package: {
@@ -2089,6 +2126,7 @@ add_owned_literal proc(
 }
 
 #! borrows a literal's spelling, independently of its diagnostic source span.
+#! query float_value first for generated IEEE literals.
 literal_text proc(tree @Tree, id NodeId) []u8 {
     node :: get_node(&tree.storage, id)
     if (node.data0.extra == 1) return tree.storage.generated.items[usize(node.main.extra)]

@@ -1144,6 +1144,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
     state.cells[usize(id)].in_cleanup = state.in_cleanup
     state.cells[usize(id)].narrowing_arm = state.narrowing_arm
     match ast.expr_kind(tree, id) {
+        .comptime_expr: try fail(state, id, .comptime_argument_required, ast.node_span(tree, id))
         .typed_constant: {
             value :: ast.typed_constant(tree, id)
             state.cells[usize(id)].fixed = true
@@ -3978,6 +3979,7 @@ constant_order proc(left, right ConstantInteger) i32 {
 
 @hide:file
 constant_real proc(state @mut State, id ast.NodeId) ?f64 ! mem.AllocError {
+    if (ast.float_value(state.tree, id)) |value| return value
     missing ?f64 :: null
     if (ast.expr_kind(state.tree, id) == .literal_float) {
         return strconv.parse_float(state.edges.allocator, ast.literal_text(state.tree, id)) catch |err| {

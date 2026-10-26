@@ -526,6 +526,7 @@ resolve_expr proc(
     if (state.bindings[usize(id)].kind != .none) return
     tree :: state.tree
     match ast.expr_kind(tree, id) {
+        .comptime_expr: try resolve_expr(state, scope, ast.comptime_operand(tree, id))
         .typed_constant: {
             value :: ast.typed_constant(tree, id)
             try resolve_expr(state, scope, value.type)

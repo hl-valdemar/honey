@@ -85,11 +85,13 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    return result
             `}
             `Fixed proc($N usize) type { return struct { values [N]i16 } }
+            `data proc() [2]i16 { return [40, 2] }
             `main proc() i16 {
-            `    box Box(i16) :: { value = identity(i16, 40) }
+            `    values :: $(data())
+            `    box Box(i16) :: { value = identity(i16, values[0]) }
             `    fixed Fixed(count()) :: { values = [box.value, 2] }
             `    same Fixed(2) :: fixed
-            `    return identity(same.values[0]) + same.values[1]
+            `    return identity(same.values[0]) + same.values[$(usize(1))]
             `}
             ,
         )
