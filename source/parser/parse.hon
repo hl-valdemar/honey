@@ -800,6 +800,10 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
             type = try parse_call(state, type, token.span.start, false)
             continue
         }
+        if (next_is(state, .open_bracket)) {
+            type = try parse_index(state, type, token.span.start)
+            continue
+        }
         if (!next_is(state, .dot)) break
         state.next_token += 1
         member :: try consume_member(state, false)

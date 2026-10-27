@@ -281,6 +281,10 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         child :: ast.child(&state.tree, id, i)
         try expand(state, child)
     }
+    if (!try type_array_projection(state, id)) {
+        try reject_evaluation(state, id)
+        return
+    }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .binary) {
         view :: ast.binary_expr(&state.tree, id)
         if (
@@ -1328,7 +1332,210 @@ expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
     for (0..ast.child_count(&state.tree, id)) |i| {
         if (!try expand_type_matches(state, ast.child(&state.tree, id, i))) return false
     }
+    return try type_array_projection(state, id)
+}
+
+@hide:file
+type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
+    if (ast.node_class(&state.tree, id) != .expression) return true
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .index or kind == .selection) {
+        base :: if (kind == .index) ast.index_expr(&state.tree, id).base else ast.selection_expr(&state.tree, id).base
+        if (ast.expr_kind(&state.tree, base) != .typed_constant) return true
+        array :: ast.typed_constant(&state.tree, base)
+        if (!try type_array_storage(state, array.type)) return true
+        selected := no_node
+        if (kind == .index) {
+            index :: try type_array_index(state, ast.index_expr(&state.tree, id).index,
+                ast.array_element_count(&state.tree, array.value))
+            if (index == no_index) return false
+            selected = ast.array_element(&state.tree, array.value, index)
+        } else {
+            member :: ast.selection_expr(&state.tree, id).member
+            if (!mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, member)), "len")) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .unknown_field, ast.node_span(&state.tree, member))
+                return false
+            }
+            count :: try ast.add_integer(state.builder, ast.node_span(&state.tree, id),
+                u64(ast.array_element_count(&state.tree, array.value)))
+            selected = try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, id),
+                try builtin(state, id, .usize), count)
+            try refresh(state)
+        }
+        # copying a nominal definition into the projection would create a new
+        # identity on every read. retain its original node behind a type alias.
+        if (nominal_type_value(state, selected)) {
+            selected = try ast.add_type_operand(state.builder, ast.node_span(&state.tree, id), selected, true)
+            try refresh(state)
+        }
+        resolved :: binding(state, selected)
+        try remember(state, id)
+        ast.replace_node_from_source(state.builder, id, selected)
+        try refresh(state)
+        state.bindings.items[usize(id)] = resolved
+    }
     return true
+}
+
+# type arrays are persistent AST values, never runtime storage. keep the same
+# typed-constant snapshots as ordinary aggregates, but validate their leaves here.
+@hide:file
+type_array_storage proc(state @mut State, annotation ast.NodeId) bool ! Error {
+    current := annotation
+    for (0..128) |_| {
+        if (is_type(state, current)) return current != annotation
+        current = try canonical_type(state, current)
+        if (current == no_node or ast.expr_kind(&state.tree, current) != .array_type) return false
+        current = ast.array_type(&state.tree, current).element
+    }
+    return false
+}
+
+@hide:file
+type_array_index proc(state @mut State, expression ast.NodeId, count usize) usize ! Error {
+    usize_type :: try builtin(state, expression, .usize)
+    actual :: try expression_type(state, expression, 0)
+    if (!flexible(state, expression) and (actual == no_node or !try same_type(state, actual, usize_type))) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_index_type, ast.node_span(&state.tree, expression))
+        return no_index
+    }
+    value :: try evaluate_ir(state, expression, usize_type)
+    if (value.kind != .integer) return no_index
+    if (value.magnitude >= u64(count)) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .index_out_of_bounds, ast.node_span(&state.tree, expression))
+        return no_index
+    }
+    return usize(value.magnitude)
+}
+
+@hide:file
+type_array_compatible proc(state @mut State, expected, actual ast.NodeId) bool ! Error {
+    if (is_type(state, expected) or is_type(state, actual))
+        return is_type(state, expected) and is_type(state, actual)
+    left :: try canonical_type(state, expected)
+    right :: try canonical_type(state, actual)
+    if (left == no_node or right == no_node) return false
+    if (ast.expr_kind(&state.tree, left) != .array_type or ast.expr_kind(&state.tree, right) != .array_type) return false
+    a :: ast.array_type(&state.tree, left)
+    b :: ast.array_type(&state.tree, right)
+    if (a.mutable != b.mutable or b.count == null) return false
+    if (a.count) |count| {
+        if (!try value_equal(state, try evaluate(state, count), try evaluate(state, b.count?))) return false
+    }
+    return try type_array_compatible(state, a.element, b.element)
+}
+
+@hide:file
+type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+    type :: try canonical_type(state, annotation)
+    array :: ast.array_type(&state.tree, type)
+    if (ast.expr_kind(&state.tree, expression) == .typed_constant) {
+        actual :: ast.typed_constant(&state.tree, expression)
+        if (try type_array_compatible(state, type, actual.type)) return expression
+    } else if (ast.expr_kind(&state.tree, expression) == .array_literal) {
+        count :: ast.array_element_count(&state.tree, expression)
+        if (array.count) |length| {
+            value :: try evaluate(state, length)
+            if (value.kind != .integer or value.negative) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .invalid_array_length, ast.node_span(&state.tree, length))
+                return no_node
+            }
+            if (value.magnitude != u64(count)) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .array_length_mismatch, ast.node_span(&state.tree, expression))
+                return no_node
+            }
+        }
+        elements := arraylist.init(ast.NodeId, state.allocator)
+        defer arraylist.deinit(&elements)
+        element_type := array.element
+        for (0..count) |i| {
+            element :: try type_execution_value(state,
+                ast.array_element(&state.tree, expression, i), element_type)
+            if (element == no_node) return no_node
+            if (ast.expr_kind(&state.tree, element) == .typed_constant)
+                element_type = ast.typed_constant(&state.tree, element).type
+            try arraylist.append(&elements, element)
+        }
+        # empty outer arrays still need concrete, valid child dimensions.
+        if (count == 0) {
+            child := element_type
+            while (!is_type(state, child)) {
+                child = try canonical_type(state, child)
+                descriptor :: ast.array_type(&state.tree, child)
+                value := Value{}
+                if (descriptor.count) |length| value = try evaluate(state, length)
+                if (value.kind != .integer or value.negative) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .invalid_array_length, ast.node_span(&state.tree, child))
+                    return no_node
+                }
+                child = descriptor.element
+            }
+        }
+        span :: ast.node_span(&state.tree, expression)
+        length :: try ast.add_integer(state.builder, span, u64(count))
+        concrete :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, annotation),
+            length, element_type, array.mutable)
+        literal :: try ast.add_array_literal(state.builder, span, elements.items)
+        result :: try ast.add_typed_constant(state.builder, span, concrete, literal)
+        try refresh(state)
+        return result
+    }
+    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+        .type_mismatch, ast.node_span(&state.tree, expression))
+    return no_node
+}
+
+# rebuild only the indexed path so previous snapshots retain their owned values.
+@hide:file
+type_array_update proc(
+    state @mut State, execution @mut TypeExecution, target, root, current, input ast.NodeId,
+) ast.NodeId ! Error {
+    # find the outermost index; rebuild its child before copying this parent.
+    first := target
+    while (true) {
+        if (ast.expr_kind(&state.tree, first) != .index) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .invalid_assignment_target, ast.node_span(&state.tree, target))
+            return no_node
+        }
+        base :: ast.index_expr(&state.tree, first).base
+        if (base == root) break
+        first = base
+    }
+    array :: ast.typed_constant(&state.tree, current)
+    descriptor :: ast.array_type(&state.tree, array.type)
+    if (!descriptor.mutable) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_index_assignment, ast.node_span(&state.tree, target))
+        return no_node
+    }
+    expression :: try type_snapshot(state, execution, ast.index_expr(&state.tree, first).index)
+    if (!try expand_type_matches(state, expression)) return no_node
+    count :: ast.array_element_count(&state.tree, array.value)
+    index :: try type_array_index(state, expression, count)
+    if (index == no_index) return no_node
+    previous :: ast.array_element(&state.tree, array.value, index)
+    updated := no_node
+    if (first == target) updated = try type_execution_value(state, input, descriptor.element)
+    else updated = try type_array_update(state, execution, target, first, previous, input)
+    if (updated == no_node) return no_node
+    elements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&elements)
+    for (0..count) |i| {
+        element :: if (i == index) updated else ast.array_element(&state.tree, array.value, i)
+        try arraylist.append(&elements, element)
+    }
+    span :: ast.node_span(&state.tree, target)
+    literal :: try ast.add_array_literal(state.builder, span, elements.items)
+    result :: try ast.add_typed_constant(state.builder, span, array.type, literal)
+    try refresh(state)
+    return result
 }
 
 @hide:file
@@ -1346,6 +1553,7 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         return concrete.node
     }
     if (!try expand_type_matches(state, expression)) return no_node
+    if (try type_array_storage(state, annotation)) return try type_array_value(state, expression, annotation)
     try expand(state, expression)
     resolved :: binding(state, expression)
     if (resolved.kind == .invalid) {
@@ -1479,6 +1687,8 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
             if (annotation == no_node) return .invalid
             value :: try type_execution_value(state, expression, annotation)
             if (value == no_node) return .invalid
+            if (ast.expr_kind(&state.tree, value) == .typed_constant)
+                annotation = ast.typed_constant(&state.tree, value).type
             try arraylist.append(&execution.locals, TypeLocal{
                 declaration = statement, value = value, annotation = annotation,
             })
@@ -1511,6 +1721,23 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
                 return .invalid
             }
             if (root != assignment.target) {
+                if (try type_array_storage(state, execution.locals.items[index].annotation)) {
+                    local :: execution.locals.items[index]
+                    if (
+                        ast.node_class(&state.tree, local.declaration) != .statement
+                        or ast.statement_decl(&state.tree, local.declaration).mutability != .variable
+                    ) {
+                        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                            .invalid_index_assignment, ast.node_span(&state.tree, assignment.target))
+                        return .invalid
+                    }
+                    input :: try type_snapshot(state, execution, assignment.value)
+                    if (!try expand_type_matches(state, input)) return .invalid
+                    value :: try type_array_update(state, execution, assignment.target, root, local.value, input)
+                    if (value == no_node) return .invalid
+                    execution.locals.items[index].value = value
+                    return .next
+                }
                 value :: try type_assignment_value(state, execution, statement, index)
                 if (value == no_node) return .invalid
                 execution.locals.items[index].value = value
@@ -1686,34 +1913,40 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
     if (annotation == no_node) return .invalid
     collection :: try type_execution_value(state, snapshot, annotation)
     if (collection == no_node) return .invalid
-    # validate the loop contract even for empty collections, without executing its
-    # type-valued body. the synthetic body exits before reading any element.
-    stop :: try ast.add_break_stmt(state.builder, span)
-    stops [1]ast.NodeId :: [stop]
-    body :: try ast.add_block(state.builder, span, stops[..])
-    selector :: try ast.add_for_stmt(state.builder, span, collection, loop.capture, loop.index,
-        loop.pointer_capture, loop.index_capture, body)
-    length := no_node
-    if (ast.expr_kind(&state.tree, annotation) == .array_type) length = ast.array_type(&state.tree, annotation).count?
-    else {
-        value :: try evaluate(state, collection)
-        if (value.kind == .string) {
-            text :: ast.literal_text(&state.tree, value.node)
-            cursor := usize(1)
-            count := u64(0)
-            while (cursor < text.len - 1) {
-                _ = ast.string_next(text, &cursor) catch { return .invalid }
-                count += 1
-            }
-            length = try ast.add_integer(state.builder, span, count)
-        } else length = try ast.add_integer(state.builder, span, 0)
+    count := Value{}
+    if (try type_array_storage(state, annotation)) {
+        count = Value{ kind = .integer,
+            magnitude = u64(ast.array_element_count(&state.tree, ast.typed_constant(&state.tree, collection).value)) }
+    } else {
+        # validate the loop contract even for empty collections, without executing
+        # its type-valued body. the synthetic body exits before reading an element.
+        stop :: try ast.add_break_stmt(state.builder, span)
+        stops [1]ast.NodeId :: [stop]
+        body :: try ast.add_block(state.builder, span, stops[..])
+        selector :: try ast.add_for_stmt(state.builder, span, collection, loop.capture, loop.index,
+            loop.pointer_capture, loop.index_capture, body)
+        length := no_node
+        if (ast.expr_kind(&state.tree, annotation) == .array_type) length = ast.array_type(&state.tree, annotation).count?
+        else {
+            value :: try evaluate(state, collection)
+            if (value.kind == .string) {
+                text :: ast.literal_text(&state.tree, value.node)
+                cursor := usize(1)
+                size := u64(0)
+                while (cursor < text.len - 1) {
+                    _ = ast.string_next(text, &cursor) catch { return .invalid }
+                    size += 1
+                }
+                length = try ast.add_integer(state.builder, span, size)
+            } else length = try ast.add_integer(state.builder, span, 0)
+        }
+        returned :: try ast.add_return_stmt(state.builder, span, length)
+        statements [2]ast.NodeId :: [selector, returned]
+        wrapper :: try ast.add_block(state.builder, span, statements[..])
+        try refresh(state)
+        count = try evaluate_ir_body(state, statement, wrapper, try builtin(state, statement, .usize))
+        if (count.kind != .integer) return .invalid
     }
-    returned :: try ast.add_return_stmt(state.builder, span, length)
-    statements [2]ast.NodeId :: [selector, returned]
-    wrapper :: try ast.add_block(state.builder, span, statements[..])
-    try refresh(state)
-    count :: try evaluate_ir_body(state, statement, wrapper, try builtin(state, statement, .usize))
-    if (count.kind != .integer) return .invalid
     if (loop.pointer_capture and loop.capture != null) {
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
         return .invalid
@@ -2154,6 +2387,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
     if (depth >= 128) return no_node
     try expand(state, id)
     resolved :: binding(state, id)
+    if (resolved.kind == .builtin and resolved.data.builtin != .type) return try builtin(state, id, .type)
     if (resolved.kind == .declaration) {
         target :: resolved.data.declaration
         class :: ast.node_class(&state.tree, target)
@@ -2180,6 +2414,9 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
     }
     kind :: ast.expr_kind(&state.tree, id)
     match kind {
+        .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
+        .enum_type, .union_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
+            return try builtin(state, id, .type)
         .typed_constant: return try canonical_type(state, ast.typed_constant(&state.tree, id).type)
         .literal_int: return try builtin(state, id, .i64)
         .literal_float: return try builtin(state, id, .f64)
@@ -2288,7 +2525,10 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             base :: try expression_type(state, view.base, depth + 1)
             if (base == no_node) return no_node
             base_kind :: ast.expr_kind(&state.tree, base)
-            if (base_kind == .array_type) return try canonical_type(state, ast.array_type(&state.tree, base).element)
+            if (base_kind == .array_type) {
+                element :: ast.array_type(&state.tree, base).element
+                return if (is_type(state, element)) element else try canonical_type(state, element)
+            }
             if (base_kind == .slice_type) return try canonical_type(state, ast.slice_type(&state.tree, base).element)
             if (base_kind == .pointer_type) return try canonical_type(state, ast.pointer_type(&state.tree, base).element)
             if (binding(state, base).kind == .builtin and binding(state, base).data.builtin == .string) return try builtin(state, id, .u8)

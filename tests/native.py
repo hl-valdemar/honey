@@ -1127,6 +1127,207 @@ CASES = {
         }
         """, b"42\n", None,
     ),
+    "type_arrays_nested_copies_assignment_and_consumers": (
+        """
+        Box proc(T type) type { return struct { value T } }
+        Selected proc() type {
+            explicit [2]mut [_]mut type := [[i8, bool], [u8, i16]]
+            inferred := [[i8, bool], [u8, i16]]
+            original :: explicit
+            copied [2]mut [_]mut type := explicit
+            (copied[0])[0] = bool
+            explicit[0] = [i16, u8]
+            inferred = [[i16, u8], [bool, i8]]
+            if (original[0][0] != i8 or copied[0][0] != bool) return bool
+            if (explicit[0][0] != i16 or inferred[1][0] != bool) return bool
+            return Box(explicit[0][0])
+        }
+        Storage proc() type {
+            types :: [Selected(), [2]i16]
+            return struct { item types[0], values types[1], bias i16 = 2 }
+        }
+        read proc(value Selected()) i16 { return value.value }
+        main proc() i16 {
+            value Storage() :: { item = { value = 19 }, values = [20, 1] }
+            return read(value.item) + value.values[0] + value.values[1] + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_iteration_borrows_nested_places_and_copies_captures": (
+        """
+        Selected proc() type {
+            types [2]mut type := [i8, bool]
+            Result := bool
+            for types |T, index| {
+                at usize :: index
+                if (at == 0) types[1] = i16
+                if (at == 1) Result = T
+            }
+            rows [2]mut [1]mut type := [[i8], [bool]]
+            for rows |row, index| {
+                copied := row
+                copied[0] = u8
+                if (row[0] == u8) return bool
+                if (index == 0) { (rows[1])[0] = Result }
+                if (index == 1 and row[0] != i16) return bool
+            }
+            empty [0]type :: []
+            for (empty) |_| return bool
+            if (empty.len != 0 or types.len != 2 or rows[0].len != 1) return bool
+            return rows[1][0]
+        }
+        main proc() i16 { value Selected() :: 42
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_only_execute_selected_bodies": (
+        """
+        Selected proc(ok bool) type {
+            types :: [i16]
+            if (ok) return types[0]
+            return types[1]
+        }
+        main proc() i16 { value Selected(true) :: 42
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_selected_invalid_body": (
+        """
+        Selected proc(ok bool) type {
+            types :: [i16]
+            if (ok) return types[0]
+            return types[1]
+        }
+        main proc() Selected(false) { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "type_arrays_read_requires_usize_index": (
+        """
+        Bad proc() type {
+            types :: [i16]
+            index u8 :: 0
+            return types[index]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "type_arrays_write_checks_bounds": (
+        """
+        Bad proc() type {
+            types [1]mut type := [i16]
+            types[1] = bool
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "type_arrays_write_requires_usize_index": (
+        """
+        Bad proc() type {
+            types [1]mut type := [i16]
+            index u8 :: 0
+            types[index] = bool
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "type_arrays_write_requires_mutable_elements": (
+        """
+        Bad proc() type {
+            types [1]type := [i16]
+            types[0] = bool
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_arrays_nested_write_requires_mutable_inner_elements": (
+        """
+        Bad proc() type {
+            types [1]mut [1]type := [[i16]]
+            (types[0])[0] = bool
+            return types[0][0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_arrays_whole_assignment_requires_mutable_binding": (
+        """
+        Bad proc() type {
+            types :: [i16]
+            types = [bool]
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "type_arrays_whole_assignment_checks_shape": (
+        """
+        Bad proc() type {
+            types := [[i16]]
+            types = [[i16, bool]]
+            return types[0][0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array literal length does not match its type",
+    ),
+    "type_arrays_indexed_assignment_checks_shape": (
+        """
+        Bad proc() type {
+            types [1]mut [1]mut type := [[i16]]
+            types[0] = [i16, bool]
+            return types[0][0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array literal length does not match its type",
+    ),
+    "type_arrays_indexed_assignment_checks_value": (
+        """
+        Bad proc() type {
+            types [1]mut type := [i16]
+            types[0] = 42
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_arrays_inferred_nested_counts_reject_ragged_initialization": (
+        """
+        Bad proc() type {
+            types [2]mut [_]mut type := [[i8], [i16, bool]]
+            return types[1][0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array literal length does not match its type",
+    ),
+    "type_arrays_preserve_anonymous_nominal_identity_across_reads_and_copies": (
+        """
+        Selected proc() type {
+            types :: [struct { value i16 }, struct { value i16 }]
+            copied :: types
+            if (types[0] != copied[0] or types[0] == types[1]) return bool
+            return struct { first types[0], second copied[0] }
+        }
+        main proc() i16 {
+            value Selected() :: { first = { value = 19 }, second = { value = 23 } }
+            copied := value.first
+            copied = value.second
+            return value.first.value + copied.value
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_empty_shapes_validate_child_lengths": (
+        """
+        Bad proc() type {
+            types [0][-1]type :: []
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array length must be a nonnegative supported compile-time integer",
+    ),
     "type_execution_mutable_types_and_nested_producers": (
         """
         Nest proc(T type, depth usize) type {
@@ -4745,7 +4946,38 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 12
+    sizing.write_text(textwrap.dedent("""
+        TypeArray proc() type {
+            types [2]mut type := [i8, bool]
+            for types |T, index| {
+                if (index == 0) types[1] = i16
+                if (index == 1) return struct { values [2]T, bias T = 2 }
+            }
+            return bool
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            value lib.TypeArray() :: { values = [19, 21] }
+            same lib.TypeArray() :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        TypeArray proc() type {
+            types [1]mut type := [i16]
+            types[1] = bool
+            return types[0]
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.TypeArray() { return 42 }\n')
+    check(app, executable, (b"", b"index out of bounds"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 14
 
 
 def check_dependency_provenance(temporary, executable):

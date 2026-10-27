@@ -158,6 +158,23 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    for "ok" |byte| { if (byte == u8(107)) Element = i16 }
             `    return [length]Element
             `}
+            `TypeArray proc() type {
+            `    types [2]mut [1]mut type := [[i8], [bool]]
+            `    original :: types
+            `    for types |row, index| {
+            `        copied := row
+            `        copied[0] = u8
+            `        if (row[0] == u8) return bool
+            `        if (index == 0) { (types[1])[0] = i16 }
+            `        if (index == 1 and row[0] != i16) return bool
+            `    }
+            `    if (original[1][0] != bool) return bool
+            `    inferred := [[i8], [bool]]
+            `    inferred = [[i16], [u8]]
+            `    empty [0]type :: []
+            `    for (empty) |_| return bool
+            `    return struct { values [types.len]types[1][0], bias inferred[0][0] = 2 }
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -190,6 +207,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    total i16 := 0
             `    for same_collected |item| { total = total + item }
             `    if (total != 42) return 0
+            `    type_array TypeArray() :: { values = [19, 21] }
+            `    same_type_array TypeArray() :: type_array
+            `    if (same_type_array.values[0] + same_type_array.values[1] + same_type_array.bias != 42) return 0
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }
