@@ -91,8 +91,13 @@ emit proc(
             for (module.functions.items[..index]) |previous| {
                 if (mem.eql(previous.external_name, function.external_name)) duplicate = true
             }
-            if (duplicate or mem.eql(function.external_name, "write") or mem.eql(function.external_name, "__error")
-                or mem.eql(function.external_name, "snprintf") or mem.eql(function.external_name, "exit")) continue
+            if (
+                duplicate
+                or mem.eql(function.external_name, "write")
+                or mem.eql(function.external_name, "__error")
+                or mem.eql(function.external_name, "snprintf")
+                or mem.eql(function.external_name, "exit")
+            ) continue
         }
         values :: try mem.alloc(Type, allocator, function.value_count)
         defer mem.free(allocator, values)

@@ -26,7 +26,8 @@ raw_alloc proc(
 }
 
 #! resize caller-owned storage with its original allocator and alignment.
-#! on allocation failure with nonzero `new_size`, original storage remains caller-owned; release the result with raw_free.
+#! on allocation failure with nonzero `new_size`, original storage remains caller-owned.
+#! release returned storage with raw_free using the same allocator and alignment, with `new_size` as its size.
 raw_realloc proc(
     allocator Allocator,
     memory ?*mut u8,
@@ -49,7 +50,9 @@ raw_free proc(
 
 eql proc($T type, left, right []T) bool {
     if (left.len != right.len) return false
-    for (0..left.len) |i| if (left[i] != right[i]) return false
+    for (0..left.len) |i| {
+        if (left[i] != right[i]) return false
+    }
     return true
 }
 

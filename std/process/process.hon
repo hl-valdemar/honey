@@ -19,7 +19,7 @@ RunError :: enum {
 }
 
 #! run a program synchronously without a shell, searching PATH for `arguments[0]`.
-#! arguments and zero-terminated strings are borrowed until this call returns.
+#! `arguments` and zero-terminated strings are borrowed until this call returns.
 #! an empty argument vector, empty executable name, or embedded NUL is invalid.
 #! the child inherits the current environment and stdin/stdout/stderr.
 #! temporary argument descriptors use `allocator` and are freed on every return.
@@ -28,7 +28,9 @@ run proc(allocator mem.Allocator, arguments [][;0]u8) i32 ! (mem.AllocError | Ru
     if (arguments.len == 0) return .invalid_arguments
     if (arguments[0].len == 0) return .invalid_arguments
     for arguments |argument| {
-        for (argument) |byte| if (byte == 0) return .invalid_arguments
+        for (argument) |byte| {
+            if (byte == 0) return .invalid_arguments
+        }
     }
     if (arguments.len == maxval!(usize)) return .out_of_memory
 
@@ -61,6 +63,6 @@ run proc(allocator mem.Allocator, arguments [][;0]u8) i32 ! (mem.AllocError | Ru
         signal :: status[0] & 127
         if (signal == 0) return i32(divtrunc!(status[0], 256) & 255)
         if (signal != 127) return i32(128 + signal)
-        # A traced child can report a stop even without WUNTRACED; wait for termination.
+        # a traced child can report a stop even without WUNTRACED; wait for termination.
     }
 }

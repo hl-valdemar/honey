@@ -54,14 +54,17 @@ Instance :: struct {
 @hide:file
 Rewrite :: struct { target ast.NodeId, saved ast.NodeId }
 
-#! owns an undo log and retained checking obligations; generated nodes belong to the caller's AST arena.
+#! owns an undo log and retained checking obligations; deinit releases them with their retained allocator.
+#! borrows the caller's AST builder; call deinit before finishing or deinitializing that builder.
+#! generated nodes remain arena-owned and are released with the AST.
 Result :: struct {
     builder @mut ast.Builder
     changes arraylist.ArrayList(Rewrite)
     constraints arraylist.ArrayList(ast.NodeId)
 }
 
-#! restores source nodes so the same compilation may be compiled again.
+#! restores rewritten source nodes in the borrowed builder and releases the undo log and checking obligations.
+#! does not remove generated arena nodes or restore resolution bindings.
 deinit proc(result @mut Result) void {
     index := result.changes.items.len
     while (index > 0) {
@@ -94,8 +97,11 @@ State :: struct {
     type_execution_remaining usize = 0
 }
 
-#! elaborates templates into cached concrete declarations in the caller-owned arena.
-#! resolution is extended to cover generated nodes; no template reaches checking or lowering.
+#! elaborates templates into cached concrete declarations in the caller-owned `builder` arena.
+#! extends `resolution` to cover generated nodes; no template reaches checking or lowering.
+#! `allocator` supplies returned logs, temporary storage released on every exit, and replacement resolution bindings.
+#! use the allocator retained by `resolution`; the returned Result borrows `builder` until the caller calls deinit.
+#! on failure, restores rewritten source nodes and releases logs; generated nodes remain arena-owned.
 elaborate proc(
     allocator mem.Allocator,
     builder @mut ast.Builder,
@@ -105,7 +111,7 @@ elaborate proc(
 ) Result ! Error {
     result := Result{ builder = builder, changes = arraylist.init(allocator), constraints = arraylist.init(allocator) }
     errdefer deinit(&result)
-    # Explicit evaluation is useful even in packages without generic declarations.
+    # explicit evaluation is useful even in packages without generic declarations.
     original :: ast.view(builder, root)
     needed := false
     for (0..ast.node_count(&original)) |i| {
@@ -250,9 +256,11 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         callee :: ast.call_expr(&state.tree, id).callee
         try expand(state, callee)
         resolved :: binding(state, callee)
-        if (resolved.kind == .declaration
+        if (
+            resolved.kind == .declaration
             and ast.node_class(&state.tree, resolved.data.declaration) == .function
-            and template(state, resolved.data.declaration)) {
+            and template(state, resolved.data.declaration)
+        ) {
             try specialize_call(state, id, resolved.data.declaration)
             return
         }
@@ -289,7 +297,7 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
 }
 
-# Only probe side-effect-free expressions. Ordinary calls stay runtime unless the
+# only probe side-effect-free expressions. ordinary calls stay runtime unless the
 # source requests evaluation with $(); probing must not execute FFI or emit traps.
 @hide:file
 branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
@@ -362,7 +370,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # A type result has no runtime call: every input participates in specialization.
+    # a type result has no runtime call: every input participates in specialization.
     type_result :: is_type(state, ast.function_decl(&state.tree, function).return_type)
     runtime := usize(0)
     for (0..count) |i| {
@@ -551,13 +559,15 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
         for (0..count) |n| {
             resolved :: binding(state, ast.NodeId(n))
-            if (resolved.kind == .declaration and resolved.data.declaration == parameter
-                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression) mapping[n] = replacement
+            if (
+                resolved.kind == .declaration and resolved.data.declaration == parameter
+                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression
+            ) mapping[n] = replacement
         }
     }
     clone :: try ast.clone_subtree(state.builder, function, mapping)
     try refresh(state)
-    # Copy original resolution, remapping references to cloned locals and runtime parameters.
+    # copy original resolution, remapping references to cloned locals and runtime parameters.
     for (0..count) |i| {
         target :: mapping[i]
         if (target == no_node or usize(target) < clone_start) continue
@@ -655,7 +665,7 @@ reject_evaluation proc(state @mut State, call ast.NodeId) void ! Error {
     state.bindings.items[usize(call)] = sema.Binding{ kind = .invalid, data = sema.BindingData{ diagnostic = diagnostic } }
 }
 
-# Failed deferred elaboration must not leave unchecked type expressions in the package.
+# failed deferred elaboration must not leave unchecked type expressions in the package.
 @hide:file
 reject_type_result proc(state @mut State, call, result ast.NodeId, constraints_start usize) void ! Error {
     try reject_evaluation(state, call)
@@ -714,8 +724,10 @@ argument_annotation proc(
         value :: try materialize(state, arguments[i])
         for (0..mapping.len) |n| {
             resolved :: binding(state, ast.NodeId(n))
-            if (resolved.kind == .declaration and resolved.data.declaration == parameter
-                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression) mapping[n] = value.node
+            if (
+                resolved.kind == .declaration and resolved.data.declaration == parameter
+                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression
+            ) mapping[n] = value.node
         }
     }
     start :: ast.node_count(&state.tree)
@@ -738,8 +750,8 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     return try evaluate(state, id)
 }
 
-# Values leaving the temporary interpreter must own no interpreter addresses or module IDs.
-# Rebuild contextual source literals while the module and its escaped flat cells are alive.
+# values leaving the temporary interpreter must own no interpreter addresses or module IDs.
+# rebuild contextual source literals while the module and its escaped flat cells are alive.
 @hide:file
 serialize_value proc(
     state @mut State, module @ir.Module, checked @typecheck.Result,
@@ -759,7 +771,7 @@ serialize_value proc(
         result = try ast.add_array_literal(state.builder, span, elements.items)
     } else if (type.kind == .record) {
         record :: typecheck.record_type(checked, type.record_type)
-        # Untagged storage has no active member; choosing one could discard bytes.
+        # untagged storage has no active member; choosing one could discard bytes.
         if (record.is_union and record.tag_type.kind != .enumeration) return no_node
         fields := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&fields)
@@ -786,7 +798,7 @@ serialize_value proc(
         child :: ir.aggregate_item(module, value, index)
         result = try serialize_value(state, module, checked, channel, child, span)
         if (result == no_node) return no_node
-        # Keep named success/error types distinct even when their members overlap.
+        # keep named success/error types distinct even when their members overlap.
         annotation := no_node
         if (channel.nominal != no_node) annotation = channel.nominal
         else if (channel.kind == .enumeration) annotation = typecheck.enum_type(checked, channel.enum_type).declaration
@@ -927,7 +939,7 @@ evaluate_call proc(state @mut State, call ast.NodeId) Value ! Error {
         }
         try arraylist.append(&arguments, concrete.node)
     }
-    # Reuse checking, typed IR and the interpreter: compile-time arithmetic and local
+    # reuse checking, typed IR and the interpreter: compile-time arithmetic and local
     # inference must have exactly the same semantics as an ordinary runtime call.
     span :: ast.node_span(&state.tree, call)
     invocation :: try ast.add_call(state.builder, span, callee.node, arguments.items)
@@ -1022,7 +1034,7 @@ TypeExecution :: struct {
 @hide:file
 TypeFlow :: enum { next, returned, break, continue, invalid }
 
-# Type values cannot enter runtime IR. Execute their control flow here, substituting
+# type values cannot enter runtime IR. execute their control flow here, substituting
 # owned constants into snapshots; ordinary value operations still use checked IR.
 @hide:file
 return_type_value proc(state @mut State, block, first_owned ast.NodeId) ast.NodeId ! Error {
@@ -1054,7 +1066,7 @@ type_step proc(state @mut State, at ast.NodeId) bool ! Error {
 @hide:file
 prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) void {
     if (usize(id) >= execution.mapping.len) return
-    # Substituted arguments belong to the caller, including nominal type identity.
+    # substituted arguments belong to the caller, including nominal type identity.
     if (id < execution.first_owned) {
         execution.mapping[usize(id)] = id
         return
@@ -1105,7 +1117,7 @@ nominal_type_value proc(state @State, id ast.NodeId) bool {
     return kind == .record_type or kind == .union_type or kind == .enum_type or kind == .distinct_type
 }
 
-# Select with ordinary checked IR so patterns, overlap and exhaustiveness have
+# select with ordinary checked IR so patterns, overlap and exhaustiveness have
 # the same rules as runtime matching, without checking unexecuted type bodies.
 @hide:file
 type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
@@ -1117,7 +1129,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     for (0..ast.match_arm_count(&state.tree, id)) |i| {
         arm_id :: ast.match_arm(&state.tree, id, i)
         arm :: ast.match_arm_view(&state.tree, arm_id)
-        # Selector bodies omit source capture uses, but must retain their resolver failures.
+        # selector bodies omit source capture uses, but must retain their resolver failures.
         if (arm.capture) |capture| {
             resolved :: binding(state, capture)
             if (resolved.kind == .invalid) {
@@ -1125,8 +1137,13 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
                 return no_index
             }
         }
-        if (i > 0 and arm.expression != ast.match_arm_view(&state.tree,
-            ast.match_arm(&state.tree, id, 0)).expression) {
+        if (
+            i > 0
+            and arm.expression != ast.match_arm_view(
+                &state.tree,
+                ast.match_arm(&state.tree, id, 0),
+            ).expression
+        ) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                 .type_mismatch, ast.node_span(&state.tree, arm_id))
             return no_index
@@ -1152,7 +1169,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     return usize(selected.magnitude)
 }
 
-# Match checking has already validated every capture. Copy the active payload
+# match checking has already validated every capture. copy the active payload
 # out of owned constant storage, never an address in the temporary interpreter.
 @hide:file
 type_match_capture proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
@@ -1163,8 +1180,10 @@ type_match_capture proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
     payload :: ast.field(&state.tree, ast.record_field(&state.tree, value.node, 0))
     for (0..ast.record_field_count(&state.tree, annotation)) |i| {
         field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, i))
-        if (field.name != null and payload.name != null
-            and ast.name_id(&state.tree, field.name?) == ast.name_id(&state.tree, payload.name?)) {
+        if (
+            field.name != null and payload.name != null
+            and ast.name_id(&state.tree, field.name?) == ast.name_id(&state.tree, payload.name?)
+        ) {
             result :: try ast.add_typed_constant(state.builder,
                 ast.node_span(&state.tree, subject), field.type?, payload.value?)
             try refresh(state)
@@ -1208,8 +1227,8 @@ type_value_expression proc(state @mut State, input ast.NodeId) ast.NodeId ! Erro
     return expression
 }
 
-# Normalize only selected expression arms before ordinary expansion can visit them.
-# Nominal results enter here after their instance declaration is cached.
+# normalize only selected expression arms before ordinary expansion can visit them.
+# nominal results enter here after their instance declaration is cached.
 @hide:file
 expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
     if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .match_expr) {
@@ -1233,7 +1252,7 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
     expression :: try type_value_expression(state, input)
     if (expression == no_node) return no_node
     if (!try expand_type_matches(state, annotation)) return no_node
-    # A recursive record needs its cached declaration before expanding its fields.
+    # a recursive record needs its cached declaration before expanding its fields.
     if (is_type(state, annotation) and nominal_type_value(state, expression)) {
         concrete :: try materialize(state, Value{ kind = .type, node = expression })
         constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, expression), concrete.node, true)
@@ -1327,9 +1346,11 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
                     if (local.declaration == resolved.data.declaration) index = i
                 }
             }
-            if (index == no_index
+            if (
+                index == no_index
                 or ast.node_class(&state.tree, execution.locals.items[index].declaration) != .statement
-                or ast.statement_decl(&state.tree, execution.locals.items[index].declaration).mutability != .variable) {
+                or ast.statement_decl(&state.tree, execution.locals.items[index].declaration).mutability != .variable
+            ) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .invalid_assignment_target, ast.node_span(&state.tree, assignment.target))
                 return .invalid
@@ -1572,9 +1593,11 @@ evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
         result_type :: try builtin(state, id, kind)
         return try evaluate_ir(state, id, result_type)
     }
-    if (left.annotation != no_node and right.annotation != no_node
+    if (
+        left.annotation != no_node and right.annotation != no_node
         and left.kind == .integer and right.kind == .integer
-        and !try same_type(state, left.annotation, right.annotation)) return Value{}
+        and !try same_type(state, left.annotation, right.annotation)
+    ) return Value{}
     if (view.operator == .equal or view.operator == .not_equal) {
         if (left.kind != right.kind) return Value{}
         equal :: try value_equal(state, left, right)
@@ -1790,8 +1813,8 @@ type_hash proc(state @mut State, id ast.NodeId) usize ! Error {
         .optional_type: return mix(hash, try type_hash(state, ast.type_operand(&state.tree, node)))
         .sum_type: {
             view :: ast.binary_expr(&state.tree, node)
-            # Set fingerprints must ignore ordering, grouping and repeated members.
-            # Colliding fingerprints still use full type equality in the cache chain.
+            # set fingerprints must ignore ordering, grouping and repeated members.
+            # colliding fingerprints still use full type equality in the cache chain.
             return try type_hash(state, view.left) | try type_hash(state, view.right)
         }
         .fallible_type: {
@@ -1914,9 +1937,11 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         }
         .binary: {
             view :: ast.binary_expr(&state.tree, id)
-            if (view.operator == .equal or view.operator == .not_equal or view.operator == .less
+            if (
+                view.operator == .equal or view.operator == .not_equal or view.operator == .less
                 or view.operator == .less_equal or view.operator == .greater or view.operator == .greater_equal
-                or view.operator == .logical_and or view.operator == .logical_or) return try builtin(state, id, .bool)
+                or view.operator == .logical_and or view.operator == .logical_or
+            ) return try builtin(state, id, .bool)
             return try expression_type(state, view.left, depth + 1)
         }
         .selection: {
@@ -1927,8 +1952,12 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             if (base == no_node) return no_node
             member :: ast.source_text(&state.tree, ast.node_span(&state.tree, view.member))
             base_kind :: ast.expr_kind(&state.tree, base)
-            if (mem.eql(member, "len") and (base_kind == .array_type or base_kind == .slice_type
-                or (binding(state, base).kind == .builtin and binding(state, base).data.builtin == .string)))
+            if (
+                mem.eql(member, "len") and (
+                    base_kind == .array_type or base_kind == .slice_type
+                    or (binding(state, base).kind == .builtin and binding(state, base).data.builtin == .string)
+                )
+            )
                 return try builtin(state, id, .usize)
             if (base_kind != .record_type and base_kind != .union_type) return no_node
             for (0..ast.record_field_count(&state.tree, base)) |i| {
@@ -2062,11 +2091,13 @@ materialize proc(state @mut State, value Value) Value ! Error {
     result := value
     span :: ast.node_span(&state.tree, value.node)
     if (value.kind == .type and nominal_type_value(state, value.node)) {
-        # Refer to declared nominal types, rather than reusing their definition as
+        # refer to declared nominal types, rather than reusing their definition as
         # an annotation and turning its value-role checker cell into an annotation.
         for (state.declarations.items) |declaration| {
-            if (ast.node_class(&state.tree, declaration) == .statement
-                and ast.statement_decl(&state.tree, declaration).initializer == value.node) {
+            if (
+                ast.node_class(&state.tree, declaration) == .statement
+                and ast.statement_decl(&state.tree, declaration).initializer == value.node
+            ) {
                 result.node = try reference(state, value.node, declaration)
                 return result
             }

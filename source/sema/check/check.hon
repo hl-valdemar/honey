@@ -227,7 +227,7 @@ State :: struct {
     pointer_depth usize = 0
 }
 
-#! borrows resolution and diagnostics during checking; Result retains the AST borrow for signature comparisons.
+#! borrows `resolution` and `diagnostic_store` during checking; Result retains the AST borrow for signature comparisons.
 #! temporary constraints are freed on every exit; Result owns types, aggregate descriptors, initializer mappings, and fallthrough obligations.
 check proc(
     allocator mem.Allocator,
@@ -322,7 +322,7 @@ check_elaborated proc(
             try collect_declaration(&state, constraint)
         } else try collect_expression(&state, constraint)
     }
-    # Preserve binding errors before RHS errors propagate. Indexed writability
+    # preserve binding errors before RHS errors propagate. indexed writability
     # waits for shapes; neither check poisons the target's type.
     for 0..count |i| {
         if (cells[i].role != .assignment_stmt) continue
@@ -357,8 +357,10 @@ check_elaborated proc(
         if (cells[i].role != .expression or !declaration_reference(tree, id)) continue
         if (cells[i].type.kind == .invalid) continue
         binding :: sema.binding(resolution, id)
-        if (binding.kind == .declaration and !cells[i].assignment_value
-            and !cells[usize(binding.data.declaration)].fixed and !has_narrowing(&state, id)) {
+        if (
+            binding.kind == .declaration and !cells[i].assignment_value
+            and !cells[usize(binding.data.declaration)].fixed and !has_narrowing(&state, id)
+        ) {
             join(&state, id, binding.data.declaration)
         }
     }
@@ -371,7 +373,8 @@ check_elaborated proc(
         if (assignment_values) {
             for (0..count) |i| {
                 id :: ast.NodeId(i)
-                if (!cells[i].assignment_value
+                if (
+                    !cells[i].assignment_value
                     or cells[i].role != .expression
                     or !declaration_reference(tree, id)
                 ) continue
@@ -380,7 +383,7 @@ check_elaborated proc(
                 if (binding.kind == .declaration) cells[i].type = types[usize(binding.data.declaration)]
             }
         }
-        # Calls use the signature result before contextual literal inference.
+        # calls use the signature result before contextual literal inference.
         try prepare_optional_captures(&state, false)
         for (0..count) |i| {
             id :: ast.NodeId(i)
@@ -840,9 +843,13 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
         view :: ast.array_type(state.tree, id)
         element := try check_annotation(state, view.element, true)
         element_binding :: sema.binding(state.resolution, view.element)
-        if ((element_binding.kind == .builtin
-            and (element_binding.data.builtin == .int or element_binding.data.builtin == .float))
-            or element.kind == .void or element.kind == .range) {
+        if (
+            (
+                element_binding.kind == .builtin
+                and (element_binding.data.builtin == .int or element_binding.data.builtin == .float)
+            )
+            or element.kind == .void or element.kind == .range
+        ) {
             element = invalid_type(try diagnostics.add(state.diagnostics, .invalid_array_element_type, ast.node_span(state.tree, view.element)))
             state.types[usize(view.element)] = element
             state.cells[usize(view.element)].type = element
@@ -920,9 +927,11 @@ collect_declaration proc(state @mut State, id ast.NodeId) void ! (mem.AllocError
         state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
     }
     try collect_expression(state, declaration.initializer)
-    if (type_syntax(ast.expr_kind(state.tree, declaration.initializer))
+    if (
+        type_syntax(ast.expr_kind(state.tree, declaration.initializer))
         and state.cells[usize(id)].type.kind != .invalid
-        and state.cells[usize(declaration.initializer)].type.kind != .none) {
+        and state.cells[usize(declaration.initializer)].type.kind != .none
+    ) {
         state.cells[usize(id)].fixed = true
         state.cells[usize(id)].type = state.cells[usize(declaration.initializer)].type
     }
@@ -1208,8 +1217,10 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
                 base :: ast.selection_expr(tree, id).base
                 if (type_reference(state, base)) {
                     checked :: try check_annotation(state, base, true)
-                    if (checked.kind != .invalid
-                        and (checked.kind != .enumeration or checked.nominal != ast.NodeId(maxval!(u32)))) {
+                    if (
+                        checked.kind != .invalid
+                        and (checked.kind != .enumeration or checked.nominal != ast.NodeId(maxval!(u32)))
+                    ) {
                         try fail(state, base, .type_not_value, ast.node_span(tree, base))
                         state.cells[usize(base)].type = state.types[usize(base)]
                     }
@@ -1219,8 +1230,10 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             if (binding.kind == .declaration) {
                 target :: binding.data.declaration
                 role :: state.cells[usize(target)].role
-                if (role != .parameter and role != .loop_capture and ast.decl_kind(tree, target) == .statement
-                    and type_syntax(ast.expr_kind(tree, ast.statement_decl(tree, target).initializer))) {
+                if (
+                    role != .parameter and role != .loop_capture and ast.decl_kind(tree, target) == .statement
+                    and type_syntax(ast.expr_kind(tree, ast.statement_decl(tree, target).initializer))
+                ) {
                     state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
                 }
             }
@@ -1451,11 +1464,13 @@ bool_equality proc(state @mut State, id ast.NodeId) bool {
     right :: group_type(state, expression.right)
     return (
         (expression.operator == .equal or expression.operator == .not_equal)
-        and ((left.kind == .bool and right.kind == .bool)
+        and (
+            (left.kind == .bool and right.kind == .bool)
             or left.kind == .enumeration or right.kind == .enumeration
             or left.kind == .pointer or right.kind == .pointer
             or left.kind == .optional or right.kind == .optional
-            or left.kind == .null or right.kind == .null)
+            or left.kind == .null or right.kind == .null
+        )
     )
 }
 
@@ -1534,8 +1549,10 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
     if (expected.kind == .fallible) {
         descriptor :: state.arrays.items[usize(expected.array_type)]
         actual := group_type(state, id)
-        if (state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)
-            and has_narrowing(state, id)) actual = try infer_shape(state, id, false)
+        if (
+            state.cells[usize(id)].role == .expression and declaration_reference(state.tree, id)
+            and has_narrowing(state, id)
+        ) actual = try infer_shape(state, id, false)
         if (actual.kind == .fallible) return
         target := descriptor.element
         literal :: state.cells[index].literal
@@ -1547,16 +1564,24 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
                 if (ast.record_literal(state.tree, literal).type) |annotation| {
                     if (ast.expr_kind(state.tree, annotation) == .enum_literal) name = ast.enum_literal(state.tree, annotation)
                 }
-                if (name == ast.NodeId(maxval!(u32)) and actual.kind == .none
+                if (
+                    name == ast.NodeId(maxval!(u32)) and actual.kind == .none
                     and descriptor.element.kind != .record and descriptor.error_type.kind == .record
-                    and !state.records.items[usize(descriptor.error_type.record_type)].is_union) target = descriptor.error_type
+                    and !state.records.items[usize(descriptor.error_type.record_type)].is_union
+                ) target = descriptor.error_type
             }
-            if (name != ast.NodeId(maxval!(u32)) and type_has_variant(state, descriptor.error_type, name)
-                and !type_has_variant(state, descriptor.element, name)) target = descriptor.error_type
-            else if (actual.kind != .none and !assignable_type(state, actual, target)
-                and assignable_type(state, actual, descriptor.error_type)) target = descriptor.error_type
-        } else if (actual.kind != .none and !assignable_type(state, actual, target)
-            and assignable_type(state, actual, descriptor.error_type)) target = descriptor.error_type
+            if (
+                name != ast.NodeId(maxval!(u32)) and type_has_variant(state, descriptor.error_type, name)
+                and !type_has_variant(state, descriptor.element, name)
+            ) target = descriptor.error_type
+            else if (
+                actual.kind != .none and !assignable_type(state, actual, target)
+                and assignable_type(state, actual, descriptor.error_type)
+            ) target = descriptor.error_type
+        } else if (
+            actual.kind != .none and !assignable_type(state, actual, target)
+            and assignable_type(state, actual, descriptor.error_type)
+        ) target = descriptor.error_type
         try demand(state, id, target, code)
         return
     }
@@ -1587,9 +1612,11 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
         }
         return
     }
-    if (expected.kind == .pointer and state.cells[usize(id)].role == .expression
+    if (
+        expected.kind == .pointer and state.cells[usize(id)].role == .expression
         and ast.expr_kind(state.tree, id) == .unary
-        and ast.unary_expr(state.tree, id).operator == .address_of) {
+        and ast.unary_expr(state.tree, id).operator == .address_of
+    ) {
         state.cells[index].expected = expected
         try demand(state, ast.unary_expr(state.tree, id).operand,
             state.pointers.items[usize(expected.pointer_type)].element, code)
@@ -1604,8 +1631,10 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
         return
     }
     literal_node :: state.cells[index].literal
-    if (expected.nominal != ast.NodeId(maxval!(u32))
-        and (expected.kind == .record or expected.kind == .array)) return
+    if (
+        expected.nominal != ast.NodeId(maxval!(u32))
+        and (expected.kind == .record or expected.kind == .array)
+    ) return
     if (literal_node != ast.NodeId(maxval!(u32)) and ast.expr_kind(state.tree, literal_node) == .enum_literal) {
         previous :: state.cells[index].expected
         if (previous.kind != .none and !same_type(state, previous, expected)) {
@@ -1655,8 +1684,10 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
     if (!numeric_kind(expected.kind)) return
     if (!state.cells[index].numeric and state.cells[index].type.kind != .none) return
     state.cells[index].numeric = true
-    if (state.cells[index].expected.kind != .none
-        and !same_type(state, state.cells[index].expected, expected)) {
+    if (
+        state.cells[index].expected.kind != .none
+        and !same_type(state, state.cells[index].expected, expected)
+    ) {
         state.cells[index].type = invalid_type(try diagnostics.add(state.diagnostics, code, ast.node_span(state.tree, id)))
         return
     }
@@ -1706,8 +1737,13 @@ mutable_target proc(state @mut State, id ast.NodeId, allow_global bool) bool {
         base :: group_type(state, view.base)
         if (base.kind == .pointer) {
             pointer :: state.pointers.items[usize(base.pointer_type)]
-            return pointer.mutable and (pointer.many
-                or (pointer.element.kind == .array and state.arrays.items[usize(pointer.element.array_type)].mutable))
+            return (
+                pointer.mutable
+                and (
+                    pointer.many
+                    or (pointer.element.kind == .array and state.arrays.items[usize(pointer.element.array_type)].mutable)
+                )
+            )
         }
         if (base.kind == .slice) return state.arrays.items[usize(base.array_type)].mutable
         return base.kind == .array and state.arrays.items[usize(base.array_type)].mutable and mutable_target(state, view.base, allow_global)
@@ -1798,8 +1834,10 @@ assignable_type proc(state @State, actual, expected Type) bool {
             or error_subset(state.records.items, state.enums.items, actual, target.error_type)
         )
     }
-    if ((composed_type(state, actual) or composed_type(state, expected))
-        and error_subset(state.records.items, state.enums.items, actual, expected)) return true
+    if (
+        (composed_type(state, actual) or composed_type(state, expected))
+        and error_subset(state.records.items, state.enums.items, actual, expected)
+    ) return true
     if (expected.kind == .optional) {
         child :: state.arrays.items[usize(expected.array_type)].element
         if (actual.kind == .null) return true
@@ -1851,9 +1889,11 @@ assignable_value proc(state @mut State, value ast.NodeId, actual, expected Type)
     if (!assignable_type(state, actual, expected)) return false
     target := expected
     while (target.kind == .optional) target = state.arrays.items[usize(target.array_type)].element
-    if (actual.kind == .array and target.kind == .slice
+    if (
+        actual.kind == .array and target.kind == .slice
         and state.arrays.items[usize(target.array_type)].mutable
-        and addressable_target(state, value)) return mutable_target(state, value, true)
+        and addressable_target(state, value)
+    ) return mutable_target(state, value, true)
     return true
 }
 
@@ -1907,8 +1947,10 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     try fail(state, value, .return_type_mismatch, ast.node_span(tree, value))
                     state.types[usize(id)] = state.types[usize(value)]
                 }
-            } else if (expected.kind != .void
-                and !(expected.kind == .fallible and state.arrays.items[usize(expected.array_type)].element.kind == .void)) {
+            } else if (
+                expected.kind != .void
+                and !(expected.kind == .fallible and state.arrays.items[usize(expected.array_type)].element.kind == .void)
+            ) {
                 try fail(state, id, .return_type_mismatch, statement.span)
             }
         }
@@ -1939,8 +1981,10 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         return
                     }
                     if (expression.operator == .dereference) {
-                        if (state.types[usize(expression.operand)].kind != .invalid
-                            and state.types[usize(expression.operand)].kind != .pointer) {
+                        if (
+                            state.types[usize(expression.operand)].kind != .invalid
+                            and state.types[usize(expression.operand)].kind != .pointer
+                        ) {
                             try fail(state, id, .invalid_dereference, expression.span)
                         }
                         return
@@ -1966,11 +2010,15 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         }
                         return
                     }
-                    if ((expression.operator == .equal or expression.operator == .not_equal)
-                        and ((left.kind == .optional and right.kind == .null) or (left.kind == .null and right.kind == .optional))) return
-                    if ((expression.operator == .equal or expression.operator == .not_equal)
+                    if (
+                        (expression.operator == .equal or expression.operator == .not_equal)
+                        and ((left.kind == .optional and right.kind == .null) or (left.kind == .null and right.kind == .optional))
+                    ) return
+                    if (
+                        (expression.operator == .equal or expression.operator == .not_equal)
                         and (left.kind == .bool or left.kind == .enumeration or left.kind == .pointer)
-                        and (assignable_type(state, left, right) or assignable_type(state, right, left))) return
+                        and (assignable_type(state, left, right) or assignable_type(state, right, left))
+                    ) return
                     if (!numeric_kind(left.kind) or !numeric_kind(right.kind) or !same_type(state, left, right)) {
                         try fail(state, id, .invalid_operand, expression.span)
                     } else if (expression.operator == .divide and left.kind != .float) {
@@ -2066,9 +2114,13 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
                 and state.enums.items[usize(actual.enum_type)].explicit_backing
             )
             backing :: immediate_backing(state, actual)
-            if (actual.kind != .invalid
-                and (!numeric_kind(backing.kind) and !allowed_enum
-                    or backing.nominal != ast.NodeId(maxval!(u32)))) {
+            if (
+                actual.kind != .invalid
+                and (
+                    !numeric_kind(backing.kind) and !allowed_enum
+                    or backing.nominal != ast.NodeId(maxval!(u32))
+                )
+            ) {
                 try fail(state, argument, .invalid_operand, ast.node_span(tree, argument))
             }
         }
@@ -2167,14 +2219,18 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
             binding :: sema.binding(state.resolution, id)
             if (binding.kind != .declaration) return null
             target :: binding.data.declaration
-            if (!state.cells[usize(target)].count_declaration
-                and (!allow_local or !state.cells[usize(target)].local)) return null
+            if (
+                !state.cells[usize(target)].count_declaration
+                and (!allow_local or !state.cells[usize(target)].local)
+            ) return null
             declaration :: ast.statement_decl(state.tree, target)
             if (declaration.mutability != .constant) return null
             if (declaration.type) |annotation| {
                 type_binding :: sema.binding(state.resolution, annotation)
-                if (!integer_kind(state.types[usize(annotation)].kind)
-                    and (type_binding.kind != .builtin or !integer_kind(builtin_kind(type_binding.data.builtin)))) return null
+                if (
+                    !integer_kind(state.types[usize(annotation)].kind)
+                    and (type_binding.kind != .builtin or !integer_kind(builtin_kind(type_binding.data.builtin)))
+                ) return null
             }
             return evaluate_integer(state, declaration.initializer, allow_local)
         }
@@ -2224,8 +2280,10 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
 @hide:file
 intern_pointer proc(state @mut State, descriptor PointerType) Type ! mem.AllocError {
     for state.pointers.items |existing, i| {
-        if (existing.mutable == descriptor.mutable and existing.many == descriptor.many
-            and same_type(state, existing.element, descriptor.element)) {
+        if (
+            existing.mutable == descriptor.mutable and existing.many == descriptor.many
+            and same_type(state, existing.element, descriptor.element)
+        ) {
             return Type{ kind = .pointer, pointer_type = PointerId(i) }
         }
     }
@@ -2241,10 +2299,12 @@ check_pointer_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError 
     element :: try check_annotation(state, view.element, true)
     if (element.kind == .invalid) return element
     binding :: sema.binding(state.resolution, view.element)
-    if (element.kind == .none or element.kind == .void or element.kind == .range
+    if (
+        element.kind == .none or element.kind == .void or element.kind == .range
         or element.kind == .type_value
         or has_inferred_count(state, element)
-        or (binding.kind == .builtin and (binding.data.builtin == .int or binding.data.builtin == .float))) {
+        or (binding.kind == .builtin and (binding.data.builtin == .int or binding.data.builtin == .float))
+    ) {
         return invalid_type(try diagnostics.add(state.diagnostics, .invalid_pointer_type, ast.node_span(state.tree, id)))
     }
     return try intern_pointer(state, PointerType{ element = element, mutable = view.mutable, many = view.many })
@@ -2282,9 +2342,11 @@ check_function_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
 @hide:file
 intern_array proc(state @mut State, descriptor ArrayType) Type ! mem.AllocError {
     for state.arrays.items |existing, i| {
-        if (existing.kind == descriptor.kind and existing.len == descriptor.len and existing.mutable == descriptor.mutable
+        if (
+            existing.kind == descriptor.kind and existing.len == descriptor.len and existing.mutable == descriptor.mutable
             and same_sentinel(existing.sentinel, descriptor.sentinel) and same_type(state, existing.element, descriptor.element)
-            and same_type(state, existing.error_type, descriptor.error_type)) {
+            and same_type(state, existing.error_type, descriptor.error_type)
+        ) {
             return Type{ kind = descriptor.kind, array_type = ArrayId(i) }
         }
     }
@@ -2527,8 +2589,10 @@ same_type proc(state @State, left, right Type) bool {
             and error_subset(state.records.items, state.enums.items, right, left)
         )
         if (a.is_union or b.is_union) return false
-        if (a.declaration != ast.NodeId(maxval!(u32)) or b.declaration != ast.NodeId(maxval!(u32))
-            or a.fields.len != b.fields.len) return false
+        if (
+            a.declaration != ast.NodeId(maxval!(u32)) or b.declaration != ast.NodeId(maxval!(u32))
+            or a.fields.len != b.fields.len
+        ) return false
         for a.fields |field, i| {
             other :: b.fields[i]
             if ((field.name == null) != (other.name == null)) return false
@@ -2749,9 +2813,11 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             }
         }
     }
-    if (state.cells[usize(id)].role == .expression
+    if (
+        state.cells[usize(id)].role == .expression
         and ast.expr_kind(state.tree, id) == .selection
-        and sema.binding(state.resolution, id).kind == .none) {
+        and sema.binding(state.resolution, id).kind == .none
+    ) {
         view :: ast.selection_expr(state.tree, id)
         if (type_reference(state, view.base)) {
             enum_shape :: try check_annotation(state, view.base, false)
@@ -2777,8 +2843,10 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         }
         if (base.kind == .pointer and base.nominal == ast.NodeId(maxval!(u32))) {
             pointer :: state.pointers.items[usize(base.pointer_type)]
-            if (!pointer.many and pointer.element.kind == .array
-                and ast.expr_kind(state.tree, view.member) == .identifier) {
+            if (
+                !pointer.many and pointer.element.kind == .array
+                and ast.expr_kind(state.tree, view.member) == .identifier
+            ) {
                 member :: ast.source_text(state.tree, ast.node_span(state.tree, view.member))
                 if (mem.eql(member, "len")) {
                     type :: Type{ kind = .usize }
@@ -2837,8 +2905,10 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         binding :: sema.binding(state.resolution, id)
         if (binding.kind == .declaration) {
             target :: binding.data.declaration
-            if (state.cells[usize(target)].role == .declaration and state.cells[usize(target)].fixed
-                and has_inferred_count(state, state.cells[usize(target)].type)) {
+            if (
+                state.cells[usize(target)].role == .declaration and state.cells[usize(target)].fixed
+                and has_inferred_count(state, state.cells[usize(target)].type)
+            ) {
                 declaration :: ast.statement_decl(state.tree, target)
                 actual :: try infer_shape(state, declaration.initializer, defaults)
                 if (actual.kind == .array and !has_inferred_count(state, actual)) {
@@ -2931,8 +3001,10 @@ prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.Allo
         for (0..(state.cells.len)) |j| {
             if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
             binding :: sema.binding(state.resolution, ast.NodeId(j))
-            if (binding.kind == .declaration and binding.data.declaration == capture
-                and !has_narrowing(state, ast.NodeId(j))) seed(state, ast.NodeId(j), child)
+            if (
+                binding.kind == .declaration and binding.data.declaration == capture
+                and !has_narrowing(state, ast.NodeId(j))
+            ) seed(state, ast.NodeId(j), child)
         }
     }
 }
@@ -2999,8 +3071,10 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
         if (state.cells[i].role != .expression or state.cells[i].assignment_value != assignment_values or ast.expr_kind(tree, id) != .call) continue
         if (state.backings[i].kind != .none) {
             backing :: state.backings[i]
-            if (ast.call_arg_count(tree, id) == 1
-                and (backing.nominal != ast.NodeId(maxval!(u32)) or !numeric_kind(backing.kind))) {
+            if (
+                ast.call_arg_count(tree, id) == 1
+                and (backing.nominal != ast.NodeId(maxval!(u32)) or !numeric_kind(backing.kind))
+            ) {
                 try context_demand(state, ast.call_arg(tree, id, 0), backing, .type_mismatch, early)
             }
             continue
@@ -3029,9 +3103,11 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
 
 @hide:file
 context_demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Code, early bool) void ! (mem.AllocError | diagnostics.CapacityError) {
-    if (early and expected.kind != .array and expected.kind != .record
+    if (
+        early and expected.kind != .array and expected.kind != .record
         and expected.kind != .pointer and expected.kind != .slice and expected.kind != .optional and expected.kind != .fallible
-        and expected.kind != .enumeration and !integer_kind(expected.kind)) return
+        and expected.kind != .enumeration and !integer_kind(expected.kind)
+    ) return
     try demand(state, id, expected, code)
 }
 
@@ -3080,13 +3156,16 @@ prepare_ranges proc(state @mut State, assignment_values, constrain bool) void ! 
     }
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
-        if (state.cells[i].role != .expression
+        if (
+            state.cells[i].role != .expression
             or state.cells[i].assignment_value
             or !declaration_reference(tree, id)
         ) continue
         binding :: sema.binding(state.resolution, id)
-        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture
-            and !has_narrowing(state, id)) {
+        if (
+            binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture
+            and !has_narrowing(state, id)
+        ) {
             seed(state, id, group_type(state, binding.data.declaration))
         }
     }
@@ -3142,13 +3221,16 @@ specialize_annotations proc(state @mut State) void ! (mem.AllocError | diagnosti
     }
     for 0..(state.cells.len) |i| {
         id :: ast.NodeId(i)
-        if (state.cells[i].role != .expression
+        if (
+            state.cells[i].role != .expression
             or state.cells[i].assignment_value
             or !declaration_reference(state.tree, id)
         ) continue
         binding :: sema.binding(state.resolution, id)
-        if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].fixed
-            and !has_narrowing(state, id)) {
+        if (
+            binding.kind == .declaration and state.cells[usize(binding.data.declaration)].fixed
+            and !has_narrowing(state, id)
+        ) {
             seed(state, id, state.cells[usize(binding.data.declaration)].type)
         }
     }
@@ -3187,8 +3269,10 @@ intern_record proc(state @mut State, declaration ast.NodeId, fields []mut Record
         for fields |field, j| {
             slot := j
             if (field.name) |name| slot = named_field(state.tree, existing.fields, name)
-            if (slot == no_index or (field.name == null and existing.fields[slot].name != null)
-                or !same_type(state, field.type, existing.fields[slot].type)) {
+            if (
+                slot == no_index or (field.name == null and existing.fields[slot].name != null)
+                or !same_type(state, field.type, existing.fields[slot].type)
+            ) {
                 equal = false
                 break
             }
@@ -3480,8 +3564,10 @@ check_type_expression proc(state @mut State, id ast.NodeId, nominal bool) Type !
         and (operand_binding.data.builtin == .int or operand_binding.data.builtin == .float)
     )
     if (kind == .distinct_type and type.kind != .invalid) {
-        if (type.kind == .none or type.kind == .void or type.kind == .range or type.kind == .type_value
-            or type.kind == .function or has_inferred_count(state, type) or constraint) {
+        if (
+            type.kind == .none or type.kind == .void or type.kind == .range or type.kind == .type_value
+            or type.kind == .function or has_inferred_count(state, type) or constraint
+        ) {
             type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_distinct_backing, ast.node_span(state.tree, id)))
         } else {
             state.backings[usize(id)] = type
@@ -3570,13 +3656,18 @@ check_enum proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | diagno
             } else valid = false
         }
         if (!integer_fits(value, backing.kind)) valid = false
-        if (explicit and i != 0 and constant_order(
-            ConstantInteger{ magnitude = members[i - 1].magnitude, negative = members[i - 1].negative },
-            value,
-        ) >= 0) valid = false
+        if (
+            explicit and i != 0
+            and constant_order(
+                ConstantInteger{ magnitude = members[i - 1].magnitude, negative = members[i - 1].negative },
+                value,
+            ) >= 0
+        ) valid = false
         for members[0..i] |member| {
-            if (ast.name_id(state.tree, member.name) == ast.name_id(state.tree, field.name?)
-                or (member.magnitude == value.magnitude and member.negative == value.negative)) valid = false
+            if (
+                ast.name_id(state.tree, member.name) == ast.name_id(state.tree, field.name?)
+                or (member.magnitude == value.magnitude and member.negative == value.negative)
+            ) valid = false
         }
         if (!valid) {
             failure :: invalid_type(try diagnostics.add(state.diagnostics, .invalid_enum_value, field.span))
@@ -3648,8 +3739,10 @@ check_union proc(state @mut State, id ast.NodeId, nominal bool) Type ! (mem.Allo
         field :: ast.field(state.tree, ast.record_field(state.tree, id, i))
         type :: try check_annotation(state, field.type?, true)
         if (type.kind == .invalid) return type
-        if (type.kind == .none or type.kind == .range or type.kind == .type_value or field.value != null
-            or (type.kind == .void and tag.kind == .none and !view.auto_tag)) {
+        if (
+            type.kind == .none or type.kind == .range or type.kind == .type_value or field.value != null
+            or (type.kind == .void and tag.kind == .none and !view.auto_tag)
+        ) {
             return invalid_type(try diagnostics.add(state.diagnostics, .invalid_record_field_type, field.span))
         }
         if (field.name == null or named_field(state.tree, fields[0..i], field.name?) != no_index) {
@@ -3896,8 +3989,10 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         )
         if (tagged) key = descriptor.tag_type
     }
-    if (subject.kind != .none and !numeric_kind(subject.kind) and subject.kind != .bool
-        and !(subject.kind == .enumeration and subject.nominal == ast.NodeId(maxval!(u32))) and !tagged) {
+    if (
+        subject.kind != .none and !numeric_kind(subject.kind) and subject.kind != .bool
+        and !(subject.kind == .enumeration and subject.nominal == ast.NodeId(maxval!(u32))) and !tagged
+    ) {
         try fail(state, id, .invalid_match_subject, ast.node_span(state.tree, id))
         seed(state, id, state.types[usize(id)])
         return state.types[usize(id)]
@@ -3942,8 +4037,10 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
                 for 0..(state.cells.len) |j| {
                     if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
                     binding :: sema.binding(state.resolution, ast.NodeId(j))
-                    if (binding.kind == .declaration and binding.data.declaration == capture
-                        and !has_narrowing(state, ast.NodeId(j))) seed(state, ast.NodeId(j), payload)
+                    if (
+                        binding.kind == .declaration and binding.data.declaration == capture
+                        and !has_narrowing(state, ast.NodeId(j))
+                    ) seed(state, ast.NodeId(j), payload)
                 }
             }
         }
@@ -4103,10 +4200,20 @@ validate_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
             } else try compatible(state, pattern, key)
             current :: try pattern_interval(state, pattern, key)
             if (current) |interval| {
-                if ((interval.real and (interval.real_low > interval.real_high
-                        or (!interval.inclusive and interval.real_low == interval.real_high)))
-                    or (!interval.real and (constant_order(interval.low, interval.high) > 0
-                        or (!interval.inclusive and constant_order(interval.low, interval.high) == 0)))) {
+                if (
+                    (
+                        interval.real and (
+                            interval.real_low > interval.real_high
+                            or (!interval.inclusive and interval.real_low == interval.real_high)
+                        )
+                    )
+                    or (
+                        !interval.real and (
+                            constant_order(interval.low, interval.high) > 0
+                            or (!interval.inclusive and constant_order(interval.low, interval.high) == 0)
+                        )
+                    )
+                ) {
                     try fail(state, id, .invalid_match_pattern, ast.node_span(state.tree, pattern))
                 }
                 if (key.kind == .bool) {
@@ -4145,8 +4252,10 @@ validate_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
 @hide:file
 global_variant proc(state @mut State, name ast.NodeId, payload Type) u64 ! mem.AllocError {
     for state.variants.items |variant, i| {
-        if (ast.name_id(state.tree, variant.name) == ast.name_id(state.tree, name)
-            and same_type(state, variant.payload, payload)) return u64(i + 1)
+        if (
+            ast.name_id(state.tree, variant.name) == ast.name_id(state.tree, name)
+            and same_type(state, variant.payload, payload)
+        ) return u64(i + 1)
     }
     try arraylist.append(&state.variants, Variant{ name = name, payload = payload })
     return u64(state.variants.items.len)
@@ -4181,8 +4290,10 @@ error_subset proc(records []RecordType, enums []EnumType, actual, expected Type)
         if (!descriptor.is_union or descriptor.tag_type.kind != .enumeration) return false
         if (descriptor.composed and actual.kind == .record and !records[usize(actual.record_type)].is_union) {
             for descriptor.fields |field| {
-                if (field.type.kind == .record and field.type.record_type == actual.record_type
-                    and field.type.nominal == actual.nominal) return true
+                if (
+                    field.type.kind == .record and field.type.record_type == actual.record_type
+                    and field.type.nominal == actual.nominal
+                ) return true
             }
             return false
         }
@@ -4199,8 +4310,10 @@ error_subset proc(records []RecordType, enums []EnumType, actual, expected Type)
     if (source.kind != .enumeration) return false
     origin :: enums[usize(source.enum_type)]
     if (origin.explicit_backing or destination.explicit_backing) {
-        if (!origin.explicit_backing or !destination.explicit_backing
-            or origin.declaration != destination.declaration or origin.backing != destination.backing) return false
+        if (
+            !origin.explicit_backing or !destination.explicit_backing
+            or origin.declaration != destination.declaration or origin.backing != destination.backing
+        ) return false
     }
     for origin.members |member| {
         found := false
@@ -4233,11 +4346,20 @@ check_fallible_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
     failure :: try check_annotation(state, expression.right, false)
     if (success.kind == .invalid) return success
     if (failure.kind == .invalid) return failure
-    valid_error :: failure.kind == .enumeration or (failure.kind == .record
-        and (!state.records.items[usize(failure.record_type)].is_union
-            or state.records.items[usize(failure.record_type)].tag_type.kind == .enumeration))
-    if (!valid_error or success.kind == .none or success.kind == .range or success.kind == .type_value
-        or success.kind == .anyopaque or has_inferred_count(state, success)) {
+    valid_error :: (
+        failure.kind == .enumeration
+        or (
+            failure.kind == .record
+            and (
+                !state.records.items[usize(failure.record_type)].is_union
+                or state.records.items[usize(failure.record_type)].tag_type.kind == .enumeration
+            )
+        )
+    )
+    if (
+        !valid_error or success.kind == .none or success.kind == .range or success.kind == .type_value
+        or success.kind == .anyopaque or has_inferred_count(state, success)
+    ) {
         return invalid_type(try diagnostics.add(state.diagnostics, .invalid_fallible_type, ast.node_span(state.tree, id)))
     }
     type :: try intern_array(state, ArrayType{ kind = .fallible, element = success, error_type = failure })
@@ -4275,8 +4397,10 @@ append_sum_variants proc(state @mut State, variants @mut arraylist.ArrayList(Sum
     name := ast.NodeId(maxval!(u32))
     for 0..ast.package_decl_count(state.tree) |i| {
         declaration :: ast.package_decl(state.tree, i)
-        if (ast.decl_kind(state.tree, declaration) == .statement
-            and ast.statement_decl(state.tree, declaration).initializer == descriptor.declaration) name = declaration
+        if (
+            ast.decl_kind(state.tree, declaration) == .statement
+            and ast.statement_decl(state.tree, declaration).initializer == descriptor.declaration
+        ) name = declaration
     }
     if (name == ast.NodeId(maxval!(u32))) {
         for 0..(state.cells.len) |i| {
@@ -4362,8 +4486,10 @@ seed_capture proc(state @mut State, capture ast.NodeId, type Type) void {
     for 0..(state.cells.len) |i| {
         if (state.cells[i].role != .expression or !declaration_reference(state.tree, ast.NodeId(i))) continue
         binding :: sema.binding(state.resolution, ast.NodeId(i))
-        if (binding.kind == .declaration and binding.data.declaration == capture
-            and !has_narrowing(state, ast.NodeId(i))) seed(state, ast.NodeId(i), type)
+        if (
+            binding.kind == .declaration and binding.data.declaration == capture
+            and !has_narrowing(state, ast.NodeId(i))
+        ) seed(state, ast.NodeId(i), type)
     }
 }
 
@@ -4434,8 +4560,14 @@ validate_fallible_expression proc(state @mut State, id ast.NodeId) void ! (mem.A
     if (result.kind == .invalid) return
     if (result.kind != .fallible) {
         try fail(state, id, .try_outside_fallible, ast.node_span(state.tree, id))
-    } else if (!error_subset(state.records.items, state.enums.items, descriptor.error_type,
-        state.arrays.items[usize(result.array_type)].error_type)) {
+    } else if (
+        !error_subset(
+            state.records.items,
+            state.enums.items,
+            descriptor.error_type,
+            state.arrays.items[usize(result.array_type)].error_type,
+        )
+    ) {
         try fail(state, id, .incompatible_propagated_error, ast.node_span(state.tree, id))
     }
 }
@@ -4445,8 +4577,10 @@ matching_narrowing_arm proc(state @State, id ast.NodeId) ast.NodeId {
     binding :: sema.binding(state.resolution, id)
     if (binding.kind != .declaration) return ast.NodeId(maxval!(u32))
     target :: binding.data.declaration
-    if (state.cells[usize(target)].role == .declaration
-        and ast.statement_decl(state.tree, target).mutability == .variable) return ast.NodeId(maxval!(u32))
+    if (
+        state.cells[usize(target)].role == .declaration
+        and ast.statement_decl(state.tree, target).mutability == .variable
+    ) return ast.NodeId(maxval!(u32))
     arm := state.cells[usize(id)].narrowing_arm
     while (arm != ast.NodeId(maxval!(u32))) {
         owner :: state.cells[usize(arm)].match_owner
@@ -4467,8 +4601,10 @@ has_narrowing proc(state @State, id ast.NodeId) bool {
 arm_names_variant proc(state @State, arm, name ast.NodeId) bool {
     for 0..ast.match_pattern_count(state.tree, arm) |i| {
         pattern :: ast.match_pattern(state.tree, arm, i)
-        if (ast.expr_kind(state.tree, pattern) == .enum_literal
-            and ast.name_id(state.tree, ast.enum_literal(state.tree, pattern)) == ast.name_id(state.tree, name)) return true
+        if (
+            ast.expr_kind(state.tree, pattern) == .enum_literal
+            and ast.name_id(state.tree, ast.enum_literal(state.tree, pattern)) == ast.name_id(state.tree, name)
+        ) return true
     }
     return false
 }

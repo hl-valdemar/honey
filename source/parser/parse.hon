@@ -1174,9 +1174,12 @@ parse_record_field proc(state @mut State, declaration bool) ast.NodeId ! ParseEr
     name ?ast.NodeId := null
     type ?ast.NodeId := null
     value ?ast.NodeId := null
-    named :: member_name(current(state).kind) and (
-        (!declaration and next_n_is(state, 1, .equal))
-        or (declaration and starts_type(state.tokens[state.next_token + 1].kind))
+    named :: (
+        member_name(current(state).kind)
+        and (
+            (!declaration and next_n_is(state, 1, .equal))
+            or (declaration and starts_type(state.tokens[state.next_token + 1].kind))
+        )
     )
     if (named) {
         token :: if (declaration) try consume(state, .ident) else try consume_member(state, false)
@@ -1901,9 +1904,11 @@ consume proc(state @mut State, kind lexer.TokenKind) lexer.Token ! SyntaxError {
 @hide:file
 consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! SyntaxError {
     token :: current(state)
-    for (kinds) |kind| if token.kind == kind {
-        state.next_token += 1
-        return token
+    for (kinds) |kind| {
+        if token.kind == kind {
+            state.next_token += 1
+            return token
+        }
     }
     return .unexpected_token
 }

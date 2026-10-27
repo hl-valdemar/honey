@@ -47,6 +47,7 @@ State :: struct {
 
 #! lowers checked source into caller-owned executable storage; release with ir.deinit.
 #! no frontend storage or source bytes are retained by the returned module.
+#! retains `allocator` in the module; temporary lowering storage is released before returning.
 lower proc(
     allocator mem.Allocator,
     tree @ast.Tree,
@@ -65,6 +66,7 @@ lower proc(
 }
 
 #! lowers the module arena, selecting an entry only from `root_package`.
+#! retains `allocator` in the returned module; release it with ir.deinit; temporary lowering storage is released before returning.
 lower_package proc(
     allocator mem.Allocator,
     tree @ast.Tree,
@@ -78,6 +80,7 @@ lower_package proc(
 
 #! lowers an isolated compile-time call wrapper without applying program entry-name rules.
 #! the caller supplies a checked parameterless function and owns the returned IR.
+#! retains `allocator` in the returned module; release it with ir.deinit; temporary lowering storage is released before returning.
 lower_evaluation proc(
     allocator mem.Allocator,
     tree @ast.Tree,
@@ -392,7 +395,9 @@ lower_global proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diag
     state.module.functions.items[state.function].result_array_type = global.array_type
     if (trap_binding(state, id)) return
     declaration :: ast.statement_decl(state.tree, id)
-    if (declaration.type) |annotation| if (trap_type(state, annotation)) return
+    if (declaration.type) |annotation| {
+        if (trap_type(state, annotation)) return
+    }
     value :: try lower_as(state, declaration.initializer, typecheck.type_of(state.checked, id))
     if (state.terminated or trap_type(state, id)) return
     finish(state, value, declaration.span)
@@ -792,10 +797,14 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
-            if (ast.expr_kind(tree, assignment.target) == .index
+            if (
+                ast.expr_kind(tree, assignment.target) == .index
                 or ast.expr_kind(tree, assignment.target) == .unary
-                or (ast.expr_kind(tree, assignment.target) == .selection
-                    and sema.binding(state.resolution, assignment.target).kind == .none)) {
+                or (
+                    ast.expr_kind(tree, assignment.target) == .selection
+                    and sema.binding(state.resolution, assignment.target).kind == .none
+                )
+            ) {
                 value :: try lower_as(state, assignment.value, typecheck.type_of(state.checked, assignment.target))
                 if (state.terminated) return
                 if (!is_place(state, assignment.target)) {
@@ -837,7 +846,9 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) return
             if (trap_binding(state, id)) return
             declaration :: ast.statement_decl(tree, id)
-            if (declaration.type) |annotation| if (trap_type(state, annotation)) return
+            if (declaration.type) |annotation| {
+                if (trap_type(state, annotation)) return
+            }
             value :: try lower_as(state, declaration.initializer, typecheck.type_of(state.checked, id))
             if (state.terminated or trap_type(state, id)) return
             _ = try emit(state, ir.Instruction{
@@ -1393,8 +1404,10 @@ convert_value proc(state @mut State, value ir.ValueId, actual, expected typechec
         length :: try usize_constant(state, typecheck.array_type(state.checked, actual.array_type).len, span)
         return try record_pair(state, try array_shape(state, expected), pointer, length, span)
     }
-    if (!typecheck.error_assignable(state.checked, actual, expected)
-        and !typecheck.error_assignable(state.checked, expected, actual)) return value
+    if (
+        !typecheck.error_assignable(state.checked, actual, expected)
+        and !typecheck.error_assignable(state.checked, expected, actual)
+    ) return value
     source_union := false
     if (actual.kind == .record) source_union = typecheck.record_type(state.checked, actual.record_type).is_union
     if (expected.kind == .enumeration) {
@@ -1701,8 +1714,10 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         if (state.terminated or trap_type(state, id)) return ir.no_value
         return try pointer_address(state, pointer, checked, span)
     }
-    if (ast.expr_kind(state.tree, id) == .selection
-        and sema.binding(state.resolution, id).kind == .none) {
+    if (
+        ast.expr_kind(state.tree, id) == .selection
+        and sema.binding(state.resolution, id).kind == .none
+    ) {
         expression :: ast.selection_expr(state.tree, id)
         base_type :: typecheck.type_of(state.checked, expression.base)
         base := ir.no_value
@@ -1892,8 +1907,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             return try lower_string(state, id)
         }
         .identifier, .selection: {
-            if (ast.expr_kind(tree, id) == .selection
-                and sema.binding(state.resolution, id).kind == .none) {
+            if (
+                ast.expr_kind(tree, id) == .selection
+                and sema.binding(state.resolution, id).kind == .none
+            ) {
                 selection :: ast.selection_expr(tree, id)
                 base_type :: typecheck.type_of(state.checked, selection.base)
                 if (base_type.kind == .slice or base_type.kind == .string or base_type.kind == .array) {
@@ -2018,8 +2035,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             }
             left_type :: typecheck.type_of(state.checked, expression.left)
             right_type :: typecheck.type_of(state.checked, expression.right)
-            if ((expression.operator == .equal or expression.operator == .not_equal)
-                and (left_type.kind == .null or right_type.kind == .null)) {
+            if (
+                (expression.operator == .equal or expression.operator == .not_equal)
+                and (left_type.kind == .null or right_type.kind == .null)
+            ) {
                 optional_id :: if (left_type.kind == .null) expression.right else expression.left
                 value :: try lower_expression(state, optional_id)
                 if (state.terminated or trap_type(state, id)) return ir.no_value

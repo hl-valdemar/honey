@@ -13,6 +13,7 @@ Error :: alias (
     | io.ReadError
 )
 
+#! returns caller-owned storage; release it with mem.free using the same allocator.
 @hide:file
 copy proc(allocator mem.Allocator, text []u8) []mut u8 ! mem.AllocError {
     bytes :: try mem.alloc(u8, allocator, text.len)
@@ -21,6 +22,7 @@ copy proc(allocator mem.Allocator, text []u8) []mut u8 ! mem.AllocError {
 }
 
 #! returns an owned canonical package directory for either a file or directory input.
+#! free the returned slice with mem.free using the same allocator; temporary storage is released before returning.
 directory proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
     resolved :: try fs.canonical(allocator, path)
     errdefer mem.free(allocator, resolved)
@@ -34,11 +36,14 @@ directory proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
     return parent
 }
 
+#! returns a caller-owned joined path; release it with mem.free using the same allocator.
 @hide:file
 join proc(allocator mem.Allocator, base, name []u8) []mut u8 ! mem.AllocError {
     separator :: if (base.len == 1 and base[0] == '/') usize(0) else usize(1)
-    if (base.len > maxval!(usize) - separator or name.len > maxval!(usize) - base.len - separator)
-        return .out_of_memory
+    if (
+        base.len > maxval!(usize) - separator
+        or name.len > maxval!(usize) - base.len - separator
+    ) return .out_of_memory
 
     bytes :: try mem.alloc(u8, allocator, base.len + separator + name.len)
     memcopy!(bytes[..base.len], base)
@@ -55,12 +60,15 @@ exists proc(allocator mem.Allocator, base, name []u8) bool ! Error {
 }
 
 #! finds the nearest ancestor build.hon/build.bro, otherwise uses the supplied directory.
+#! free the returned slice with mem.free using the same allocator; temporary search storage is released before returning.
 project_root proc(allocator mem.Allocator, package_dir []u8) []mut u8 ! Error {
     end := package_dir.len
     while true {
         base :: package_dir[..end]
-        if (try exists(allocator, base, "build.hon") or try exists(allocator, base, "build.bro"))
-            return try copy(allocator, base)
+        if (
+            try exists(allocator, base, "build.hon")
+            or try exists(allocator, base, "build.bro")
+        ) return try copy(allocator, base)
 
         if (end == 1) break
         while (end > 1 and package_dir[end - 1] != '/') end -= 1
@@ -70,9 +78,12 @@ project_root proc(allocator mem.Allocator, package_dir []u8) []mut u8 ! Error {
 }
 
 #! relative imports start at the importing package; @ imports start at the project root.
+#! free the returned slice with mem.free using the same allocator; temporary path storage is released before returning.
 resolve proc(allocator mem.Allocator, root_dir, package_dir, import_path []u8) []mut u8 ! Error {
     if (import_path.len == 0 or import_path[0] == '/') return .invalid_path
-    for (import_path) |byte| if (byte == 0) return .invalid_path
+    for (import_path) |byte| {
+        if (byte == 0) return .invalid_path
+    }
     base := package_dir
     path := import_path
     if (path[0] == '@') {
@@ -99,7 +110,8 @@ before proc(left, right []u8) bool {
     return left.len < right.len
 }
 
-#! lists production sources in bytewise order; caller frees every path and the list.
+#! lists production sources in bytewise order; free each path with mem.free using the same allocator.
+#! release the list with arraylist.deinit, which uses its retained allocator; temporary directory storage is released before returning.
 files proc(allocator mem.Allocator, package_dir []u8) arraylist.ArrayList([]u8) ! Error {
     handle := try fs.open_directory(allocator, package_dir)
     closing := false
@@ -116,8 +128,11 @@ files proc(allocator mem.Allocator, package_dir []u8) arraylist.ArrayList([]u8) 
             and entry.kind != .unknown
         ) continue
         name :: entry.name
-        if ((!ends_with(name, ".hon") and !ends_with(name, ".bro"))
-            or ends_with(name, ".test.hon") or ends_with(name, ".test.bro")) continue
+        if (
+            (!ends_with(name, ".hon") and !ends_with(name, ".bro"))
+            or ends_with(name, ".test.hon")
+            or ends_with(name, ".test.bro")
+        ) continue
         path :: try join(allocator, package_dir, name)
         errdefer mem.free(allocator, path)
         if (entry.kind != .file and try fs.kind(allocator, path) != .file) {
@@ -157,6 +172,7 @@ sift proc(items []mut []u8, start, count usize) void {
 }
 
 #! the compiler limits source size to its u32 span address space; storage remains caller-owned.
+#! release the returned list with arraylist.deinit, which uses its retained allocator.
 read_source proc(allocator mem.Allocator, runtime io.Io, path []u8) arraylist.ArrayList(u8) ! Error {
     return fs.read_file(allocator, runtime, path, usize(maxval!(u32))) catch |err| {
         match err {

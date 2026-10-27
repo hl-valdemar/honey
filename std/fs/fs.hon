@@ -20,17 +20,21 @@ Entry :: struct {
     kind Kind
 }
 
+#! returns caller-owned zero-terminated storage; release it with mem.free using the same allocator.
 @hide:file
 terminated proc(allocator mem.Allocator, text []u8) []mut u8 ! Error {
     if (text.len == 0 or text.len == maxval!(usize)) return .invalid_path
-    for (text) |byte| if (byte == 0) return .invalid_path
+    for (text) |byte| {
+        if (byte == 0) return .invalid_path
+    }
     bytes :: try mem.alloc(u8, allocator, text.len + 1)
     memcopy!(bytes[..text.len], text)
     bytes[text.len] = 0
     return bytes
 }
 
-#! returns an owned absolute path with symlinks resolved; free it with the same allocator.
+#! returns an owned absolute path with symlinks resolved; release it with mem.free using the same allocator.
+#! temporary path storage uses `allocator` and is released before returning.
 canonical proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
     input :: try terminated(allocator, path)
     defer mem.free(allocator, input)
@@ -49,6 +53,7 @@ canonical proc(allocator mem.Allocator, path []u8) []mut u8 ! Error {
 }
 
 #! follows symlinks; nonexistent paths (including dangling links) return missing.
+#! temporary path storage uses `allocator` and is released before returning.
 kind proc(allocator mem.Allocator, path []u8) Kind ! Error {
     input :: try terminated(allocator, path)
     defer mem.free(allocator, input)
@@ -69,7 +74,9 @@ exists proc(allocator mem.Allocator, path []u8) bool ! Error {
     return (try kind(allocator, path)) != .missing
 }
 
-#! opens an owned directory handle; path is borrowed only during this call.
+#! opens an owned directory handle; `path` is borrowed only during this call.
+#! temporary path storage uses `allocator` and is released before returning.
+#! release the returned handle with close_directory.
 open_directory proc(allocator mem.Allocator, path []u8) Directory ! Error {
     input :: try terminated(allocator, path)
     defer mem.free(allocator, input)
@@ -119,9 +126,10 @@ close_directory proc(directory @mut Directory) void ! Error {
     if (c.closedir(handle) != 0) return .directory_failed
 }
 
-#! reads a regular file through runtime IO, accepting at most maximum bytes.
+#! reads a regular file through runtime IO, accepting at most `maximum` bytes.
 #! follows symlinks and rejects devices/FIFOs before opening; metadata uses the host filesystem.
-#! returned storage belongs to the caller; release with arraylist.deinit. all errors close the file.
+#! returned storage belongs to the caller and retains `allocator`; release with arraylist.deinit. all errors close the file.
+#! temporary path storage uses `allocator` and is released before returning.
 read_file proc(
     allocator mem.Allocator,
     runtime io.Io,

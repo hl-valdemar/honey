@@ -102,7 +102,7 @@ add_package proc(compilation @mut Compilation) PackageId ! mem.AllocError {
 }
 
 #! copies `path`, scans/parses into the shared arena and takes `bytes` only on success.
-#! failure leaves bytes caller-owned and rolls back source diagnostics; interned names may remain.
+#! failure leaves `bytes` caller-owned and rolls back source diagnostics; interned names may remain.
 add_source proc(
     compilation @mut Compilation,
     package PackageId,
@@ -329,6 +329,7 @@ package_root proc(compilation @mut Compilation, package PackageId) ast.NodeId ! 
 
 #! checks every package in a separate scope and lowers one module with root-only entry selection.
 #! returned IR borrows no frontend data; release it with ir.deinit.
+#! temporary compilation storage uses the retained allocator and is released before returning.
 compile proc(
     compilation @mut Compilation,
     root_package PackageId,
@@ -357,12 +358,16 @@ compile proc(
         name := strpool.no_str
         failure ?diagnostics.DiagnosticId := null
         for (diagnostic_store.list.items) |diagnostic, index| {
-            if (diagnostic.span.source == imported.path.source
+            if (
+                diagnostic.span.source == imported.path.source
                 and diagnostic.span.start == imported.path.start
                 and diagnostic.span.end == imported.path.end
-                and (diagnostic.code == .package_unavailable
+                and (
+                    diagnostic.code == .package_unavailable
                     or diagnostic.code == .invalid_import_path
-                    or diagnostic.code == .import_cycle)) {
+                    or diagnostic.code == .import_cycle
+                )
+            ) {
                 failure = diagnostics.DiagnosticId(index)
                 break
             }
@@ -379,8 +384,12 @@ compile proc(
             candidate :: path[start..]
             valid := candidate.len > 0
             for (candidate) |byte, index| {
-                if (!(byte >= 'a' and byte <= 'z') and !(byte >= 'A' and byte <= 'Z')
-                    and byte != '_' and !(index > 0 and byte >= '0' and byte <= '9')) valid = false
+                if (
+                    !(byte >= 'a' and byte <= 'z')
+                    and !(byte >= 'A' and byte <= 'Z')
+                    and byte != '_'
+                    and !(index > 0 and byte >= '0' and byte <= '9')
+                ) valid = false
             }
             if (valid) {
                 name = try strpool.intern(&compilation.strings, candidate)

@@ -254,6 +254,7 @@ Module :: struct {
     entry_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
 }
 
+#! retains `allocator` for executable storage; release the returned module with deinit.
 init proc(allocator mem.Allocator) Module {
     return Module{
         allocator = allocator,
@@ -264,6 +265,7 @@ init proc(allocator mem.Allocator) Module {
     }
 }
 
+#! retains `allocator` in its lists; transfer the function to a module using the same allocator for cleanup with deinit.
 init_function proc(allocator mem.Allocator) Function {
     return Function{
         parameters = arraylist.init(allocator),
@@ -273,6 +275,7 @@ init_function proc(allocator mem.Allocator) Function {
     }
 }
 
+#! retains `allocator` in its lists; transfer the block to a module function for cleanup with deinit.
 init_block proc(allocator mem.Allocator) Block {
     return Block{
         instructions = arraylist.init(allocator),
