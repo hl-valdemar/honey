@@ -174,6 +174,7 @@ Cell :: struct {
     literal ast.NodeId = ast.NodeId(maxval!(u32))
     producer ast.NodeId = ast.NodeId(maxval!(u32))
     capture ast.NodeId = ast.NodeId(maxval!(u32))
+    for_loop ast.NodeId = ast.NodeId(maxval!(u32))
     record_checking bool = false
     record_pointer_depth usize = 0
     nominal bool = false
@@ -382,6 +383,7 @@ check_elaborated proc(
             }
         }
         # calls use the signature result before contextual literal inference.
+        try prepare_for_captures(&state, false)
         try prepare_optional_captures(&state, false)
         for (0..count) |i| {
             id :: ast.NodeId(i)
@@ -553,7 +555,7 @@ check_elaborated proc(
         if (cells[i].role != .for_stmt) continue
         iterable :: ast.for_stmt(tree, ast.NodeId(i)).iterable
         actual :: types[usize(iterable)]
-        if (actual.kind != .invalid and actual.kind != .range) {
+        if (actual.kind != .invalid and actual.kind != .range and !collection_type(&state, actual)) {
             try fail(&state, iterable, .invalid_for_iterable, ast.node_span(tree, iterable))
         }
     }
@@ -1073,12 +1075,13 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 state.cells[usize(loop.iterable)].for_iterable = true
                 try collect_expression(state, loop.iterable)
                 try depend(state, loop.iterable, statement)
-                if (loop.pointer_capture) {
+                direct_range :: ast.expr_kind(tree, loop.iterable) == .range
+                if (direct_range and loop.pointer_capture) {
                     state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
                         state.diagnostics, .range_pointer_capture, loop.span,
                     ))
                 }
-                if (loop.index_capture) {
+                if (direct_range and loop.index_capture) {
                     diagnostic :: try diagnostics.add(state.diagnostics, .range_index_capture, loop.span)
                     if (state.cells[usize(statement)].type.kind != .invalid) {
                         state.cells[usize(statement)].type = invalid_type(diagnostic)
@@ -1086,9 +1089,18 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 }
                 if (loop.capture) |capture| {
                     try collect_capture(state, capture, loop.body)
+                    if (!direct_range) {
+                        state.cells[usize(capture)].for_loop = statement
+                        if (state.cells[usize(capture)].type.kind != .invalid) state.cells[usize(capture)].type = Type{}
+                    }
                     state.cells[usize(loop.iterable)].capture = capture
                 }
-                if (loop.index) |index| try collect_capture(state, index, loop.body)
+                if (loop.index) |index| {
+                    try collect_capture(state, index, loop.body)
+                    if (!direct_range and state.cells[usize(index)].type.kind != .invalid) {
+                        state.cells[usize(index)].type = Type{ kind = .usize }
+                    }
+                }
                 try collect_block(state, loop.body, return_annotation, true)
                 try depend(state, loop.body, id)
             }
@@ -1761,6 +1773,15 @@ indexable_type proc(state @State, type Type) bool {
     if (type.kind != .pointer) return false
     pointer :: state.pointers.items[usize(type.pointer_type)]
     return (pointer.many and pointer.element.kind != .anyopaque) or pointer.element.kind == .array
+}
+
+@hide:file
+collection_type proc(state @State, type Type) bool {
+    if (type.nominal != ast.NodeId(maxval!(u32))) return false
+    if (type.kind == .array or type.kind == .slice or type.kind == .string) return true
+    if (type.kind != .pointer) return false
+    pointer :: state.pointers.items[usize(type.pointer_type)]
+    return !pointer.many and pointer.element.kind == .array and pointer.element.nominal == ast.NodeId(maxval!(u32))
 }
 
 @hide:file
@@ -2676,6 +2697,28 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     if (state.cells[index].type.kind == .invalid) return state.cells[index].type
     state.cells[index].visiting = true
     defer state.cells[index].visiting = false
+    if (state.cells[usize(id)].role == .loop_capture and state.cells[usize(id)].for_loop != ast.NodeId(maxval!(u32))) {
+        loop :: ast.for_stmt(state.tree, state.cells[usize(id)].for_loop)
+        actual :: try infer_shape(state, loop.iterable, defaults)
+        if (actual.kind == .invalid or state.types[usize(loop.iterable)].kind == .invalid) {
+            type :: if (actual.kind == .invalid) actual else state.types[usize(loop.iterable)]
+            seed(state, id, type)
+            return type
+        }
+        if (!collection_type(state, actual)) {
+            if (actual.kind != .none) {
+                try fail(state, loop.iterable, .invalid_for_iterable, ast.node_span(state.tree, loop.iterable))
+                seed(state, id, state.types[usize(loop.iterable)])
+            }
+            return group_type(state, id)
+        }
+        descriptor :: try sequence_type(state, loop.iterable, defaults)
+        type :: if (loop.pointer_capture)
+            try intern_pointer(state, PointerType{ element = descriptor.element, mutable = descriptor.mutable, many = false })
+        else descriptor.element
+        seed(state, id, type)
+        return type
+    }
     if (state.cells[usize(id)].role == .expression) {
         kind :: ast.expr_kind(state.tree, id)
         if (declaration_reference(state.tree, id) and has_narrowing(state, id)) {
@@ -2683,6 +2726,14 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             if (narrowed.kind != .none) {
                 seed(state, id, narrowed)
                 return narrowed
+            }
+        }
+        if (declaration_reference(state.tree, id)) {
+            binding :: sema.binding(state.resolution, id)
+            if (binding.kind == .declaration and state.cells[usize(binding.data.declaration)].role == .loop_capture) {
+                type :: try infer_shape(state, binding.data.declaration, defaults)
+                if (type.kind != .none) seed(state, id, type)
+                return group_type(state, id)
             }
         }
         if (kind == .try_expr or kind == .catch_expr) return try infer_fallible_expression(state, id, defaults)
@@ -2938,6 +2989,15 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
 }
 
 @hide:file
+prepare_for_captures proc(state @mut State, defaults bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    for 0..(state.cells.len) |i| {
+        if (state.cells[i].role == .loop_capture and state.cells[i].for_loop != ast.NodeId(maxval!(u32))) {
+            _ = try infer_shape(state, ast.NodeId(i), defaults)
+        }
+    }
+}
+
+@hide:file
 prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     for 0..(state.cells.len) |i| {
         if (state.cells[i].role == .expression and ast.expr_kind(state.tree, ast.NodeId(i)) == .catch_expr) {
@@ -2965,6 +3025,7 @@ prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.Allo
 
 @hide:file
 prepare_shapes proc(state @mut State, assignment_values, defaults bool) void ! (mem.AllocError | diagnostics.CapacityError) {
+    try prepare_for_captures(state, defaults)
     try prepare_optional_captures(state, defaults)
     for 0..(state.cells.len) |i| {
         if (state.cells[i].role != .expression or state.cells[i].assignment_value != assignment_values) continue

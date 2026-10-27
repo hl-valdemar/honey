@@ -482,13 +482,17 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
             }
             .for_stmt: {
                 loop :: ast.for_stmt(state.tree, statement)
+                is_range :: ast.expr_kind(state.tree, loop.iterable) == .range
                 family :: typecheck.type_of(state.checked, loop.iterable).range_element
-                type :: lower_type(state, typecheck.Type{ kind = family })
+                type ir.Type :: if (is_range) lower_type(state, typecheck.Type{ kind = family }) else .usize
                 slot :: try ir.add_local(state.module, ir.FunctionId(state.function), type, ir.no_array)
                 state.storage[usize(statement)] = Storage{ kind = .local, index = u32(slot) }
-                if (loop.capture) |capture| state.storage[usize(capture)] = state.storage[usize(statement)]
+                if (loop.capture) |capture| {
+                    if (is_range) state.storage[usize(capture)] = state.storage[usize(statement)]
+                    else try predeclare_capture(state, capture)
+                }
                 if (loop.index) |index| {
-                    index_slot :: try ir.add_local(state.module, ir.FunctionId(state.function), .int, ir.no_array)
+                    index_slot :: try ir.add_local(state.module, ir.FunctionId(state.function), .usize, ir.no_array)
                     state.storage[usize(index)] = Storage{ kind = .local, index = u32(index_slot) }
                 }
                 try predeclare_locals(state, loop.body)
@@ -705,8 +709,7 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
 lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     loop :: ast.for_stmt(state.tree, id)
     if (ast.expr_kind(state.tree, loop.iterable) != .range) {
-        _ = try lower_expression(state, loop.iterable)
-        if (!state.terminated) _ = trap_type(state, id)
+        try lower_collection_for(state, id)
         return
     }
     interval :: ast.range_expr(state.tree, loop.iterable)
@@ -758,6 +761,78 @@ lower_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnos
     one :: try constant(state, unit, interval.span)
     next :: try emit(state, ir.Instruction{ op = .add, type = family, left = last, right = one, span = interval.span })
     _ = try emit(state, ir.Instruction{ op = .store_local, type = family, left = next, slot = slot, span = interval.span })
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = condition, span = loop.span,
+    }
+    state.block = exit
+    state.terminated = false
+}
+
+@hide:file
+lower_collection_for proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    loop :: ast.for_stmt(state.tree, id)
+    parts :: try slice_parts(state, loop.iterable)
+    if (state.terminated or trap_type(state, loop.iterable) or trap_type(state, id)) return
+    slot :: state.storage[usize(id)].index
+    zero :: try usize_constant(state, 0, loop.span)
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = .usize, left = zero, slot = slot, span = loop.span })
+    origin :: state.block
+    condition :: try add_block(state)
+    body :: try add_block(state)
+    update :: try add_block(state)
+    exit :: try add_block(state)
+    state.module.functions.items[state.function].blocks.items[usize(origin)].terminator = ir.Terminator{
+        kind = .jump, target = condition, span = loop.span,
+    }
+    state.block = condition
+    current :: try emit(state, ir.Instruction{ op = .load_local, type = .usize, slot = slot, span = loop.span })
+    condition_value :: try emit(state, ir.Instruction{ op = .less, type = .bool, left = current, right = parts.bound, span = loop.span })
+    state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .branch, value = condition_value, target = body, alternative = exit, span = loop.span,
+    }
+    previous_loop :: state.loop
+    state.loop = LoopTargets{ continue_target = update, exit = exit, cleanup_depth = state.cleanups.items.len }
+    defer state.loop = previous_loop
+    state.block = body
+    if (loop.capture) |capture| {
+        if (!trap_binding(state, capture) and !trap_type(state, capture)) {
+            runtime :: lower_type(state, parts.element)
+            shape :: try array_shape(state, parts.element)
+            pointer :: try emit(state, ir.Instruction{
+                op = .pointer_offset, type = .pointer, left = parts.pointer, right = current,
+                pointee = runtime, array_type = shape, span = loop.span,
+            })
+            value := pointer
+            if (!loop.pointer_capture) {
+                address :: try pointer_address(state, pointer, parts.element, loop.span)
+                value = try emit(state, ir.Instruction{
+                    op = .load_address, type = runtime, array_type = shape, left = address, span = loop.span,
+                })
+            }
+            checked :: typecheck.type_of(state.checked, capture)
+            _ = try emit(state, ir.Instruction{
+                op = .store_local, type = lower_type(state, checked), array_type = try array_shape(state, checked),
+                left = value, slot = state.storage[usize(capture)].index, span = loop.span,
+            })
+        }
+    }
+    if (loop.index) |index| {
+        if (!state.terminated and !trap_binding(state, index) and !trap_type(state, index)) {
+            _ = try emit(state, ir.Instruction{
+                op = .store_local, type = .usize, left = current, slot = state.storage[usize(index)].index, span = loop.span,
+            })
+        }
+    }
+    if (!state.terminated) try lower_block(state, loop.body, true)
+    if (!state.terminated) state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+        kind = .jump, target = update, span = loop.span,
+    }
+    state.block = update
+    state.terminated = false
+    last :: try emit(state, ir.Instruction{ op = .load_local, type = .usize, slot = slot, span = loop.span })
+    one :: try usize_constant(state, 1, loop.span)
+    next :: try emit(state, ir.Instruction{ op = .add, type = .usize, left = last, right = one, span = loop.span })
+    _ = try emit(state, ir.Instruction{ op = .store_local, type = .usize, left = next, slot = slot, span = loop.span })
     state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
         kind = .jump, target = condition, span = loop.span,
     }

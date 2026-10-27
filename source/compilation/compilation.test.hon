@@ -146,6 +146,18 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        bias i16 = config.bias + i16(original.counts[1])
             `    }
             `}
+            `Collected proc() type {
+            `    counts [2]mut usize := [1, 1]
+            `    length usize := 0
+            `    for counts |amount, index| {
+            `        counts[1] = 2
+            `        length = length + amount
+            `        if (index == 0) continue
+            `    }
+            `    Element := i8
+            `    for "ok" |byte| { if (byte == u8(107)) Element = i16 }
+            `    return [length]Element
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -173,6 +185,11 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (optional[0] + optional[1] != 40) return 0
             `    updated Updated() :: { values = optional }
             `    if (updated.bias != 42 or updated.values[1] != 21) return 0
+            `    collected Collected() :: [19, 21, 2]
+            `    same_collected Collected() :: collected
+            `    total i16 := 0
+            `    for same_collected |item| { total = total + item }
+            `    if (total != 42) return 0
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }

@@ -11,6 +11,200 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "collection_iteration_borrows_array_and_reads_each_element": (
+        """
+        main proc() [2]i16 {
+            values [3]mut i16 := [19, 1, 100]
+            total i16 := 0
+            for values |value, index| {
+                if (index == 0) values[1] = 22
+                if (index == 2) break
+                total = total + value + i16(index)
+                continue
+            }
+            return [total, values[1]]
+        }
+        """, b"[42, 22]\n", None,
+    ),
+    "collection_iteration_pointer_captures_slices_and_array_pointers": (
+        """
+        main proc() [3]i16 {
+            values [2]mut i16 := [19, 21]
+            for (&values) |@value, index| { value^ = value^ + i16(index) }
+            view []mut i16 :: values[..]
+            for view |@value| { value^ = value^ + 1 }
+            total i16 := 0
+            for view |value| { total = total + value }
+            return [total - 1, values[0], values[1]]
+        }
+        """, b"[42, 20, 23]\n", None,
+    ),
+    "collection_iteration_evaluates_entry_once_and_retains_slice_bound": (
+        """
+        data proc(calls @mut i16) [2]i16 {
+            calls^ = calls^ + 1
+            return [19, 22]
+        }
+        main proc() [3]i16 {
+            calls i16 := 0
+            total i16 := 0
+            for data(&calls) |value, index| { total = total + value + i16(index) }
+            values [2]mut i16 := [20, 22]
+            view []mut i16 := values[..]
+            sum i16 := 0
+            for view |value| {
+                view = values[0..0]
+                sum = sum + value
+            }
+            return [total, calls, sum]
+        }
+        """, b"[42, 1, 42]\n", None,
+    ),
+    "collection_iteration_aggregate_copies_nested_and_zero_cell_shapes": (
+        """
+        Empty :: struct {}
+        Item :: struct { values [2]mut i16 }
+        main proc() [3]i16 {
+            items [2]mut Item := [{ values = [19, 21] }, { values = [0, 0] }]
+            total i16 := 0
+            for items |item, index| {
+                copied := item
+                copied.values[0] = copied.values[0] + 1
+                for copied.values |value| { total = total + value }
+                if (index == 0) items[1].values[1] = 0
+            }
+            empty [0]i16 :: []
+            for empty |_| { return [-1, -1, -1] }
+            cells [2]Empty :: [{}, {}]
+            count i16 := 0
+            for cells |cell, index| {
+                saved Empty :: cell
+                count = count + i16(index) + 1
+            }
+            return [total, items[0].values[0], count]
+        }
+        """, b"[42, 19, 3]\n", None,
+    ),
+    "collection_iteration_strings_and_cleanup_on_transfers": (
+        """
+        main proc() [2]i16 {
+            values [3]i16 :: [20, 22, 99]
+            total i16 := 0
+            cleanups i16 := 0
+            for values |value, index| {
+                defer cleanups = cleanups + 1
+                if (index == 2) break
+                total = total + value
+                continue
+            }
+            for "a\\0b" |byte, index| {
+                if (index == 1 and byte != 0) return [-1, -1]
+                if (index == 2 and byte != u8(98)) return [-2, -2]
+            }
+            return [total, cleanups]
+        }
+        """, b"[42, 3]\n", None,
+    ),
+    "collection_iteration_ordinary_constant_procedure": (
+        """
+        compute proc() i16 {
+            values [2]mut i16 := [19, 21]
+            view []mut i16 :: values[..]
+            for view |@value| { value^ = value^ + 1 }
+            total i16 := 0
+            for values |value| { total = total + value }
+            return total
+        }
+        main proc() i16 { return $(compute()) }
+        """, b"42\n", None,
+    ),
+    "type_execution_collection_iteration_observes_updates_and_freezes_places": (
+        """
+        Storage proc() type {
+            rows [2]mut [2]mut usize := [[1, 1], [9, 9]]
+            selected usize := 0
+            length usize := 0
+            for rows[selected] |value, index| {
+                selected = 1
+                (rows[0])[1] = 2
+                length = length + value
+                if (index == 0) continue
+                break
+            }
+            Result := i8
+            for "a\\0b" |byte, index| {
+                if (byte == 0 and index == 1) Result = i16
+            }
+            return struct { values [length]Result }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 21, 2] }
+            same Storage() :: value
+            return same.values[0] + same.values[1] + same.values[2]
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_collection_nested_aggregate_captures_and_empty_body": (
+        """
+        Storage proc() type {
+            items [2]struct { values [2]usize, text string } :: [
+                { values = [1, 0], text = "a" }, { values = [0, 1], text = "b" },
+            ]
+            length usize := 0
+            for items |item| {
+                for item.values |value| { length = length + value }
+            }
+            empty [0]i16 :: []
+            for empty |_| { return i8(128) }
+            for items |@_, index| { if (index == 1) break }
+            return [length]i16
+        }
+        main proc() i16 {
+            values Storage() :: [20, 22]
+            return values[0] + values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "collection_iteration_rejects_scalar_iterable": (
+        "main proc() i16 { for 1.5 |_| { return 0 }\nreturn 42 }",
+        b"", b"for-loop iteration requires",
+    ),
+    "collection_iteration_rejects_capture_rebinding": (
+        "main proc() i16 { values [1]i16 :: [1]\nfor values |value| { value = 42 }\nreturn 0 }",
+        b"", b"assignment requires a mutable local binding",
+    ),
+    "collection_iteration_rejects_index_rebinding": (
+        "main proc() usize { values [1]i16 :: [1]\nfor values |_, index| { index = 42 }\nreturn 0 }",
+        b"", b"assignment requires a mutable local binding",
+    ),
+    "collection_iteration_rejects_readonly_array_pointer_mutation": (
+        "main proc() i16 { values [1]mut i16 :: [1]\nfor values |@value| { value^ = 42 }\nreturn 0 }",
+        b"", b"mutable pointee",
+    ),
+    "collection_iteration_rejects_readonly_slice_pointer_mutation": (
+        "main proc() i16 { values [1]mut i16 := [1]\nview []i16 :: values[..]\nfor view |@value| { value^ = 42 }\nreturn 0 }",
+        b"", b"mutable pointee",
+    ),
+    "type_execution_collection_iteration_preserves_element_type": (
+        """
+        Bad proc() type {
+            values [1]i8 :: [127]
+            for values |value| { next :: value + 1 }
+            return i16
+        }
+        main proc() Bad() { return 0 }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_execution_collection_iteration_preserves_step_bound": (
+        """
+        Bad proc() type {
+            cells [1]i16 :: [0]
+            for cells |_| { while (true) {} }
+            return i16
+        }
+        main proc() Bad() { return 0 }
+        """, b"", b"compile-time execution",
+    ),
     "type_execution_aggregate_updates_preserve_copies_and_generate_defaults": (
         """
         Config :: struct { values [2]mut i16, count usize, text string }
@@ -4520,7 +4714,38 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 10
+    sizing.write_text(textwrap.dedent("""
+        Collected proc() type {
+            values [2]usize :: [1, 1]
+            length usize := 0
+            for values |value, index| { length = length + value + index }
+            return [length]i16
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            values lib.Collected() :: [19, 21, 2]
+            same lib.Collected() :: values
+            total i16 := 0
+            for same |value| { total = total + value }
+            return total
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        Collected proc() type {
+            values [1]i8 :: [127]
+            for values |value| { next :: value + 1 }
+            return i16
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.Collected() { return 0 }\n')
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 12
 
 
 def check_dependency_provenance(temporary, executable):

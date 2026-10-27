@@ -1617,10 +1617,153 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
     return .next
 }
 
+# retain an array place, but freeze its indices at loop entry. snapshots then read
+# the current owned root after body assignments without re-evaluating the place.
+@hide:file
+type_collection_place proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        for (execution.locals.items) |local| {
+            if (local.declaration == resolved.data.declaration) return id
+        }
+        return no_node
+    }
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind != .selection and kind != .index) return no_node
+    base :: if (kind == .selection) ast.selection_expr(&state.tree, id).base else ast.index_expr(&state.tree, id).base
+    place :: try type_collection_place(state, execution, base)
+    if (place == no_node) return no_node
+    result := no_node
+    if (kind == .selection) {
+        result = try ast.add_selection(state.builder, ast.node_span(&state.tree, id),
+            place, ast.selection_expr(&state.tree, id).member)
+    } else {
+        index :: try type_snapshot(state, execution, ast.index_expr(&state.tree, id).index)
+        value :: try type_execution_value(state, index, try builtin(state, index, .usize))
+        if (value == no_node) return no_node
+        result = try ast.add_index(state.builder, ast.node_span(&state.tree, id), place, value)
+    }
+    try refresh(state)
+    return result
+}
+
+@hide:file
+type_collection_read proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
+    if (binding(state, id).kind == .declaration) return try type_snapshot(state, execution, id)
+    kind :: ast.expr_kind(&state.tree, id)
+    base :: if (kind == .selection) ast.selection_expr(&state.tree, id).base else ast.index_expr(&state.tree, id).base
+    value :: try type_collection_read(state, execution, base)
+    result := no_node
+    if (kind == .selection)
+        result = try ast.add_selection(state.builder, ast.node_span(&state.tree, id),
+            value, ast.selection_expr(&state.tree, id).member)
+    else result = try ast.add_index(state.builder, ast.node_span(&state.tree, id),
+        value, ast.index_expr(&state.tree, id).index)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+execute_type_collection proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
+    loop :: ast.for_stmt(&state.tree, statement)
+    span :: ast.node_span(&state.tree, statement)
+    if (loop.capture) |capture| {
+        if (binding(state, capture).kind == .invalid) {
+            state.evaluation_diagnostic = binding(state, capture).data.diagnostic
+            return .invalid
+        }
+    }
+    if (loop.index) |index| {
+        if (binding(state, index).kind == .invalid) {
+            state.evaluation_diagnostic = binding(state, index).data.diagnostic
+            return .invalid
+        }
+    }
+    snapshot :: try type_snapshot(state, execution, loop.iterable)
+    if (!try expand_type_matches(state, snapshot)) return .invalid
+    try expand(state, snapshot)
+    annotation :: try expression_type(state, snapshot, 0)
+    if (annotation == no_node) return .invalid
+    collection :: try type_execution_value(state, snapshot, annotation)
+    if (collection == no_node) return .invalid
+    # validate the loop contract even for empty collections, without executing its
+    # type-valued body. the synthetic body exits before reading any element.
+    stop :: try ast.add_break_stmt(state.builder, span)
+    stops [1]ast.NodeId :: [stop]
+    body :: try ast.add_block(state.builder, span, stops[..])
+    selector :: try ast.add_for_stmt(state.builder, span, collection, loop.capture, loop.index,
+        loop.pointer_capture, loop.index_capture, body)
+    length := no_node
+    if (ast.expr_kind(&state.tree, annotation) == .array_type) length = ast.array_type(&state.tree, annotation).count?
+    else {
+        value :: try evaluate(state, collection)
+        if (value.kind == .string) {
+            text :: ast.literal_text(&state.tree, value.node)
+            cursor := usize(1)
+            count := u64(0)
+            while (cursor < text.len - 1) {
+                _ = ast.string_next(text, &cursor) catch { return .invalid }
+                count += 1
+            }
+            length = try ast.add_integer(state.builder, span, count)
+        } else length = try ast.add_integer(state.builder, span, 0)
+    }
+    returned :: try ast.add_return_stmt(state.builder, span, length)
+    statements [2]ast.NodeId :: [selector, returned]
+    wrapper :: try ast.add_block(state.builder, span, statements[..])
+    try refresh(state)
+    count :: try evaluate_ir_body(state, statement, wrapper, try builtin(state, statement, .usize))
+    if (count.kind != .integer) return .invalid
+    if (loop.pointer_capture and loop.capture != null) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
+        return .invalid
+    }
+    place := no_node
+    if (ast.expr_kind(&state.tree, annotation) == .array_type)
+        place = try type_collection_place(state, execution, loop.iterable)
+    if (state.evaluation_diagnostic != diagnostics.no_diagnostic) return .invalid
+    saved :: execution.locals.items.len
+    defer execution.locals.items = execution.locals.items[..saved]
+    execution.loop_depth += 1
+    defer execution.loop_depth -= 1
+    for (0..usize(count.magnitude)) |i| {
+        if (!try type_step(state, statement)) return .invalid
+        execution.locals.items = execution.locals.items[..saved]
+        index :: try ast.add_integer(state.builder, span, u64(i))
+        try refresh(state)
+        if (loop.capture) |capture| {
+            current := collection
+            if (place != no_node) current = try type_collection_read(state, execution, place)
+            element :: try ast.add_index(state.builder, span, current, index)
+            try refresh(state)
+            element_type :: try expression_type(state, element, 0)
+            value :: try type_execution_value(state, element, element_type)
+            if (value == no_node) return .invalid
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = capture, value = value, annotation = element_type,
+            })
+        }
+        if (loop.index) |capture| {
+            type :: try builtin(state, capture, .usize)
+            value :: try type_execution_value(state, index, type)
+            if (value == no_node) return .invalid
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = capture, value = value, annotation = type,
+            })
+        }
+        flow :: try execute_type_block(state, execution, loop.body)
+        if (flow == .returned or flow == .invalid) return flow
+        if (flow == .break) return .next
+    }
+    return .next
+}
+
 @hide:file
 execute_type_for proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
     loop :: ast.for_stmt(&state.tree, statement)
-    if (loop.pointer_capture or loop.index_capture or ast.expr_kind(&state.tree, loop.iterable) != .range) return .invalid
+    if (ast.expr_kind(&state.tree, loop.iterable) != .range)
+        return try execute_type_collection(state, execution, statement)
+    if (loop.pointer_capture or loop.index_capture) return .invalid
     bounds :: ast.range_expr(&state.tree, loop.iterable)
     start :: try type_snapshot(state, execution, bounds.start)
     end :: try type_snapshot(state, execution, bounds.end)
