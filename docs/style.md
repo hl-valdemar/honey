@@ -10,7 +10,7 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 
 ## bindings and types
 
-- prefer `::` for bindings that stay fixed; use `:=` for bindings that change, including values mutated through pointers.
+- prefer `::` when the bound value stays fixed; use `:=` when the bound value changes. mutation through a mutable pointer or slice does not require rebinding and is not, by itself, a reason to use `:=`.
 - infer types when the initializer makes the intended type clear. write an explicit type when it determines representation, mutability, or a public contract.
 - request mutable pointers and slices only when the operation needs to modify their contents.
 - give aggregates meaningful defaults. use `undefined` only when every value that can be read is assigned first.
