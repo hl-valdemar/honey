@@ -11,6 +11,133 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_match_tagged_capture_preserves_resolution_errors": (
+        """
+        data proc() [2]i16 { return [40, 2] }
+        Choice :: union(enum) { payload struct { values [2]i16 }, empty void }
+        Storage proc(input Choice) type {
+            return match input {
+                .payload |data|: struct { bias i16 = data.values[1] },
+                .empty: bool,
+            }
+        }
+        main proc() Storage(.payload{ values = [40, 2] }) { return {} }
+        """, b"", b"duplicate name",
+    ),
+    "type_match_tagged_capture_statements_and_cache_identity": (
+        """
+        Tag :: enum(i16) { empty = -7, second = 3, count = 90 }
+        Choice :: union(Tag) { count usize, second usize, empty void }
+        choice proc() Choice { return .second{2} }
+        Storage proc(input Choice) type {
+            Result := i8
+            match input {
+                .count, .second |length|: {
+                    Result = struct { values [length]i16 }
+                }
+                .empty: return struct { values [0]i16 },
+            }
+            return Result
+        }
+        main proc() i16 {
+            value Storage(choice()) :: { values = [40, 2] }
+            cached Storage(.second{2}) :: value
+            empty Storage(.empty) :: { values = [] }
+            return cached.values[0] + cached.values[1] + i16(empty.values.len)
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_tagged_capture_nested_expressions_and_storage": (
+        """
+        Inner :: union(enum) { count usize, empty void }
+        Detail :: struct { inner Inner, wide bool, bias i16, text string }
+        Choice :: union(enum) { detail Detail, unused i8 }
+        Box proc(T type) type { return struct { value T } }
+        Storage proc(input Choice) type {
+            Element :: match input {
+                .detail |detail|: match detail.wide { true: i16, false: i8 },
+                .unused |small|: [small]bool,
+            }
+            return struct {
+                values [match input {
+                    .detail |detail|: match detail.inner { .count |n|: n, .empty: usize(0) },
+                    .unused |small|: usize(small),
+                }]Element
+                boxed Box(match input { .detail |detail|: Element, .unused: bool })
+                bias i16 = match input { .detail |detail|: detail.bias, .unused: i8(128) }
+                label string = match input { .detail |detail|: detail.text, .unused: "" }
+            }
+        }
+        main proc() i16 {
+            value Storage(.detail{ inner = .count{2}, wide = true, bias = 2, text = "owned" }) :: {
+                values = [19, 21], boxed = { value = 0 },
+            }
+            if (value.label.len != 5 or value.label[0] != 111) return -1
+            return value.values[0] + value.values[1] + value.boxed.value + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_tagged_capture_loop_snapshots_and_transfers": (
+        """
+        Choice :: union(enum) { count usize, empty void }
+        Nest proc() type {
+            Result := i16
+            current Choice := .count{0}
+            for (0..usize(4)) |index| {
+                current = .count{index}
+                match current {
+                    .count |length|: {
+                        if (length == 0) continue
+                        if (length == 3) break
+                        Result = [length]Result
+                    }
+                    .empty: return bool,
+                }
+            }
+            return Result
+        }
+        main proc() i16 {
+            value Nest() :: [[40], [2]]
+            return value[0][0] + value[1][0]
+        }
+        """, b"42\n", None,
+    ),
+    "type_match_tagged_capture_checks_unselected_capture_types": (
+        """
+        Choice :: union(enum) { count usize, small i8, empty void }
+        Bad proc(input Choice) type {
+            return match input { .count, .small |value|: [value]i16, .empty: bool }
+        }
+        main proc() Bad(.empty) { return true }
+        """, b"", b"payload capture requires compatible nonvoid tagged union variants",
+    ),
+    "type_match_tagged_capture_preserves_exact_payload_type": (
+        """
+        Choice :: union(enum) { small i8, empty void }
+        Bad proc(input Choice) type {
+            match input {
+                .small |value|: {
+                    next :: value + 1
+                    return [usize(next)]i16
+                }
+                .empty: return bool,
+            }
+        }
+        main proc() Bad(.small{127}) { return [] }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_match_tagged_capture_is_immutable": (
+        """
+        Choice :: union(enum) { count usize }
+        Bad proc(input Choice) type {
+            match input { .count |length|: {
+                length = 2
+                return [length]i16
+            } }
+        }
+        main proc() Bad(.count{1}) { return [0, 0] }
+        """, b"", b"mutable local binding",
+    ),
     "nested_type_match_failure_preserves_shared_return_types": (
         """
         Original :: alias [2]i16
@@ -3713,6 +3840,13 @@ def check_specialization_packages(temporary, executable):
             }
             return struct { values [match length { 0: usize(0), else: length }]mut Element }
         }
+        Choice :: union(enum) { count usize, empty void }
+        Captured proc(T type, choice Choice) type {
+            return match choice {
+                .count |length|: struct { values [length]T },
+                .empty: bool,
+            }
+        }
     """).strip() + "\n")
     (library / "functions.hon").write_text(textwrap.dedent("""
         identity proc($T type, value T) T { return value }
@@ -3733,8 +3867,9 @@ def check_specialization_packages(temporary, executable):
         main proc() i16 {
             imported ImportedBox :: { value = 40 }
             copy lib.Box(i16) :: imported
+            captured lib.Captured(ImportedBox, .count{2}) :: { values = [imported, copy] }
             fixed lib.Fixed(i16, lib.count()) :: { values = [2, 0] }
-            return copy.value + lib.identity(lib.first(&fixed))
+            return captured.values[0].value + lib.identity(lib.first(&fixed))
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
@@ -3782,7 +3917,23 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:2:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 4
+    sizing.write_text(textwrap.dedent("""
+        SizingChoice :: union(enum) { small i8 }
+        Bad proc() type {
+            input SizingChoice :: .small{127}
+            match input {
+                .small |value|: {
+                    next :: value + 1
+                    return [usize(next)]i16
+                }
+            }
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:6:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 5
 
 
 def check_dependency_provenance(temporary, executable):
