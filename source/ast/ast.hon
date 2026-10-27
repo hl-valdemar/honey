@@ -39,6 +39,7 @@ LiteralKind :: enum {
     bool
     null
     void
+    undefined
 }
 
 ExprKind :: enum {
@@ -78,6 +79,7 @@ ExprKind :: enum {
     typed_constant
     comptime_expr
     literal_void
+    literal_undefined
 }
 
 DeclKind :: enum {
@@ -184,6 +186,7 @@ NodeKind :: enum {
     expr_comptime
     literal_float_value
     literal_void
+    literal_undefined
 }
 
 @hide:file
@@ -499,6 +502,7 @@ add_literal proc(builder @mut Builder, kind LiteralKind, span Span) NodeId ! mem
         .bool: .literal_bool
         .null: .literal_null
         .void: .literal_void
+        .undefined: .literal_undefined
     }
     return try add_node(builder, Node{ kind = node_kind }, span)
 }
@@ -1433,6 +1437,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_comptime: .comptime_expr
         .literal_float_value: .literal_float
         .literal_void: .literal_void
+        .literal_undefined: .literal_undefined
         else: unreachable
     }
 }
@@ -1828,7 +1833,7 @@ node_layout proc(node Node) NodeLayout {
     layout := NodeLayout{}
     match node.kind {
         .literal_int, .literal_float, .literal_float_value, .literal_string, .literal_bool, .literal_null,
-        .literal_void, .expr_identifier, .invalid_expr: {}
+        .literal_void, .literal_undefined, .expr_identifier, .invalid_expr: {}
         .expr_unary: layout.direct_children = 2
         .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant,
         .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:

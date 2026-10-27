@@ -1317,6 +1317,194 @@ CASES = {
         }
         """, b"42\n", None,
     ),
+    "type_arrays_undefined_loop_initialization_generates_storage": (
+        """
+        Storage proc() type {
+            types [2]mut type := undefined
+            if (types.len != 2) return bool
+            for (usize(0)..types.len) |index| { types[index] = i16 }
+            return struct { values [types.len]types[0], bias types[1] = 2 }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 21] }
+            same Storage() :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_undefined_nested_updates_partial_copies_and_replacement": (
+        """
+        Storage proc() type {
+            rows [2]mut [2]mut type := undefined
+            if (rows.len != 2 or rows[0].len != 2) return bool
+            (rows[0])[0] = i8
+            copied := rows
+            (rows[0])[1] = u8
+            rows[1] = [i8, bool]
+            (copied[0])[1] = i16
+            copied[1] = [bool, i16]
+            if (rows[0][0] != i8 or copied[0][0] != i8) return bool
+            if (rows[0][1] != u8 or rows[1][0] != i8 or rows[1][1] != bool) return bool
+            replacement [2]mut type := undefined
+            replacement = [i16, bool]
+            return struct { first copied[0][1], second copied[1][1], bias replacement[0] = 2 }
+        }
+        main proc() i16 {
+            value Storage() :: { first = 19, second = 21 }
+            return value.first + value.second + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_arrays_undefined_empty_shapes_and_erased_generic_consumer": (
+        """
+        empty_rows proc() [2]mut [0]mut type {
+            rows [2]mut [0]mut type := undefined
+            return rows
+        }
+        empty_outer proc() [0]mut [2]mut type {
+            rows [0]mut [2]mut type := undefined
+            return rows
+        }
+        row proc() [2]mut type {
+            types [2]mut type := undefined
+            rows :: empty_rows()
+            outer :: empty_outer()
+            if (rows.len != 2 or rows[0].len != 0 or rows[1].len != 0 or outer.len != 0) {
+                return [bool, bool]
+            }
+            for rows |empty| { for empty |_| { return [bool, bool] } }
+            types[0] = i16
+            types[1] = bool
+            return types
+        }
+        add proc($types [2]mut type, left types[0], right types[0]) types[0] {
+            enabled types[1] :: true
+            if (enabled) return left + right
+            return 0
+        }
+        forward proc(value i16) i16 { return add(row(), value, 2) }
+        main proc() i16 { return forward(40) }
+        """, b"42\n", None,
+    ),
+    "type_arrays_undefined_reject_premature_leaf_read": (
+        """
+        Bad proc() type {
+            types [2]mut type := undefined
+            types[0] = i16
+            return types[1]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_arrays_undefined_reject_partial_return": (
+        """
+        rows proc() [2]mut [1]mut type {
+            types [2]mut [1]mut type := undefined
+            (types[0])[0] = i16
+            return types
+        }
+        main proc() rows()[0][0] { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_arrays_undefined_reject_partial_argument": (
+        """
+        Selected proc(types [2]mut [1]mut type) type { return i16 }
+        Bad proc() type {
+            types [2]mut [1]mut type := undefined
+            (types[0])[0] = i16
+            return Selected(types)
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_arrays_undefined_reject_partial_erased_argument": (
+        """
+        Selected proc($types [2]mut type) type { return i16 }
+        Bad proc() type {
+            types [2]mut type := undefined
+            types[0] = i16
+            return Selected(types)
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_arrays_undefined_copy_does_not_observe_later_initialization": (
+        """
+        Bad proc() type {
+            types [2]mut type := undefined
+            types[0] = i16
+            copied :: types
+            types[1] = bool
+            return copied[1]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_arrays_undefined_reject_readonly_element_write": (
+        """
+        Bad proc() type {
+            types [1]type := undefined
+            types[0] = i16
+            return types[0]
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_arrays_undefined_reject_inferred_length": (
+        """
+        Bad proc() type {
+            types [_]mut type := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array length must be a nonnegative supported compile-time integer",
+    ),
+    "type_arrays_undefined_empty_outer_rejects_inferred_child_length": (
+        """
+        Bad proc() type {
+            types [0]mut [_]mut type := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array length must be a nonnegative supported compile-time integer",
+    ),
+    "type_arrays_undefined_construction_is_bounded": (
+        """
+        Bad proc() type {
+            types [1000000000]mut type := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "type_arrays_undefined_nested_empty_construction_is_bounded": (
+        """
+        Bad proc() type {
+            types [100]mut [100]mut [0]mut type := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "type_arrays_undefined_does_not_enable_runtime_storage": (
+        """
+        main proc() i16 {
+            values [1]mut i16 := undefined
+            values[0] = 42
+            return values[0]
+        }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "type_arrays_undefined_does_not_enable_comptime_value_storage": (
+        """
+        Bad proc() type {
+            values [1]mut usize := undefined
+            values[0] = 1
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
     "type_arrays_only_execute_selected_bodies": (
         """
         Selected proc(ok bool) type {

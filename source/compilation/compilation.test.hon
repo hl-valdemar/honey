@@ -195,6 +195,17 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `read_type_rows proc($rows [2]mut [1]mut type, value rows[0][0]) rows[1][0] {
             `    return value + rows[1][0](rows.len)
             `}
+            `UninitializedRows proc() [2]mut type {
+            `    types [2]mut type := undefined
+            `    for (usize(0)..types.len) |index| {
+            `        if (index == 0) { types[index] = struct { value i16 } }
+            `        else { types[index] = types[0] }
+            `    }
+            `    return types
+            `}
+            `UninitializedType proc(types [2]mut type) type {
+            `    return struct { first types[0], second types[1] }
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -236,6 +247,12 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (copy_type_rows(TypeRows())[0][0] != u8 or copy_type_rows(TypeRows())[1][0] != i16) return 0
             `    if (TypeRows()[0][0] != i16) return 0
             `    if (read_type_rows(TypeRows(), 40) != 42 or read_type_rows(TypeRows(), 40) != 42) return 0
+            `    initialized UninitializedType(UninitializedRows()) :: {
+            `        first = { value = 19 }, second = { value = 21 },
+            `    }
+            `    same_initialized UninitializedType(UninitializedRows()) :: initialized
+            `    copied_initialized := same_initialized.first
+            `    copied_initialized = same_initialized.second
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }
@@ -244,7 +261,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        .failed |detail|: detail.code + i16(detail.text.len),
             `    }
             `    if (error_code != 7) return 0
-            `    return read_selected(packet.choices[0], identity(same.values[0]) + same.values[$(usize(1))] + same.bias - 2)
+            `    return read_selected(packet.choices[0], identity(initialized.first.value) + copied_initialized.value + same.values[$(usize(1))] + same.bias - 2)
             `}
             ,
         )

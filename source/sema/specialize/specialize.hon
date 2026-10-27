@@ -938,7 +938,7 @@ argument_annotation proc(
 evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Error {
     if (type_array_annotation(&state.tree, state.bindings.items, annotation)) {
         constant :: try type_execution_value(state, id, annotation)
-        if (constant == no_node) return Value{}
+        if (constant == no_node or !try type_array_initialized(state, constant, id)) return Value{}
         value :: ast.typed_constant(&state.tree, constant)
         return Value{ kind = .aggregate, node = value.value, annotation = value.type }
     }
@@ -1484,6 +1484,11 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
                 ast.array_element_count(&state.tree, array.value))
             if (index == no_index) return false
             selected = ast.array_element(&state.tree, array.value, index)
+            if (ast.expr_kind(&state.tree, selected) == .literal_undefined) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .read_before_initialization, ast.node_span(&state.tree, id))
+                return false
+            }
         } else {
             member :: ast.selection_expr(&state.tree, id).member
             if (!mem.eql(ast.literal_text(&state.tree, member), "len")) {
@@ -1562,8 +1567,68 @@ type_array_compatible proc(state @mut State, expected, actual ast.NodeId) bool !
     return try type_array_compatible(state, a.element, b.element)
 }
 
+# undefined leaves are initialization state, not type values. snapshots may copy
+# that state locally; procedure boundaries require every leaf to be initialized.
+@hide:file
+type_array_initialized proc(state @mut State, value, at ast.NodeId) bool ! Error {
+    kind :: ast.expr_kind(&state.tree, value)
+    if (kind == .literal_undefined) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .read_before_initialization, ast.node_span(&state.tree, at))
+        return false
+    }
+    if (kind == .typed_constant)
+        return try type_array_initialized(state, ast.typed_constant(&state.tree, value).value, at)
+    if (kind == .array_literal) {
+        for (0..ast.array_element_count(&state.tree, value)) |i| {
+            if (!try type_array_initialized(state, ast.array_element(&state.tree, value, i), at)) return false
+        }
+    }
+    return true
+}
+
+# bound the expanded snapshot, not just its dimensions, so later reads and
+# initialization checks cannot traverse an exponentially shared empty shape.
+@hide:file
+type_array_undefined proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+    if (is_type(state, annotation)) return expression
+    type :: try canonical_type(state, annotation)
+    descriptor :: ast.array_type(&state.tree, type)
+    length := Value{}
+    if (descriptor.count) |count| length = try evaluate(state, count)
+    if (length.kind != .integer or length.negative) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_array_length, ast.node_span(&state.tree, annotation))
+        return no_node
+    }
+    # validate child dimensions even when this dimension is empty.
+    child :: try type_array_undefined(state, expression, descriptor.element)
+    if (child == no_node) return no_node
+    elements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&elements)
+    for (0..length.magnitude) |i| {
+        if (!try type_step(state, expression)) return no_node
+        element := child
+        if (i != 0) element = try type_array_undefined(state, expression, descriptor.element)
+        if (element == no_node) return no_node
+        try arraylist.append(&elements, element)
+    }
+    span :: ast.node_span(&state.tree, expression)
+    type_span :: ast.node_span(&state.tree, annotation)
+    element_type :: if (ast.expr_kind(&state.tree, child) == .typed_constant)
+        ast.typed_constant(&state.tree, child).type else descriptor.element
+    count :: try ast.add_integer(state.builder, span, length.magnitude)
+    concrete :: try ast.add_array_type(state.builder, type_span, count, element_type, descriptor.mutable)
+    literal :: try ast.add_array_literal(state.builder, span, elements.items)
+    result :: try ast.add_typed_constant(state.builder, span, concrete, literal)
+    try refresh(state)
+    return result
+}
+
 @hide:file
 type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+    if (ast.expr_kind(&state.tree, expression) == .literal_undefined)
+        return try type_array_undefined(state, expression, annotation)
     type :: try canonical_type(state, annotation)
     array :: ast.array_type(&state.tree, type)
     if (ast.expr_kind(&state.tree, expression) == .typed_constant) {
@@ -1695,6 +1760,11 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
     }
     if (try type_array_storage(state, annotation)) return try type_array_value(state, expression, annotation)
     if (is_type(state, annotation)) {
+        if (ast.expr_kind(&state.tree, expression) == .literal_undefined) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .read_before_initialization, ast.node_span(&state.tree, expression))
+            return no_node
+        }
         value :: try evaluate(state, expression)
         if (value.kind != .type) {
             if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
@@ -1832,6 +1902,8 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
             if (ast.return_stmt(&state.tree, statement).value) |value| {
                 expression :: try type_snapshot(state, execution, value)
                 execution.returned = try type_execution_value(state, expression, execution.result_type)
+                if (execution.returned != no_node
+                    and !try type_array_initialized(state, execution.returned, value)) return .invalid
                 if (execution.returned != no_node) return .returned
             }
             return .invalid

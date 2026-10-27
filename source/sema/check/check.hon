@@ -1201,6 +1201,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
         .literal_null: state.cells[usize(id)].type = Type{ kind = .null }
         .literal_void: state.cells[usize(id)].type = Type{ kind = .void }
+        .literal_undefined: try fail(state, id, .comptime_argument_required, ast.node_span(tree, id))
         .builtin_call: try collect_builtin(state, id)
         .slice: {
             view :: ast.slice_expr(tree, id)
