@@ -1399,6 +1399,42 @@ type_capture_guard proc(state @mut State, expression, capture ast.NodeId) Value 
     return try evaluate_ir_body(state, expression, body, try builtin(state, expression, .bool))
 }
 
+# update one owned aggregate through ordinary assignment checking and execution.
+# only the target's root becomes a temporary local; indices and RHS retain their
+# pre-assignment snapshots, and no interpreter storage survives the evaluation.
+@hide:file
+type_assignment_value proc(
+    state @mut State, execution @mut TypeExecution, statement ast.NodeId, index usize,
+) ast.NodeId ! Error {
+    assignment :: ast.assignment_stmt(&state.tree, statement)
+    local :: execution.locals.items[index]
+    span :: ast.node_span(&state.tree, statement)
+    value :: try type_snapshot(state, execution, assignment.value)
+    mutability :: if (ast.node_class(&state.tree, local.declaration) == .statement)
+        ast.statement_decl(&state.tree, local.declaration).mutability else ast.Mutability.constant
+    temporary :: try ast.add_statement_decl(state.builder, span, span, strpool.no_str,
+        local.annotation, mutability, local.value)
+    try refresh(state)
+    target := no_node
+    {
+        execution.locals.items[index].value = try reference(state, assignment.target, temporary)
+        defer execution.locals.items[index].value = local.value
+        target = try type_snapshot(state, execution, assignment.target)
+    }
+    if (!try expand_type_matches(state, target) or !try expand_type_matches(state, value)) return no_node
+    update :: try ast.add_assignment_stmt(state.builder, span, target, value)
+    returned :: try ast.add_return_stmt(state.builder, span, try reference(state, statement, temporary))
+    statements [3]ast.NodeId :: [temporary, update, returned]
+    body :: try ast.add_block(state.builder, span, statements[..])
+    try refresh(state)
+    result :: try evaluate_ir_body(state, statement, body, local.annotation)
+    if (result.kind == .invalid) return no_node
+    concrete :: try materialize(state, result)
+    owned :: try ast.add_typed_constant(state.builder, span, local.annotation, concrete.node)
+    try refresh(state)
+    return owned
+}
+
 @hide:file
 execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
     saved :: execution.locals.items.len
@@ -1449,7 +1485,15 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(&state.tree, statement)
-            resolved :: binding(state, assignment.target)
+            root := assignment.target
+            while (true) {
+                kind :: ast.expr_kind(&state.tree, root)
+                if (kind == .selection and binding(state, root).kind == .none)
+                    root = ast.selection_expr(&state.tree, root).base
+                else if (kind == .index) root = ast.index_expr(&state.tree, root).base
+                else break
+            }
+            resolved :: binding(state, root)
             index := no_index
             if (resolved.kind == .declaration) {
                 for (execution.locals.items) |local, i| {
@@ -1458,12 +1502,19 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
             }
             if (
                 index == no_index
-                or ast.node_class(&state.tree, execution.locals.items[index].declaration) != .statement
-                or ast.statement_decl(&state.tree, execution.locals.items[index].declaration).mutability != .variable
+                or (root == assignment.target
+                    and (ast.node_class(&state.tree, execution.locals.items[index].declaration) != .statement
+                        or ast.statement_decl(&state.tree, execution.locals.items[index].declaration).mutability != .variable))
             ) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .invalid_assignment_target, ast.node_span(&state.tree, assignment.target))
                 return .invalid
+            }
+            if (root != assignment.target) {
+                value :: try type_assignment_value(state, execution, statement, index)
+                if (value == no_node) return .invalid
+                execution.locals.items[index].value = value
+                return .next
             }
             expression :: try type_snapshot(state, execution, assignment.value)
             value :: try type_execution_value(state, expression, execution.locals.items[index].annotation)

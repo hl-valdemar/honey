@@ -134,6 +134,18 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    }
             `    return Result
             `}
+            `Updated proc() type {
+            `    config struct { counts [2]mut usize, bias i16 } := { counts = [0, 0], bias = 0 }
+            `    original :: config
+            `    for (usize(0)..2) |index| {
+            `        config.counts[index] = index + 1
+            `        config.bias = config.bias + 21
+            `    }
+            `    return struct {
+            `        values [config.counts[1]]i16
+            `        bias i16 = config.bias + i16(original.counts[1])
+            `    }
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -159,6 +171,8 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (captured.values[0] + captured.values[1] + captured.bias != 42) return 0
             `    optional Optional() :: captured.values
             `    if (optional[0] + optional[1] != 40) return 0
+            `    updated Updated() :: { values = optional }
+            `    if (updated.bias != 42 or updated.values[1] != 21) return 0
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }

@@ -11,6 +11,156 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_execution_aggregate_updates_preserve_copies_and_generate_defaults": (
+        """
+        Config :: struct { values [2]mut i16, count usize, text string }
+        Storage proc() type {
+            config Config := { values = [17, 19], count = 0, text = "old" }
+            original :: config
+            for (usize(0)..2) |index| {
+                config.values[index] = config.values[index] + 1
+                config.count = config.count + 1
+            }
+            config.text = "owned"
+            config.values[config.count - 1] = match true {
+                true: config.values[0] + 4,
+                false: i8(128),
+            }
+            return struct {
+                values [config.count]mut i16 = config.values
+                bias i16 = original.values[0] - 17 + i16(config.text.len) - 3
+            }
+        }
+        main proc() i16 {
+            value Storage() :: {}
+            same Storage() :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_nested_array_record_updates_and_loop_transfers": (
+        """
+        Item :: struct { length usize, value i16 }
+        Storage proc() type {
+            items [2]mut Item := [{ length = 0, value = 0 }, { length = 0, value = 0 }]
+            index usize := 0
+            while (index < 3) {
+                if (index == 2) break
+                items[index].length = index + 1
+                items[index].value = i16(index) + 20
+                index = index + 1
+                continue
+            }
+            return struct {
+                values [items[1].length]i16
+                bias i16 = items[0].value + items[1].value + i16(items[0].length)
+            }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [0, 0] }
+            return value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_field_update_rejects_constant_root": (
+        """
+        Config :: struct { count usize }
+        Bad proc() type {
+            config Config :: { count = 1 }
+            config.count = 2
+            return [config.count]i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "type_execution_index_update_rejects_readonly_array": (
+        """
+        Bad proc() type {
+            counts [1]usize := [1]
+            counts[0] = 2
+            return [counts[0]]i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_execution_index_update_checks_bounds": (
+        """
+        Bad proc() type {
+            counts [1]mut usize := [1]
+            counts[1] = 2
+            return [counts[0]]i16
+        }
+        main proc() Bad() { return [0] }
+        """, b"", b"index out of bounds",
+    ),
+    "type_execution_index_update_checks_index_type": (
+        """
+        Bad proc() type {
+            counts [1]mut usize := [1]
+            index u8 :: 0
+            counts[index] = 2
+            return [counts[0]]i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"array index must have type usize",
+    ),
+    "type_execution_field_update_checks_exact_value_type": (
+        """
+        Config :: struct { count usize }
+        Bad proc() type {
+            config Config := { count = 1 }
+            value u8 :: 2
+            config.count = value
+            return [config.count]i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"incompatible value type",
+    ),
+    "type_execution_index_update_preserves_narrow_overflow": (
+        """
+        Bad proc() type {
+            values [1]mut i8 := [127]
+            values[0] = values[0] + 1
+            return [usize(values[0])]i16
+        }
+        main proc() Bad() { return [0] }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_execution_field_update_rejects_payload_capture_mutation": (
+        """
+        Config :: struct { count usize }
+        Bad proc() type {
+            input ?Config :: { count = 1 }
+            if input |config| {
+                config.count = 2
+                return [config.count]i16
+            }
+            return i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "type_execution_index_update_rejects_constant_array_root": (
+        """
+        Bad proc() type {
+            counts [1]mut usize :: [1]
+            counts[0] = 2
+            return [counts[0]]i16
+        }
+        main proc() Bad() { return [0, 0] }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_execution_field_update_checks_member": (
+        """
+        Config :: struct { count usize }
+        Bad proc() type {
+            config Config := { count = 1 }
+            config.missing = 2
+            return [config.count]i16
+        }
+        main proc() Bad() { return [0] }
+        """, b"", b"record has no such field",
+    ),
     "type_execution_optional_if_selects_storage_and_cache_identity": (
         """
         Count :: alias ?usize
@@ -4342,7 +4492,35 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:4:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 8
+    sizing.write_text(textwrap.dedent("""
+        Updated proc() type {
+            config struct { counts [2]mut usize, bias i16 } := { counts = [0, 0], bias = 40 }
+            config.counts[1] = 2
+            config.bias = config.bias + i16(config.counts[1])
+            return struct { values [config.counts[1]]i16, bias i16 = config.bias }
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            value lib.Updated() :: { values = [0, 0] }
+            return value.bias
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        Updated proc() type {
+            counts [1]mut usize := [1]
+            counts[1] = 2
+            return [counts[0]]i16
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.Updated() { return [0] }\n')
+    check(app, executable, (b"", b"index out of bounds"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 10
 
 
 def check_dependency_provenance(temporary, executable):
