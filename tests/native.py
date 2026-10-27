@@ -1495,15 +1495,208 @@ CASES = {
         }
         """, b"", b"generic argument must be a compile-time value",
     ),
-    "type_arrays_undefined_does_not_enable_comptime_value_storage": (
+    "value_arrays_undefined_loop_initialization_generates_storage": (
+        """
+        Storage proc() type {
+            rows [2]mut [2]mut usize := undefined
+            for (usize(0)..rows.len) |row| {
+                for (usize(0)..rows[row].len) |column| { (rows[row])[column] = row + column + 1 }
+            }
+            return struct { values [rows[0][1]]i16, bias i16 = i16(rows[1][0]) }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 21] }
+            same Storage() :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "value_arrays_undefined_partial_copies_and_whole_replacement": (
+        """
+        Storage proc() type {
+            rows [2]mut [2]mut i16 := undefined
+            (rows[0])[0] = 19
+            copied := rows
+            (rows[0])[1] = 1
+            rows[1] = [2, 3]
+            (copied[0])[1] = 21
+            copied[1] = [1, 1]
+            replacement [2]mut i16 := undefined
+            replacement = copied[1]
+            if (rows[0][1] != 1 or rows[1][0] != 2) return bool
+            return struct { value i16 = copied[0][0] + copied[0][1] + replacement[0] + replacement[1] }
+        }
+        main proc() i16 { value Storage() :: {}
+            return value.value
+        }
+        """, b"42\n", None,
+    ),
+    "value_arrays_undefined_strings_optionals_records_and_unions": (
+        """
+        Item :: struct { text string, amount ?i16, values [1]mut i16 }
+        Choice :: union(enum) { value i16, empty void }
+        Storage proc() type {
+            words [2]mut string := undefined
+            words[0] = "ok"
+            words[1] = "yes"
+            options [2]mut ?i16 := undefined
+            options[0] = null
+            options[1] = 37
+            items [1]mut Item := undefined
+            items[0] = { text = words[0], amount = options[0], values = [0] }
+            items[0].amount = options[1]
+            items[0].values[0] = 37
+            choices [1]mut Choice := undefined
+            choices[0] = .empty
+            choices[0] = .value{items[0].values[0]}
+            amount :: match choices[0] { .value |value|: value, .empty: i16(0) }
+            return struct { value i16 = amount + items[0].amount? - 37 + i16(items[0].text.len + words[1].len) }
+        }
+        main proc() i16 { value Storage() :: {}
+            return value.value
+        }
+        """, b"42\n", None,
+    ),
+    "value_arrays_undefined_empty_shapes_and_type_array_producer": (
+        """
+        Rows proc() [1]mut type {
+            rows [2]mut [0]mut i16 := undefined
+            outer [0]mut [2]mut usize := undefined
+            copied :: rows
+            if (copied.len != 2 or copied[0].len != 0 or outer.len != 0) return [bool]
+            for rows |row| { for row |_| { return [bool] } }
+            counts [1]mut usize := undefined
+            counts[0] = rows.len
+            return [struct { values [counts[0]]i16, bias i16 = 2 }]
+        }
+        main proc() i16 {
+            value Rows()[0] :: { values = [19, 21] }
+            return value.values[0] + value.values[1] + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "value_arrays_undefined_reject_premature_leaf_read": (
         """
         Bad proc() type {
-            values [1]mut usize := undefined
-            values[0] = 1
+            values [2]mut usize := undefined
+            values[0] = 2
+            return [values[1]]i16
+        }
+        main proc() Bad() { return [] }
+        """, b"", b"local value was read before initialization",
+    ),
+    "value_arrays_undefined_reject_partial_argument": (
+        """
+        Selected proc(values [2]mut usize) type { return [values[0]]i16 }
+        Bad proc() type {
+            values [2]mut usize := undefined
+            values[0] = 2
+            return Selected(values)
+        }
+        main proc() Bad() { return [19, 23] }
+        """, b"", b"local value was read before initialization",
+    ),
+    "value_arrays_undefined_copy_does_not_observe_later_initialization": (
+        """
+        Bad proc() type {
+            values [2]mut usize := undefined
+            values[0] = 2
+            copied :: values
+            values[1] = 1
+            return [copied[1]]i16
+        }
+        main proc() Bad() { return [] }
+        """, b"", b"local value was read before initialization",
+    ),
+    "value_arrays_undefined_reject_readonly_binding": (
+        """
+        Bad proc() type {
+            values [1]mut usize :: undefined
+            values = [2]
             return i16
         }
         main proc() Bad() { return 42 }
-        """, b"", b"generic argument must be a compile-time value",
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "value_arrays_undefined_reject_readonly_elements": (
+        """
+        Bad proc() type {
+            values [1]usize := undefined
+            values[0] = 2
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "value_arrays_undefined_reject_wrong_leaf_type": (
+        """
+        Bad proc() type {
+            values [1]mut usize := undefined
+            wrong u8 :: 2
+            values[0] = wrong
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"",
+    ),
+    "value_arrays_undefined_reject_wrong_index_type": (
+        """
+        Bad proc() type {
+            values [1]mut usize := undefined
+            index u8 :: 0
+            values[index] = 2
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "value_arrays_undefined_reject_out_of_bounds_write": (
+        """
+        Bad proc() type {
+            values [1]mut usize := undefined
+            values[1] = 2
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "value_arrays_undefined_preserve_narrow_overflow": (
+        """
+        Bad proc() type {
+            values [1]mut i8 := undefined
+            values[0] = 127
+            values[0] = values[0] + 1
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "value_arrays_undefined_construction_is_bounded": (
+        """
+        Bad proc() type {
+            values [1000000000]mut usize := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "value_arrays_undefined_nested_empty_construction_is_bounded": (
+        """
+        Bad proc() type {
+            values [100]mut [100]mut [0]mut usize := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "value_arrays_undefined_reject_invalid_empty_element_annotation": (
+        """
+        Storage proc() type {
+            values [0]mut void := undefined
+            return i16
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", b"array element annotations",
     ),
     "type_arrays_only_execute_selected_bodies": (
         """

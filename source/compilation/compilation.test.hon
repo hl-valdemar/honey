@@ -206,6 +206,19 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `UninitializedType proc(types [2]mut type) type {
             `    return struct { first types[0], second types[1] }
             `}
+            `UninitializedValues proc() type {
+            `    rows [2]mut [2]mut usize := undefined
+            `    (rows[0])[0] = 1
+            `    copied := rows
+            `    rows[0] = [3, 4]
+            `    (copied[0])[1] = 2
+            `    copied[1] = [1, 1]
+            `    for (usize(0)..rows[1].len) |index| { (rows[1])[index] = index + 1 }
+            `    return struct {
+            `        values [copied[0][1]]i16
+            `        bias i16 = i16(copied[1][0] + rows[1][0])
+            `    }
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -252,6 +265,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    }
             `    same_initialized UninitializedType(UninitializedRows()) :: initialized
             `    copied_initialized := same_initialized.first
+            `    initialized_values UninitializedValues() :: { values = [19, 21] }
+            `    same_initialized_values UninitializedValues() :: initialized_values
+            `    if (same_initialized_values.values[0] + same_initialized_values.values[1] + same_initialized_values.bias != 42) return 0
             `    copied_initialized = same_initialized.second
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0

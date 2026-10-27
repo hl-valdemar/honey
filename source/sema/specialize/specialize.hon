@@ -875,6 +875,9 @@ evaluation_dependencies proc(
 ) bool ! Error {
     if ((flags[usize(id)] & 4) != 0) return true
     flags[usize(id)] = flags[usize(id)] | 4
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .typed_constant) {
+        if (!try type_array_initialized(state, id, id)) return false
+    }
     resolved :: binding(state, id)
     if (resolved.kind == .declaration) {
         target :: resolved.data.declaration
@@ -944,6 +947,8 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     }
     if (!is_type(state, annotation)) {
         type :: try canonical_type(state, annotation)
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .array_type
+            and !try type_array_initialized(state, id, id)) return Value{}
         if (type != no_node and (contextual_literal(state, id) or ast.expr_kind(&state.tree, type) == .fallible_type))
             return try evaluate_ir(state, id, type)
     }
@@ -1477,7 +1482,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
         }
         if (ast.expr_kind(&state.tree, base) != .typed_constant) return true
         array :: ast.typed_constant(&state.tree, base)
-        if (!try type_array_storage(state, array.type)) return true
+        if (!try execution_array_storage(state, array.type)) return true
         selected := no_node
         if (kind == .index) {
             index :: try type_array_index(state, ast.index_expr(&state.tree, id).index,
@@ -1489,8 +1494,17 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
                     .read_before_initialization, ast.node_span(&state.tree, id))
                 return false
             }
+            if (!type_array_annotation(&state.tree, state.bindings.items, array.type)
+                and ast.expr_kind(&state.tree, selected) != .typed_constant) {
+                descriptor :: ast.array_type(&state.tree, try canonical_type(state, array.type))
+                selected = try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, id),
+                    descriptor.element, selected)
+                try refresh(state)
+            }
         } else {
             member :: ast.selection_expr(&state.tree, id).member
+            if (!type_array_annotation(&state.tree, state.bindings.items, array.type)
+                and !mem.eql(ast.literal_text(&state.tree, member), "len")) return true
             if (!mem.eql(ast.literal_text(&state.tree, member), "len")) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .unknown_field, ast.node_span(&state.tree, member))
@@ -1517,18 +1531,12 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
     return true
 }
 
-# type arrays are persistent AST values, never runtime storage. keep the same
-# typed-constant snapshots as ordinary aggregates, but validate their leaves here.
+# type-control arrays are persistent AST snapshots, including uninitialized leaves.
+# only fully initialized ordinary values may enter checked runtime IR.
 @hide:file
-type_array_storage proc(state @mut State, annotation ast.NodeId) bool ! Error {
-    current := annotation
-    for (0..128) |_| {
-        if (is_type(state, current)) return current != annotation
-        current = try canonical_type(state, current)
-        if (current == no_node or ast.expr_kind(&state.tree, current) != .array_type) return false
-        current = ast.array_type(&state.tree, current).element
-    }
-    return false
+execution_array_storage proc(state @mut State, annotation ast.NodeId) bool ! Error {
+    current :: try canonical_type(state, annotation)
+    return current != no_node and ast.expr_kind(&state.tree, current) == .array_type
 }
 
 @hide:file
@@ -1557,7 +1565,8 @@ type_array_compatible proc(state @mut State, expected, actual ast.NodeId) bool !
     left :: try canonical_type(state, expected)
     right :: try canonical_type(state, actual)
     if (left == no_node or right == no_node) return false
-    if (ast.expr_kind(&state.tree, left) != .array_type or ast.expr_kind(&state.tree, right) != .array_type) return false
+    if (ast.expr_kind(&state.tree, left) != .array_type or ast.expr_kind(&state.tree, right) != .array_type)
+        return try same_type(state, left, right)
     a :: ast.array_type(&state.tree, left)
     b :: ast.array_type(&state.tree, right)
     if (a.mutable != b.mutable or b.count == null) return false
@@ -1593,6 +1602,7 @@ type_array_initialized proc(state @mut State, value, at ast.NodeId) bool ! Error
 type_array_undefined proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
     if (is_type(state, annotation)) return expression
     type :: try canonical_type(state, annotation)
+    if (type == no_node or ast.expr_kind(&state.tree, type) != .array_type) return expression
     descriptor :: ast.array_type(&state.tree, type)
     length := Value{}
     if (descriptor.count) |count| length = try evaluate(state, count)
@@ -1634,6 +1644,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
     if (ast.expr_kind(&state.tree, expression) == .typed_constant) {
         actual :: ast.typed_constant(&state.tree, expression)
         if (try type_array_compatible(state, type, actual.type)) return expression
+        if (!try type_array_initialized(state, expression, expression)) return no_node
     } else if (ast.expr_kind(&state.tree, expression) == .array_literal) {
         count :: ast.array_element_count(&state.tree, expression)
         if (array.count) |length| {
@@ -1665,6 +1676,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
             child := element_type
             while (!is_type(state, child)) {
                 child = try canonical_type(state, child)
+                if (child == no_node or ast.expr_kind(&state.tree, child) != .array_type) break
                 descriptor :: ast.array_type(&state.tree, child)
                 value := Value{}
                 if (descriptor.count) |length| value = try evaluate(state, length)
@@ -1685,9 +1697,16 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
         try refresh(state)
         return result
     }
-    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-        .type_mismatch, ast.node_span(&state.tree, expression))
-    return no_node
+    if (type_array_annotation(&state.tree, state.bindings.items, annotation)) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .type_mismatch, ast.node_span(&state.tree, expression))
+        return no_node
+    }
+    value :: try evaluate_ir(state, expression, annotation)
+    if (value.kind == .invalid) return no_node
+    result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), annotation, value.node)
+    try refresh(state)
+    return result
 }
 
 # rebuild only the indexed path so previous snapshots retain their owned values.
@@ -1758,7 +1777,17 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         state.evaluation_diagnostic = resolved.data.diagnostic
         return no_node
     }
-    if (try type_array_storage(state, annotation)) return try type_array_value(state, expression, annotation)
+    if (try execution_array_storage(state, annotation)) {
+        value :: try type_array_value(state, expression, annotation)
+        if (value != no_node and !type_array_annotation(&state.tree, state.bindings.items, annotation)) {
+            # erased snapshots still owe ordinary array-element/layout checking.
+            constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, expression),
+                ast.typed_constant(&state.tree, value).type, true)
+            try refresh(state)
+            try arraylist.append(&state.rewrites.constraints, constraint)
+        }
+        return value
+    }
     if (is_type(state, annotation)) {
         if (ast.expr_kind(&state.tree, expression) == .literal_undefined) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
@@ -1949,10 +1978,13 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
                 return try execute_type_statement(state, execution, normalized)
             }
             root := assignment.target
+            indexed := true
             while (true) {
                 kind :: ast.expr_kind(&state.tree, root)
-                if (kind == .selection and binding(state, root).kind == .none)
+                if (kind == .selection and binding(state, root).kind == .none) {
+                    indexed = false
                     root = ast.selection_expr(&state.tree, root).base
+                }
                 else if (kind == .index) root = ast.index_expr(&state.tree, root).base
                 else break
             }
@@ -1974,7 +2006,7 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
                 return .invalid
             }
             if (root != assignment.target) {
-                if (try type_array_storage(state, execution.locals.items[index].annotation)) {
+                if (indexed and try execution_array_storage(state, execution.locals.items[index].annotation)) {
                     local :: execution.locals.items[index]
                     if (
                         ast.node_class(&state.tree, local.declaration) != .statement
@@ -2167,7 +2199,7 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
     collection :: try type_execution_value(state, snapshot, annotation)
     if (collection == no_node) return .invalid
     count := Value{}
-    if (try type_array_storage(state, annotation)) {
+    if (try execution_array_storage(state, annotation)) {
         count = Value{ kind = .integer,
             magnitude = u64(ast.array_element_count(&state.tree, ast.typed_constant(&state.tree, collection).value)) }
     } else {
