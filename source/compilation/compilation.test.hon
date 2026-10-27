@@ -138,8 +138,8 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    config struct { counts [2]mut usize, bias i16 } := { counts = [0, 0], bias = 0 }
             `    original :: config
             `    for (usize(0)..2) |index| {
-            `        config.counts[index] = index + 1
-            `        config.bias = config.bias + 21
+            `        field!(config, "counts")[index] = index + 1
+            `        field!(config, "bias") = field!(config, "bias") + 21
             `    }
             `    return struct {
             `        values [config.counts[1]]i16
@@ -232,7 +232,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (same_type_array.values[0] + same_type_array.values[1] + same_type_array.bias != 42) return 0
             `    boundary BoundaryType(TypeRows()) :: { values = [19, 21] }
             `    same_boundary BoundaryType(TypeRows()) :: boundary
-            `    if (same_boundary.values[0] + same_boundary.values[1] + same_boundary.bias != 42) return 0
+            `    if (same_boundary.values[0] + same_boundary.values[1] + field!(same_boundary, "bias") != 42) return 0
             `    if (copy_type_rows(TypeRows())[0][0] != u8 or copy_type_rows(TypeRows())[1][0] != i16) return 0
             `    if (TypeRows()[0][0] != i16) return 0
             `    if (read_type_rows(TypeRows(), 40) != 42 or read_type_rows(TypeRows(), 40) != 42) return 0

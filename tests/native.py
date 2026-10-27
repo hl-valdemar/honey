@@ -11,6 +11,142 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "field_reflection_runtime_places_callbacks_and_single_evaluation": (
+        """
+        Point :: struct { value i16, callback @proc(value i16) i16 }
+        add proc(value i16) i16 { return value + 2 }
+        place proc(point @mut Point, calls @mut i16) @mut Point {
+            calls^ = calls^ + 1
+            return point
+        }
+        name proc() string { return "val\\x75e" }
+        main proc() [3]i16 {
+            point Point := { value = 19, callback = add }
+            calls i16 := 0
+            field!(place(&point, &calls), name()) = 40
+            pointer @mut i16 :: &field!(point, "value")
+            pointer^ = pointer^ + 1
+            return [field!(point, "callback")(field!(point, "value")), calls, point.value]
+        }
+        """, b"[43, 1, 41]\n", None,
+    ),
+    "field_reflection_tuple_enum_union_and_sequence_members": (
+        """
+        A :: enum { first, second }
+        B :: enum { third }
+        E :: alias A | B
+        Choice :: union(enum) { payload i16, empty void }
+        read proc($name string, value struct { count i16 }) i16 {
+            return field!(value, name)
+        }
+        main proc() [4]i16 {
+            tuple :: {i16(19), i16(21)}
+            choice Choice :: { payload = 2 }
+            values [2]i16 :: [19, 21]
+            member E :: field!(E, "third")
+            if (member != E.third) return [0, 0, 0, 0]
+            return [
+                field!(tuple, "0") + field!(tuple, "1") + field!(choice, "payload"),
+                i16(field!(values, "len")),
+                field!(&values, "ptr")[1],
+                read("count", { count = 42 }),
+            ]
+        }
+        """, b"[42, 2, 21, 42]\n", None,
+    ),
+    "field_reflection_type_control_and_constant_materialization": (
+        """
+        Config :: struct { count usize, value i16 }
+        config proc() Config { return { count = 2, value = 21 } }
+        Storage proc(name string) type {
+            settings :: config()
+            types :: [i16, bool]
+            return struct {
+                values [field!(settings, name)]types[0]
+                bias i16 = i16(field!(types, "len"))
+            }
+        }
+        main proc() i16 {
+            value Storage("count") :: { values = [19, 21] }
+            constant :: $(field!(config(), "value"))
+            return value.values[0] + constant + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "field_reflection_type_control_updates_names_and_nested_places": (
+        """
+        Selected proc() type {
+            config struct { left [1]mut usize, right [1]mut usize } := { left = [0], right = [0] }
+            original :: config
+            for ["left", "right"] |name| { field!(config, name)[0] = 2 }
+            if (original.left[0] != 0 or original.right[0] != 0) return bool
+            return [config.left[0] + config.right[0]]i16
+        }
+        main proc() i16 {
+            values Selected() :: [10, 10, 10, 12]
+            return values[0] + values[1] + values[2] + values[3]
+        }
+        """, b"42\n", None,
+    ),
+    "field_reflection_preserves_readonly_pointer_assignment": (
+        """
+        Point :: struct { value i16 }
+        update proc(point @Point) void { field!(point, "value") = 0 }
+        main proc() i16 {
+            point Point :: { value = 42 }
+            update(&point)
+            return point.value
+        }
+        """, b"", b"mutable pointee",
+    ),
+    "field_reflection_rejects_nonstring_names": (
+        """
+        main proc() i16 { return field!({ value = i16(42) }, 0) }
+        """, b"", b"compile-time value",
+    ),
+    "field_reflection_rejects_unknown_enum_members": (
+        """
+        E :: enum { first }
+        main proc() E { return field!(E, "missing") }
+        """, b"", b"no such field",
+    ),
+    "field_reflection_rejects_overflowing_tuple_ordinals": (
+        """
+        main proc() i16 { return field!({i16(42)}, "18446744073709551616") }
+        """, b"", b"no such field",
+    ),
+    "field_reflection_rejects_runtime_names": (
+        """
+        read proc(name string, value struct { count i16 }) i16 {
+            return field!(value, name)
+        }
+        main proc() i16 { return read("count", { count = 42 }) }
+        """, b"", b"compile-time value",
+    ),
+    "field_reflection_rejects_unknown_fields": (
+        """
+        main proc() i16 { return field!({ count = i16(42) }, "missing") }
+        """, b"", b"no such field",
+    ),
+    "field_reflection_rejects_noncanonical_tuple_names": (
+        """
+        main proc() i16 { return field!({i16(42)}, "00") }
+        """, b"", b"no such field",
+    ),
+    "field_reflection_rejects_wrong_arity": (
+        """
+        main proc() i16 { return field!(42) }
+        """, b"", b"argument count",
+    ),
+    "field_reflection_preserves_union_active_field_checks": (
+        """
+        Choice :: union(enum) { value i16, empty void }
+        main proc() i16 {
+            choice Choice :: .empty
+            return field!(choice, "value")
+        }
+        """, b"", b"not active",
+    ),
     "collection_iteration_borrows_array_and_reads_each_element": (
         """
         main proc() [2]i16 {

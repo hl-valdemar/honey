@@ -514,6 +514,21 @@ add_identifier proc(
     }, span)
 }
 
+#! copies selector spelling into AST-owned storage, independently of its diagnostic span.
+add_generated_identifier proc(
+    builder @mut Builder,
+    at Span,
+    interned_name strpool.StringId,
+    text []u8,
+) NodeId ! mem.AllocError {
+    id :: try add_generated_literal(builder, at, .string, text)
+    node :: &builder.storage.nodes.items[usize(id)]
+    node.kind = .expr_identifier
+    node.data1 = node.main
+    node.main = NodeData{ name_id = interned_name }
+    return id
+}
+
 add_unary proc(
     builder @mut Builder,
     span Span,
@@ -2141,10 +2156,12 @@ add_owned_literal proc(
     return id
 }
 
-#! borrows a literal's spelling, independently of its diagnostic source span.
+#! borrows literal or selector spelling, independently of its diagnostic source span.
 #! query float_value first for generated IEEE literals.
 literal_text proc(tree @Tree, id NodeId) []u8 {
     node :: get_node(&tree.storage, id)
+    if (node.kind == .expr_identifier and node.data0.extra == 1)
+        return tree.storage.generated.items[usize(node.data1.extra)]
     if (node.data0.extra == 1) return tree.storage.generated.items[usize(node.main.extra)]
     return source_text(tree, get_span(&tree.storage, id))
 }

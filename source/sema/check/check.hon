@@ -2830,7 +2830,7 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         }
         base := try infer_shape(state, view.base, defaults)
         if ((base.kind == .array or base.kind == .slice or base.kind == .string) and base.nominal == ast.NodeId(maxval!(u32))) {
-            member :: ast.source_text(state.tree, ast.node_span(state.tree, view.member))
+            member :: ast.literal_text(state.tree, view.member)
             if (mem.eql(member, "len")) {
                 seed(state, id, Type{ kind = .usize })
                 return group_type(state, id)
@@ -2852,7 +2852,7 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
                 !pointer.many and pointer.element.kind == .array
                 and ast.expr_kind(state.tree, view.member) == .identifier
             ) {
-                member :: ast.source_text(state.tree, ast.node_span(state.tree, view.member))
+                member :: ast.literal_text(state.tree, view.member)
                 if (mem.eql(member, "len")) {
                     type :: Type{ kind = .usize }
                     seed(state, id, type)
@@ -3259,7 +3259,7 @@ named_field proc(tree @ast.Tree, fields []RecordField, name ast.NodeId) usize {
 selected_field proc(state @State, fields []RecordField, member ast.NodeId) usize {
     if (ast.expr_kind(state.tree, member) == .identifier) return named_field(state.tree, fields, member)
     value := usize(0)
-    for ast.source_text(state.tree, ast.node_span(state.tree, member)) |byte| {
+    for ast.literal_text(state.tree, member) |byte| {
         if (byte < '0' or byte > '9') return no_index
         digit :: usize(byte - '0')
         if (value > divtrunc!(maxval!(usize) - digit, usize(10))) return no_index

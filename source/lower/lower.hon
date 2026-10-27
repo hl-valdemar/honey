@@ -1972,9 +1972,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 and sema.binding(state.resolution, id).kind == .none
             ) {
                 selection :: ast.selection_expr(tree, id)
+                if (trap_type(state, id)) return ir.no_value
                 base_type :: typecheck.type_of(state.checked, selection.base)
                 if (base_type.kind == .slice or base_type.kind == .string or base_type.kind == .array) {
-                    member :: ast.source_text(tree, ast.node_span(tree, selection.member))
+                    member :: ast.literal_text(tree, selection.member)
                     if (mem.eql(member, "len") or mem.eql(member, "ptr")) {
                         parts :: try slice_parts(state, selection.base)
                         if (state.terminated or trap_type(state, id)) return ir.no_value
@@ -1986,7 +1987,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     if (!descriptor.many and descriptor.element.kind == .array) {
                         pointer :: try lower_expression(state, selection.base)
                         if (state.terminated or trap_type(state, id)) return ir.no_value
-                        member :: ast.source_text(tree, ast.node_span(tree, selection.member))
+                        member :: ast.literal_text(tree, selection.member)
                         array :: typecheck.array_type(state.checked, descriptor.element.array_type)
                         if (mem.eql(member, "len")) return try constant(state, ir.Value{
                             type = .usize, data = ir.ValueData{ unsigned = u64(array.len) },

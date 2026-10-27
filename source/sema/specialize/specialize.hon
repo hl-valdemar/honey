@@ -15,7 +15,7 @@ typecheck :: import "@source/sema/check"
 @hide:file no_index :: maxval!(usize)
 
 @hide:file
-Error :: alias mem.AllocError | diagnostics.CapacityError
+Error :: alias mem.AllocError | diagnostics.CapacityError | strpool.InternError
 
 @hide:file
 ValueKind :: enum {
@@ -82,6 +82,7 @@ State :: struct {
     allocator mem.Allocator
     builder @mut ast.Builder
     tree ast.Tree
+    strings @mut strpool.StringPool
     bindings arraylist.ArrayList(sema.Binding)
     declarations arraylist.ArrayList(ast.NodeId)
     instances arraylist.ArrayList(Instance)
@@ -108,6 +109,7 @@ elaborate proc(
     builder @mut ast.Builder,
     root ast.NodeId,
     resolution @mut sema.Resolution,
+    strings @mut strpool.StringPool,
     diagnostic_store @mut diagnostics.Store,
 ) Result ! Error {
     result := Result{ builder = builder, changes = arraylist.init(allocator), constraints = arraylist.init(allocator) }
@@ -119,6 +121,10 @@ elaborate proc(
         id :: ast.NodeId(i)
         class :: ast.node_class(&original, id)
         if (class == .expression and ast.expr_kind(&original, id) == .comptime_expr) needed = true
+        if (class == .expression and ast.expr_kind(&original, id) == .builtin_call) {
+            name :: ast.builtin_call(&original, id).name
+            if (mem.eql(ast.source_text(&original, ast.node_span(&original, name)), "field")) needed = true
+        }
         if (class == .function and ast.function_generic(&original, id)) needed = true
         if (class == .function) {
             result_type :: sema.binding(resolution, ast.function_decl(&original, id).return_type)
@@ -134,7 +140,7 @@ elaborate proc(
     mapping :: try mem.alloc(ast.NodeId, allocator, ast.node_count(&original))
     defer mem.free(allocator, mapping)
     state := State{
-        allocator = allocator, builder = builder, tree = ast.view(builder, root),
+        allocator = allocator, builder = builder, tree = ast.view(builder, root), strings = strings,
         bindings = arraylist.init(allocator), declarations = arraylist.init(allocator),
         instances = arraylist.init(allocator), cache = hashmap.init(allocator),
         expanded = arraylist.init(allocator), diagnostics = diagnostic_store,
@@ -269,6 +275,13 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         try refresh(state)
         return
     }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .builtin_call) {
+        name :: ast.builtin_call(&state.tree, id).name
+        if (mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "field")) {
+            try expand_field(state, id)
+            return
+        }
+    }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .call) {
         callee :: ast.call_expr(&state.tree, id).callee
         try expand(state, callee)
@@ -316,6 +329,66 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
             }
         }
     }
+}
+
+# erase only the name: ordinary selection checks the base and retains its place,
+# evaluation order, mutability and active-union checks through both backends.
+@hide:file
+expand_field proc(state @mut State, id ast.NodeId) void ! Error {
+    if (ast.call_arg_count(&state.tree, id) != 2) {
+        try reject(state, id, .argument_count_mismatch)
+        return
+    }
+    base :: ast.call_arg(&state.tree, id, 0)
+    argument :: ast.call_arg(&state.tree, id, 1)
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    value :: try evaluate(state, argument)
+    if (value.kind != .string) {
+        if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .comptime_argument_required, ast.node_span(&state.tree, argument))
+        try reject_evaluation(state, id)
+        return
+    }
+    try arraylist.append(&state.rewrites.constraints, argument)
+    text :: ast.literal_text(&state.tree, value.node)
+    bytes := arraylist.init(u8, state.allocator)
+    defer arraylist.deinit(&bytes)
+    cursor := usize(1)
+    while (cursor < text.len - 1) {
+        byte :: ast.string_next(text, &cursor) catch {
+            try reject(state, id, .invalid_escape)
+            return
+        }
+        try arraylist.append(&bytes, byte)
+    }
+    # only canonical decimal names denote tuple ordinals; "01" is a name.
+    numeric := bytes.items.len > 0 and (bytes.items.len == 1 or bytes.items[0] != '0')
+    ordinal := u64(0)
+    for (bytes.items) |byte| {
+        if (byte < '0' or byte > '9') {
+            numeric = false
+            break
+        }
+        digit :: u64(byte - '0')
+        if (ordinal > divtrunc!(maxval!(u64) - digit, u64(10))) {
+            numeric = false
+            break
+        }
+        ordinal = ordinal * 10 + digit
+    }
+    span :: ast.node_span(&state.tree, argument)
+    member := no_node
+    if (numeric) member = try ast.add_integer(state.builder, span, ordinal)
+    else {
+        interned :: try strpool.intern(state.strings, bytes.items)
+        member = try ast.add_generated_identifier(state.builder, span, interned, bytes.items)
+    }
+    selection :: try ast.add_selection(state.builder, ast.node_span(&state.tree, id), base, member)
+    try replace(state, id, selection)
+    try refresh(state)
+    state.expanded.items[usize(id)] = 0
+    try expand(state, id)
 }
 
 # runtime bodies share the type-producer selector, but retain ordinary runtime
@@ -1413,7 +1486,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             selected = ast.array_element(&state.tree, array.value, index)
         } else {
             member :: ast.selection_expr(&state.tree, id).member
-            if (!mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, member)), "len")) {
+            if (!mem.eql(ast.literal_text(&state.tree, member), "len")) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .unknown_field, ast.node_span(&state.tree, member))
                 return false
@@ -1717,6 +1790,41 @@ execute_type_block proc(state @mut State, execution @mut TypeExecution, block as
     return .next
 }
 
+# substitute selector names without snapshotting away the assignment's root place.
+@hide:file
+type_assignment_target proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .builtin_call) {
+        name :: ast.builtin_call(&state.tree, id).name
+        if (!mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "field")) return id
+        if (ast.call_arg_count(&state.tree, id) != 2) {
+            try reject(state, id, .argument_count_mismatch)
+            return no_node
+        }
+        base :: try type_assignment_target(state, execution, ast.call_arg(&state.tree, id, 0))
+        if (base == no_node) return no_node
+        argument :: try type_snapshot(state, execution, ast.call_arg(&state.tree, id, 1))
+        arguments [2]ast.NodeId :: [base, argument]
+        result :: try ast.add_builtin_call(state.builder, ast.node_span(&state.tree, id), name, arguments[..])
+        try refresh(state)
+        try expand(state, result)
+        if (binding(state, result).kind == .invalid) return no_node
+        return result
+    }
+    if (kind != .selection and kind != .index) return id
+    base :: if (kind == .selection) ast.selection_expr(&state.tree, id).base else ast.index_expr(&state.tree, id).base
+    selected :: try type_assignment_target(state, execution, base)
+    if (selected == no_node or selected == base) return if (selected == no_node) no_node else id
+    result := no_node
+    if (kind == .selection)
+        result = try ast.add_selection(state.builder, ast.node_span(&state.tree, id),
+            selected, ast.selection_expr(&state.tree, id).member)
+    else result = try ast.add_index(state.builder, ast.node_span(&state.tree, id),
+        selected, ast.index_expr(&state.tree, id).index)
+    try refresh(state)
+    return result
+}
+
 @hide:file
 execute_type_statement proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
     match ast.stmt_kind(&state.tree, statement) {
@@ -1756,6 +1864,18 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(&state.tree, statement)
+            target :: try type_assignment_target(state, execution, assignment.target)
+            if (target == no_node) return .invalid
+            if (target != assignment.target) {
+                normalized :: try ast.add_assignment_stmt(state.builder,
+                    ast.node_span(&state.tree, statement), target, assignment.value)
+                try refresh(state)
+                # synthesized places still need local substitution in snapshots.
+                previous :: execution.mapping.len
+                execution.mapping = try mem.realloc(state.allocator, execution.mapping, ast.node_count(&state.tree))
+                mem.set(execution.mapping[previous..], no_node)
+                return try execute_type_statement(state, execution, normalized)
+            }
             root := assignment.target
             while (true) {
                 kind :: ast.expr_kind(&state.tree, root)
@@ -2564,7 +2684,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             if (base == no_node) return no_node
             if (ast.expr_kind(&state.tree, base) == .pointer_type) base = try canonical_type(state, ast.pointer_type(&state.tree, base).element)
             if (base == no_node) return no_node
-            member :: ast.source_text(&state.tree, ast.node_span(&state.tree, view.member))
+            member :: ast.literal_text(&state.tree, view.member)
             base_kind :: ast.expr_kind(&state.tree, base)
             if (
                 mem.eql(member, "len") and (

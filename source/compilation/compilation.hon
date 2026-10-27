@@ -398,7 +398,14 @@ compile proc(
     }
     resolution := try sema.resolve_packages(compilation.allocator, &tree, roots.items, imports.items, &compilation.strings, diagnostic_store)
     defer sema.deinit(&resolution)
-    elaborated := try specialize.elaborate(compilation.allocator, &compilation.builder, compilation.module_root?, &resolution, diagnostic_store)
+    elaborated := try specialize.elaborate(
+        compilation.allocator,
+        &compilation.builder,
+        compilation.module_root?,
+        &resolution,
+        &compilation.strings,
+        diagnostic_store,
+    )
     defer specialize.deinit(&elaborated)
     tree = ast.view(&compilation.builder, compilation.module_root?)
     checked := try typecheck.check_elaborated(compilation.allocator, &tree, &resolution, elaborated.constraints.items, diagnostic_store)
