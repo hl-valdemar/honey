@@ -94,7 +94,13 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        length = length + 1
             `    }
             `    return match length {
-            `        2: struct { values [length]Element },
+            `        2: struct {
+            `            values [match length { 2: length, else: usize(1) }](match true {
+            `                true: Element,
+            `                false: i8(128),
+            `            })
+            `            bias i16 = match true { true: 0, false: i8(128) }
+            `        },
             `        else: i8(128),
             `    }
             `}
@@ -105,7 +111,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    box Box(i16) :: { value = identity(i16, values[0]) }
             `    fixed Fixed(count()) :: { values = [box.value, 2] }
             `    same Fixed(2) :: fixed
-            `    return identity(same.values[0]) + same.values[$(usize(1))]
+            `    return identity(same.values[0]) + same.values[$(usize(1))] + same.bias
             `}
             ,
         )

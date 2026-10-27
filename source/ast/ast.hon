@@ -2040,6 +2040,12 @@ replace_node proc(builder @mut Builder, target, source NodeId) void {
     builder.storage.nodes.items[usize(target)] = get_node(&builder.storage, source)
 }
 
+#! selects a source node, retaining its literal spelling and diagnostic provenance.
+replace_node_from_source proc(builder @mut Builder, target, source NodeId) void {
+    replace_node(builder, target, source)
+    builder.storage.spans.items[usize(target)] = get_span(&builder.storage, source)
+}
+
 #! shallow-copies kind, payload, and span; extra storage remains shared.
 copy_node proc(builder @mut Builder, id NodeId) NodeId ! mem.AllocError {
     node :: get_node(&builder.storage, id)

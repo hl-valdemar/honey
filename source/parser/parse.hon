@@ -282,6 +282,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
             or next_n_is(state, 1, .struct)
             or next_n_is(state, 1, .enum) or next_n_is(state, 1, .union)
             or next_n_is(state, 1, .distinct)
+            or next_n_is(state, 1, .match)
             or next_n_is(state, 1, .at)
             or next_n_is(state, 1, .question)
             or (next_n_is(state, 1, .open_paren) and pointer_binding_starts(state))
@@ -800,6 +801,7 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
     if next_is(state, .struct) return try parse_record_type(state)
     if next_is(state, .enum) return try parse_enum_type(state)
     if next_is(state, .union) return try parse_union_type(state)
+    if next_is(state, .match) return try parse_match(state)
     if (next_is(state, .distinct) or next_is(state, .alias)) return try parse_type_wrapper(state)
     token :: try consume(state, .ident)
     type := try ast.add_identifier(state.builder, token.span, token.data.str_id)
@@ -846,7 +848,7 @@ parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.Nod
 starts_type proc(kind lexer.TokenKind) bool {
     return (
         kind == .ident or kind == .open_bracket or kind == .struct
-        or kind == .enum or kind == .union or kind == .distinct or kind == .alias
+        or kind == .enum or kind == .union or kind == .distinct or kind == .alias or kind == .match
         or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc
     )
 }
@@ -1498,6 +1500,7 @@ parse_index proc(state @mut State, base ast.NodeId, start u32) ast.NodeId ! Pars
 @hide:file
 array_starts_type proc(state @State) bool {
     depth usize := 0
+    curly_depth := usize(0)
     for (state.next_token)..(state.tokens.len) |i| {
         kind :: state.tokens[i].kind
         if (kind == .open_bracket) depth += 1
@@ -1509,7 +1512,12 @@ array_starts_type proc(state @State) bool {
                 return starts_type(next) or next == .mut
             }
         }
-        if (kind == .open_curly or kind == .close_curly or kind == .eof) return false
+        if (kind == .open_curly) curly_depth += 1
+        if (kind == .close_curly) {
+            if (curly_depth == 0) return false
+            curly_depth -= 1
+        }
+        if (kind == .eof) return false
     }
     return false
 }
@@ -1587,7 +1595,7 @@ named_binding_starts proc(state @State) bool {
         next_is(state, .ident)
         and (
             next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
-            or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc)
+            or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc) or next_n_is(state, 1, .match)
             or next_n_is(state, 1, .at)
             or next_n_is(state, 1, .question)
             or (next_n_is(state, 1, .open_paren) and pointer_binding_starts(state))

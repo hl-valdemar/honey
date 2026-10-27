@@ -11,6 +11,100 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "nested_type_match_failure_preserves_shared_return_types": (
+        """
+        Original :: alias [2]i16
+        Broken proc() type {
+            Unused :: struct { value match true { true: i16 } }
+            return Original
+        }
+        main proc() i16 {
+            if (false) {
+                bad Broken() :: [0, 0]
+                return bad[0]
+            }
+            good Original :: [40, 2]
+            return good[0] + good[1]
+        }
+        """, b"42\n", b"match is not exhaustive",
+    ),
+    "nested_type_matches_in_storage_calls_and_defaults": (
+        """
+        Box proc(T type) type { return struct { value T } }
+        increment proc(value i16) i16 { return value + 2 }
+        Storage proc(wide bool) type {
+            return struct {
+                values [match wide { true: usize(2), false: usize(1) }]mut (match wide { true: i16, false: i8 })
+                boxed Box(match wide { true: i16, false: i8 })
+                callback @proc(value match wide { true: i16, false: i8 }) match wide { true: i16, false: i8 }
+                bias i16 = match (match wide { true: true, false: false }) { true: 0, false: i8(128) }
+                enabled bool = match wide { true: true, false: false }
+                label []u8 = match wide { true: "ok", false: "bad" }
+                fraction f64 = match wide { true: 0.5, false: 0.0 }
+            }
+        }
+        main proc() i16 {
+            value Storage(true) :: { values = [20, 20], boxed = { value = 0 }, callback = increment }
+            cached Storage(!false) :: value
+            if (!cached.enabled or cached.label[0] != 111 or cached.fraction != 0.5) return -1
+            return cached.callback(cached.values[0] + cached.values[1]) + cached.boxed.value + cached.bias
+        }
+        """, b"42\n", None,
+    ),
+    "nested_type_matches_preserve_recursive_nominal_identity": (
+        """
+        Node proc(wide bool) type {
+            return struct {
+                value match wide { true: i16, false: i8 }
+                next ?@match wide { true: Node(wide), false: bool } = match wide { true: null, false: null }
+            }
+        }
+        main proc() i16 {
+            leaf Node(true) :: { value = 40 }
+            head Node(!false) :: { value = 2, next = &leaf }
+            small Node(false) :: { value = 0 }
+            return head.value + head.next?.value + i16(small.value)
+        }
+        """, b"42\n", None,
+    ),
+    "nested_type_matches_retain_loop_snapshots": (
+        """
+        Nest proc(depth usize) type {
+            Result match true { true: type, false: i8 } := i16
+            count match true { true: usize, false: i8 } := depth
+            for (0..count) |index| {
+                Result = [match index { 0: usize(2), else: usize(1) }](match index {
+                    0: Result,
+                    else: match true { true: Result, false: i8(128) },
+                })
+            }
+            return Result
+        }
+        main proc() i16 {
+            values Nest(2) :: [[40, 2]]
+            return values[0][0] + values[0][1]
+        }
+        """, b"42\n", None,
+    ),
+    "nested_type_matches_check_patterns_before_selecting": (
+        """
+        Bad proc() type {
+            return struct { value [1](match true { true: i16 }) }
+        }
+        main proc() Bad() { return {} }
+        """, b"", b"match is not exhaustive",
+    ),
+    "nested_type_matches_check_selected_defaults": (
+        """
+        Bad proc() type {
+            return struct { value i8 = match true { true: 128, false: 0 } }
+        }
+        main proc() i16 {
+            value Bad() :: {}
+            return i16(value.value)
+        }
+        """, b"", b"numeric literal is outside",
+    ),
     "type_match_enum_storage_and_cache_identity": (
         """
         Mode :: enum { tiny, pair, wide }
@@ -161,9 +255,12 @@ CASES = {
     "type_match_resolves_untaken_bodies": (
         """
         Bad proc() type {
-            return match true { true: i16, false: missing }
+            return struct { value match true { true: i16, false: missing } }
         }
-        main proc() Bad() { return 42 }
+        main proc() i16 {
+            value Bad() :: { value = 42 }
+            return value.value
+        }
         """, b"42\n", b"unknown name",
     ),
     "type_match_remains_bounded": (
@@ -3401,7 +3498,9 @@ def check_specialization_packages(temporary, executable):
     app.mkdir(parents=True)
     library.mkdir()
     (library / "types.hon").write_text(textwrap.dedent("""
-        Box proc(T type) type { return struct { value T } }
+        Box proc(T type) type {
+            return struct { value match true { true: T, false: i8(128) } }
+        }
         Selected proc(wide bool) type {
             return match wide { true: i16, false: u8 }
         }
@@ -3412,7 +3511,7 @@ def check_specialization_packages(temporary, executable):
                 Element = T
                 length = length + 1
             }
-            return struct { values [length]mut Element }
+            return struct { values [match length { 0: usize(0), else: length }]mut Element }
         }
     """).strip() + "\n")
     (library / "functions.hon").write_text(textwrap.dedent("""
@@ -3472,7 +3571,7 @@ def check_specialization_packages(temporary, executable):
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
     sizing.write_text(textwrap.dedent("""
         Bad proc() type {
-            return match true { true: i16, true: i8, else: bool }
+            return struct { value match true { true: i16, true: i8, else: bool } }
         }
     """).strip() + "\n")
     source.write_text(textwrap.dedent("""

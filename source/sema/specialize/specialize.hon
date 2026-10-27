@@ -67,7 +67,7 @@ deinit proc(result @mut Result) void {
     while (index > 0) {
         index -= 1
         change :: result.changes.items[index]
-        ast.replace_node(result.builder, change.target, change.saved)
+        ast.replace_node_from_source(result.builder, change.target, change.saved)
     }
     arraylist.deinit(&result.changes)
     arraylist.deinit(&result.constraints)
@@ -583,11 +583,14 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
     }
     if (is_type(state, view.return_type)) {
+        if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+        state.type_execution_depth += 1
+        defer state.type_execution_depth -= 1
         state.evaluation_diagnostic = diagnostics.no_diagnostic
         constraints_start :: state.rewrites.constraints.items.len
         returned :: try return_type_value(state, view.body, ast.NodeId(clone_start))
         if (returned == no_node) {
-            try reject_evaluation(state, call)
+            try reject_type_result(state, call, returned, constraints_start)
             return
         }
         result := returned
@@ -603,9 +606,20 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         state.instances.items[index].type = returned
         state.bindings.items[usize(declaration)] = sema.Binding{ kind = .declaration, data = sema.BindingData{ declaration = declaration } }
         try arraylist.append(&state.declarations, declaration)
+        if (!try expand_type_matches(state, declaration)) {
+            try reject_type_result(state, call, result, constraints_start)
+            return
+        }
         try expand(state, declaration)
         constraint_count :: state.rewrites.constraints.items.len
-        for (constraints_start..constraint_count) |i| try expand(state, state.rewrites.constraints.items[i])
+        for (constraints_start..constraint_count) |i| {
+            constraint :: state.rewrites.constraints.items[i]
+            if (!try expand_type_matches(state, constraint)) {
+                try reject_type_result(state, call, result, constraints_start)
+                return
+            }
+            try expand(state, constraint)
+        }
     } else {
         runtime := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&runtime)
@@ -635,6 +649,16 @@ reject_evaluation proc(state @mut State, call ast.NodeId) void ! Error {
     try replace(state, call, invalid)
     try refresh(state)
     state.bindings.items[usize(call)] = sema.Binding{ kind = .invalid, data = sema.BindingData{ diagnostic = diagnostic } }
+}
+
+# Failed deferred elaboration must not leave unchecked type expressions in the package.
+@hide:file
+reject_type_result proc(state @mut State, call, result ast.NodeId, constraints_start usize) void ! Error {
+    try reject_evaluation(state, call)
+    state.evaluation_diagnostic = binding(state, call).data.diagnostic
+    if (result != no_node) try reject_evaluation(state, result)
+    for (constraints_start..(state.rewrites.constraints.items.len)) |i|
+        try reject_evaluation(state, state.rewrites.constraints.items[i])
 }
 
 @hide:file
@@ -976,9 +1000,6 @@ TypeFlow :: enum { next, returned, break, continue, invalid }
 return_type_value proc(state @mut State, block, first_owned ast.NodeId) ast.NodeId ! Error {
     # ponytail: snapshots recheck scalar IR; cap type-control work at 4096 steps
     # until type values can share one persistent checked execution frame.
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
-    defer state.type_execution_depth -= 1
     execution := TypeExecution{
         locals = arraylist.init(state.allocator),
         mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
@@ -1060,6 +1081,7 @@ nominal_type_value proc(state @State, id ast.NodeId) bool {
 # the same rules as runtime matching, without checking unexecuted type bodies.
 @hide:file
 type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
+    if (!try expand_type_matches(state, ast.match_expr(&state.tree, id).subject)) return no_index
     arms := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&arms)
     patterns := arraylist.init(ast.NodeId, state.allocator)
@@ -1074,8 +1096,11 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
             return no_index
         }
         patterns.items = patterns.items[..0]
-        for (0..ast.match_pattern_count(&state.tree, arm_id)) |j|
-            try arraylist.append(&patterns, ast.match_pattern(&state.tree, arm_id, j))
+        for (0..ast.match_pattern_count(&state.tree, arm_id)) |j| {
+            pattern :: ast.match_pattern(&state.tree, arm_id, j)
+            if (!try expand_type_matches(state, pattern)) return no_index
+            try arraylist.append(&patterns, pattern)
+        }
         span :: ast.node_span(&state.tree, arm_id)
         index :: try ast.add_integer(state.builder, span, u64(i))
         selector :: try ast.add_match_arm(state.builder, span, patterns.items,
@@ -1105,10 +1130,31 @@ type_value_expression proc(state @mut State, input ast.NodeId) ast.NodeId ! Erro
     return expression
 }
 
+# Normalize only selected expression arms before ordinary expansion can visit them.
+# Nominal results enter here after their instance declaration is cached.
+@hide:file
+expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .match_expr) {
+        selected :: try type_value_expression(state, id)
+        if (selected == no_node) return false
+        resolved :: binding(state, selected)
+        try remember(state, id)
+        ast.replace_node_from_source(state.builder, id, selected)
+        try refresh(state)
+        state.bindings.items[usize(id)] = resolved
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (!try expand_type_matches(state, ast.child(&state.tree, id, i))) return false
+    }
+    return true
+}
+
 @hide:file
 type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.NodeId ! Error {
+    if (annotation == no_node) return no_node
     expression :: try type_value_expression(state, input)
     if (expression == no_node) return no_node
+    if (!try expand_type_matches(state, annotation)) return no_node
     # A recursive record needs its cached declaration before expanding its fields.
     if (is_type(state, annotation) and nominal_type_value(state, expression)) {
         concrete :: try materialize(state, Value{ kind = .type, node = expression })
@@ -1117,6 +1163,7 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         try arraylist.append(&state.rewrites.constraints, constraint)
         return concrete.node
     }
+    if (!try expand_type_matches(state, expression)) return no_node
     try expand(state, expression)
     resolved :: binding(state, expression)
     if (resolved.kind == .invalid) {
@@ -1178,6 +1225,7 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
             if (declaration.type) |type| annotation = try type_snapshot(state, execution, type)
             else if (nominal_type_value(state, expression)) annotation = try builtin(state, expression, .type)
             else {
+                if (!try expand_type_matches(state, expression)) return .invalid
                 try expand(state, expression)
                 annotation = try expression_type(state, expression, 0)
                 if (annotation == no_node) {
