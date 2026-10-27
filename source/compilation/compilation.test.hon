@@ -175,6 +175,26 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    for (empty) |_| return bool
             `    return struct { values [types.len]types[1][0], bias inferred[0][0] = 2 }
             `}
+            `TypeRows proc() [2]mut [1]mut type {
+            `    rows [2]mut [1]mut type := [[i8], [i16]]
+            `    (rows[0])[0] = i16
+            `    return rows
+            `}
+            `copy_type_rows proc(rows [2]mut [1]mut type) [2]mut [1]mut type {
+            `    copied := rows
+            `    (copied[0])[0] = u8
+            `    if (rows[0][0] != i16) return [[bool], [bool]]
+            `    return copied
+            `}
+            `BoundaryType proc(rows [2]mut [1]mut type) type {
+            `    original :: rows
+            `    changed :: copy_type_rows(rows)
+            `    if (changed[0][0] != u8 or rows[0][0] != i16 or original[0][0] != i16) return bool
+            `    return struct { values [rows.len]rows[0][0], bias rows[1][0] = 2 }
+            `}
+            `read_type_rows proc($rows [2]mut [1]mut type, value rows[0][0]) rows[1][0] {
+            `    return value + rows[1][0](rows.len)
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -210,6 +230,12 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    type_array TypeArray() :: { values = [19, 21] }
             `    same_type_array TypeArray() :: type_array
             `    if (same_type_array.values[0] + same_type_array.values[1] + same_type_array.bias != 42) return 0
+            `    boundary BoundaryType(TypeRows()) :: { values = [19, 21] }
+            `    same_boundary BoundaryType(TypeRows()) :: boundary
+            `    if (same_boundary.values[0] + same_boundary.values[1] + same_boundary.bias != 42) return 0
+            `    if (copy_type_rows(TypeRows())[0][0] != u8 or copy_type_rows(TypeRows())[1][0] != i16) return 0
+            `    if (TypeRows()[0][0] != i16) return 0
+            `    if (read_type_rows(TypeRows(), 40) != 42 or read_type_rows(TypeRows(), 40) != 42) return 0
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }

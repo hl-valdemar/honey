@@ -1328,6 +1328,186 @@ CASES = {
         main proc() Bad() { return 42 }
         """, b"", b"array length must be a nonnegative supported compile-time integer",
     ),
+    "type_array_procedure_nested_results_in_signatures_storage_and_defaults": (
+        """
+        Row :: alias [2]type
+        row proc(wide bool) Row {
+            if (wide) return [i16, [2]i16]
+            return [i8, [2]i8]
+        }
+        rows proc() [2]Row { return [row(true), row(false)] }
+        Storage :: struct { values rows()[0][1], bias rows()[0][0] = 2 }
+        read proc(value rows()[0][0]) rows()[0][0] { return value }
+        main proc() i16 {
+            value Storage :: { values = [19, 21] }
+            small rows()[1][1] :: [0, 0]
+            return read(value.values[0]) + value.values[1] + value.bias + i16(small[0])
+        }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_dependent_lengths_and_ordinary_array_inputs": (
+        """
+        identity proc($N usize, types [N]type) [N]type { return types }
+        row proc() [2]type { return identity(2, identity(1 + 1, [i16, bool])) }
+        Box proc($N usize, types [N]type) type {
+            return struct { value types[0], enabled types[1] = true }
+        }
+        main proc() i16 {
+            value Box(2, row()) :: { value = 42 }
+            same Box(1 + 1, [i16, bool]) :: value
+            if (same.enabled) return same.value
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_erased_runtime_generic_parameters": (
+        """
+        row proc() [2]type { return [i16, bool] }
+        add proc($types [2]type, left types[0], right types[0]) types[0] {
+            enabled types[1] :: true
+            if (enabled) return left + right
+            return 0
+        }
+        forward proc(value i16) i16 { return add(row(), value, 2) }
+        main proc() i16 { return forward(40) }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_inputs_results_and_cache_are_by_value": (
+        """
+        change proc(types [1]mut [2]mut type) [1]mut [2]mut type {
+            copied := types
+            (copied[0])[0] = bool
+            return copied
+        }
+        seed proc() [1]mut [2]mut type { return [[i16, i8]] }
+        Selected proc() type {
+            original [1]mut [2]mut type := $(seed())
+            changed := change(original)
+            (changed[0])[1] = u8
+            cached := change(seed())
+            fresh := seed()
+            if (original[0][0] != i16 or fresh[0][0] != i16) return bool
+            if (cached[0][0] != bool or cached[0][1] != i8) return bool
+            if (changed[0][1] != u8) return bool
+            return original[0][0]
+        }
+        main proc() Selected() { return 42 }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_cache_canonical_leaves_and_nominal_identity": (
+        """
+        Original :: struct { value i16 }
+        Same :: alias Original
+        leaf proc() type { return Original }
+        identity proc(types [2]type) [2]type { return types }
+        Box proc(types [2]type) type { return struct { first types[0], second types[1] } }
+        Selected proc() type {
+            leaves :: identity([struct { value i16 }, struct { value i16 }])
+            copied :: identity(leaves)
+            if (leaves[0] == leaves[1] or leaves[0] != copied[0]) return bool
+            if (Box([leaves[0], leaves[0]]) == Box([leaves[1], leaves[1]])) return bool
+            return Box([copied[0], leaves[0]])
+        }
+        main proc() i16 {
+            canonical Box(identity([Same, leaf()])) :: {
+                first = { value = 19 }, second = { value = 21 },
+            }
+            cached Box([Original, Original]) :: canonical
+            nominal Selected() :: { first = { value = 1 }, second = { value = 1 } }
+            copy := nominal.first
+            copy = nominal.second
+            return cached.first.value + cached.second.value + nominal.first.value + copy.value
+        }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_empty_nested_shapes": (
+        """
+        empty proc() [0]type { return [] }
+        rows proc(types [0]type) [2][0]type { return [types, empty()] }
+        outer proc() [0][2]type { return [] }
+        Selected proc(types [2][0]type, absent [0][2]type) type {
+            if (types.len != 2 or types[0].len != 0 or absent.len != 0) return bool
+            for types |row| { for row |_| { return bool } }
+            return i16
+        }
+        main proc() Selected(rows(empty()), outer()) { return 42 }
+        """, b"42\n", None,
+    ),
+    "type_array_procedure_rejects_input_shape": (
+        """
+        first proc(types [2]type) type { return types[0] }
+        main proc() first([i16]) { return 42 }
+        """, b"", b"array literal length does not match its type",
+    ),
+    "type_array_procedure_rejects_input_leaf": (
+        """
+        first proc(types [1]type) type { return types[0] }
+        main proc() first([42]) { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_array_procedure_rejects_parameter_mutability_mismatch": (
+        """
+        row proc() [1]mut type { return [i16] }
+        first proc(types [1]type) type { return types[0] }
+        main proc() first(row()) { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_array_procedure_rejects_result_shape": (
+        """
+        bad proc() [1][2]type { return [[i16]] }
+        main proc() bad()[0][0] { return 42 }
+        """, b"", b"array literal length does not match its type",
+    ),
+    "type_array_procedure_rejects_result_leaf": (
+        """
+        bad proc() [1]type { return [42] }
+        main proc() bad()[0] { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_array_procedure_result_index_checks_bounds": (
+        """
+        row proc() [1]type { return [i16] }
+        main proc() row()[1] { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "type_array_procedure_result_index_requires_usize": (
+        """
+        row proc() [1]type { return [i16] }
+        main proc() row()[u8(0)] { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "type_array_procedure_rejects_runtime_dependency": (
+        """
+        row proc(wide bool) [1]type {
+            if (wide) return [i16]
+            return [i8]
+        }
+        read proc(wide bool) i16 {
+            value row(wide)[0] :: 42
+            return i16(value)
+        }
+        main proc() i16 { return read(true) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "type_array_procedure_requires_all_ordinary_arguments": (
+        """
+        row proc(ignored usize) [1]type { return [i16] }
+        main proc() row()[0] { return 42 }
+        """, b"", b"argument count does not match",
+    ),
+    "type_array_procedure_nested_execution_shares_step_limit": (
+        """
+        row proc(count usize) [1]type {
+            for (0..count) |_| { }
+            return [i16]
+        }
+        Selected proc() type {
+            for (0..usize(100)) |index| { types :: row(index + 100) }
+            return i16
+        }
+        main proc() Selected() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
     "type_execution_mutable_types_and_nested_producers": (
         """
         Nest proc(T type, depth usize) type {
@@ -4977,7 +5157,38 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 14
+    sizing.write_text(textwrap.dedent("""
+        row proc($N usize, types [N]type) [N]type { return types }
+        rows proc() [1][2]type { return [row(2, [i16, bool])] }
+        FromTypes proc(types [2]type) type {
+            return struct { value types[0], enabled types[1] = true }
+        }
+        add proc($types [2]type, value types[0]) types[0] { return value + 2 }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Imported :: alias lib.FromTypes(lib.rows()[0])
+        read proc(value lib.rows()[0][0]) i16 {
+            return lib.add(lib.row(2, [i16, bool]), value)
+        }
+        main proc() i16 {
+            value Imported :: { value = 40 }
+            same lib.FromTypes([i16, bool]) :: value
+            if (same.enabled) return read(same.value)
+            return 0
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        row proc() [1]type { return [i16] }
+        bad_rows proc() [1][1]type { return [[row()[1]]] }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.bad_rows()[0][0] { return 42 }\n')
+    check(app, executable, (b"", b"index out of bounds"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:2:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 16
 
 
 def check_dependency_provenance(temporary, executable):
