@@ -20,8 +20,8 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 - use four-space indentation and put opening braces on the declaration or control-flow line.
 - use single-line bodies for simple operations. use braces for multiple statements or nested control flow.
 - break long parameter lists and aggregate initializers across lines, with a trailing comma on the last item.
-- when breaking boolean or arithmetic expressions across lines, put continuation operators at the start of each line. indent operands one level inside the enclosing parentheses and put the closing parenthesis on its own line.
-- wrap multiline `if` and `while` guards in parentheses, with the opening body brace after the closing parenthesis, so the guard's end is visually distinct from its body.
+- when breaking boolean or arithmetic expressions across lines, put continuation operators at the start of each continued line. inner groups may keep opening parentheses beside their first operand and combine closing parentheses to avoid staircase indentation.
+- wrap multiline `if` and `while` guards in parentheses. put the outer guard's operands on following lines, indented one level, and its closing `)` on its own line, followed by any opening body brace.
 
 ```hon
 debug.assert(
