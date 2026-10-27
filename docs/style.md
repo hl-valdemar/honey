@@ -21,7 +21,7 @@ these guidelines apply to Honey programs, the compiler, and the standard library
 - use single-line bodies for simple operations. use braces for multiple statements or nested control flow.
 - break long parameter lists and aggregate initializers across lines, with a trailing comma on the last item.
 - when breaking boolean or arithmetic expressions across lines, put continuation operators at the start of each continued line. inner groups may keep opening parentheses beside their first operand and combine closing parentheses to avoid staircase indentation.
-- wrap multiline `if` and `while` guards in parentheses. put the outer guard's operands on following lines, indented one level, and its closing `)` on its own line, followed by any opening body brace.
+- wrap multiline `if` and `while` guards in parentheses. put the outer guard's operands on following lines, indented one level, and its closing `)` on a separate line. a simple single-statement body may follow `)` on that same line without braces; otherwise put the opening body brace there.
 
 ```hon
 debug.assert(
