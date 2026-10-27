@@ -817,6 +817,206 @@ CASES = {
         main proc() usize { return $(make())[0].len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
+    "comptime_tagged_union_preserves_tags_and_nested_raw_payloads": (
+        """
+        Tag :: enum(i16) { number = -7, empty = 12, zero = 41, payload = 90 }
+        Empty :: struct {}
+        Payload :: struct { rows [2]struct { values [2]i16 }, text string }
+        Choice :: union(Tag) { payload Payload, empty void, zero Empty, number i16 }
+        make proc() Choice {
+            return .payload { rows = [{ values = [10, 20] }, { values = [4, 6] }], text = "ok" }
+        }
+        numeric proc() Choice { return .number{42} }
+        empty proc() Choice { return .empty }
+        zero proc() Choice { return .zero{} }
+        score proc(value Choice) i16 {
+            return match value {
+                .number |number|: number,
+                .payload |payload|: (
+                    payload.rows[0].values[0] + payload.rows[0].values[1]
+                    + payload.rows[1].values[0] + payload.rows[1].values[1] + i16(payload.text.len)
+                ),
+                .empty: 3,
+                .zero: 5,
+            }
+        }
+        main proc() [5]i16 {
+            value :: $(make())
+            return [score(value), value.payload.rows[1].values[1], score($(numeric())),
+                score($(empty())), score($(zero()))]
+        }
+        """, b"[42, 6, 42, 3, 5]\n", None,
+    ),
+    "comptime_tagged_union_value_parameters_and_cache_identity": (
+        """
+        Choice :: union(enum) { left i16, right i16 }
+        make proc() Choice { return .left{2} }
+        Fixed proc($choice Choice) type {
+            return struct { values [usize(choice.left)]i16 }
+        }
+        Token proc($choice Choice) type { return struct {} }
+        score proc($choice Choice) i16 {
+            return match choice { .left |value|: value, .right |value|: value + 1 }
+        }
+        main proc() i16 {
+            first Fixed(make()) :: { values = [20, 20] }
+            same Fixed(Choice { left = 2 }) :: first
+            if (Token(make()) != Token(Choice { left = 2 })) return 0
+            if (Token(make()) == Token(Choice { right = 2 })) return 0
+            if (Token(make()) == Token(Choice { left = 3 })) return 0
+            return same.values[0] + same.values[1] + score(make())
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_fallible_nested_storage_preserves_both_channels": (
+        """
+        Error :: enum { failed }
+        Storage :: struct { values [2](i16 ! Error), text string ! Error }
+        make proc() Storage { return { values = [40, .failed], text = "ok" } }
+        main proc() i16 {
+            storage :: $(make())
+            text :: storage.text catch ""
+            return (storage.values[0] catch 0) + (storage.values[1] catch i16(text.len))
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_fallible_materializes_composed_and_payload_errors": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { failed struct { rows [2]i16, text string }, empty void }
+        Failure :: struct { code i16 }
+        missing proc() i16 ! (Missing | Detail) { return .missing }
+        detail proc() i16 ! (Missing | Detail) {
+            return .failed { rows = [20, 20], text = "ok" }
+        }
+        record proc() i16 ! Failure { return Failure { code = 42 } }
+        read proc(value i16 ! (Missing | Detail)) i16 {
+            return value catch |err| match err {
+                .missing: 7,
+                .failed |payload|: payload.rows[0] + payload.rows[1] + i16(payload.text.len),
+                .empty: 0,
+            }
+        }
+        main proc() [3]i16 {
+            return [read($(missing())), read($(detail())), $(record()) catch |err| err.code]
+        }
+        """, b"[7, 42, 42]\n", None,
+    ),
+    "comptime_fallible_value_parameters_type_inputs_and_cache_identity": (
+        """
+        Error :: enum { failed, other }
+        good proc() i16 ! Error { return 2 }
+        bad proc() i16 ! Error { return .failed }
+        Fixed proc($result i16 ! Error) type {
+            return struct { values [usize(result catch 1)]i16 }
+        }
+        Token proc($result i16 ! Error) type { return struct {} }
+        score proc($result i16 ! Error) i16 { return result catch 40 }
+        main proc() i16 {
+            first Fixed(good()) :: { values = [20, 20] }
+            same Fixed(2) :: first
+            if (Token(good()) != Token(2) or Token(bad()) != Token(Error.failed)) return 0
+            if (Token(good()) == Token(3) or Token(bad()) == Token(Error.other)) return 0
+            if (Token(good()) == Token(bad())) return 0
+            return same.values[0] + same.values[1] + score(good())
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_fallible_void_success_and_error_channels": (
+        """
+        Error :: enum { failed }
+        good proc() void ! Error {}
+        bad proc() void ! Error { return .failed }
+        score proc($result void ! Error) i16 {
+            result catch { return 2 }
+            return 40
+        }
+        main proc() i16 {
+            value i16 := 0
+            $(good()) catch { value = 100 }
+            $(bad()) catch { value = 2 }
+            return value + score(good()) + score(bad()) - 2
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_fallible_preserves_overlapping_channel_types": (
+        """
+        Success :: enum { failed }
+        Error :: enum { failed }
+        Value :: struct { code i16 }
+        Failure :: struct { code i16 }
+        good proc() Success ! Error { return Success.failed }
+        bad proc() Success ! Error { return Error.failed }
+        good_record proc() Value ! Failure { return Value { code = 40 } }
+        bad_record proc() Value ! Failure { return Failure { code = 2 } }
+        enum_score proc() i16 {
+            value :: $(good()) catch { return -1 }
+            if (value != Success.failed) return -2
+            $(bad()) catch { return 42 }
+            return 0
+        }
+        main proc() [2]i16 {
+            left :: $(good_record()) catch Value { code = 0 }
+            right :: $(bad_record()) catch |err| Value { code = err.code }
+            return [enum_score(), left.code + right.code]
+        }
+        """, b"[42, 42]\n", None,
+    ),
+    "comptime_tagged_union_projects_raw_nested_channels": (
+        """
+        Error :: enum { failed }
+        Choice :: union(enum) {
+            data struct { maybe ?i16, result i16 ! Error }
+            pointer @i16
+            empty void
+        }
+        make proc() Choice { return .data { maybe = 40, result = .failed } }
+        absent proc() Choice { return .empty }
+        main proc() i16 {
+            value :: $(make())
+            empty :: $(absent())
+            match empty { .empty: {}, else: return 0 }
+            return value.data.maybe? + (value.data.result catch 2)
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_tagged_union_rejects_nonnull_pointer_payload_escape": (
+        """
+        Choice :: union(enum) { pointer @i16, empty void }
+        make proc() Choice {
+            value i16 :: 42
+            return .pointer{&value}
+        }
+        main proc() i16 { return $(make()).pointer^ }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_fallible_rejects_nonnull_success_pointer_escape": (
+        """
+        Error :: enum { failed }
+        make proc() @i16 ! Error {
+            value i16 :: 42
+            return &value
+        }
+        main proc() i16 { return ($(make()) catch null)^ }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_fallible_rejects_nonnull_error_pointer_escape": (
+        """
+        Failure :: struct { pointer @i16 }
+        make proc() i16 ! Failure {
+            value i16 :: 42
+            return Failure { pointer = &value }
+        }
+        main proc() i16 { return $(make()) catch |err| err.pointer^ }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_remains_an_escape_trap": (
+        """
+        Storage :: union { number i16, bits u16 }
+        make proc() Storage { return Storage { number = 42 } }
+        main proc() i16 { return $(make()).number }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
     "comptime_float_bits_survive_aggregate_materialization": (
         """
         Floats :: struct { zero f64, nan f64 }

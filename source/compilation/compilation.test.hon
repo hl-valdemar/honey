@@ -105,12 +105,33 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    }
             `}
             `data proc() [2]i16 { return [40, 2] }
+            `Tag :: enum(i16) { empty = -7, payload = 90 }
+            `Choice :: union(Tag) { payload struct { values [2]i16, text string }, empty void }
+            `Error :: union(enum) { failed struct { code i16, text string } }
+            `Packet :: struct { choices [2]Choice, results [2](i16 ! Error) }
+            `packet_data proc() Packet {
+            `    return {
+            `        choices = [.payload { values = [40, 2], text = "ok" }, .empty],
+            `        results = [40, .failed { code = 2, text = "owned" }],
+            `    }
+            `}
+            `Token proc($value Packet) type { return struct {} }
             `main proc() i16 {
             `    if $(i16 != i16) { return $(i8(128)) }
             `    values :: $(data())
             `    box Box(i16) :: { value = identity(i16, values[0]) }
             `    fixed Fixed(count()) :: { values = [box.value, 2] }
             `    same Fixed(2) :: fixed
+            `    packet :: $(packet_data())
+            `    if (Token(packet_data()) != Token(packet)) return 0
+            `    payload :: packet.choices[0].payload
+            `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
+            `    match packet.choices[1] { .empty: {}, .payload: return 0 }
+            `    if ((packet.results[0] catch 0) != 40) return 0
+            `    error_code :: packet.results[1] catch |err| match err {
+            `        .failed |detail|: detail.code + i16(detail.text.len),
+            `    }
+            `    if (error_code != 7) return 0
             `    return identity(same.values[0]) + same.values[$(usize(1))] + same.bias
             `}
             ,
