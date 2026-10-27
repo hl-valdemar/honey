@@ -18,23 +18,17 @@ Pair proc($V type) type {
 #! initializes a static string map from a list of key-value pairs (constructed at compile-time).
 #! returned views use compile-time storage and require no cleanup.
 init proc($V type, $N usize, $entries [N]Pair(V)) StaticStringMap(V) {
-    if N > usize(maxval!(u32)) {
-        compile_error!("static string map has too many entries")
-    }
+    if (N > usize(maxval!(u32))) compile_error!("static string map has too many entries")
 
     keys [N]mut []u8 := undefined
     values [N]mut V := undefined
 
     # assert no duplicate keys
     for entries |entry, i| {
-        if entry.0.len > usize(maxval!(u32)) {
-            compile_error!("static string map key is too long")
-        }
+        if (entry.0.len > usize(maxval!(u32))) compile_error!("static string map key is too long")
 
         for (0..i) |prior| {
-            if mem.eql(u8, entry.0, entries[prior].0) {
-                compile_error!("duplicate static string map key")
-            }
+            if mem.eql(u8, entry.0, entries[prior].0) compile_error!("duplicate static string map key")
         }
 
         keys[i] = entry.0

@@ -38,15 +38,10 @@ reserve proc(
     new_capacity := 8
     if list.capacity >= 8 {
         half :: divtrunc!(list.capacity, 2)
-        if list.capacity > maxval!(usize) - half {
-            new_capacity = min_capacity
-        } else {
-            new_capacity = list.capacity + half
-        }
+        if (list.capacity > maxval!(usize) - half) new_capacity = min_capacity
+        else new_capacity = list.capacity + half
     }
-    if new_capacity < min_capacity {
-        new_capacity = min_capacity
-    }
+    if (new_capacity < min_capacity) new_capacity = min_capacity
 
     length :: list.items.len
     allocation :: list.items.ptr[..list.capacity]
@@ -60,9 +55,7 @@ reserve proc(
 
 append proc($T type, list @mut ArrayList(T), value T) void ! mem.AllocError {
     length :: list.items.len
-    if length == maxval!(usize) {
-        return .out_of_memory
-    }
+    if (length == maxval!(usize)) return .out_of_memory
     try reserve(list, length + 1)
     list.items = list.items.ptr[..length + 1]
     list.items[length] = value

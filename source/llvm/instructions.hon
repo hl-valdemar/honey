@@ -201,9 +201,8 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         .optional_check: {
             operand :: try load(state, instruction.left)
             failed :: fresh(state)
-            if (state.values[usize(instruction.left)].kind == .bool) {
-                try io.print("  %r{} = xor i1 %r{}, true\n", output, {failed, operand})
-            } else try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {failed, operand})
+            if (state.values[usize(instruction.left)].kind == .bool) try io.print("  %r{} = xor i1 %r{}, true\n", output, {failed, operand})
+            else try io.print("  %r{} = icmp eq ptr %r{}, null\n", output, {failed, operand})
             try check_failure(state, failed, .null_unwrap, instruction.span)
             return
         }

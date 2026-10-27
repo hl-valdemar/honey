@@ -581,9 +581,8 @@ range_captures_preserve_duplicate_builtin_and_discard_errors test {
         } else return .expectation_failed
     }
     indexed :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 3))
-    if (indexed.index) |index| {
-        try testing.expect_equal(BindingKind.invalid, binding(&resolution, index).kind)
-    } else return .expectation_failed
+    if (indexed.index) |index| try testing.expect_equal(BindingKind.invalid, binding(&resolution, index).kind)
+    else return .expectation_failed
     if (indexed.capture) |capture| {
         reference :: ast.statement_expr(&tree, ast.block_statement(&tree, indexed.body, 0))
         try testing.expect_equal(capture, binding(&resolution, reference).data.declaration)

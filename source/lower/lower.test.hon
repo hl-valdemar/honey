@@ -1695,11 +1695,8 @@ array_context_inference_empty_shapes_and_scalar_leaf_families test {
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         defer interpreter.deinit(&outcome)
         try testing.expect(outcome.trap == null)
-        if (outcome.value.type == .string) {
-            try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "two"))
-        } else {
-            try testing.expect(outcome.value.data.boolean)
-        }
+        if (outcome.value.type == .string) try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "two"))
+        else try testing.expect(outcome.value.data.boolean)
     }
 }
 

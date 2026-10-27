@@ -170,9 +170,7 @@ lower_module proc(
 
 @hide:file
 lower_type proc(state @State, type typecheck.Type) ir.Type {
-    if (type.kind == .enumeration) {
-        return lower_type(state, typecheck.Type{ kind = typecheck.enum_type(state.checked, type.enum_type).backing })
-    }
+    if (type.kind == .enumeration) return lower_type(state, typecheck.Type{ kind = typecheck.enum_type(state.checked, type.enum_type).backing })
     if (type.kind == .slice) return .record
     if (type.kind == .fallible) return .record
     if (type.kind == .optional) return lower_optional_type(state, typecheck.array_type(state.checked, type.array_type).element)
@@ -562,11 +560,9 @@ lower_cleanups proc(state @mut State, depth usize, error_value ir.ValueId) void 
         id :: state.cleanups.items[index]
         if (ast.stmt_kind(state.tree, id) == .errdefer_stmt and error_value == ir.no_value) continue
         cleanup :: ast.cleanup_stmt(state.tree, id)
-        if (cleanup.capture) |capture| {
-            _ = try emit(state, ir.Instruction{
-                op = .store_local, left = error_value, slot = state.storage[usize(capture)].index, span = cleanup.span,
-            })
-        }
+        if (cleanup.capture) |capture| _ = try emit(state, ir.Instruction{
+            op = .store_local, left = error_value, slot = state.storage[usize(capture)].index, span = cleanup.span,
+        })
         try lower_block(state, cleanup.body, true)
         if (state.terminated) return
     }
@@ -800,10 +796,8 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             if (
                 ast.expr_kind(tree, assignment.target) == .index
                 or ast.expr_kind(tree, assignment.target) == .unary
-                or (
-                    ast.expr_kind(tree, assignment.target) == .selection
-                    and sema.binding(state.resolution, assignment.target).kind == .none
-                )
+                or (ast.expr_kind(tree, assignment.target) == .selection
+                    and sema.binding(state.resolution, assignment.target).kind == .none)
             ) {
                 value :: try lower_as(state, assignment.value, typecheck.type_of(state.checked, assignment.target))
                 if (state.terminated) return
@@ -865,9 +859,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             value := ir.no_value
             if (statement.value) |expression| value = try lower_as(state, expression, state.return_type)
             if (state.terminated or trap_type(state, id)) return
-            if (statement.value == null and state.return_type.kind == .fallible) {
-                value = try wrap_fallible(state, value, state.return_type, false, statement.span)
-            }
+            if (statement.value == null and state.return_type.kind == .fallible) value = try wrap_fallible(state, value, state.return_type, false, statement.span)
             try lower_return(state, value, statement.span)
         }
     }
@@ -1080,11 +1072,8 @@ lower_union proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         count :: ast.record_field_count(tree, id)
         contextual := false
         if (view.type) |annotation| contextual = ast.expr_kind(tree, annotation) == .enum_literal
-        if (contextual and field.type == .record and (count != 1 or ast.field(tree, ast.record_field(tree, id, 0)).name != null)) {
-            payload = try lower_record_as(state, id, typecheck.union_payload_type(state.checked, id))
-        } else if (count != 0) {
-            payload = try lower_as(state, ast.field(tree, ast.record_field(tree, id, 0)).value?, typecheck.union_payload_type(state.checked, id))
-        }
+        if (contextual and field.type == .record and (count != 1 or ast.field(tree, ast.record_field(tree, id, 0)).name != null)) payload = try lower_record_as(state, id, typecheck.union_payload_type(state.checked, id))
+        else if (count != 0) payload = try lower_as(state, ast.field(tree, ast.record_field(tree, id, 0)).value?, typecheck.union_payload_type(state.checked, id))
     }
     if (state.terminated) return ir.no_value
     return try emit(state, ir.Instruction{
@@ -1826,9 +1815,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (!trap_type(state, id)) unreachable
         }
         .array_type, .pointer_type, .function_type, .record_type, .enum_type, .union_type, .distinct_type, .slice_type, .optional_type, .fallible_type, .sum_type: {
-            if (!trap_type(state, id)) {
-                trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
-            }
+            if (!trap_type(state, id)) trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
         }
         .alias_expr: return try lower_expression(state, ast.type_operand(tree, id))
         .enum_literal: {
@@ -1843,9 +1830,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .builtin_call: return try lower_builtin(state, id)
         .record_literal: {
             checked :: typecheck.type_of(state.checked, id)
-            if (checked.kind == .record and typecheck.record_type(state.checked, checked.record_type).is_union) {
-                return try lower_union(state, id)
-            }
+            if (checked.kind == .record and typecheck.record_type(state.checked, checked.record_type).is_union) return try lower_union(state, id)
             return try lower_record_as(state, id, checked)
         }
         .array_literal: {
@@ -2014,9 +1999,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 text :: ast.literal_text(tree, expression.operand)
                 magnitude_limit :: ir.integer_max(type) + 1
                 if (integer_magnitude(text, magnitude_limit)) |magnitude| {
-                    if (magnitude == magnitude_limit) {
-                        return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = ir.integer_min(type) } }, span)
-                    }
+                    if (magnitude == magnitude_limit) return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = ir.integer_min(type) } }, span)
                 }
             }
             operand :: try lower_expression(state, expression.operand)
@@ -2030,9 +2013,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .binary: {
             expression :: ast.binary_expr(tree, id)
-            if (expression.operator == .logical_and or expression.operator == .logical_or) {
-                return try lower_logical(state, id)
-            }
+            if (expression.operator == .logical_and or expression.operator == .logical_or) return try lower_logical(state, id)
             left_type :: typecheck.type_of(state.checked, expression.left)
             right_type :: typecheck.type_of(state.checked, expression.right)
             if (
@@ -2100,9 +2081,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             for (0..count) |i| {
                 signature :: typecheck.type_of(state.checked, ast.call_expr(tree, id).callee).function
                 expected := typecheck.Type{}
-                if (signature != ast.NodeId(maxval!(u32)) and i < ast.function_param_count(tree, signature)) {
-                    expected = typecheck.type_of(state.checked, ast.param(tree, ast.function_param(tree, signature, i)).type)
-                }
+                if (signature != ast.NodeId(maxval!(u32)) and i < ast.function_param_count(tree, signature)) expected = typecheck.type_of(state.checked, ast.param(tree, ast.function_param(tree, signature, i)).type)
                 argument :: try lower_as(state, ast.call_arg(tree, id, i), expected)
                 if (state.terminated) return ir.no_value
                 state.arguments.items[scratch_start + i] = argument
@@ -2162,13 +2141,9 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     text :: ast.literal_text(state.tree, id)
     type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
-            return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
-        }
+        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
     } else if (ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| {
-            return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
-        }
+        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
     } else {
         value :: strconv.parse_float(state.module.allocator, text) catch |err| {
             match err {

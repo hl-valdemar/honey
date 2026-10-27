@@ -277,8 +277,7 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
 parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     if (
         next_is(state, .ident)
-        and (
-            next_n_is(state, 1, .ident)
+        and (next_n_is(state, 1, .ident)
             or next_n_is(state, 1, .struct)
             or next_n_is(state, 1, .enum) or next_n_is(state, 1, .union)
             or next_n_is(state, 1, .distinct)
@@ -289,11 +288,8 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
             or (next_n_is(state, 1, .star) and pointer_binding_starts(state))
             or (next_n_is(state, 1, .open_bracket) and array_starts_type(state))
             or next_n_is(state, 1, .double_colon)
-            or next_n_is(state, 1, .colon_equal)
-        )
-    ) {
-        return try parse_statement_decl(state)
-    }
+            or next_n_is(state, 1, .colon_equal))
+    ) return try parse_statement_decl(state)
     match current(state).kind {
         .if: return try parse_if(state)
         .while: return try parse_while(state, allow_else)
@@ -343,17 +339,13 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)
         or (state.match_arm_body and next_is(state, .comma))
         or (allow_else and next_is(state, .else))
-    ) {
-        return try ast.add_return_stmt(state.builder, keyword.span, null)
-    }
+    ) return try ast.add_return_stmt(state.builder, keyword.span, null)
     value :: try parse_expr(state)
     if (
         !next_is(state, .newline) and !next_is(state, .close_curly) and !next_is(state, .eof)
         and !(allow_else and next_is(state, .else))
         and !(state.match_arm_body and next_is(state, .comma))
-    ) {
-        return .unexpected_token
-    }
+    ) return .unexpected_token
     # include consumed grouping punctuation, which has no separate expression node.
     end :: state.tokens[state.next_token - 1].span.end
     return try ast.add_return_stmt(
@@ -395,9 +387,7 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
         and !next_is(state, .eof)
         and !(allow_else and next_is(state, .else))
         and !(state.match_arm_body and next_is(state, .comma))
-    ) {
-        return .unexpected_token
-    }
+    ) return .unexpected_token
     end :: state.tokens[state.next_token - 1].span.end
     return try ast.add_assignment_stmt(
         state.builder,
@@ -1176,10 +1166,8 @@ parse_record_field proc(state @mut State, declaration bool) ast.NodeId ! ParseEr
     value ?ast.NodeId := null
     named :: (
         member_name(current(state).kind)
-        and (
-            (!declaration and next_n_is(state, 1, .equal))
-            or (declaration and starts_type(state.tokens[state.next_token + 1].kind))
-        )
+        and ((!declaration and next_n_is(state, 1, .equal))
+            or (declaration and starts_type(state.tokens[state.next_token + 1].kind)))
     )
     if (named) {
         token :: if (declaration) try consume(state, .ident) else try consume_member(state, false)
@@ -1596,14 +1584,12 @@ pointer_binding_starts proc(state @State) bool {
 named_binding_starts proc(state @State) bool {
     return (
         next_is(state, .ident)
-        and (
-            next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
+        and (next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
             or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc) or next_n_is(state, 1, .match)
             or next_n_is(state, 1, .at)
             or next_n_is(state, 1, .question)
             or (next_n_is(state, 1, .open_paren) and pointer_binding_starts(state))
-            or (next_n_is(state, 1, .star) and pointer_binding_starts(state))
-        )
+            or (next_n_is(state, 1, .star) and pointer_binding_starts(state)))
     )
 }
 
@@ -1699,9 +1685,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         else: {
             diagnostic :: try unexpected_diagnostic(state)
 
-            if !is_expression_recovery_boundary(token.kind) {
-                state.next_token += 1
-            }
+            if (!is_expression_recovery_boundary(token.kind)) state.next_token += 1
 
             return try ast.add_invalid_expr(state.builder, token.span, diagnostic)
         }
@@ -1846,9 +1830,7 @@ recovery_closes_delimiters proc(state @State, paren_depth, square_depth usize) b
             .ident: {
                 if (i + 1 < state.tokens.len) {
                     next :: state.tokens[i + 1].kind
-                    if (next == .double_colon or next == .colon_equal or next == .ident or next == .proc) {
-                        return false
-                    }
+                    if (next == .double_colon or next == .colon_equal or next == .ident or next == .proc) return false
                 }
             }
             else: {}
@@ -1865,9 +1847,7 @@ recovery_closes_delimiters proc(state @State, paren_depth, square_depth usize) b
 @hide:file
 unexpected_diagnostic proc(state @mut State) diagnostics.DiagnosticId ! (mem.AllocError | diagnostics.CapacityError) {
     token :: current(state)
-    if (token.kind == .invalid and token.data.diagnostic != diagnostics.no_diagnostic) {
-        return token.data.diagnostic
-    }
+    if (token.kind == .invalid and token.data.diagnostic != diagnostics.no_diagnostic) return token.data.diagnostic
     return try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
 }
 

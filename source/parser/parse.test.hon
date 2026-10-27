@@ -442,11 +442,8 @@ parses_return_boundaries_and_recovers_trailing_tokens test {
     try testing.expect_equal(ast.StmtKind.expression, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 1)))
     grouped :: ast.return_stmt(&tree, ast.block_statement(&tree, body, 2))
     try testing.expect_equal("return (3 + 4)", ast.source_text(&tree, grouped.span))
-    if (grouped.value) |value| {
-        try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, value))
-    } else {
-        return .expectation_failed
-    }
+    if (grouped.value) |value| try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, value))
+    else return .expectation_failed
     try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 3)))
     after :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 4))
     try testing.expect_equal("after", ast.source_text(&tree, after.name))
@@ -1146,9 +1143,8 @@ rejects_control_tails_and_preserves_following_declarations test {
     }
     conditional :: ast.if_stmt(&tree, ast.block_statement(&tree, loop.body, 4))
     try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, conditional.then_block, 0)))
-    if (conditional.else_block) |other| {
-        try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, other, 0)))
-    } else return .expectation_failed
+    if (conditional.else_block) |other| try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, other, 0)))
+    else return .expectation_failed
     try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 1)))
     try testing.expect_equal(ast.DeclKind.statement, ast.decl_kind(&tree, ast.package_decl(&tree, 5)))
 }

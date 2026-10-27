@@ -170,9 +170,7 @@ execute proc(
         for (frames.items) |frame| free_frame(allocator, frame)
         arraylist.deinit(&frames)
     }
-    if (module.functions.items[usize(entry)].external_name.len != 0) {
-        return try runtime_trap(diagnostic_store, .unsupported_foreign_call, module.functions.items[usize(entry)].span)
-    }
+    if (module.functions.items[usize(entry)].external_name.len != 0) return try runtime_trap(diagnostic_store, .unsupported_foreign_call, module.functions.items[usize(entry)].span)
     try push_frame(allocator, module, &frames, entry, ir.no_value, null)
 
     while frames.items.len != 0 {
@@ -204,9 +202,7 @@ execute proc(
                 continue
             }
             value := ir.Value{}
-            if terminator.value != ir.no_value {
-                value = frames.items[frame_index].values[usize(terminator.value)]
-            }
+            if (terminator.value != ir.no_value) value = frames.items[frame_index].values[usize(terminator.value)]
             completed :: frames.items[frame_index]
             # transfer leaves while the completed frame still owns its backing.
             if completed.global |global_index| {
@@ -222,9 +218,7 @@ execute proc(
                 }
                 return Outcome{ value = value }
             }
-            if completed.destination != ir.no_value {
-                copy_value(module, &frames.items[frame_index - 1].values[usize(completed.destination)], value)
-            }
+            if (completed.destination != ir.no_value) copy_value(module, &frames.items[frame_index - 1].values[usize(completed.destination)], value)
             _ = arraylist.pop(&frames)
             free_frame(allocator, completed)
             continue
@@ -237,9 +231,7 @@ execute proc(
             .constant: value = instruction.constant
             .load_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
-                if !local.initialized {
-                    return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
-                }
+                if (!local.initialized) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
                 value = local.value
             }
             .store_local: {
@@ -250,9 +242,7 @@ execute proc(
             }
             .assign_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
-                if (!local.initialized) {
-                    return try runtime_trap(diagnostic_store, .write_before_initialization, instruction.span)
-                }
+                if (!local.initialized) return try runtime_trap(diagnostic_store, .write_before_initialization, instruction.span)
                 copy_value(module, &local.value, frames.items[frame_index].values[usize(instruction.left)])
                 continue
             }
@@ -283,13 +273,9 @@ execute proc(
             }
             .call: {
                 callable :: frames.items[frame_index].values[usize(instruction.left)]
-                if (callable.data.function == maxval!(ir.FunctionId)) {
-                    return try runtime_trap(diagnostic_store, .null_unwrap, instruction.span)
-                }
+                if (callable.data.function == maxval!(ir.FunctionId)) return try runtime_trap(diagnostic_store, .null_unwrap, instruction.span)
                 callee :: callable.data.function
-                if (module.functions.items[usize(callee)].external_name.len != 0) {
-                    return try runtime_trap(diagnostic_store, .unsupported_foreign_call, instruction.span)
-                }
+                if (module.functions.items[usize(callee)].external_name.len != 0) return try runtime_trap(diagnostic_store, .unsupported_foreign_call, instruction.span)
                 try push_frame(allocator, module, &frames, callee, instruction.destination, null)
                 # frame indices survive stack growth; pointers into frames.items do not.
                 for (0..instruction.arguments_count) |argument_index| {
@@ -346,9 +332,7 @@ execute proc(
                 start :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
                 end :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 if (start > end) return try runtime_trap(diagnostic_store, .invalid_slice_bounds, instruction.span)
-                if (instruction.extra != ir.no_value and end > frames.items[frame_index].values[usize(instruction.extra)].data.unsigned) {
-                    return try runtime_trap(diagnostic_store, .invalid_slice_bounds, instruction.span)
-                }
+                if (instruction.extra != ir.no_value and end > frames.items[frame_index].values[usize(instruction.extra)].data.unsigned) return try runtime_trap(diagnostic_store, .invalid_slice_bounds, instruction.span)
                 continue
             }
             .optional_check: {
@@ -423,17 +407,13 @@ execute proc(
                 base :: frames.items[frame_index].values[usize(instruction.left)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 shape :: module.arrays.items[usize(base.array_type)]
-                if (index >= u64(shape.len)) {
-                    return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
-                }
+                if (index >= u64(shape.len)) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 value = ir.aggregate_item(module, base, usize(index))
             }
             .field: {
                 base :: frames.items[frame_index].values[usize(instruction.left)]
                 shape :: module.arrays.items[usize(base.array_type)]
-                if (shape.is_union and !ir.union_active(module, base, usize(instruction.slot))) {
-                    return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
-                }
+                if (shape.is_union and !ir.union_active(module, base, usize(instruction.slot))) return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
                 value = ir.aggregate_item(module, base, usize(instruction.slot))
             }
             .address_local: {
@@ -489,9 +469,7 @@ execute proc(
                 base :: frames.items[frame_index].addresses[usize(base_id)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 shape :: module.arrays.items[usize(base.array_type)]
-                if (index >= u64(shape.len)) {
-                    return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
-                }
+                if (index >= u64(shape.len)) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 width :: if (base.raw or base.byte_view) ir.storage_size(module, shape.element, shape.element_array) else element_cells(module, shape)
                 start :: usize(index) * width
                 address := base
@@ -513,9 +491,7 @@ execute proc(
                     if base.initialized |initialized| {
                         if (!initialized^) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
                     }
-                    if (!ir.union_active(module, read_address(module, base, scratch), usize(instruction.slot))) {
-                        return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
-                    }
+                    if (!ir.union_active(module, read_address(module, base, scratch), usize(instruction.slot))) return try runtime_trap(diagnostic_store, .inactive_union_field, instruction.span)
                 }
                 raw :: base.raw or shape.is_union
                 width :: if (raw or base.byte_view) ir.storage_size(module, field.type, field.array_type) else if (ir.aggregate(field.type)) module.arrays.items[usize(field.array_type)].cells else 1
@@ -548,9 +524,7 @@ execute proc(
             }
             .pointer_address: {
                 handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
-                if (handle >= u64(pointers.items.len)) {
-                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
-                }
+                if (handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 location :: pointers.items[usize(handle)]
                 if (pointer_address(module, location, instruction.pointee, instruction.array_type)) |address| {
                     frames.items[frame_index].addresses[usize(instruction.destination)] = address
@@ -561,19 +535,13 @@ execute proc(
             }
             .pointer_offset: {
                 handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
-                if (handle >= u64(pointers.items.len)) {
-                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
-                }
+                if (handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 address := pointers.items[usize(handle)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 stride :: ir.storage_size(module, instruction.pointee, instruction.array_type)
-                if (stride != 0 and index > u64(divtrunc!(maxval!(usize) - address.byte_offset, stride))) {
-                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
-                }
+                if (stride != 0 and index > u64(divtrunc!(maxval!(usize) - address.byte_offset, stride))) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 address.byte_offset += usize(index) * stride
-                if (address.byte_offset > pointer_size(module, address)) {
-                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
-                }
+                if (address.byte_offset > pointer_size(module, address)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 value = try pointer_value(&pointers, address)
             }
             .load_address, .store_address: {
@@ -604,9 +572,7 @@ execute proc(
                 if instruction.type == .float {
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = -operand.data.real } }
                 } else {
-                    if operand.data.integer == ir.integer_min(instruction.type) {
-                        return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
-                    }
+                    if (operand.data.integer == ir.integer_min(instruction.type)) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = -operand.data.integer } }
                 }
             }
@@ -638,9 +604,7 @@ execute proc(
                 } else {
                     result :: checked_integer(instruction.op, left.data.integer, right.data.integer)
                     if result |result_integer| {
-                        if (result_integer < ir.integer_min(instruction.type) or result_integer > i64(ir.integer_max(instruction.type))) {
-                            return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
-                        }
+                        if (result_integer < ir.integer_min(instruction.type) or result_integer > i64(ir.integer_max(instruction.type))) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                         value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = result_integer } }
                     } else {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
@@ -699,9 +663,7 @@ execute proc(
                 value = ir.Value{ type = .bool, data = ir.ValueData{ boolean = result } }
             }
         }
-        if instruction.destination != ir.no_value {
-            copy_value(module, &frames.items[frame_index].values[usize(instruction.destination)], value)
-        }
+        if (instruction.destination != ir.no_value) copy_value(module, &frames.items[frame_index].values[usize(instruction.destination)], value)
     }
     unreachable
 }

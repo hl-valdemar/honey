@@ -70,9 +70,7 @@ alloc proc($T type, allocator Allocator, count usize) []mut T ! AllocError {
     element_size :: sizeof!(T)
     if (element_size == 0) return empty_slice(T, count)
 
-    if count > divtrunc!(maxval!(usize), element_size) {
-        return .out_of_memory
-    }
+    if (count > divtrunc!(maxval!(usize), element_size)) return .out_of_memory
 
     memory :: raw_alloc(allocator, count * element_size, alignof!(T))
     if memory |bytes| {
@@ -194,9 +192,7 @@ c_realloc proc(
     }
 
     if memory |old_memory| {
-        if alignment <= malloc_alignment {
-            return ptrcast!(c.realloc(old_memory, c_ulong(new_size)))
-        }
+        if (alignment <= malloc_alignment) return ptrcast!(c.realloc(old_memory, c_ulong(new_size)))
 
         new_memory :: c_alloc(null, new_size, alignment)
         if new_memory |new_bytes| {

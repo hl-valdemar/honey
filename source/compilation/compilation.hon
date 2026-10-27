@@ -347,9 +347,7 @@ compile proc(
             for (0..ast.package_decl_count(&tree)) |i| try arraylist.append(&declarations, ast.package_decl(&tree, i))
         }
     }
-    if (compilation.module_root == null) {
-        compilation.module_root = try ast.add_package(&compilation.builder, diagnostics.Span{ start = 0, end = 0 }, declarations.items)
-    }
+    if (compilation.module_root == null) compilation.module_root = try ast.add_package(&compilation.builder, diagnostics.Span{ start = 0, end = 0 }, declarations.items)
     imports := arraylist.init(sema.Import, compilation.allocator)
     defer arraylist.deinit(&imports)
     tree := ast.view(&compilation.builder, compilation.module_root?)
@@ -362,11 +360,9 @@ compile proc(
                 diagnostic.span.source == imported.path.source
                 and diagnostic.span.start == imported.path.start
                 and diagnostic.span.end == imported.path.end
-                and (
-                    diagnostic.code == .package_unavailable
+                and (diagnostic.code == .package_unavailable
                     or diagnostic.code == .invalid_import_path
-                    or diagnostic.code == .import_cycle
-                )
+                    or diagnostic.code == .import_cycle)
             ) {
                 failure = diagnostics.DiagnosticId(index)
                 break

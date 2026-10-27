@@ -71,11 +71,8 @@ get proc(
     if (map.count == 0) return null
 
     hash usize := 0
-    if $(hash_key == null) {
-        hash = normalize(auto_hash(K, key))
-    } else {
-        hash = normalize(call_hash(K, hash_key?, key))
-    }
+    if ($(hash_key == null)) hash = normalize(auto_hash(K, key))
+    else hash = normalize(call_hash(K, hash_key?, key))
     idx := hash & (map.entries.len - 1)
 
     while true {
@@ -114,9 +111,7 @@ put proc(
             if (entry.hash == 0) continue
 
             idx := entry.hash & (new_entries.len - 1)
-            while new_entries[idx].hash != 0 {
-                idx = (idx + 1) & (new_entries.len - 1)
-            }
+            while (new_entries[idx].hash != 0) idx = (idx + 1) & (new_entries.len - 1)
 
             new_entries[idx] = entry
         }
@@ -126,11 +121,8 @@ put proc(
     }
 
     hash usize := 0
-    if $(hash_key == null) {
-        hash = normalize(auto_hash(K, key))
-    } else {
-        hash = normalize(call_hash(K, hash_key?, key))
-    }
+    if ($(hash_key == null)) hash = normalize(auto_hash(K, key))
+    else hash = normalize(call_hash(K, hash_key?, key))
     idx := hash & (map.entries.len - 1)
 
     while true {

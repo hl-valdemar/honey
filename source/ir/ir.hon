@@ -434,9 +434,7 @@ storage_size proc(module @Module, type Type, shape ArrayId) usize {
 
 #! loads a scalar or borrows an aggregate from byte cells without allocating.
 read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, raw bool) Value {
-    if (aggregate(type)) {
-        return Value{ type = type, array_type = shape, raw = raw, data = ValueData{ elements = cells[..storage_size(module, type, shape)] } }
-    }
+    if (aggregate(type)) return Value{ type = type, array_type = shape, raw = raw, data = ValueData{ elements = cells[..storage_size(module, type, shape)] } }
     bits u64 := 0
     size :: storage_size(module, type, shape)
     count :: if (size > 8) usize(8) else size

@@ -168,11 +168,8 @@ rejects_fixed_family_conversion_integer_division_and_conflicting_demands test {
     for conflicts |declaration| {
         try testing.expect_equal(TypeKind.invalid, type_of(&result, declaration).kind)
         diagnostic :: type_of(&result, declaration).diagnostic
-        if (diagnostics.get(&diagnostic_store, diagnostic)) |error| {
-            try testing.expect_equal(diagnostics.Code.type_mismatch, error.code)
-        } else {
-            return .expectation_failed
-        }
+        if (diagnostics.get(&diagnostic_store, diagnostic)) |error| try testing.expect_equal(diagnostics.Code.type_mismatch, error.code)
+        else return .expectation_failed
         try testing.expect_equal(diagnostic, type_of(&result, ast.statement_decl(&tree, declaration).initializer).diagnostic)
     }
     conflict_uses [4]usize :: [8, 9, 11, 12]
@@ -294,11 +291,8 @@ separates_type_annotations_from_values_and_restricts_void_storage test {
     defer deinit(&result)
 
     bad :: ast.statement_decl(&tree, ast.package_decl(&tree, 1))
-    if (bad.type) |annotation| {
-        _ = try expect_error(&result, &diagnostic_store, annotation, .expected_type, ast.node_span(&tree, annotation))
-    } else {
-        return .expectation_failed
-    }
+    if (bad.type) |annotation| _ = try expect_error(&result, &diagnostic_store, annotation, .expected_type, ast.node_span(&tree, annotation))
+    else return .expectation_failed
     _ = try expect_error(&result, &diagnostic_store, bad.initializer, .invalid_operand, ast.node_span(&tree, bad.initializer))
     builtin :: ast.statement_decl(&tree, ast.package_decl(&tree, 2)).initializer
     _ = try expect_error(&result, &diagnostic_store, builtin, .type_not_value, ast.node_span(&tree, builtin))
@@ -322,11 +316,8 @@ separates_type_annotations_from_values_and_restricts_void_storage test {
     try testing.expect_equal(void_error, type_of(&result, void_b).diagnostic)
     try expect_kind(&result, ast.function_decl(&tree, void_function).return_type, .void)
     storage :: ast.statement_decl(&tree, ast.package_decl(&tree, 5))
-    if (storage.type) |annotation| {
-        _ = try expect_error(&result, &diagnostic_store, annotation, .invalid_void_type, ast.node_span(&tree, annotation))
-    } else {
-        return .expectation_failed
-    }
+    if (storage.type) |annotation| _ = try expect_error(&result, &diagnostic_store, annotation, .invalid_void_type, ast.node_span(&tree, annotation))
+    else return .expectation_failed
     holder :: ast.statement_decl(&tree, ast.package_decl(&tree, 8)).initializer
     _ = try expect_error(&result, &diagnostic_store, holder, .type_mismatch, ast.node_span(&tree, holder))
     operand :: ast.statement_decl(&tree, ast.package_decl(&tree, 9)).initializer
@@ -677,11 +668,8 @@ returns_supply_numeric_context_and_resolve_forward_local_and_parameter_names tes
     }
     identity :: ast.package_decl(&tree, 1)
     identity_body :: ast.function_decl(&tree, identity).body
-    if (ast.return_stmt(&tree, ast.block_statement(&tree, identity_body, 0)).value) |value| {
-        try testing.expect_equal(ast.function_param(&tree, identity, 0), sema.binding(&resolution, value).data.declaration)
-    } else {
-        return .expectation_failed
-    }
+    if (ast.return_stmt(&tree, ast.block_statement(&tree, identity_body, 0)).value) |value| try testing.expect_equal(ast.function_param(&tree, identity, 0), sema.binding(&resolution, value).data.declaration)
+    else return .expectation_failed
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
@@ -1429,11 +1417,8 @@ logical_operand_errors_are_independent_and_skipped_rhs_preserves_bool test {
     try expect_kind(&result, loop.condition, .bool)
     returned :: ast.block_statement(&tree, body, 6)
     try expect_kind(&result, returned, .void)
-    if (ast.return_stmt(&tree, returned).value) |value| {
-        try expect_kind(&result, value, .bool)
-    } else {
-        return .expectation_failed
-    }
+    if (ast.return_stmt(&tree, returned).value) |value| try expect_kind(&result, value, .bool)
+    else return .expectation_failed
     try testing.expect_equal(7, code_count(&diagnostic_store, .unknown_name))
     try testing.expect_equal(8, code_count(&diagnostic_store, .invalid_operand))
     try testing.expect_equal(15, diagnostics.count(&diagnostic_store))
@@ -2271,9 +2256,7 @@ nested_array_numeric_context_flows_through_index_children_before_defaults test {
     for usize(1)..usize(4) |i| {
         element_kind TypeKind :: if (i == 2) .float else .array
         type :: try expect_array(result, ast.package_decl(tree, i), 2, false, element_kind)
-        if (type.element.kind == .array) {
-            try testing.expect_equal(TypeKind.float, array_type(result, type.element.array_type).element.kind)
-        }
+        if (type.element.kind == .array) try testing.expect_equal(TypeKind.float, array_type(result, type.element.array_type).element.kind)
     }
     matrix :: ast.statement_decl(tree, ast.package_decl(tree, 1)).initializer
     for 0..ast.array_element_count(tree, matrix) |i| {

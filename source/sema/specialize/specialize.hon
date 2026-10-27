@@ -528,11 +528,8 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
     }
     callee :: try reference(state, call, target)
     replacement := no_node
-    if (state.instances.items[instance].type != no_node) {
-        replacement = try ast.add_type_operand(state.builder, ast.node_span(&state.tree, call), callee, true)
-    } else {
-        replacement = try ast.add_call(state.builder, ast.node_span(&state.tree, call), callee, runtime_arguments.items)
-    }
+    if (state.instances.items[instance].type != no_node) replacement = try ast.add_type_operand(state.builder, ast.node_span(&state.tree, call), callee, true)
+    else replacement = try ast.add_call(state.builder, ast.node_span(&state.tree, call), callee, runtime_arguments.items)
     try replace(state, call, replacement)
     try refresh(state)
 }
@@ -1554,13 +1551,10 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         .unary: {
             view :: ast.unary_expr(&state.tree, id)
             value := try evaluate(state, view.operand)
-            if (view.operator == .negate and value.kind == .integer) {
-                value.negative = value.magnitude != 0 and !value.negative
-            } else if (view.operator == .negate and value.kind == .real) {
-                value.magnitude = value.magnitude xor (u64(1) << 63)
-            } else if (view.operator == .logical_not and value.kind == .boolean) {
-                value.boolean = !value.boolean
-            } else return Value{}
+            if (view.operator == .negate and value.kind == .integer) value.negative = value.magnitude != 0 and !value.negative
+            else if (view.operator == .negate and value.kind == .real) value.magnitude = value.magnitude xor (u64(1) << 63)
+            else if (view.operator == .logical_not and value.kind == .boolean) value.boolean = !value.boolean
+            else return Value{}
             value.node = id
             return value
         }
@@ -1642,9 +1636,7 @@ evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
                 if (left.magnitude > maxval!(u64) - right.magnitude) return Value{}
                 return try integer_value(state, id, left.magnitude + right.magnitude, left.negative, annotation)
             }
-            if (left.magnitude < right.magnitude) {
-                return try integer_value(state, id, right.magnitude - left.magnitude, right.negative, annotation)
-            }
+            if (left.magnitude < right.magnitude) return try integer_value(state, id, right.magnitude - left.magnitude, right.negative, annotation)
             return try integer_value(state, id, left.magnitude - right.magnitude,
                 left.magnitude != right.magnitude and left.negative, annotation)
         }
@@ -1666,9 +1658,7 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
     if (a == b) return true
     x :: binding(state, a)
     y :: binding(state, b)
-    if (x.kind == .builtin or y.kind == .builtin) {
-        return x.kind == .builtin and y.kind == .builtin and builtin_identity(x.data.builtin) == builtin_identity(y.data.builtin)
-    }
+    if (x.kind == .builtin or y.kind == .builtin) return x.kind == .builtin and y.kind == .builtin and builtin_identity(x.data.builtin) == builtin_identity(y.data.builtin)
     kind :: ast.expr_kind(&state.tree, a)
     if (kind == .sum_type or ast.expr_kind(&state.tree, b) == .sum_type)
         return try type_subset(state, a, b) and try type_subset(state, b, a)
@@ -1908,9 +1898,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             callee :: ast.call_expr(&state.tree, id).callee
             destination :: binding(state, callee)
             if (destination.kind == .builtin) return callee
-            if (destination.kind == .declaration and ast.node_class(&state.tree, destination.data.declaration) == .function) {
-                return try canonical_type(state, ast.function_decl(&state.tree, destination.data.declaration).return_type)
-            }
+            if (destination.kind == .declaration and ast.node_class(&state.tree, destination.data.declaration) == .function) return try canonical_type(state, ast.function_decl(&state.tree, destination.data.declaration).return_type)
             signature :: try expression_type(state, callee, depth + 1)
             if (signature != no_node and ast.expr_kind(&state.tree, signature) == .function_type)
                 return try canonical_type(state, ast.callable_result(&state.tree, signature))

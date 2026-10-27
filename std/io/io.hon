@@ -269,9 +269,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
     while cursor < format.len {
         byte :: format[cursor]
         if byte == '{' {
-            if cursor + 1 >= format.len {
-                compile_error!("io.print format has an unmatched '{'")
-            }
+            if (cursor + 1 >= format.len) compile_error!("io.print format has an unmatched '{'")
             if cursor > literal_start {
                 tokens[token_count] = FormatToken{
                     kind = .literal,
@@ -298,9 +296,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
             kind FormatTokenKind := .default
             width := 2
             if next != '}' {
-                if cursor + 2 >= format.len or format[cursor + 2] != '}' {
-                    compile_error!("io.print format expects a one-character specifier")
-                }
+                if (cursor + 2 >= format.len or format[cursor + 2] != '}') compile_error!("io.print format expects a one-character specifier")
 
                 width = 3
                 if (next == 's') kind = .string
@@ -314,9 +310,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
                 else compile_error!("io.print format has an unknown specifier")
             }
 
-            if argument_count >= field_count {
-                compile_error!("io.print format argument count does not match the tuple")
-            }
+            if (argument_count >= field_count) compile_error!("io.print format argument count does not match the tuple")
 
             tokens[token_count] = FormatToken{
                 kind = kind,
@@ -333,9 +327,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
         }
 
         if byte == '}' {
-            if cursor + 1 >= format.len or format[cursor + 1] != '}' {
-                compile_error!("io.print format has an unmatched '}'")
-            }
+            if (cursor + 1 >= format.len or format[cursor + 1] != '}') compile_error!("io.print format has an unmatched '}'")
             if cursor > literal_start {
                 tokens[token_count] = FormatToken{
                     kind = .literal,
@@ -368,9 +360,7 @@ parse_format proc($N usize, $format []u8, $Args type) [N]mut FormatToken {
         }
     }
 
-    if argument_count != field_count {
-        compile_error!("io.print format argument count does not match the tuple")
-    }
+    if (argument_count != field_count) compile_error!("io.print format argument count does not match the tuple")
     return tokens
 }
 
@@ -466,9 +456,7 @@ write_decimal proc($T type, output Writer, value T) void ! WriteError {
 write_character proc($T type, output Writer, value T) void ! WriteError {
     match typeinfo!(T) {
         .integer: {
-            if minval!(T) < 0 or maxval!(T) > 255 {
-                compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
-            }
+            if (minval!(T) < 0 or maxval!(T) > 255) compile_error!("io.print '{c}' requires an unsigned integer that fits in u8")
             buffer [1]u8 :: [u8(value)]
             try write_all(output, buffer[..])
         }

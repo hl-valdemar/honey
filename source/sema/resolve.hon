@@ -349,9 +349,7 @@ resolve_function proc(
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
         try resolve_expr(state, &signature, ast.param(tree, parameter).type)
-        if (ast.param(tree, parameter).comptime) {
-            try predeclare(state, &signature, parameter, ast.param(tree, parameter).name)
-        }
+        if (ast.param(tree, parameter).comptime) try predeclare(state, &signature, parameter, ast.param(tree, parameter).name)
     }
     try resolve_expr(state, &signature, function.return_type)
     scope := Scope{
@@ -381,9 +379,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
     tree :: state.tree
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
-        if ast.stmt_kind(tree, statement) == .declaration {
-            try predeclare(state, scope, statement, ast.statement_decl(tree, statement).name)
-        }
+        if (ast.stmt_kind(tree, statement) == .declaration) try predeclare(state, scope, statement, ast.statement_decl(tree, statement).name)
     }
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
@@ -423,12 +419,8 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
                     parent = scope,
                 }
                 defer hashmap.deinit(&body_scope.names)
-                if (loop.capture) |capture| {
-                    try predeclare(state, &body_scope, capture, ast.node_span(tree, capture))
-                }
-                if (loop.index) |index| {
-                    try predeclare(state, &body_scope, index, ast.node_span(tree, index))
-                }
+                if (loop.capture) |capture| try predeclare(state, &body_scope, capture, ast.node_span(tree, capture))
+                if (loop.index) |index| try predeclare(state, &body_scope, index, ast.node_span(tree, index))
                 try resolve_block(state, &body_scope, loop.body)
             }
             .invalid: resolve_invalid(state, statement)
@@ -451,9 +443,7 @@ resolve_statement_decl proc(
     id ast.NodeId,
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
     declaration :: ast.statement_decl(state.tree, id)
-    if (ast.expr_kind(state.tree, declaration.initializer) == .alias_expr) {
-        state.aliases[usize(id)] = ast.type_operand(state.tree, declaration.initializer)
-    }
+    if (ast.expr_kind(state.tree, declaration.initializer) == .alias_expr) state.aliases[usize(id)] = ast.type_operand(state.tree, declaration.initializer)
     if (declaration.type) |type| try resolve_expr(state, scope, type)
     try resolve_expr(state, scope, declaration.initializer)
 }
@@ -562,9 +552,7 @@ resolve_expr proc(
             try resolve_expr(state, scope, expression.operand)
             handler_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
             defer hashmap.deinit(&handler_scope.names)
-            if (expression.capture) |capture| {
-                try predeclare(state, &handler_scope, capture, ast.node_span(tree, capture))
-            }
+            if (expression.capture) |capture| try predeclare(state, &handler_scope, capture, ast.node_span(tree, capture))
             if (expression.handler_is_block) try resolve_block(state, &handler_scope, expression.handler)
             else try resolve_expr(state, &handler_scope, expression.handler)
         }
