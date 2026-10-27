@@ -11,6 +11,147 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_execution_optional_if_selects_storage_and_cache_identity": (
+        """
+        Count :: alias ?usize
+        Storage proc(count Count) type {
+            if count |length| { return struct { values [length]i16 } }
+            else { return struct { value i16 = 2 } }
+        }
+        main proc() i16 {
+            value Storage(2) :: { values = [19, 21] }
+            same Storage(usize(2)) :: value
+            empty Storage(null) :: {}
+            return same.values[0] + same.values[1] + empty.value
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_optional_payload_owned_aggregate_and_nested_capture": (
+        """
+        Detail :: struct { values [2]i16, text string, count ?usize }
+        detail proc() ?Detail { return { values = [19, 21], text = "ok", count = 2 } }
+        Storage proc() type {
+            if detail() |payload| {
+                if payload.count |count| {
+                    return struct {
+                        values [count]i16
+                        bias i16 = payload.values[0] + payload.values[1] + i16(payload.text.len)
+                    }
+                }
+            }
+            return bool
+        }
+        main proc() i16 {
+            value Storage() :: { values = [0, 0] }
+            return value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_optional_while_refreshes_capture_and_preserves_transfers": (
+        """
+        next proc(count usize) ?usize {
+            if (count < 4) return count
+            return null
+        }
+        Storage proc() type {
+            count usize := 0
+            Result := i16
+            while next(count) |length| {
+                count = count + 1
+                if (length == 0) continue
+                if (length == 3) break
+                Result = [length]Result
+            }
+            pending ?usize := 2
+            while pending |length| {
+                pending = null
+                if (length != 2) return bool
+                count = count + length
+            }
+            return struct { values Result, bias i16 = i16(count) }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [[17], [19]] }
+            return value.values[0][0] + value.values[1][0] + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_optional_absence_skips_invalid_bodies": (
+        """
+        absent proc() ?i16 { return null }
+        null_pointer proc() ?@i16 { return null }
+        null_callback proc() ?@proc() i16 { return null }
+        Storage proc() type {
+            pointer ?@i16 :: null
+            while pointer |_| { return i8(128) }
+            if absent() |_| { return i8(128) }
+            else { return i16 }
+        }
+        main proc() i16 {
+            absent_pointer :: $(null_pointer())
+            absent_callback :: $(null_callback())
+            if absent_pointer |_| { return -1 }
+            if absent_callback |_| { return -2 }
+            value Storage() :: 42
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "type_execution_optional_capture_retains_exact_payload_type": (
+        """
+        narrow proc() ?i8 { return 127 }
+        Bad proc() type {
+            if narrow() |value| {
+                copy :: value
+                overflow :: copy + 1
+                return [usize(overflow)]i16
+            }
+            return i16
+        }
+        main proc() i16 { value Bad() :: 42
+            return value }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_execution_optional_capture_is_immutable": (
+        """
+        Bad proc(value ?usize) type {
+            if value |length| { length = 2 }
+            return i16
+        }
+        main proc() i16 { value Bad(1) :: 42
+            return value }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "type_execution_optional_capture_requires_optional_guard": (
+        """
+        Bad proc() type {
+            if true |_| { return i16 }
+            return bool
+        }
+        main proc() i16 { value Bad() :: 42
+            return value }
+        """, b"", b"condition must have type bool",
+    ),
+    "type_execution_optional_capture_preserves_resolution_errors": (
+        """
+        Bad proc(value ?usize) type {
+            if value |value| { return i16 }
+            return bool
+        }
+        main proc() i16 { value Bad(null) :: 42
+            return value }
+        """, b"", b"duplicate name",
+    ),
+    "type_execution_optional_capture_loop_is_bounded": (
+        """
+        Bad proc(value ?usize) type {
+            while value |_| {}
+            return i16
+        }
+        main proc() i16 { value Bad(1) :: 42
+            return value }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
     "generic_match_scalar_enum_and_range_selection": (
         """
         Mode :: enum { pair, other }
@@ -4173,7 +4314,35 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:6:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 6
+    sizing.write_text(textwrap.dedent("""
+        Optional proc(T type, size ?usize) type {
+            if size |length| { return struct { values [length]T } }
+            else { return bool }
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            value lib.Optional(i16, 2) :: { values = [40, 2] }
+            return value.values[0] + value.values[1]
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        narrow proc() ?i8 { return 127 }
+        Optional proc(T type, size ?usize) type {
+            if narrow() |value| {
+                next :: value + 1
+                return [usize(next)]T
+            }
+            return T
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:4:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 8
 
 
 def check_dependency_provenance(temporary, executable):

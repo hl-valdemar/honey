@@ -890,7 +890,10 @@ serialize_value proc(
     } else if (type.kind == .optional) {
         container :: typecheck.array_type(checked, type.array_type)
         if (container.element.kind == .pointer or container.element.kind == .function) {
-            if (value.data.unsigned != 0) return no_node
+            absent :: if (container.element.kind == .function)
+                value.data.function == maxval!(ir.FunctionId)
+                else value.data.unsigned == maxval!(u64)
+            if (!absent) return no_node
             result = try ast.add_literal(state.builder, .null, span)
         } else if (!ir.aggregate_item(module, value, 0).data.boolean) {
             result = try ast.add_literal(state.builder, .null, span)
@@ -1024,6 +1027,13 @@ evaluate_ir proc(state @mut State, expression, result_type ast.NodeId) Value ! E
     returned :: try ast.add_return_stmt(state.builder, span, expression)
     statements [1]ast.NodeId :: [returned]
     body :: try ast.add_block(state.builder, span, statements[..])
+    try refresh(state)
+    return try evaluate_ir_body(state, expression, body, result_type)
+}
+
+@hide:file
+evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value ! Error {
+    span :: ast.node_span(&state.tree, at)
     wrapper :: try ast.add_function_decl(state.builder, span, span, strpool.no_str, result_type, &[], body)
     try refresh(state)
     declarations := arraylist.init(ast.NodeId, state.allocator)
@@ -1364,6 +1374,31 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
     return result
 }
 
+# check capture guards with ordinary IR without elaborating either source body.
+@hide:file
+type_capture_guard proc(state @mut State, expression, capture ast.NodeId) Value ! Error {
+    resolved :: binding(state, capture)
+    if (resolved.kind == .invalid) {
+        state.evaluation_diagnostic = resolved.data.diagnostic
+        return Value{}
+    }
+    span :: ast.node_span(&state.tree, expression)
+    yes :: try ast.add_boolean(state.builder, span, true)
+    no :: try ast.add_boolean(state.builder, span, false)
+    taken :: try ast.add_return_stmt(state.builder, span, yes)
+    skipped :: try ast.add_return_stmt(state.builder, span, no)
+    taken_statements [1]ast.NodeId :: [taken]
+    skipped_statements [1]ast.NodeId :: [skipped]
+    then_block :: try ast.add_block(state.builder, span, taken_statements[..])
+    else_block :: try ast.add_block(state.builder, span, skipped_statements[..])
+    selector :: try ast.add_if_stmt(state.builder, span, expression, then_block, else_block)
+    ast.set_capture(state.builder, selector, capture)
+    statements [1]ast.NodeId :: [selector]
+    body :: try ast.add_block(state.builder, span, statements[..])
+    try refresh(state)
+    return try evaluate_ir_body(state, expression, body, try builtin(state, expression, .bool))
+}
+
 @hide:file
 execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
     saved :: execution.locals.items.len
@@ -1440,33 +1475,52 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
             condition := no_node
             body := no_node
             other := no_node
+            capture ?ast.NodeId := null
             if (looping) {
                 view :: ast.while_stmt(&state.tree, statement)
-                if (view.capture != null) return .invalid
+                capture = view.capture
                 condition = view.condition
                 body = view.body
             } else {
                 view :: ast.if_stmt(&state.tree, statement)
-                if (view.capture != null) return .invalid
+                capture = view.capture
                 condition = view.condition
                 body = view.then_block
                 if (view.else_block) |branch| other = branch
             }
             if (looping) execution.loop_depth += 1
             defer if (looping) execution.loop_depth -= 1
+            saved :: execution.locals.items.len
+            defer execution.locals.items = execution.locals.items[..saved]
             invariant :: branch_constant(state, condition, 0)
             value := Value{}
             while (true) {
                 if (!try type_step(state, condition)) return .invalid
                 if (!invariant or value.kind == .invalid) {
                     expression :: try type_snapshot(state, execution, condition)
-                    boolean :: try builtin(state, expression, .bool)
-                    value = try evaluate_ir(state, expression, boolean)
+                    if (capture) |name| value = try type_capture_guard(state, expression, name)
+                    else {
+                        boolean :: try builtin(state, expression, .bool)
+                        value = try evaluate_ir(state, expression, boolean)
+                    }
                 }
                 if (value.kind != .boolean) return .invalid
                 if (!value.boolean) {
                     if (!looping and other != no_node) return try execute_type_block(state, execution, other)
                     return .next
+                }
+                execution.locals.items = execution.locals.items[..saved]
+                if (capture) |name| {
+                    expression :: try type_snapshot(state, execution, condition)
+                    unwrapped :: try ast.add_unary(state.builder,
+                        ast.node_span(&state.tree, condition), .unwrap, expression)
+                    try refresh(state)
+                    annotation :: try expression_type(state, unwrapped, 0)
+                    payload :: try type_execution_value(state, unwrapped, annotation)
+                    if (payload == no_node) return .invalid
+                    try arraylist.append(&execution.locals, TypeLocal{
+                        declaration = name, value = payload, annotation = annotation,
+                    })
                 }
                 flow :: try execute_type_block(state, execution, body)
                 if (!looping or flow == .returned or flow == .invalid) return flow

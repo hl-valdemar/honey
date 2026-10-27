@@ -125,6 +125,15 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        .empty: return bool,
             `    }
             `}
+            `Optional proc() type {
+            `    pending ?usize := 2
+            `    Result := i8
+            `    while pending |length| {
+            `        pending = null
+            `        Result = [length]i16
+            `    }
+            `    return Result
+            `}
             `read_selected proc($choice Choice, value i16) i16 {
             `    match choice {
             `        .payload |detail|: {
@@ -148,6 +157,8 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (Token(packet_data()) != Token(packet)) return 0
             `    captured Captured(packet.choices[0]) :: { values = [19, 21] }
             `    if (captured.values[0] + captured.values[1] + captured.bias != 42) return 0
+            `    optional Optional() :: captured.values
+            `    if (optional[0] + optional[1] != 40) return 0
             `    payload :: packet.choices[0].payload
             `    if (payload.values[0] != 40 or payload.values[1] != 2 or payload.text.len != 2) return 0
             `    match packet.choices[1] { .empty: {}, .payload: return 0 }
