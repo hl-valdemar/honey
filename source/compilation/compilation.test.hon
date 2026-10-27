@@ -125,6 +125,19 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        .empty: return bool,
             `    }
             `}
+            `read_selected proc($choice Choice, value i16) i16 {
+            `    match choice {
+            `        .payload |detail|: {
+            `            copied :: detail
+            `            if (copied.text.len != 2) return -1
+            `            return match detail.values[1] {
+            `                2: match true { true: value + detail.values[1], false: value.missing },
+            `                else: value.missing,
+            `            }
+            `        }
+            `        .empty: return value.missing,
+            `    }
+            `}
             `main proc() i16 {
             `    if $(i16 != i16) { return $(i8(128)) }
             `    values :: $(data())
@@ -143,7 +156,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        .failed |detail|: detail.code + i16(detail.text.len),
             `    }
             `    if (error_code != 7) return 0
-            `    return identity(same.values[0]) + same.values[$(usize(1))] + same.bias
+            `    return read_selected(packet.choices[0], identity(same.values[0]) + same.values[$(usize(1))] + same.bias - 2)
             `}
             ,
         )

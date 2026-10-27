@@ -197,6 +197,17 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     if (state.expanded.items[usize(id)] != 0) return
     state.expanded.items[usize(id)] = 1
     class :: ast.node_class(&state.tree, id)
+    if (class == .statement and ast.stmt_kind(&state.tree, id) == .expression) {
+        expression :: ast.statement_expr(&state.tree, id)
+        if (
+            ast.expr_kind(&state.tree, expression) == .match_expr
+            and try specialize_match(state, expression, id)
+        ) return
+    }
+    if (
+        class == .expression and ast.expr_kind(&state.tree, id) == .match_expr
+        and try specialize_match(state, id, no_node)
+    ) return
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .if_stmt) {
         conditional :: ast.if_stmt(&state.tree, id)
         explicit :: ast.expr_kind(&state.tree, conditional.condition) == .comptime_expr
@@ -297,6 +308,44 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
 }
 
+# runtime bodies share the type-producer selector, but retain ordinary runtime
+# parameters and control transfers in the selected arm.
+@hide:file
+specialize_match proc(state @mut State, id, statement ast.NodeId) bool ! Error {
+    subject :: ast.match_expr(&state.tree, id).subject
+    explicit :: ast.expr_kind(&state.tree, subject) == .comptime_expr
+    if (!explicit and usize(id) < state.original_count) return false
+    try expand(state, subject)
+    if (!explicit and !branch_constant(state, subject, 0)) return false
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    index :: try type_match_arm(state, id)
+    if (index == no_index) {
+        try reject_evaluation(state, id)
+        return true
+    }
+    arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, id, index))
+    selected :: try type_match_body(state, id, arm)
+    if (selected == no_node or (statement == no_node and !arm.expression)) {
+        try reject_evaluation(state, id)
+        return true
+    }
+    try expand(state, selected)
+    if (statement != no_node) {
+        replacement := no_node
+        if (arm.expression) replacement = try ast.add_expression_stmt(state.builder, selected)
+        else replacement = try ast.add_block_stmt(state.builder, selected)
+        try replace(state, statement, replacement)
+    } else {
+        resolved :: binding(state, selected)
+        try remember(state, id)
+        ast.replace_node_from_source(state.builder, id, selected)
+        try refresh(state)
+        state.bindings.items[usize(id)] = resolved
+    }
+    try refresh(state)
+    return true
+}
+
 # only probe side-effect-free expressions. ordinary calls stay runtime unless the
 # source requests evaluation with $(); probing must not execute FFI or emit traps.
 @hide:file
@@ -309,14 +358,38 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         if (ast.node_class(&state.tree, target) == .function) return true
         if (ast.node_class(&state.tree, target) != .statement) return false
         declaration :: ast.statement_decl(&state.tree, target)
+        initializer :: ast.expr_kind(&state.tree, declaration.initializer)
+        # contextual aggregates may omit defaults with runtime calls.
+        if (declaration.type != null and (initializer == .record_literal or initializer == .array_literal)) return false
         return (
             declaration.mutability == .constant
             and branch_constant(state, declaration.initializer, depth + 1)
         )
     }
     match ast.expr_kind(&state.tree, id) {
-        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null: return true
+        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
+        .enum_literal: return true
+        .record_literal: {
+            # typed literals may omit defaults; materialized constants are complete
+            # contextual literals inside a typed_constant wrapper.
+            for (0..ast.record_field_count(&state.tree, id)) |i| {
+                field :: ast.field(&state.tree, ast.record_field(&state.tree, id, i))
+                if (field.value == null or !branch_constant(state, field.value?, depth + 1)) return false
+            }
+            return ast.record_literal(&state.tree, id).type == null
+        }
+        .array_literal: {
+            for (0..ast.array_element_count(&state.tree, id)) |i| {
+                if (!branch_constant(state, ast.array_element(&state.tree, id, i), depth + 1)) return false
+            }
+            return true
+        }
+        .selection: return branch_constant(state, ast.selection_expr(&state.tree, id).base, depth + 1)
+        .index: {
+            view :: ast.index_expr(&state.tree, id)
+            return branch_constant(state, view.base, depth + 1) and branch_constant(state, view.index, depth + 1)
+        }
         .unary: {
             view :: ast.unary_expr(&state.tree, id)
             return (
@@ -1119,6 +1192,7 @@ nominal_type_value proc(state @State, id ast.NodeId) bool {
 @hide:file
 type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     if (!try expand_type_matches(state, ast.match_expr(&state.tree, id).subject)) return no_index
+    try expand(state, ast.match_expr(&state.tree, id).subject)
     arms := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&arms)
     patterns := arraylist.init(ast.NodeId, state.allocator)
@@ -1149,6 +1223,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
         for (0..ast.match_pattern_count(&state.tree, arm_id)) |j| {
             pattern :: ast.match_pattern(&state.tree, arm_id, j)
             if (!try expand_type_matches(state, pattern)) return no_index
+            try expand(state, pattern)
             try arraylist.append(&patterns, pattern)
         }
         span :: ast.node_span(&state.tree, arm_id)
@@ -1161,6 +1236,9 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     selector :: try ast.add_match(state.builder, ast.node_span(&state.tree, id),
         ast.match_expr(&state.tree, id).subject, arms.items)
     try refresh(state)
+    # selector arms contain only indices. do not specialize this synthetic match
+    # again while its checked evaluation expands the wrapper.
+    state.expanded.items[usize(selector)] = 1
     selected :: try evaluate_ir(state, selector, try builtin(state, id, .usize))
     if (selected.kind != .integer) return no_index
     return usize(selected.magnitude)
@@ -1191,8 +1269,7 @@ type_match_capture proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
 }
 
 @hide:file
-type_match_expression_body proc(state @mut State, id ast.NodeId, arm ast.MatchArmView) ast.NodeId ! Error {
-    if (!arm.expression) return no_node
+type_match_body proc(state @mut State, id ast.NodeId, arm ast.MatchArmView) ast.NodeId ! Error {
     if (arm.capture == null) return arm.body
     value :: try type_match_capture(state, id)
     if (value == no_node) return no_node
@@ -1218,7 +1295,8 @@ type_value_expression proc(state @mut State, input ast.NodeId) ast.NodeId ! Erro
         index :: try type_match_arm(state, expression)
         if (index == no_index) return no_node
         arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, expression, index))
-        expression = try type_match_expression_body(state, expression, arm)
+        if (!arm.expression) return no_node
+        expression = try type_match_body(state, expression, arm)
         if (expression == no_node) return no_node
     }
     return expression

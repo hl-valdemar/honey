@@ -11,6 +11,230 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "generic_match_scalar_enum_and_range_selection": (
+        """
+        Mode :: enum { pair, other }
+        answer proc($mode Mode, $count u8, value i16) i16 {
+            match true {
+                true: {
+                    selected :: count
+                    match selected {
+                        0..2: return value.missing,
+                        2..=3: {
+                            return match mode {
+                                .pair: value + 2,
+                                .other: value.missing,
+                            }
+                        }
+                        else: return false,
+                    }
+                }
+                false: return value.missing,
+            }
+        }
+        main proc() i16 { return answer(.pair, 2, 40) }
+        """, b"42\n", None,
+    ),
+    "generic_match_expression_selects_each_instance": (
+        """
+        read proc($take bool, value i16) i16 {
+            return match take {
+                true: match take { true: value, false: value.missing },
+                false: value + 2,
+            }
+        }
+        main proc() i16 { return read(true, 20) + read(false, 20) }
+        """, b"42\n", None,
+    ),
+    "generic_match_tagged_capture_exact_scalar_type": (
+        """
+        Choice :: union(enum) { small i8, empty void }
+        exact proc(value i8) i16 { return i16(value) }
+        read proc($choice Choice, value i16) i16 {
+            return match choice {
+                .small |small|: exact(small) + value,
+                .empty: value.missing,
+            }
+        }
+        main proc() i16 { return read(.small{2}, 40) }
+        """, b"42\n", None,
+    ),
+    "generic_match_tagged_capture_nested_owned_values": (
+        """
+        Inner :: union(enum) { small i8, empty void }
+        Detail :: struct { inner Inner, values [2]i16, text string }
+        Choice :: union(enum) { detail Detail, unused void }
+        exact proc(value i8) i16 { return i16(value) }
+        read proc($choice Choice, value i16) i16 {
+            match choice {
+                .detail |detail|: {
+                    copied Detail :: detail
+                    if (copied.text.len != 5 or copied.text[0] != 111) return -1
+                    return match detail.inner {
+                        .small |small|: exact(small) + detail.values[0] + detail.values[1] + value,
+                        .empty: value.missing,
+                    }
+                }
+                .unused: return value.missing,
+            }
+        }
+        main proc() i16 {
+            return read(.detail{ inner = .small{2}, values = [19, 20], text = "owned" }, 1)
+        }
+        """, b"42\n", None,
+    ),
+    "generic_match_selected_return_runs_cleanup": (
+        """
+        read proc($take bool, total @mut i16, value i16) i16 {
+            defer total^ = total^ + 1
+            match take {
+                true: {
+                    owned :: ["owned", "copy"]
+                    defer total^ = total^ + i16(owned[1].len)
+                    return value
+                }
+                false: return value.missing,
+            }
+        }
+        main proc() i16 {
+            total i16 := 0
+            value :: read(true, &total, 37)
+            return value + total
+        }
+        """, b"42\n", None,
+    ),
+    "generic_match_selected_loop_transfers_run_cleanup": (
+        """
+        read proc($take bool) i16 {
+            total i16 := 0
+            for (0..3) |index| {
+                match take {
+                    true: {
+                        owned :: ["owned", "copy"]
+                        defer total = total + i16(owned[1].len)
+                        if (index == 0) continue
+                        break
+                    }
+                    false: return total.missing,
+                }
+                total = -100
+            }
+            return total + 34
+        }
+        main proc() i16 { return read(true) }
+        """, b"42\n", None,
+    ),
+    "explicit_comptime_match_ordinary_call_without_templates": (
+        """
+        selected proc() bool { return true }
+        main proc() i16 {
+            bias :: match $(selected()) { true: 2, false: false.missing }
+            match $(selected()) {
+                true: return 40 + bias,
+                false: return false,
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "generic_match_ordinary_call_still_checks_both_arms": (
+        """
+        selected proc() bool { return true }
+        read proc($unused bool, value i16) i16 {
+            match selected() { true: return value, false: return false }
+        }
+        main proc() i16 { return read(true, 42) }
+        """, b"42\n", b"return does not match",
+    ),
+    "ordinary_literal_match_still_checks_both_arms": (
+        """
+        main proc() i16 {
+            match true { true: return 42, false: return false }
+        }
+        """, b"42\n", b"return does not match",
+    ),
+    "generic_match_record_default_call_stays_runtime": (
+        """
+        default_value proc() u8 { return 2 }
+        Choice :: struct { count u8, bias u8 = default_value() }
+        read proc($unused bool, value i16) i16 {
+            choice Choice :: { count = 2 }
+            match choice.bias { 2: return value, else: return false }
+        }
+        main proc() i16 { return read(true, 42) }
+        """, b"42\n", b"return does not match",
+    ),
+    "generic_match_runtime_subject_still_checks_both_arms": (
+        """
+        read proc($unused bool, take bool, value i16) i16 {
+            match take { true: return value, false: return false }
+        }
+        main proc() i16 { return read(true, true, 42) }
+        """, b"42\n", b"return does not match",
+    ),
+    "generic_match_mutable_local_still_checks_both_arms": (
+        """
+        read proc($take bool, value i16) i16 {
+            selected := take
+            match selected { true: return value, false: return false }
+        }
+        main proc() i16 { return read(true, 42) }
+        """, b"42\n", b"return does not match",
+    ),
+    "generic_match_runtime_subject_runs_once": (
+        """
+        selected proc(count @mut i16) bool {
+            count^ = count^ + 1
+            return true
+        }
+        read proc($unused bool, count @mut i16) i16 {
+            return match selected(count) { true: 41, false: 0 }
+        }
+        main proc() i16 {
+            count i16 := 0
+            value :: read(true, &count)
+            return value + count
+        }
+        """, b"42\n", None,
+    ),
+    "generic_match_checks_untaken_overlap": (
+        """
+        read proc($value u8) i16 {
+            return match value { 0: 42, 1..=3: 0, 3..5: 0, else: 0 }
+        }
+        main proc() i16 { return read(0) }
+        """, b"", b"duplicate or overlapping match pattern",
+    ),
+    "generic_match_checks_exhaustiveness": (
+        """
+        read proc($value bool) i16 { return match value { true: 42 } }
+        main proc() i16 { return read(true) }
+        """, b"", b"match is not exhaustive",
+    ),
+    "generic_match_checks_untaken_capture_types": (
+        """
+        Choice :: union(enum) { count usize, small i8, empty void }
+        read proc($choice Choice) i16 {
+            return match choice { .count, .small |value|: i16(value), .empty: 42 }
+        }
+        main proc() i16 { return read(.empty) }
+        """, b"", b"payload capture requires compatible nonvoid tagged union variants",
+    ),
+    "generic_match_preserves_untaken_resolution_errors": (
+        """
+        read proc($value bool) i16 {
+            return match value { true: 42, false: missing }
+        }
+        main proc() i16 { return read(true) }
+        """, b"42\n", b"unknown name",
+    ),
+    "explicit_comptime_match_rejects_runtime_subject": (
+        """
+        read proc(take bool) i16 {
+            return match $(take) { true: 42, false: 0 }
+        }
+        main proc() i16 { return read(true) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
     "type_match_tagged_capture_preserves_resolution_errors": (
         """
         data proc() [2]i16 { return [40, 2] }
@@ -3858,6 +4082,14 @@ def check_specialization_packages(temporary, executable):
             while (result < 2) result = result + 1
             return result
         }
+        selected proc($choice Choice, value i16) i16 {
+            match choice {
+                .count |length|: {
+                    return match length { 2: value + i16(length), else: value.missing }
+                }
+                .empty: return value.missing,
+            }
+        }
     """).strip() + "\n")
     source = app / "main.hon"
     source.write_text(textwrap.dedent("""
@@ -3870,6 +4102,14 @@ def check_specialization_packages(temporary, executable):
             captured lib.Captured(ImportedBox, .count{2}) :: { values = [imported, copy] }
             fixed lib.Fixed(i16, lib.count()) :: { values = [2, 0] }
             return captured.values[0].value + lib.identity(lib.first(&fixed))
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            value lib.Captured(i16, .count{2}) :: { values = [20, 20] }
+            return lib.selected(.count{2}, value.values[0] + value.values[1])
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
@@ -3933,7 +4173,7 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:6:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 5
+    return 6
 
 
 def check_dependency_provenance(temporary, executable):
