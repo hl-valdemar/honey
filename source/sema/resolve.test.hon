@@ -931,3 +931,44 @@ canonicalizes_imported_aliases_and_namespace_alias_selections test {
     namespace :: ast.package_decl_at(&tree, root, 3)
     try testing.expect_equal(BindingKind.namespace, binding(&resolution, namespace).kind)
 }
+
+resolves_inline_match_captures_and_all_bodies test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `inspect proc(value int) void {
+        `    match value { inline |payload, tag|: {
+        `        payload
+        `        tag
+        `    } }
+        `    match value { inline |same, same|: same }
+        `    match value { inline |payload, value|: value }
+        `    match value { .if: 1, inline |_|: missing }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    first_match :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 0))
+    first :: ast.match_arm_view(&tree, ast.match_arm(&tree, first_match, 0))
+    payload_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, first.body, 0))
+    tag_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, first.body, 1))
+    try testing.expect_equal(first.capture?, binding(&resolution, payload_ref).data.declaration)
+    try testing.expect_equal(first.tag_capture?, binding(&resolution, tag_ref).data.declaration)
+    for (usize(1)..usize(3)) |i| {
+        matched :: ast.statement_expr(&tree, ast.block_statement(&tree, body, i))
+        arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, matched, 0))
+        try testing.expect_equal(BindingKind.invalid, binding(&resolution, arm.tag_capture?).kind)
+    }
+    last_match :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 3))
+    last :: ast.match_arm_view(&tree, ast.match_arm(&tree, last_match, 1))
+    try testing.expect_equal(BindingKind.invalid, binding(&resolution, last.body).kind)
+}

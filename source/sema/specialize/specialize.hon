@@ -88,6 +88,7 @@ State :: struct {
     instances arraylist.ArrayList(Instance)
     cache hashmap.AutoHashMap(usize, usize)
     expanded arraylist.ArrayList(u8)
+    capture_types hashmap.AutoHashMap(ast.NodeId, ast.NodeId)
     diagnostics @mut diagnostics.Store
     depth usize = 0
     original_count usize
@@ -123,6 +124,7 @@ elaborate proc(
         if (class == .expression and ast.expr_kind(&original, id) == .comptime_expr) needed = true
         if (class == .statement and ast.stmt_kind(&original, id) == .for_stmt
             and ast.for_stmt(&original, id).is_inline) needed = true
+        if (class == .match_arm and ast.match_arm_view(&original, id).is_inline) needed = true
         if (class == .expression and ast.expr_kind(&original, id) == .builtin_call) {
             name :: ast.builtin_call(&original, id).name
             text :: ast.source_text(&original, ast.node_span(&original, name))
@@ -145,6 +147,7 @@ elaborate proc(
         allocator = allocator, builder = builder, tree = ast.view(builder, root), strings = strings,
         bindings = arraylist.init(allocator), declarations = arraylist.init(allocator),
         instances = arraylist.init(allocator), cache = hashmap.init(allocator),
+        capture_types = hashmap.init(allocator),
         expanded = arraylist.init(allocator), diagnostics = diagnostic_store,
         original_count = ast.node_count(&original),
         rewrites = &result,
@@ -155,6 +158,7 @@ elaborate proc(
     defer arraylist.deinit(&state.declarations)
     defer arraylist.deinit(&state.expanded)
     defer hashmap.deinit(&state.cache)
+    defer hashmap.deinit(&state.capture_types)
     defer {
         for (state.instances.items) |instance| mem.free(allocator, instance.arguments)
         arraylist.deinit(&state.instances)
@@ -237,6 +241,55 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         and ast.for_stmt(&state.tree, id).is_inline) {
         try expand_inline_for(state, id)
         return
+    }
+    if (class == .statement and ast.stmt_kind(&state.tree, id) == .for_stmt) {
+        loop :: ast.for_stmt(&state.tree, id)
+        try expand(state, loop.iterable)
+        if (!loop.pointer_capture and loop.capture != null) {
+            iterable :: try expression_type(state, loop.iterable, 0)
+            element := no_node
+            if (ast.expr_kind(&state.tree, loop.iterable) == .range) {
+                element = try expression_type(state, ast.range_expr(&state.tree, loop.iterable).start, 0)
+            } else if (iterable != no_node) {
+                kind :: ast.expr_kind(&state.tree, iterable)
+                if (kind == .array_type) element = ast.array_type(&state.tree, iterable).element
+                if (kind == .slice_type) element = ast.slice_type(&state.tree, iterable).element
+                if (kind == .pointer_type) {
+                    array :: try canonical_type(state, ast.pointer_type(&state.tree, iterable).element)
+                    if (array != no_node and ast.expr_kind(&state.tree, array) == .array_type)
+                        element = ast.array_type(&state.tree, array).element
+                }
+                if (binding(state, iterable).kind == .builtin
+                    and binding(state, iterable).data.builtin == .string)
+                    element = try builtin(state, id, .u8)
+            }
+            if (element != no_node) {
+                hashmap.put(&state.capture_types, loop.capture?, element) catch |err| {
+                    match err {
+                        .key_exists: {}
+                        else: return err
+                    }
+                }
+            }
+        }
+    }
+    if (class == .statement
+        and (ast.stmt_kind(&state.tree, id) == .if_stmt or ast.stmt_kind(&state.tree, id) == .while_stmt)) {
+        looping :: ast.stmt_kind(&state.tree, id) == .while_stmt
+        capture :: if (looping) ast.while_stmt(&state.tree, id).capture else ast.if_stmt(&state.tree, id).capture
+        condition :: if (looping) ast.while_stmt(&state.tree, id).condition else ast.if_stmt(&state.tree, id).condition
+        if (capture) |name| {
+            annotation :: try expression_type(state, condition, 0)
+            if (annotation != no_node and ast.expr_kind(&state.tree, annotation) == .optional_type) {
+                child :: ast.type_operand(&state.tree, annotation)
+                hashmap.put(&state.capture_types, name, child) catch |err| {
+                    match err {
+                        .key_exists: {}
+                        else: return err
+                    }
+                }
+            }
+        }
     }
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .expression) {
         expression :: ast.statement_expr(&state.tree, id)
@@ -654,12 +707,215 @@ expand_struct_type proc(state @mut State, id ast.NodeId) void ! Error {
     try expand(state, id)
 }
 
+# expand dispatch, not the subject: ordinary checking/lowering retains its single
+# evaluation and by-value payload captures. only tags are compile-time constants.
+@hide:file
+expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! Error {
+    inline_arm := no_node
+    for (0..ast.match_arm_count(&state.tree, id)) |i| {
+        candidate :: ast.match_arm(&state.tree, id, i)
+        if (ast.match_arm_view(&state.tree, candidate).is_inline) {
+            inline_arm = candidate
+            break
+        }
+    }
+    if (inline_arm == no_node) return
+    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+    state.type_execution_depth += 1
+    defer state.type_execution_depth -= 1
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    arm :: ast.match_arm_view(&state.tree, inline_arm)
+    for (0..usize(2)) |i| {
+        capture :: if (i == 0) arm.capture else arm.tag_capture
+        if (capture) |name| {
+            resolved :: binding(state, name)
+            if (resolved.kind == .invalid) {
+                state.evaluation_diagnostic = resolved.data.diagnostic
+                try reject_evaluation(state, id)
+                return
+            }
+        }
+    }
+    count :: ast.match_arm_count(&state.tree, id)
+    if (ast.match_arm(&state.tree, id, count - 1) != inline_arm) {
+        try reject(state, id, .unreachable_match_arm)
+        return
+    }
+    subject :: ast.match_expr(&state.tree, id).subject
+    annotation := subject_type
+    if (annotation == no_node) annotation = try expression_type(state, subject, 0)
+    if (annotation == no_node) {
+        try reject(state, id, .invalid_inline_match_subject)
+        return
+    }
+    kind :: ast.expr_kind(&state.tree, annotation)
+    tag_only :: kind == .union_tag_type
+    members_type := annotation
+    if (tag_only) members_type = try canonical_type(state, ast.type_operand(&state.tree, annotation))
+    if (members_type == no_node) {
+        try reject(state, id, .invalid_inline_match_subject)
+        return
+    }
+    tagged := false
+    if (kind == .union_type) {
+        view :: ast.union_type(&state.tree, annotation)
+        tagged = view.auto_tag or view.tag != null
+    }
+    if (kind != .enum_type and !tag_only and !tagged) {
+        try reject(state, id, .invalid_inline_match_subject)
+        return
+    }
+    if (!tagged and arm.tag_capture_present) {
+        try reject(state, id, .invalid_inline_match_capture)
+        return
+    }
+    arms := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&arms)
+    for (0..(count - 1)) |i| {
+        prior :: ast.match_arm(&state.tree, id, i)
+        if (ast.match_arm_view(&state.tree, prior).catch_all) {
+            try reject(state, id, .unreachable_match_arm)
+            return
+        }
+        try arraylist.append(&arms, prior)
+    }
+    execution := TypeExecution{
+        locals = arraylist.init(state.allocator),
+        mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
+        first_owned = ast.NodeId(0), result_type = no_node,
+    }
+    defer arraylist.deinit(&execution.locals)
+    defer mem.free(state.allocator, execution.mapping)
+    span :: ast.node_span(&state.tree, inline_arm)
+    static_capture :: if (tagged) arm.tag_capture else arm.capture
+    tag_type := annotation
+    if (static_capture != null) {
+        if (tagged) {
+            union_view :: ast.union_type(&state.tree, annotation)
+            if (union_view.tag) |tag| tag_type = try canonical_type(state, tag)
+            else {
+                concrete :: try materialize(state, Value{ kind = .type, node = annotation })
+                tag_type = try ast.add_union_tag_type(state.builder, span, concrete.node)
+                try refresh(state)
+            }
+        }
+        concrete_tag :: try materialize(state, Value{ kind = .type, node = tag_type })
+        tag_type = concrete_tag.node
+    }
+    union_members :: tagged or tag_only
+    members :: if (union_members) ast.record_field_count(&state.tree, members_type)
+        else ast.enum_member_count(&state.tree, members_type)
+    for (0..members) |i| {
+        member :: if (union_members) ast.record_field(&state.tree, members_type, i)
+            else ast.enum_member(&state.tree, members_type, i)
+        field :: ast.field(&state.tree, member)
+        if (field.name == null or (tagged and field.type == null)) {
+            try reject(state, id, .invalid_record_field_type)
+            return
+        }
+        covered := false
+        for (arms.items) |prior| {
+            for (0..ast.match_pattern_count(&state.tree, prior)) |j| {
+                pattern :: ast.match_pattern(&state.tree, prior, j)
+                if (ast.expr_kind(&state.tree, pattern) == .enum_literal
+                    and ast.name_id(&state.tree, ast.enum_literal(&state.tree, pattern))
+                        == ast.name_id(&state.tree, field.name?)) covered = true
+            }
+        }
+        if (covered) continue
+        if (!try type_step(state, inline_arm)) {
+            try reject_evaluation(state, id)
+            return
+        }
+        execution.locals.items = execution.locals.items[..0]
+        mem.set(execution.mapping, no_node)
+        literal :: try ast.add_enum_literal(state.builder, span, field.name?)
+        if (static_capture) |capture| {
+            # runtime patterns use the union's dispatch enum, not its declared tag enum.
+            tag_literal :: try ast.add_enum_literal(state.builder, span, field.name?)
+            tag :: try ast.add_typed_constant(state.builder, span, tag_type, tag_literal)
+            try refresh(state)
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = capture, value = tag, annotation = tag_type,
+            })
+        }
+        payload_capture ?ast.NodeId := null
+        if (tagged and arm.capture != null) {
+            payload_type :: try canonical_type(state, field.type?)
+            if (payload_type == no_node) {
+                try reject(state, id, .invalid_record_field_type)
+                return
+            }
+            if (binding(state, payload_type).kind == .builtin
+                and binding(state, payload_type).data.builtin == .void) {
+                value :: try ast.add_literal(state.builder, .void, span)
+                try refresh(state)
+                try arraylist.append(&execution.locals, TypeLocal{
+                    declaration = arm.capture?, value = value, annotation = payload_type,
+                })
+            } else {
+                name :: arm.capture?
+                payload_capture = try ast.add_identifier(state.builder,
+                    ast.node_span(&state.tree, name), ast.name_id(&state.tree, name))
+                try refresh(state)
+                state.bindings.items[usize(payload_capture?)] = sema.Binding{
+                    kind = .declaration, data = sema.BindingData{ declaration = payload_capture? },
+                }
+                execution.mapping[usize(name)] = payload_capture?
+                hashmap.put(&state.capture_types, payload_capture?, payload_type) catch |err| {
+                    match err {
+                        .key_exists: unreachable
+                        else: return err
+                    }
+                }
+            }
+        }
+        body :: try type_snapshot(state, &execution, arm.body)
+        patterns [1]ast.NodeId :: [literal]
+        generated :: try ast.add_match_arm(state.builder, span, patterns[..],
+            payload_capture, body, arm.expression, false)
+        try refresh(state)
+        try arraylist.append(&arms, generated)
+    }
+    if (arms.items.len == count - 1) {
+        try reject(state, id, .unreachable_match_arm)
+        return
+    }
+    replacement :: try ast.add_match(state.builder, ast.node_span(&state.tree, id), subject, arms.items)
+    try replace(state, id, replacement)
+    try refresh(state)
+}
+
 # runtime bodies share the type-producer selector, but retain ordinary runtime
 # parameters and control transfers in the selected arm.
 @hide:file
 specialize_match proc(state @mut State, id, statement ast.NodeId) bool ! Error {
+    explicit :: ast.expr_kind(&state.tree, ast.match_expr(&state.tree, id).subject) == .comptime_expr
+    try expand_inline_match(state, id, no_node)
+    if (ast.expr_kind(&state.tree, id) != .match_expr) return true
     subject :: ast.match_expr(&state.tree, id).subject
-    explicit :: ast.expr_kind(&state.tree, subject) == .comptime_expr
+    annotation := no_node
+    for (0..ast.match_arm_count(&state.tree, id)) |i| {
+        arm_id :: ast.match_arm(&state.tree, id, i)
+        arm :: ast.match_arm_view(&state.tree, arm_id)
+        if (explicit or arm.capture == null or ast.match_pattern_count(&state.tree, arm_id) == 0) continue
+        if (hashmap.get(&state.capture_types, arm.capture?) != null) continue
+        if (annotation == no_node) annotation = try expression_type(state, subject, 0)
+        if (annotation == no_node or ast.expr_kind(&state.tree, annotation) != .union_type) break
+        pattern :: ast.match_pattern(&state.tree, arm_id, 0)
+        if (ast.expr_kind(&state.tree, pattern) != .enum_literal) continue
+        slot :: type_record_slot(state, annotation, ast.enum_literal(&state.tree, pattern))
+        if (slot == no_index) continue
+        field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, slot))
+        if (field.type) |type| {
+            hashmap.put(&state.capture_types, arm.capture?, type) catch |err| {
+                match err {
+                    .key_exists: unreachable
+                    else: return err
+                }
+            }
+        }
+    }
     if (!explicit and usize(id) < state.original_count) return false
     try expand(state, subject)
     if (!explicit and !branch_constant(state, subject, 0)) return false
@@ -753,7 +1009,7 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .pointer_type: return branch_constant(state, ast.pointer_type(&state.tree, id).element, depth + 1)
         .optional_type, .alias_expr: return branch_constant(state, ast.type_operand(&state.tree, id), depth + 1)
         .record_type, .union_type, .enum_type, .distinct_type, .array_type, .slice_type, .function_type,
-        .fallible_type, .sum_type: return true
+        .fallible_type, .sum_type, .union_tag_type: return true
         else: return false
     }
 }
@@ -1587,7 +1843,7 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
 }
 
 @hide:file
-bind_type_snapshot proc(state @mut State, execution @TypeExecution, id, start ast.NodeId) void {
+bind_type_snapshot proc(state @mut State, execution @TypeExecution, id, start ast.NodeId) void ! Error {
     if (usize(id) >= execution.mapping.len) return
     target :: execution.mapping[usize(id)]
     if (target == no_node or target < start) return
@@ -1598,8 +1854,16 @@ bind_type_snapshot proc(state @mut State, execution @TypeExecution, id, start as
             resolved.data.declaration = execution.mapping[usize(declaration)]
     }
     state.bindings.items[usize(target)] = resolved
+    if (hashmap.get(&state.capture_types, id)) |annotation| {
+        hashmap.put(&state.capture_types, target, annotation) catch |err| {
+            match err {
+                .key_exists: {}
+                else: return err
+            }
+        }
+    }
     for (0..ast.child_count(&state.tree, id)) |i|
-        bind_type_snapshot(state, execution, ast.child(&state.tree, id, i), start)
+        try bind_type_snapshot(state, execution, ast.child(&state.tree, id, i), start)
 }
 
 @hide:file
@@ -1608,7 +1872,7 @@ type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId
     start :: ast.NodeId(ast.node_count(&state.tree))
     result :: try ast.clone_subtree(state.builder, id, execution.mapping)
     try refresh(state)
-    bind_type_snapshot(state, execution, id, start)
+    try bind_type_snapshot(state, execution, id, start)
     return result
 }
 
@@ -1768,6 +2032,8 @@ expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
 # the same rules as runtime matching, without checking unexecuted type bodies.
 @hide:file
 type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
+    try expand_inline_match(state, id, no_node)
+    if (ast.expr_kind(&state.tree, id) != .match_expr) return no_index
     if (!try expand_type_matches(state, ast.match_expr(&state.tree, id).subject)) return no_index
     try expand(state, ast.match_expr(&state.tree, id).subject)
     arms := arraylist.init(ast.NodeId, state.allocator)
@@ -2751,6 +3017,21 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
         .expression: {
             expression :: ast.statement_expr(&state.tree, statement)
             if (ast.expr_kind(&state.tree, expression) != .match_expr) return .invalid
+            subject_type := no_node
+            arms :: ast.match_arm_count(&state.tree, expression)
+            if (arms > 0
+                and ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, expression, arms - 1)).is_inline) {
+                subject :: try type_snapshot(state, execution, ast.match_expr(&state.tree, expression).subject)
+                subject_type = try expression_type(state, subject, 0)
+            }
+            before :: ast.node_count(&state.tree)
+            try expand_inline_match(state, expression, subject_type)
+            if (ast.expr_kind(&state.tree, expression) != .match_expr) return .invalid
+            if (ast.node_count(&state.tree) != before) {
+                previous :: execution.mapping.len
+                execution.mapping = try mem.realloc(state.allocator, execution.mapping, ast.node_count(&state.tree))
+                mem.set(execution.mapping[previous..], no_node)
+            }
             snapshot :: try type_snapshot(state, execution, expression)
             index :: try type_match_arm(state, snapshot)
             if (index == no_index) return .invalid
@@ -3061,7 +3342,7 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         .literal_null: return Value{ kind = .null, node = id }
         .literal_void: return Value{ kind = .aggregate, node = id, annotation = try builtin(state, id, .void) }
         .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
-        .enum_type, .union_type, .distinct_type, .fallible_type, .sum_type:
+        .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type:
             return Value{ kind = .type, node = id }
         .alias_expr: return try evaluate(state, ast.type_operand(&state.tree, id))
         .unary: {
@@ -3205,6 +3486,8 @@ same_type_context proc(state @mut State, left, right ast.NodeId, metadata bool) 
         return try type_subset(state, a, b) and try type_subset(state, b, a)
     if (kind != ast.expr_kind(&state.tree, b)) return false
     match kind {
+        .union_tag_type: return try same_type_context(state,
+            ast.type_operand(&state.tree, a), ast.type_operand(&state.tree, b), metadata)
         .record_type: {
             if (!metadata and (!type_record_storage(state, a, 0) or !type_record_storage(state, b, 0))) return false
             if (!structural_type_record(state, a) or !structural_type_record(state, b)) return false
@@ -3338,6 +3621,8 @@ type_hash_context proc(state @mut State, id ast.NodeId, metadata bool) usize ! E
     kind :: ast.expr_kind(&state.tree, node)
     hash := enum_index(kind)
     match kind {
+        .union_tag_type: return mix(hash,
+            try type_hash_context(state, ast.type_operand(&state.tree, node), metadata))
         .record_type: {
             if ((!metadata and !type_record_storage(state, node, 0))
                 or !structural_type_record(state, node)) return mix(hash, usize(node))
@@ -3401,6 +3686,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
     if (resolved.kind == .builtin and resolved.data.builtin != .type) return try builtin(state, id, .type)
     if (resolved.kind == .declaration) {
         target :: resolved.data.declaration
+        if (hashmap.get(&state.capture_types, target)) |annotation| return try canonical_type(state, annotation)
         class :: ast.node_class(&state.tree, target)
         if (class == .parameter) {
             annotation :: ast.param(&state.tree, target).type
@@ -3426,7 +3712,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
     kind :: ast.expr_kind(&state.tree, id)
     match kind {
         .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
-        .enum_type, .union_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
+        .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
             return try builtin(state, id, .type)
         .typed_constant: return try canonical_type(state, ast.typed_constant(&state.tree, id).type)
         .literal_int: return try builtin(state, id, .i64)

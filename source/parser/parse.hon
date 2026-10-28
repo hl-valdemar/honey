@@ -1048,27 +1048,39 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
     start :: current(state).span
     patterns arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&patterns)
-    catch_all :: next_is(state, .else)
+    is_inline :: next_is(state, .inline)
+    if (is_inline) state.next_token += 1
+    catch_all :: !is_inline and next_is(state, .else)
     capture ?ast.NodeId := null
+    tag_capture ?ast.NodeId := null
+    tag_capture_present := false
     if (catch_all) state.next_token += 1
-    else {
+    else if (!is_inline) {
         while true {
             try arraylist.append(&patterns, try parse_guard_expr(state))
             if (!next_is(state, .comma)) break
             state.next_token += 1
             skip_newlines(state)
         }
-        if next_is(state, .pipe) {
+    }
+    if (is_inline or (!catch_all and next_is(state, .pipe))) {
+        _ = try consume(state, .pipe)
+        # captures are by value; pointer capture tokens are not identifiers.
+        token :: try consume(state, .ident)
+        if (
+            token.span.end != token.span.start + 1
+            or state.builder.source[usize(token.span.start)] != '_'
+        ) capture = try ast.add_identifier(state.builder, token.span, token.data.str_id)
+        if (is_inline and next_is(state, .comma)) {
             state.next_token += 1
-            # pointer payload captures are outside the current runtime representation.
-            if (next_is(state, .at) or next_is(state, .star)) return .unexpected_token
-            token :: try consume(state, .ident)
+            tag_capture_present = true
+            tag :: try consume(state, .ident)
             if (
-                token.span.end != token.span.start + 1
-                or state.builder.source[usize(token.span.start)] != '_'
-            ) capture = try ast.add_identifier(state.builder, token.span, token.data.str_id)
-            _ = try consume(state, .pipe)
+                tag.span.end != tag.span.start + 1
+                or state.builder.source[usize(tag.span.start)] != '_'
+            ) tag_capture = try ast.add_identifier(state.builder, tag.span, tag.data.str_id)
         }
+        _ = try consume(state, .pipe)
     }
     _ = try consume(state, .colon)
     skip_newlines(state)
@@ -1079,24 +1091,37 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
         .open_curly, .return, .break, .continue, .if, .while, .for, .inline, .defer, .errdefer: true
         else: false
     }
+    body ast.NodeId := undefined
+    expression := false
     if (statement_body or named_binding_starts(state)) {
-        body :: try parse_arm(state, false)
-        return try ast.add_match_arm(state.builder, ast.Span{
-            start = start.start, end = ast.builder_span(state.builder, body).end, source = start.source,
-        }, patterns.items, capture, body, false, catch_all)
+        body = try parse_arm(state, false)
+    } else {
+        value :: try parse_expr(state)
+        if next_is(state, .equal) {
+            statement :: try parse_assignment(state, value, false)
+            statements [1]ast.NodeId :: [statement]
+            body = try ast.add_block(state.builder, ast.builder_span(state.builder, statement), statements[..])
+        } else {
+            body = value
+            expression = true
+        }
+        tree :: ast.view(state.builder, value)
+        if (expression and ast.expr_kind(&tree, value) == .match_expr
+            and ast.match_arm_count(&tree, value) > 0) {
+            nested :: ast.match_arm_view(&tree, ast.match_arm(&tree, value, 0))
+            if (!nested.expression) {
+                statement :: try ast.add_expression_stmt(state.builder, value)
+                statements [1]ast.NodeId :: [statement]
+                body = try ast.add_block(state.builder, ast.builder_span(state.builder, value), statements[..])
+                expression = false
+            }
+        }
     }
-    value :: try parse_expr(state)
-    if next_is(state, .equal) {
-        statement :: try parse_assignment(state, value, false)
-        statements [1]ast.NodeId :: [statement]
-        body :: try ast.add_block(state.builder, ast.builder_span(state.builder, statement), statements[..])
-        return try ast.add_match_arm(state.builder, ast.Span{
-            start = start.start, end = ast.builder_span(state.builder, body).end, source = start.source,
-        }, patterns.items, capture, body, false, catch_all)
-    }
-    return try ast.add_match_arm(state.builder, ast.Span{
-        start = start.start, end = ast.builder_span(state.builder, value).end, source = start.source,
-    }, patterns.items, capture, value, true, catch_all)
+    arm :: try ast.add_match_arm(state.builder, ast.Span{
+        start = start.start, end = ast.builder_span(state.builder, body).end, source = start.source,
+    }, patterns.items, capture, body, expression, catch_all)
+    if (is_inline) ast.set_match_arm_inline(state.builder, arm, tag_capture, tag_capture_present)
+    return arm
 }
 
 @hide:file

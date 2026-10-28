@@ -1315,7 +1315,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         .array_type: {
             state.cells[usize(id)].type = invalid_type(try diagnostics.add(state.diagnostics, .type_not_value, ast.node_span(tree, id)))
         }
-        .record_type, .union_type, .enum_type, .distinct_type,
+        .record_type, .union_type, .enum_type, .distinct_type, .union_tag_type,
         .pointer_type, .function_type, .slice_type, .optional_type, .fallible_type, .sum_type: {
             type := try check_type_expression(state, id, state.cells[usize(id)].nominal)
             if (type.kind != .invalid) {
@@ -3536,7 +3536,7 @@ type_syntax proc(kind ast.ExprKind) bool {
         kind == .record_type or kind == .union_type or kind == .enum_type
         or kind == .distinct_type or kind == .alias_expr
         or kind == .pointer_type or kind == .function_type or kind == .slice_type or kind == .optional_type
-        or kind == .fallible_type or kind == .sum_type
+        or kind == .fallible_type or kind == .sum_type or kind == .union_tag_type
     )
 }
 
@@ -3575,6 +3575,21 @@ check_type_expression proc(state @mut State, id ast.NodeId, nominal bool) Type !
         type :: try check_union(state, id, nominal)
         state.cells[usize(id)].type = type
         return type
+    }
+    if (kind == .union_tag_type) {
+        operand :: try check_annotation(state, ast.type_operand(state.tree, id), false)
+        if (operand.kind == .invalid) return operand
+        if (operand.kind == .record and operand.nominal == ast.NodeId(maxval!(u32))) {
+            descriptor :: state.records.items[usize(operand.record_type)]
+            if (descriptor.is_union and descriptor.tag_type.kind == .enumeration) {
+                tag :: if (descriptor.declared_tag_type.kind == .enumeration)
+                    descriptor.declared_tag_type else descriptor.tag_type
+                state.cells[usize(id)].type = tag
+                return tag
+            }
+        }
+        return invalid_type(try diagnostics.add(state.diagnostics, .invalid_inline_match_subject,
+            ast.node_span(state.tree, id)))
     }
     cached := state.cells[usize(id)].type
     if (cached.kind == .type_value) {

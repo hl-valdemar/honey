@@ -415,6 +415,87 @@ recompiles_imported_inline_for_without_retaining_expansions test {
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
+recompiles_imported_inline_match_arms_without_retaining_expansions test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        root_bytes := try owned_text(
+            `dep :: import "../dependency"
+            `known proc($tag dep.Mode) i16 {
+            `    if (tag == .answer) return 0 else return false
+            `}
+            `enum_score proc(input dep.Mode) i16 {
+            `    return match input { .skip: 0, inline |tag|: known(tag) }
+            `}
+            `main proc() i16 {
+            `    values :: dep.values()
+            `    if (enum_score(.skip) + enum_score(dep.mode()) != 0) return -1
+            `    return (
+            `        dep.read(dep.Choice, values[0]) + dep.read(dep.Choice, values[1])
+            `        + dep.read(dep.Choice, values[2]) + dep.read(dep.Choice, values[3])
+            `    )
+            `}
+            ,
+        )
+        defer arraylist.deinit(&root_bytes)
+        dependency_bytes := try owned_text(
+            `Mode :: enum(i16) { skip = -7, answer = 42 }
+            `Tag :: enum(i16) { number = -7, record = 3, text = 42, empty = 90 }
+            `Pair :: struct { values [2]i16 }
+            `Choice :: union(Tag) { text string, empty void, number i8, record Pair }
+            `mode proc() Mode { return .answer }
+            `values proc() [4]Choice {
+            `    return [.number{19}, .record{values = [9, 11]}, .text{"ok"}, .empty]
+            `}
+            `narrow proc(value i8) i16 { return i16(value) }
+            `pair proc(value Pair) i16 { return value.values[0] + value.values[1] }
+            `read proc($T type, input T) i16 {
+            `    match input {
+            `        inline |payload, tag|: {
+            `            match tag {
+            `                inline |selected|: {
+            `                    if (selected == .number) { return narrow(payload) }
+            `                    else if (selected == .record) { return pair(payload) }
+            `                    else if (selected == .text) { return i16(payload.len) }
+            `                    else {
+            `                        payload
+            `                        return 1
+            `                    }
+            `                },
+            `            }
+            `        },
+            `    }
+            `}
+            ,
+        )
+        defer arraylist.deinit(&dependency_bytes)
+        root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
+        _ = try add_source(&session, dependency, "dependency/values.hon", &dependency_bytes, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for (0..modules.len) |index| {
+        outcome := try interpreter.run(mem.c_allocator, &modules[index], &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 recompiles_generated_records_without_borrowing_previous_ir test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

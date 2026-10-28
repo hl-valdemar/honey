@@ -525,7 +525,7 @@ resolve_expr proc(
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void,
         .literal_undefined: {}
         .enum_literal: {}
-        .distinct_type, .alias_expr, .optional_type, .try_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))
+        .distinct_type, .alias_expr, .union_tag_type, .optional_type, .try_expr: try resolve_expr(state, scope, ast.type_operand(tree, id))
         .enum_type: {
             if (ast.enum_type(tree, id).backing) |backing| try resolve_expr(state, scope, backing)
             for (0..ast.enum_member_count(tree, id)) |i| {
@@ -544,6 +544,7 @@ resolve_expr proc(
                 arm_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
                 defer hashmap.deinit(&arm_scope.names)
                 if (arm.capture) |capture| try predeclare(state, &arm_scope, capture, ast.node_span(tree, capture))
+                if (arm.tag_capture) |capture| try predeclare(state, &arm_scope, capture, ast.node_span(tree, capture))
                 if (arm.expression) try resolve_expr(state, &arm_scope, arm.body)
                 else try resolve_block(state, &arm_scope, arm.body)
             }

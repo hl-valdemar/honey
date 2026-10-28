@@ -62,6 +62,7 @@ ExprKind :: enum {
     union_type
     distinct_type
     alias_expr
+    union_tag_type
     enum_literal
     match_expr
     index
@@ -148,6 +149,7 @@ NodeKind :: enum {
     expr_union_type
     expr_distinct_type
     expr_alias
+    expr_union_tag_type
     expr_enum_literal
     expr_match
     match_arm
@@ -345,6 +347,9 @@ MatchArmView :: struct {
     body NodeId
     expression bool
     catch_all bool
+    is_inline bool = false
+    tag_capture ?NodeId = null
+    tag_capture_present bool = false
 }
 
 IndexView :: struct {
@@ -795,6 +800,13 @@ add_type_operand proc(builder @mut Builder, span Span, operand NodeId, transpare
     }, span)
 }
 
+add_union_tag_type proc(builder @mut Builder, span Span, operand NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_union_tag_type,
+        main = NodeData{ node_id = operand },
+    }, span)
+}
+
 add_enum_literal proc(builder @mut Builder, span Span, member NodeId) NodeId ! mem.AllocError {
     return try add_node(builder, Node{
         kind = .expr_enum_literal,
@@ -823,6 +835,7 @@ add_match_arm proc(
     start :: try add_extra(builder, raw_capture)
     _ = try add_extra(builder, expression_flag)
     _ = try add_extra(builder, catch_all_flag)
+    _ = try add_extra(builder, u32(no_node))
     for (patterns) |pattern| _ = try add_extra(builder, u32(pattern))
     return try add_node(builder, Node{
         kind = .match_arm,
@@ -830,6 +843,18 @@ add_match_arm proc(
         data0 = NodeData{ extra = start },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
     }, span)
+}
+
+set_match_arm_inline proc(
+    builder @mut Builder, id NodeId, tag_capture ?NodeId, tag_capture_present bool,
+) void {
+    node :: get_node(&builder.storage, id)
+    debug.assert(node.kind == .match_arm)
+    extra :: usize(node.data0.extra)
+    builder.storage.extra.items[extra + 1] = builder.storage.extra.items[extra + 1] | 2
+    if (tag_capture_present)
+        builder.storage.extra.items[extra + 1] = builder.storage.extra.items[extra + 1] | 4
+    builder.storage.extra.items[extra + 3] = if (tag_capture) |capture| u32(capture) else u32(no_node)
 }
 
 add_record_literal proc(
@@ -1440,6 +1465,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_union_type: .union_type
         .expr_distinct_type: .distinct_type
         .expr_alias: .alias_expr
+        .expr_union_tag_type: .union_tag_type
         .expr_enum_literal: .enum_literal
         .expr_match: .match_expr
         .expr_index: .index
@@ -1664,7 +1690,7 @@ union_type proc(tree @Tree, id NodeId) UnionTypeView {
 
 type_operand proc(tree @Tree, id NodeId) NodeId {
     node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias or node.kind == .expr_optional_type or node.kind == .expr_try)
+    debug.assert(node.kind == .expr_distinct_type or node.kind == .expr_alias or node.kind == .expr_optional_type or node.kind == .expr_try or node.kind == .expr_union_tag_type)
     return node.main.node_id
 }
 
@@ -1699,21 +1725,24 @@ match_arm_view proc(tree @Tree, id NodeId) MatchArmView {
     return MatchArmView{
         capture = maybe_node_id(tree.storage.extra.items[extra]),
         body = node.main.node_id,
-        expression = tree.storage.extra.items[extra + 1] != 0,
+        expression = (tree.storage.extra.items[extra + 1] & 1) != 0,
         catch_all = tree.storage.extra.items[extra + 2] != 0,
+        is_inline = (tree.storage.extra.items[extra + 1] & 2) != 0,
+        tag_capture = maybe_node_id(tree.storage.extra.items[extra + 3]),
+        tag_capture_present = (tree.storage.extra.items[extra + 1] & 4) != 0,
     }
 }
 
 match_pattern_count proc(tree @Tree, id NodeId) usize {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .match_arm)
-    return usize(node.data1.extra - node.data0.extra - 3)
+    return usize(node.data1.extra - node.data0.extra - 4)
 }
 
 match_pattern proc(tree @Tree, id NodeId, index usize) NodeId {
     node :: get_node(&tree.storage, id)
     debug.assert(index < match_pattern_count(tree, id))
-    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + 3 + index])
+    return NodeId(tree.storage.extra.items[usize(node.data0.extra) + 4 + index])
 }
 
 record_field_count proc(tree @Tree, id NodeId) usize {
@@ -1860,7 +1889,7 @@ node_layout proc(node Node) NodeLayout {
         .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
-        .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_enum_literal,
+        .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_union_tag_type, .expr_enum_literal,
         .expr_try, .expr_comptime: layout.direct_children = 1
         .expr_call, .expr_builtin_call, .expr_function_type, .expr_array_literal,
         .expr_record_type, .expr_record_literal, .expr_enum_type, .expr_match,
@@ -1892,8 +1921,8 @@ node_layout proc(node Node) NodeLayout {
             layout.extra_pointers = 6
             layout.extra_start = usize(node.data0.extra)
             layout.extra_count = usize(node.data1.extra - node.data0.extra)
-            layout.extra_children = 1
-            layout.list_start = 3
+            layout.extra_children = 9
+            layout.list_start = 4
             layout.list_end = layout.extra_count
         }
         .expr_catch: {

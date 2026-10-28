@@ -1899,3 +1899,79 @@ rejects_pointer_match_captures_and_preserves_siblings test {
     try testing.expect_equal("after", ast.source_text(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 1)).name))
     try testing.expect_equal("last", ast.source_text(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 3)).name))
 }
+
+parses_and_clones_inline_match_captures_and_body_forms test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc(value int) void {
+        `    match value { .if, .return: 1, inline |payload, tag|: payload }
+        `    match value { inline |_, _|: return }
+        `    match value { inline |_|: value = 1 }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    original :: ast.view(&builder, root)
+    mapping :: try mem.alloc(ast.NodeId, mem.c_allocator, ast.node_count(&original))
+    defer mem.free(mem.c_allocator, mapping)
+    mem.set(mapping, maxval!(ast.NodeId))
+    cloned :: try ast.clone_subtree(&builder, root, mapping)
+    tree :: ast.view(&builder, root)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    roots [2]ast.NodeId :: [root, cloned]
+    for (roots) |package| {
+        body :: ast.function_decl(&tree, ast.child(&tree, package, 0)).body
+        matched :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 0))
+        ordinary :: ast.match_arm(&tree, matched, 0)
+        try testing.expect_equal(2, ast.match_pattern_count(&tree, ordinary))
+        try testing.expect(!ast.match_arm_view(&tree, ordinary).is_inline)
+        arm_id :: ast.match_arm(&tree, matched, 1)
+        arm :: ast.match_arm_view(&tree, arm_id)
+        try testing.expect(arm.is_inline and arm.expression and arm.tag_capture_present)
+        try testing.expect_equal(0, ast.match_pattern_count(&tree, arm_id))
+        try testing.expect_equal(3, ast.child_count(&tree, arm_id))
+        try testing.expect_equal(arm.body, ast.child(&tree, arm_id, 0))
+        try testing.expect_equal(arm.capture?, ast.child(&tree, arm_id, 1))
+        try testing.expect_equal(arm.tag_capture?, ast.child(&tree, arm_id, 2))
+        try testing.expect_equal("payload", ast.source_text(&tree, ast.node_span(&tree, arm.capture?)))
+        try testing.expect_equal("tag", ast.source_text(&tree, ast.node_span(&tree, arm.tag_capture?)))
+        for (usize(1)..usize(3)) |i| {
+            statement_match :: ast.statement_expr(&tree, ast.block_statement(&tree, body, i))
+            discarded :: ast.match_arm_view(&tree, ast.match_arm(&tree, statement_match, 0))
+            try testing.expect(discarded.is_inline and !discarded.expression)
+            try testing.expect(discarded.capture == null and discarded.tag_capture == null)
+            try testing.expect_equal(i == 1, discarded.tag_capture_present)
+        }
+    }
+}
+
+rejects_malformed_inline_match_captures test {
+    sources [8][]u8 :: [
+        "run proc() void { match value { inline ||: 1 } }",
+        "run proc() void { match value { inline |a, b, c|: 1 } }",
+        "run proc() void { match value { inline |@a|: 1 } }",
+        "run proc() void { match value { inline |*a|: 1 } }",
+        "run proc() void { match value { inline |a, @b|: 1 } }",
+        "run proc() void { match value { inline |a: 1 } }",
+        "run proc() void { match value { inline a|: 1 } }",
+        "run proc() void { match value { inline |a,|: 1 } }",
+    ]
+    for (sources) |source| {
+        strings := strpool.init(mem.c_allocator)
+        defer strpool.deinit(&strings)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        scan_state := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&scan_state)
+        try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+        tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+        defer ast.deinit(&tree)
+        try testing.expect(diagnostics.count(&diagnostic_store) > 0)
+    }
+}

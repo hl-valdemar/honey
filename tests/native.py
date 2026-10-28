@@ -11,6 +11,290 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "inline_match_runtime_enum_static_capture_expression_and_single_subject": (
+        """
+        Mode :: enum(i16) { handled = -7, first = 3, second = 8, answer = 42, zero = 90 }
+        selected proc(value Mode, calls @mut i16) Mode {
+            calls^ = calls^ + 1
+            return value
+        }
+        remaining proc($tag Mode) i16 {
+            if (tag == .answer) { return 42 }
+            else if (tag == .zero) { return 0 }
+            else { return false }
+        }
+        read proc(value Mode, calls @mut i16) i16 {
+            return match selected(value, calls) {
+                .handled: 0,
+                .first, .second: 0,
+                inline |tag|: remaining(tag),
+            }
+        }
+        main proc() [2]i16 {
+            calls i16 := 0
+            total :: (
+                read(.handled, &calls) + read(.first, &calls) + read(.second, &calls)
+                + read(.answer, &calls) + read(.zero, &calls)
+            )
+            return [total, calls]
+        }
+        """, b"[42, 5]\n", None,
+    ),
+    "inline_match_generic_heterogeneous_payloads_static_tags_and_nested_selection": (
+        """
+        Tag :: enum(i16) { handled = -7, first = 3, second = 8, number = 42, record = 90, text = 100, empty = 120 }
+        Pair :: struct { values [2]i16 }
+        Choice :: union(Tag) { text string, empty void, record Pair, number i8, handled bool, second bool, first bool }
+        narrow proc($tag Tag, value i8) i16 {
+            if (tag == .number) return i16(value) else return false
+        }
+        pair proc(value Pair) i16 { return value.values[0] + value.values[1] }
+        read proc($T type, input T) i16 {
+            return match input {
+                .handled: 0,
+                .first, .second: 0,
+                inline |payload, tag|: match tag {
+                    .number: narrow(tag, payload),
+                    .record: pair(payload),
+                    .text: i16(payload.len),
+                    .empty: 1,
+                    else: false,
+                },
+            }
+        }
+        nested proc(input Choice) i16 {
+            match input {
+                .handled, .first, .second: return 0,
+                inline |payload, tag|: {
+                    match tag {
+                        inline |selected|: {
+                            if (selected == .number) { return narrow(tag, payload) }
+                            else if (selected == .record) { return pair(payload) }
+                            else if (selected == .text) { return i16(payload.len) }
+                            else {
+                                payload
+                                return 1
+                            }
+                        },
+                    }
+                },
+            }
+        }
+        main proc() i16 {
+            if (read(Choice, .handled{false}) + read(Choice, .first{true}) + read(Choice, .second{false}) != 0) return -1
+            if (nested(.number{19}) + nested(.record{values = [9, 11]}) + nested(.text{"ok"}) + nested(.empty) != 42) return -2
+            return (
+                read(Choice, .number{19}) + read(Choice, .record{values = [9, 11]})
+                + read(Choice, .text{"ok"}) + read(Choice, .empty)
+            )
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_union_subject_once_and_payload_copy_isolation_without_tag": (
+        """
+        Pair :: struct { values [2]mut i16 }
+        Choice :: union(enum) { record Pair, other Pair }
+        exact proc(value Pair) i16 { return value.values[0] + value.values[1] }
+        selected proc(input @Choice, calls @mut i16) Choice {
+            calls^ = calls^ + 1
+            return input^
+        }
+        main proc() i16 {
+            input Choice := .record{values = [19, 23]}
+            calls i16 := 0
+            match selected(&input, &calls) {
+                inline |payload|: {
+                    input.record.values[0] = 0
+                    copied := payload
+                    copied.values[1] = 0
+                    if (calls != 1 or input.record.values[0] != 0 or copied.values[1] != 0) return -1
+                    return exact(payload)
+                },
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_return_break_continue_run_arm_cleanup": (
+        """
+        Mode :: enum { skip, add, stop }
+        finish proc(input Mode, cleanups @mut i16) i16 {
+            match input {
+                .skip, .stop: return 0,
+                inline |tag|: {
+                    defer cleanups^ = cleanups^ + 1
+                    if (tag == .add) return 19 else return false
+                },
+            }
+        }
+        main proc() i16 {
+            total i16 := 0
+            cleanups i16 := 0
+            for [Mode.skip, .add, .stop, .add] |input| {
+                match input {
+                    inline |tag|: {
+                        defer cleanups = cleanups + 1
+                        if (tag == .skip) { continue }
+                        else if (tag == .stop) { break }
+                        else { total = total + 19 }
+                    },
+                }
+            }
+            result :: finish(.add, &cleanups)
+            return total + result + cleanups
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_rejects_scalar_subject": (
+        "main proc() i16 { return match i16(42) { inline |value|: value } }",
+        b"", b"inline match arm requires an enum or tagged union",
+    ),
+    "inline_match_rejects_untagged_union_subject": (
+        "Choice :: union { number i16 }\nmain proc() i16 { input Choice :: { number = 42 }\nreturn match input { inline |value|: value } }",
+        b"", b"inline match arm requires an enum or tagged union",
+    ),
+    "inline_match_rejects_second_enum_capture": (
+        "Mode :: enum { answer }\nmain proc() i16 { return match Mode.answer { inline |value, tag|: 42 } }",
+        b"", b"inline match arm requires one enum capture",
+    ),
+    "inline_match_rejects_redundant_remaining_arm": (
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { .first, .second: 42, inline |_|: 0 } }",
+        b"", b"match arm is unreachable",
+    ),
+    "inline_match_rejects_following_arm": (
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { inline |_|: 42, .second: 0 } }",
+        b"", b"match arm is unreachable",
+    ),
+    "inline_match_rejects_arm_after_else": (
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { else: 42, inline |_|: 0 } }",
+        b"", b"match arm is unreachable",
+    ),
+    "inline_match_checks_preceding_duplicate_patterns": (
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { .first: 42, .first: 0, inline |_|: 0 } }",
+        b"", b"duplicate or overlapping match pattern",
+    ),
+    "inline_match_rejects_duplicate_capture_names": (
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nreturn match input { inline |value, value|: 42 } }",
+        b"", b"duplicate name or forbidden shadowing",
+    ),
+    "inline_match_rejects_shadowed_enum_capture": (
+        "Mode :: enum { answer }\nmain proc() i16 { value :: 42\nreturn match Mode.answer { inline |value|: 42 } }",
+        b"", b"duplicate name or forbidden shadowing",
+    ),
+    "inline_match_rejects_shadowed_tag_capture": (
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { tag :: 42\ninput Choice :: .number{42}\nreturn match input { inline |value, tag|: 42 } }",
+        b"", b"duplicate name or forbidden shadowing",
+    ),
+    "inline_match_enum_capture_is_immutable": (
+        "Mode :: enum { first, second }\nmain proc() i16 { match Mode.first { inline |value|: value = .second }\nreturn 42 }",
+        b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_match_payload_capture_is_immutable": (
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nmatch input { inline |value|: value = 0 }\nreturn 42 }",
+        b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_match_tag_capture_is_immutable": (
+        "Choice :: union(enum) { number i8, empty void }\nmain proc() i16 { input Choice :: .number{42}\nmatch input { inline |value, tag|: tag = .empty }\nreturn 42 }",
+        b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_match_payload_preserves_narrow_type": (
+        "Choice :: union(enum) { number i8 }\nread proc(input Choice) i16 { match input { inline |value|: return value } }\nmain proc() i16 { return read(.number{42}) }",
+        b"", b"return does not match",
+    ),
+    "inline_match_payload_is_not_a_comptime_binding": (
+        "Choice :: union(enum) { number i8 }\nknown proc($value i8) i16 { return i16(value) }\nread proc(input Choice) i16 { return match input { inline |value|: known(value) } }\nmain proc() i16 { return read(.number{42}) }",
+        b"", b"compile-time",
+    ),
+    "inline_match_resolves_unselected_bodies": (
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { inline |tag|: match tag { .first: 42, .second: missing } } }",
+        b"42\n", b"unknown name",
+    ),
+    "inline_match_rejects_pointer_capture_syntax": (
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nreturn match input { inline |*value|: 42 } }",
+        b"", b"unexpected token",
+    ),
+    "inline_match_nested_optional_loop_and_ordinary_match_captures": (
+        """
+        Mode :: enum { skip, answer }
+        Choice :: union(enum) { mode Mode }
+        score proc(value Mode) i16 {
+            return match value { inline |tag|: match tag { .skip: 0, .answer: 14 } }
+        }
+        read proc(input ?Mode, choice Choice) i16 {
+            total i16 := 0
+            if input |value| {
+                total = match value { inline |tag|: score(tag) }
+            }
+            pending ?Mode := input
+            while pending |value| {
+                total = total + match value { inline |tag|: score(tag) }
+                pending = null
+            }
+            match choice {
+                .mode |value|: {
+                    total = total + match value { inline |tag|: score(tag) }
+                }
+            }
+            return total
+        }
+        main proc() i16 { return read(.answer, .mode{.answer}) + read(null, .mode{.skip}) }
+        """, b"42\n", None,
+    ),
+    "inline_match_type_producer_selects_generated_storage": (
+        """
+        Mode :: enum { small, wide }
+        Storage proc(input Mode) type {
+            match input { inline |tag|: {
+                if (tag == .small) { return struct { value i8 = 19 } }
+                else { return struct { value i16 = 23 } }
+            } }
+        }
+        main proc() i16 {
+            small Storage(.small) :: {}
+            wide Storage(.wide) :: {}
+            return i16(small.value) + wide.value
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_auto_tag_nested_expansion_infers_exact_payload_generics": (
+        """
+        Choice :: union(enum) { number i8, empty void }
+        identity proc($T type, value T) T { return value }
+        read proc(input Choice) i16 {
+            match input { inline |payload, tag|: match tag {
+                inline |value|: {
+                    if (value == .number) { return i16(identity(payload)) }
+                    else {
+                        payload
+                        return 2
+                    }
+                }
+            } }
+        }
+        main proc() i16 { return read(.number{40}) + read(.empty) }
+        """, b"42\n", None,
+    ),
+    "inline_match_type_producer_updates_outer_type_and_value_locals": (
+        """
+        Choice :: union(enum) { number u8, empty void }
+        Storage proc(input Choice) type {
+            length usize := 1
+            Element := i8
+            for [input] |item| {
+                match item { inline |payload, tag|: {
+                    if (tag == .number) {
+                        length = usize(payload)
+                        Element = i16
+                    } else { length = 2 }
+                } }
+            }
+            return struct { values [length]Element }
+        }
+        main proc() i16 {
+            value Storage(.number{2}) :: { values = [19, 23] }
+            return value.values[0] + value.values[1]
+        }
+        """, b"42\n", None,
+    ),
     "inline_for_heterogeneous_tuple_exact_captures_and_nested_values": (
         """
         Choice :: union(enum) { number i8, empty void }
@@ -6979,6 +7263,18 @@ def check_dependency_provenance(temporary, executable):
                 return 42
             }
         """, 5, 16, False),
+        ("""
+            Choice :: union(enum) { number int, empty void }
+            fail proc() int {
+                input Choice :: .number{9223372036854775807}
+                return match input {
+                    inline |payload, tag|: match tag {
+                        .number: payload + 1,
+                        .empty: 0,
+                    },
+                }
+            }
+        """, 8, 22, False),
         ("""
             fail proc() int {
                 a :: [42]
