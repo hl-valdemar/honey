@@ -435,6 +435,7 @@ recompiles_imported_inline_match_arms_without_retaining_expansions test {
             `main proc() i16 {
             `    values :: dep.values()
             `    if (enum_score(.skip) + enum_score(dep.mode()) != 0) return -1
+            `    if (dep.error_score(.Failure{code = 42}) + dep.error_score(.missing) != 42) return -2
             `    return (
             `        dep.read(dep.Choice, values[0]) + dep.read(dep.Choice, values[1])
             `        + dep.read(dep.Choice, values[2]) + dep.read(dep.Choice, values[3])
@@ -448,6 +449,15 @@ recompiles_imported_inline_match_arms_without_retaining_expansions test {
             `Tag :: enum(i16) { number = -7, record = 3, text = 42, empty = 90 }
             `Pair :: struct { values [2]i16 }
             `Choice :: union(Tag) { text string, empty void, number i8, record Pair }
+            `Missing :: enum { missing }
+            `Failure :: struct { code i16 }
+            `Errors :: alias (Missing | Failure | Missing)
+            `fail proc(input Errors) i16 ! Errors { return input }
+            `error_score proc(input Errors) i16 {
+            `    return fail(input) catch |err| match err {
+            `        inline |payload, tag|: match tag { .Failure: payload.code, else: 0 },
+            `    }
+            `}
             `mode proc() Mode { return .answer }
             `values proc() [4]Choice {
             `    return [.number{19}, .record{values = [9, 11]}, .text{"ok"}, .empty]

@@ -11,6 +11,141 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "inline_match_composed_enums_keep_static_sum_tags_and_runtime_dispatch": (
+        """
+        First :: enum { skipped, first }
+        Second :: enum { second, last }
+        Errors :: alias (First | (Second | First))
+        selected proc(input Errors, calls @mut i16) Errors {
+            calls^ = calls^ + 1
+            return input
+        }
+        known proc($tag Errors) i16 {
+            return match tag { .first: 19, .second: 23, else: 0 }
+        }
+        read proc(input Errors, calls @mut i16) i16 {
+            return match selected(input, calls) {
+                .skipped: 0,
+                inline |tag|: known(tag),
+            }
+        }
+        main proc() [2]i16 {
+            calls i16 := 0
+            total :: read(.skipped, &calls) + read(.first, &calls) + read(.second, &calls) + read(.last, &calls)
+            return [total, calls]
+        }
+        """, b"[42, 4]\n", None,
+    ),
+    "inline_match_composed_payloads_catch_static_tags_and_owned_copies": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { number i8, text string, empty void }
+        Failure :: struct { values [2]mut i16 }
+        Errors :: alias ((Missing | Detail) | (Failure | Missing))
+        fail proc(input Errors) i16 ! Errors { return input }
+        exact proc(value i8) i16 { return i16(value) }
+        read proc(input Errors) i16 {
+            fail(input) catch |err| {
+                match err {
+                    .missing: return 0,
+                    inline |payload, tag|: {
+                        match tag {
+                            inline |selected|: {
+                                if (selected == .number) { return exact(payload) }
+                                else if (selected == .text) { return i16(payload.len) }
+                                else if (selected == .Failure) {
+                                    copy := payload
+                                    copy.values[0] = 0
+                                    return payload.values[0] + payload.values[1]
+                                } else {
+                                    payload
+                                    return 1
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+            return -1
+        }
+        main proc() i16 {
+            return read(.missing) + read(.number{19}) + read(.text{"ok"}) + read(.Failure{values = [9, 11]}) + read(.empty)
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_composed_type_producers_and_constant_inputs": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { count usize, empty void }
+        Failure :: struct { count usize }
+        Errors :: alias (Missing | Detail | (Failure | Detail))
+        Storage proc(input Errors) type {
+            length usize := 0
+            match input {
+                inline |payload, tag|: {
+                    if (tag == .count) { length = payload }
+                    else if (tag == .Failure) { length = payload.count }
+                    else if (tag == .missing) { length = 1 }
+                    else { length = 0 }
+                },
+            }
+            return struct { values [length]i16 }
+        }
+        score proc(input Errors) i16 {
+            return match input {
+                inline |payload, tag|: match tag { .count: i16(payload), else: 0 },
+            }
+        }
+        known proc($input Errors) i16 { return score(input) }
+        main proc() i16 {
+            first Storage(.count{2}) :: { values = [19, 20] }
+            same Storage(.count{2}) :: first
+            record Storage(.Failure{count = 2}) :: { values = [0, 0] }
+            other Storage(.missing) :: { values = [0] }
+            empty Storage(.empty) :: { values = [] }
+            return same.values[0] + same.values[1] + $(score(.count{2})) + known(.count{1}) + other.values[0] + i16(empty.values.len) + record.values[0]
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_composed_payload_cleanup_on_error_return": (
+        """
+        Missing :: enum { missing }
+        Detail :: union(enum) { failed i16 }
+        Errors :: alias (Missing | Detail)
+        forward proc(input Errors, cleanups @mut i16) i16 ! Errors {
+            match input {
+                inline |payload, tag|: {
+                    defer cleanups^ = cleanups^ + 1
+                    if (tag == .failed) { return .failed{payload} }
+                    else { return .missing }
+                },
+            }
+        }
+        main proc() i16 {
+            cleanups i16 := 0
+            value :: forward(.failed{41}, &cleanups) catch |err| match err {
+                inline |payload, tag|: match tag { .failed: payload, else: 0 },
+            }
+            return value + cleanups
+        }
+        """, b"42\n", None,
+    ),
+    "inline_match_composed_enums_reject_second_capture": (
+        "A :: enum { a }\nB :: enum { b }\nmain proc() i16 { input (A | B) :: .a\nreturn match input { inline |value, tag|: 42 } }",
+        b"", b"inline match arm requires one enum capture",
+    ),
+    "inline_match_composed_rejects_conflicting_variant_payloads": (
+        "A :: union(enum) { failed i8 }\nB :: union(enum) { failed i16 }\nmain proc() i16 { input (A | B) :: .failed{42}\nreturn match input { inline |payload, tag|: i16(payload) } }",
+        b"", b"sum composition requires compatible",
+    ),
+    "inline_match_composed_preserves_narrow_payload_type": (
+        "A :: enum { a }\nB :: union(enum) { failed i8 }\nread proc(input (A | B)) i16 { return match input { inline |payload, tag|: match tag { .failed: payload, else: i16(0) } } }\nmain proc() i16 { return read(.failed{42}) }",
+        b"", b"incompatible value type",
+    ),
+    "inline_match_composed_rejects_fully_covered_arm": (
+        "A :: enum { a }\nB :: enum { b }\nmain proc() i16 { input (A | B) :: .a\nreturn match input { .a, .b: 42, inline |_|: 0 } }",
+        b"", b"match arm is unreachable",
+    ),
     "inline_match_runtime_enum_static_capture_expression_and_single_subject": (
         """
         Mode :: enum(i16) { handled = -7, first = 3, second = 8, answer = 42, zero = 90 }
