@@ -11,6 +11,174 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "type_records_local_schema_defaults_and_owned_copies": (
+        """
+        Storage proc() type {
+            Config :: struct { child type = i8, count usize = 2, text string = "ok" }
+            config Config := {}
+            original :: config
+            field!(config, "child") = i16
+            config.count = config.count + 1
+            config.text = "owned"
+            if (original.child != i8 or original.count != 2 or original.text.len != 2) return bool
+            return struct { values [config.count]config.child, bias original.child = 2 }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 21, 0] }
+            same Storage() :: value
+            return same.values[0] + same.values[1] + i16(same.bias)
+        }
+        """, b"42\n", None,
+    ),
+    "type_records_nested_arrays_borrowed_iteration_and_capture_copies": (
+        """
+        Storage proc() type {
+            Item :: struct { child type, values [1]mut usize }
+            config struct { items [2]mut Item, bias struct { value i16 } } := {
+                items = [{ child = i8, values = [1] }, { child = bool, values = [1] }],
+                bias = { value = 0 },
+            }
+            original :: config
+            for config.items |item, index| {
+                config.items[1].child = i16
+                config.items[index].values[0] = index + 1
+                config.bias.value = config.bias.value + 1
+                if (index == 0 and item.child != i8) return bool
+                if (index == 1 and item.child != i16) return bool
+                copied := item
+                copied.child = u8
+                if (item.child == u8) return bool
+            }
+            if (original.items[1].child != bool or original.items[1].values[0] != 1) return bool
+            return struct { values [config.items[1].values[0]]config.items[1].child, bias i16 = config.bias.value }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 21] }
+            return value.values[0] + value.values[1] + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_records_inferred_tuples_nested_replacement_and_nominal_leaves": (
+        """
+        Storage proc() type {
+            Child :: struct { value i16 }
+            config := { nested = { child = Child, count = usize(1) }, tuple = {i8, usize(2)} }
+            saved :: config
+            config.nested = saved.nested
+            config.tuple.0 = i16
+            config.nested.count = config.tuple.1
+            if (saved.tuple.0 != i8 or config.nested.child != Child) return bool
+            Element :: field!(config.tuple, "0")
+            return struct { first config.nested.child, second Child, bias Element = 2 }
+        }
+        main proc() i16 {
+            value Storage() :: { first = { value = 19 }, second = { value = 21 } }
+            copied := value.first
+            copied = value.second
+            return value.first.value + copied.value + value.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_records_reject_unknown_initializer_field": (
+        """
+        Bad proc() type {
+            config struct { child type } :: { child = i16, missing = 1 }
+            return config.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"no such field",
+    ),
+    "type_records_reject_duplicate_initializer_field": (
+        """
+        Bad proc() type {
+            config struct { child type } :: { child = i16, child = i8 }
+            return config.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"more than once",
+    ),
+    "type_records_reject_missing_initializer_field": (
+        """
+        Bad proc() type {
+            config struct { child type, count usize } :: { child = i16 }
+            return config.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"missing a required field",
+    ),
+    "type_records_reject_non_type_leaf": (
+        """
+        Bad proc() type {
+            config struct { child type } :: { child = 42 }
+            return config.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_records_preserve_value_leaf_overflow": (
+        """
+        Bad proc() type {
+            config struct { child type, count i8 } := { child = i16, count = 127 }
+            config.count = config.count + 1
+            return config.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "type_records_reject_immutable_capture_updates": (
+        """
+        Bad proc() type {
+            for [{ child = i16 }] |item| { item.child = i8 }
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"writable array element",
+    ),
+    "type_records_reject_readonly_nested_array_updates": (
+        """
+        Bad proc() type {
+            config struct { children [1]type } := { children = [i16] }
+            config.children[0] = i8
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"writable array element",
+    ),
+    "type_records_reject_unknown_selected_field": (
+        """
+        Bad proc() type {
+            config :: { child = i16 }
+            return field!(config, "missing")
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"no such field",
+    ),
+    "type_records_reject_unused_invalid_value_field": (
+        """
+        Bad proc() type {
+            Config :: struct { child type, invalid void }
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"42\n", b"void cannot be stored",
+    ),
+    "type_records_reject_unused_invalid_default": (
+        """
+        Bad proc() type {
+            Config :: struct { child type, count i8 = 128 }
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"outside its runtime type",
+    ),
+    "type_records_do_not_enable_runtime_storage": (
+        """
+        main proc() i16 {
+            config :: { child = i16, count = 42 }
+            return config.count
+        }
+        """, b"", b"type name cannot be used as a value",
+    ),
     "field_reflection_runtime_places_callbacks_and_single_evaluation": (
         """
         Point :: struct { value i16, callback @proc(value i16) i16 }
@@ -5454,6 +5622,14 @@ def check_specialization_packages(temporary, executable):
                 .empty: bool,
             }
         }
+        TypeRecord proc(T type) type {
+            config struct { child type, count usize } := { child = i8, count = 1 }
+            original :: config
+            config.child = T
+            config.count = 2
+            if (original.child != i8 or original.count != 1) return bool
+            return struct { values [config.count]config.child }
+        }
     """).strip() + "\n")
     (library / "functions.hon").write_text(textwrap.dedent("""
         identity proc($T type, value T) T { return value }
@@ -5493,6 +5669,15 @@ def check_specialization_packages(temporary, executable):
         main proc() i16 {
             value lib.Captured(i16, .count{2}) :: { values = [20, 20] }
             return lib.selected(.count{2}, value.values[0] + value.values[1])
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            value lib.TypeRecord(i16) :: { values = [19, 23] }
+            same lib.TypeRecord(i16) :: value
+            return same.values[0] + same.values[1]
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
@@ -5705,7 +5890,19 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:2:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 16
+    sizing.write_text(textwrap.dedent("""
+        BadRecord proc() type {
+            config :: { child = i16, count = i8(127) }
+            next :: config.count + 1
+            return [usize(next)]config.child
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.BadRecord() { return 42 }\n')
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 18
 
 
 def check_dependency_provenance(temporary, executable):
