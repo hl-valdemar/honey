@@ -1428,7 +1428,7 @@ parse_call proc(state @mut State, callee ast.NodeId, start u32, builtin bool) as
     defer state.allow_record_literals = previous
     state.paren_depth += 1
     defer state.paren_depth -= 1
-    skip_operand_newlines(state)
+    skip_argument_newlines(state)
     arguments arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&arguments)
     argument_start :: state.next_token
@@ -1441,7 +1441,7 @@ parse_call proc(state @mut State, callee ast.NodeId, start u32, builtin bool) as
         try arraylist.append(&arguments, argument)
         if (!next_is(state, .comma)) break
         state.next_token += 1
-        skip_operand_newlines(state)
+        skip_argument_newlines(state)
     }
     if (!previous and !next_is(state, .close_paren)) {
         # a guard's body may look like a record argument until its missing ')' is known.
@@ -1742,6 +1742,15 @@ skip_operand_newlines proc(state @mut State) void {
         named_binding_starts(state)
         or (next_is(state, .ident) and next_n_is(state, 1, .equal))
     ) state.next_token = start
+}
+
+@hide:file
+skip_argument_newlines proc(state @mut State) void {
+    skip_operand_newlines(state)
+    if (!next_is(state, .newline)) return
+    start :: state.next_token
+    skip_newlines(state)
+    if (!next_is(state, .open_curly)) state.next_token = start
 }
 
 @hide:file

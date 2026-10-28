@@ -747,6 +747,18 @@ add_record_type proc(builder @mut Builder, span Span, fields []NodeId) NodeId ! 
     }, span)
 }
 
+set_record_c_layout proc(builder @mut Builder, id NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .expr_record_type)
+    node.main = NodeData{ extra = 1 }
+}
+
+record_c_layout proc(tree @Tree, id NodeId) bool {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_record_type)
+    return node.main.extra == 1
+}
+
 add_enum_type proc(builder @mut Builder, span Span, backing ?NodeId, members []NodeId) NodeId ! mem.AllocError {
     start :: builder.storage.extra.items.len
     for (members) |member| _ = try add_extra(builder, u32(member))

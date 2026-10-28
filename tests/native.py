@@ -11,6 +11,162 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "struct_type_literal_fields_contextual_defaults_and_required_null": (
+        """
+        present proc() ??i16 { return 2 }
+        Record :: struct_type!(
+            .auto,
+            {"number", "ready", "text", "maybe", "required"},
+            {i16, bool, string, ?i16, ?i16},
+            {null, true, "ok", present(), null},
+        )
+        main proc() i16 {
+            value Record :: { number = 40, required = 2 }
+            if (!value.ready or value.text.len != 2) return -1
+            if (value.maybe? != 2) return -2
+            return value.number + value.required?
+        }
+        """, b"42\n", None,
+    ),
+    "struct_type_computed_arrays_snapshots_and_nominal_cache_identity": (
+        """
+        names proc() [2]mut string {
+            result [2]mut string := ["", ""]
+            result[0] = "value"
+            result[1] = "bias"
+            return result
+        }
+        change proc(input [2]mut type, T type) [2]mut type {
+            copied := input
+            copied[0] = T
+            return copied
+        }
+        Generated proc(T type, bias i16) type {
+            fields := names()
+            types [2]mut type := undefined
+            types[0] = i8
+            types[1] = i16
+            changed := change(types, T)
+            if (types[0] != i8 or changed[0] != T) return bool
+            defaults [2]mut ?i16 := undefined
+            defaults[0] = null
+            defaults[1] = bias
+            Result :: struct_type!(.auto, fields, changed, defaults)
+            fields[0] = "replaced"
+            types[1] = bool
+            changed[0] = bool
+            defaults[1] = 0
+            return Result
+        }
+        Other proc() type {
+            return struct_type!(.auto, ["value", "bias"], [i16, i16], [null, 2])
+        }
+        Selected :: alias Generated(i16, 2)
+        main proc() i16 {
+            if (Selected != Generated(i16, 2)) return -1
+            if (Selected == Generated(i16, 3) or Selected == Other()) return -2
+            value Selected :: { value = 40 }
+            same Generated(i16, 2) :: value
+            return same.value + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "struct_type_tuple_helper_nested_aggregate_defaults_and_copy_isolation": (
+        """
+        Child :: struct { values [2]mut i8, maybe ?i8 = null }
+        names proc() struct { string, string } { return {"rows", "bias"} }
+        Generated proc() type {
+            return struct_type!(
+                .auto,
+                names(),
+                [[2]mut Child, i8],
+                [[{ values = [19, 0] }, { values = [0, 23], maybe = 2 }], 127],
+            )
+        }
+        copy proc(value Generated()) Generated() { return value }
+        main proc() i16 {
+            first Generated() := {}
+            saved :: copy(first)
+            first.rows[0].values[0] = 0
+            first.rows[1].maybe = null
+            second Generated() :: {}
+            if (saved.rows[1].maybe? != 2 or second.bias != 127) return -1
+            return i16(saved.rows[0].values[0]) + i16(second.rows[1].values[1])
+        }
+        """, b"42\n", None,
+    ),
+    "struct_type_empty_auto_and_nested_c_layout": (
+        """
+        Layout :: enum { auto, c }
+        Tag :: enum(u8) { ready = 7 }
+        Empty :: struct_type!(.auto, [], [], [])
+        Inner :: struct_type!(.c, ["value"], [i16], [null])
+        Packet :: struct_type!(
+            Layout.c,
+            {"tag", "items", "pointer", "maybe"},
+            {Tag, [2]Inner, @i16, ?@i16},
+            {.ready, null, null, null},
+        )
+        identity proc(value Empty) Empty { return value }
+        main proc() i16 {
+            empty Empty :: identity({})
+            if (sizeof!(Packet) != 24 or alignof!(Packet) != 8) return -3
+            extra i16 :: 2
+            packet Packet :: {
+                items = [{ value = 19 }, { value = 21 }],
+                pointer = &extra,
+                maybe = null,
+            }
+            if (packet.tag != .ready) return -1
+            if packet.maybe |_| return -2
+            return packet.items[0].value + packet.items[1].value + packet.pointer^
+        }
+        """, b"42\n", None,
+    ),
+    "struct_type_required_optional_is_not_a_null_default": (
+        """
+        Record :: struct_type!(.auto, ["required"], [?i16], [null])
+        main proc() i16 {
+            value Record :: {}
+            return 42
+        }
+        """, b"", b"missing a required field",
+    ),
+    "struct_type_default_preserves_narrow_field_arithmetic": (
+        """
+        Record :: struct_type!(.auto, ["value"], [i8], [127])
+        main proc() i16 {
+            value Record := {}
+            value.value = value.value + 1
+            return i16(value.value)
+        }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "struct_type_runtime_dependencies_are_not_captured": (
+        """
+        read proc(value i16) i16 {
+            Record :: struct_type!(.auto, ["value"], [i16], [value])
+            result Record :: {}
+            return result.value
+        }
+        main proc() i16 { return read(42) }
+        """, b"", b"compile-time value",
+    ),
+    "struct_type_incomplete_array_snapshot_stays_incomplete": (
+        """
+        Generated proc() type {
+            types [2]mut type := undefined
+            types[0] = i16
+            saved :: types
+            types[1] = i16
+            return struct_type!(.auto, ["first", "second"], saved, [null, null])
+        }
+        main proc() i16 {
+            value Generated() :: { first = 19, second = 23 }
+            return value.first + value.second
+        }
+        """, b"", b"initialization",
+    ),
     "type_records_local_schema_defaults_and_owned_copies": (
         """
         Storage proc() type {
@@ -5327,6 +5483,94 @@ CASES = {
     ),
 }
 
+# Keep malformed schemas grouped: each must fail before generated storage is used.
+for name, expression, diagnostic in (
+    (
+        "argument_count",
+        'struct_type!(.auto, ["value"], [i16])',
+        b"argument count",
+    ),
+    (
+        "invalid_layout",
+        'struct_type!(.packed, ["value"], [i16], [null])',
+        b"layout",
+    ),
+    (
+        "invalid_field_name",
+        'struct_type!(.auto, ["9value"], [i16], [null])',
+        b"generated field name",
+    ),
+    (
+        "duplicate_field_name",
+        'struct_type!(.auto, ["value", "value"], [i16, i16], [null, null])',
+        b"specified more than once",
+    ),
+    (
+        "named_record_collection",
+        'struct_type!(.auto, {name = "value"}, [i16], [null])',
+        b"compile-time value",
+    ),
+    (
+        "unequal_collection_lengths",
+        'struct_type!(.auto, ["value", "bias"], [i16], [null, 2])',
+        b"length does not match",
+    ),
+    (
+        "non_type_field",
+        'struct_type!(.auto, ["value"], [42], [null])',
+        b"record fields require a concrete value type",
+    ),
+    (
+        "compile_time_only_field",
+        'struct_type!(.auto, ["value"], [type], [null])',
+        b"record fields require a concrete value type",
+    ),
+    (
+        "wrong_typed_default",
+        'struct_type!(.auto, ["value"], [i16], [u8(2)])',
+        b"incompatible value type",
+    ),
+    (
+        "out_of_range_default",
+        'struct_type!(.auto, ["value"], [i8], [128])',
+        b"outside its runtime type",
+    ),
+    (
+        "empty_c_layout",
+        'struct_type!(.c, [], [], [])',
+        b"C-layout",
+    ),
+    (
+        "non_c_field",
+        'struct_type!(.c, ["value"], [string], [null])',
+        b"C-layout",
+    ),
+    (
+        "non_c_nested_record",
+        'struct_type!(.c, ["value"], [struct { value i16 }], [null])',
+        b"C-layout",
+    ),
+):
+    CASES[f"struct_type_rejects_{name}"] = (
+        f"""
+        Generated proc() type {{ return {expression} }}
+        main proc() i16 {{
+            value Generated() :: {{}}
+            return 42
+        }}
+        """, b"", diagnostic,
+    )
+
+generated_field_count = 4097
+CASES["struct_type_bounds_generated_field_construction"] = (
+    "Record :: struct_type!(.auto, ["
+    + ", ".join(f'"field_{index}"' for index in range(generated_field_count))
+    + "], [" + ", ".join(["i16"] * generated_field_count)
+    + "], [" + ", ".join(["null"] * generated_field_count)
+    + "])\nmain proc() i16 { value Record :: {}\nreturn 42 }\n",
+    b"", b"compile-time execution exceeds",
+)
+
 # Exercise each representation through storage, calls, ranges and checked updates.
 for integer_type, bits, signed in (
     ("i8", 8, True), ("i16", 16, True), ("i32", 32, True),
@@ -5720,7 +5964,33 @@ def check_record_packages(temporary, executable):
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
-    return 4
+    types.write_text(textwrap.dedent("""
+        Generated proc(bias i16) type {
+            return struct_type!(.auto, ["value", "bias"], [i16, i16], [null, bias])
+        }
+    """).strip() + "\n")
+    (library / "functions.hon").write_text(
+        "identity proc(value Generated(2)) Generated(2) { return value }\n"
+    )
+    (app / "main.hon").write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Selected :: alias lib.Generated(2)
+        main proc() i16 {
+            value Selected :: { value = 40 }
+            same lib.Generated(2) :: lib.identity(value)
+            return same.value + same.bias
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    types.write_text(textwrap.dedent("""
+        Generated proc(bias i16) type {
+            return struct_type!(.auto, ["bad-name"], [i16], [null])
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"generated field name"))
+    diagnosed = run(str(HONEY), "run", str(app))
+    assert diagnosed.stderr.startswith(f"{types.resolve()}:2:".encode()), outcome(diagnosed)
+    return 6
 
 
 def check_data_model_packages(temporary, executable):

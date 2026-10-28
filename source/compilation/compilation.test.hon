@@ -338,6 +338,57 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
     }
 }
 
+recompiles_generated_records_without_borrowing_previous_ir test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        bytes := try owned_text(
+            `Child proc(value i16) type {
+            `    return struct_type!(.auto, ["value"], [i16], [value])
+            `}
+            `Parent proc(value i16) type {
+            `    ChildType :: Child(value)
+            `    child ChildType :: {}
+            `    return struct_type!(
+            `        .auto,
+            `        ["child", "bias", "text"],
+            `        [ChildType, i16, string],
+            `        [child, 2, "owned"],
+            `    )
+            `}
+            `main proc() i16 {
+            `    parent Parent(40) :: {}
+            `    same Parent(40) :: parent
+            `    child Child(40) :: same.child
+            `    if (Child(40) == Child(41) or Parent(40) == Parent(41)) return 0
+            `    other Parent(41) :: {}
+            `    if (other.child.value != 41 or same.text.len != 5) return 0
+            `    return child.value + same.bias
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        _ = try add_source(&session, root, "generated.hon", &bytes, &diagnostic_store)
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for (0..modules.len) |index| {
+        outcome := try interpreter.run(mem.c_allocator, &modules[index], &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 dependency_traps_keep_original_spans_and_remain_demand_driven test {
     mains [2][]u8 :: [
         `dep :: import "../dependency"

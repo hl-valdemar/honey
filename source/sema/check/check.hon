@@ -3313,6 +3313,28 @@ intern_record proc(state @mut State, declaration ast.NodeId, fields []mut Record
 }
 
 @hide:file
+c_record_field_type proc(state @State, type Type, depth usize) bool {
+    if (depth >= 128 or type.nominal != ast.NodeId(maxval!(u32))) return false
+    if (numeric_kind(type.kind) or type.kind == .bool or type.kind == .pointer) return true
+    if (type.kind == .optional)
+        return state.arrays.items[usize(type.array_type)].element.kind == .pointer
+    if (type.kind == .enumeration)
+        return state.enums.items[usize(type.enum_type)].explicit_backing
+    if (type.kind == .array) {
+        array :: state.arrays.items[usize(type.array_type)]
+        return array.len > 0 and c_record_field_type(state, array.element, depth + 1)
+    }
+    if (type.kind != .record) return false
+    record :: state.records.items[usize(type.record_type)]
+    if (record.is_union or record.declaration == ast.NodeId(maxval!(u32))
+        or !ast.record_c_layout(state.tree, record.declaration) or record.fields.len == 0) return false
+    for (record.fields) |field| {
+        if (!c_record_field_type(state, field.type, depth + 1)) return false
+    }
+    return true
+}
+
+@hide:file
 check_record proc(state @mut State, id ast.NodeId, nominal bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
     cached := state.cells[usize(id)].type
     if (cached.kind == .invalid) return cached
@@ -3358,6 +3380,9 @@ check_record proc(state @mut State, id ast.NodeId, nominal bool) Type ! (mem.All
         if (type.kind == .void or type.kind == .range or type.kind == .type_value or type.kind == .none) {
             type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_record_field_type, view.span))
         }
+        if (type.kind != .invalid and ast.record_c_layout(state.tree, id)
+            and !c_record_field_type(state, type, 0))
+            type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_c_record_field_type, view.span))
         if (view.name) |name| {
             if (named_field(state.tree, fields[0..i], name) != no_index) {
                 type = invalid_type(try diagnostics.add(state.diagnostics, .duplicate_field, ast.node_span(state.tree, name)))
