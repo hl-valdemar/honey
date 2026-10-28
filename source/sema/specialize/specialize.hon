@@ -127,13 +127,12 @@ elaborate proc(
         }
         if (class == .function and ast.function_generic(&original, id)) needed = true
         if (class == .function) {
-            result_type :: sema.binding(resolution, ast.function_decl(&original, id).return_type)
-            if (
-                (result_type.kind == .builtin and result_type.data.builtin == .type)
-                or type_array_annotation(&original, resolution.storage.bindings,
-                    ast.function_decl(&original, id).return_type)
-            ) needed = true
+            if (type_storage_annotation(&original, resolution.storage.bindings,
+                ast.function_decl(&original, id).return_type, 0)) needed = true
         }
+        if (class == .statement and ast.stmt_kind(&original, id) == .declaration
+            and type_storage_annotation(&original, resolution.storage.bindings,
+                ast.statement_decl(&original, id).initializer, 0)) needed = true
         if (needed) break
     }
     if (!needed) return result
@@ -169,6 +168,29 @@ elaborate proc(
         try expand(&state, state.declarations.items[index])
         index += 1
     }
+    # metadata definitions have no runtime layout. retain their AST and bindings:
+    # surviving runtime annotations still resolve the definition and are rejected.
+    retained := usize(0)
+    index = 0
+    while (index < state.declarations.items.len) {
+        declaration :: state.declarations.items[index]
+        index += 1
+        if (ast.node_class(&state.tree, declaration) == .statement
+            and ast.stmt_kind(&state.tree, declaration) == .declaration) {
+            view :: ast.statement_decl(&state.tree, declaration)
+            if (view.mutability == .constant and type_record_storage(&state, view.initializer, 0)) {
+                state.type_execution_remaining = 4096
+                state.type_execution_depth += 1
+                defer state.type_execution_depth -= 1
+                state.evaluation_diagnostic = diagnostics.no_diagnostic
+                if (try type_record_check(&state, view.initializer)) continue
+                try reject_evaluation(&state, view.initializer)
+            }
+        }
+        state.declarations.items[retained] = declaration
+        retained += 1
+    }
+    state.declarations.items = state.declarations.items[..retained]
     try remember(&state, root)
     try ast.set_package_declarations(builder, root, state.declarations.items)
     try refresh(&state)
@@ -258,7 +280,7 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         operand :: ast.comptime_operand(&state.tree, id)
         state.evaluation_diagnostic = diagnostics.no_diagnostic
         value :: try evaluate(state, operand)
-        if (value.annotation == no_node or !type_array_annotation(&state.tree, state.bindings.items, value.annotation))
+        if (value.annotation == no_node or !type_record_storage(state, value.annotation, 0))
             try arraylist.append(&state.rewrites.constraints, operand)
         if (value.kind == .invalid) {
             try reject_evaluation(state, id)
@@ -517,34 +539,36 @@ is_type proc(state @State, id ast.NodeId) bool {
     return value.kind == .builtin and value.data.builtin == .type
 }
 
-# recognize erased result signatures without evaluating dependent lengths or
-# elaborating their bodies. aliases retain the same compile-time-only contract.
+# recognize erased storage without evaluating dependent lengths or elaborating
+# bodies. pointers retain the runtime materialization boundary.
 @hide:file
-type_array_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.NodeId) bool {
-    current := input
-    array := false
-    for (0..128) |_| {
-        resolved :: bindings[usize(current)]
-        if (resolved.kind == .builtin) return array and resolved.data.builtin == .type
-        if (resolved.kind == .declaration) {
-            declaration :: resolved.data.declaration
-            if (ast.node_class(tree, declaration) != .statement) return false
-            view :: ast.statement_decl(tree, declaration)
-            if (view.mutability != .constant) return false
-            current = view.initializer
-        } else if (ast.expr_kind(tree, current) == .array_type) {
-            array = true
-            current = ast.array_type(tree, current).element
-        } else if (ast.expr_kind(tree, current) == .alias_expr) {
-            current = ast.type_operand(tree, current)
-        } else return false
+type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.NodeId, depth usize) bool {
+    if (depth >= 128 or usize(input) >= bindings.len) return false
+    resolved :: bindings[usize(input)]
+    if (resolved.kind == .builtin) return resolved.data.builtin == .type
+    if (resolved.kind == .declaration) {
+        declaration :: resolved.data.declaration
+        if (ast.node_class(tree, declaration) != .statement) return false
+        view :: ast.statement_decl(tree, declaration)
+        return (view.mutability == .constant
+            and type_storage_annotation(tree, bindings, view.initializer, depth + 1))
+    }
+    kind :: ast.expr_kind(tree, input)
+    if (kind == .alias_expr)
+        return type_storage_annotation(tree, bindings, ast.type_operand(tree, input), depth + 1)
+    if (kind == .array_type)
+        return type_storage_annotation(tree, bindings, ast.array_type(tree, input).element, depth + 1)
+    if (kind != .record_type) return false
+    for (0..ast.record_field_count(tree, input)) |i| {
+        field :: ast.field(tree, ast.record_field(tree, input, i))
+        if (field.type != null and type_storage_annotation(tree, bindings, field.type?, depth + 1)) return true
     }
     return false
 }
 
 @hide:file
 compiletime_result proc(state @State, annotation ast.NodeId) bool {
-    return is_type(state, annotation) or type_array_annotation(&state.tree, state.bindings.items, annotation)
+    return type_record_storage(state, annotation, 0)
 }
 
 @hide:file
@@ -556,7 +580,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # type and type-array results have no runtime call: every input is specialized.
+    # type-containing results have no runtime call: every input is specialized.
     type_result :: compiletime_result(state, ast.function_decl(&state.tree, function).return_type)
     runtime := usize(0)
     for (0..count) |i| {
@@ -589,7 +613,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
                 type :: try canonical_type(state, annotation)
                 contextual = type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type
             }
-            if (contextual or type_array_annotation(&state.tree, state.bindings.items, annotation))
+            if (contextual or type_record_storage(state, annotation, 0))
                 annotation = try argument_annotation(state, function, view.type, arguments)
             arguments[i] = try evaluate_expected(state, argument, annotation)
             if (arguments[i].kind == .invalid) {
@@ -708,7 +732,7 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
             view :: ast.param(&state.tree, parameter)
             if (
                 (!type_result and !view.comptime) or is_type(state, view.type)
-                or type_array_annotation(&state.tree, state.bindings.items, view.type)
+                or type_record_storage(state, view.type, 0)
             ) continue
             original :: ast.call_arg(&state.tree, call, i)
             constraint :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, original), view.type, original)
@@ -799,6 +823,15 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
         if (!is_type(state, view.return_type)) {
             state.instances.items[index].value = returned
+            constraint_count :: state.rewrites.constraints.items.len
+            for (constraints_start..constraint_count) |i| {
+                constraint :: state.rewrites.constraints.items[i]
+                if (!try expand_type_matches(state, constraint)) {
+                    try reject_type_result(state, call, returned, constraints_start)
+                    return
+                }
+                try expand(state, constraint)
+            }
             return
         }
         result := returned
@@ -918,7 +951,12 @@ argument_annotation proc(
     for (0..ast.function_param_count(&state.tree, function)) |i| {
         if (arguments[i].kind == .invalid) continue
         parameter :: ast.function_param(&state.tree, function, i)
-        value :: try materialize(state, arguments[i])
+        value := try materialize(state, arguments[i])
+        if (value.kind != .type and value.annotation != no_node) {
+            value.node = try ast.add_typed_constant(state.builder,
+                ast.node_span(&state.tree, value.node), value.annotation, value.node)
+            try refresh(state)
+        }
         for (0..mapping.len) |n| {
             resolved :: binding(state, ast.NodeId(n))
             if (
@@ -939,7 +977,10 @@ argument_annotation proc(
 
 @hide:file
 evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Error {
-    if (type_array_annotation(&state.tree, state.bindings.items, annotation)) {
+    if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
+        if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+        state.type_execution_depth += 1
+        defer state.type_execution_depth -= 1
         constant :: try type_execution_value(state, id, annotation)
         if (constant == no_node or !try type_array_initialized(state, constant, id)) return Value{}
         value :: ast.typed_constant(&state.tree, constant)
@@ -1062,7 +1103,7 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
     if (kind == .typed_constant) {
         a :: ast.typed_constant(&state.tree, left)
         b :: ast.typed_constant(&state.tree, right)
-        return try same_type(state, a.type, b.type) and try constant_equal(state, a.value, b.value)
+        return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
     }
     if (kind == .array_literal) {
         count :: ast.array_element_count(&state.tree, left)
@@ -1096,7 +1137,7 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     if (kind == .literal_void) return hash
     if (kind == .typed_constant) {
         value :: ast.typed_constant(&state.tree, id)
-        return mix(mix(hash, try type_hash(state, value.type)), try constant_hash(state, value.value))
+        return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
     }
     if (kind == .array_literal) {
         result := hash
@@ -1482,14 +1523,15 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
         }
         if (ast.expr_kind(&state.tree, base) != .typed_constant) return true
         array :: ast.typed_constant(&state.tree, base)
-        record :: (type_record_storage(state, array.type, 0)
-            and ast.expr_kind(&state.tree, array.type) == .record_type)
+        type :: try canonical_type(state, array.type)
+        record :: (type != no_node and type_record_storage(state, type, 0)
+            and ast.expr_kind(&state.tree, type) == .record_type)
         if (!record and !try execution_array_storage(state, array.type)) return true
         selected := no_node
         if (record) {
             if (kind != .selection) return true
             member :: ast.selection_expr(&state.tree, id).member
-            slot :: type_record_slot(state, array.type, member)
+            slot :: type_record_slot(state, type, member)
             if (slot == no_index) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .unknown_field, ast.node_span(&state.tree, member))
@@ -1515,7 +1557,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             }
         } else {
             member :: ast.selection_expr(&state.tree, id).member
-            if (!type_array_annotation(&state.tree, state.bindings.items, array.type)
+            if (!type_record_storage(state, array.type, 0)
                 and !mem.eql(ast.literal_text(&state.tree, member), "len")) return true
             if (!mem.eql(ast.literal_text(&state.tree, member), "len")) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
@@ -1551,31 +1593,9 @@ execution_array_storage proc(state @mut State, annotation ast.NodeId) bool ! Err
     return current != no_node and ast.expr_kind(&state.tree, current) == .array_type
 }
 
-# inspect storage syntax without elaboration: nominal results must enter the cache
-# before any recursive field calls expand. pointers retain the materialization boundary.
 @hide:file
 type_record_storage proc(state @State, annotation ast.NodeId, depth usize) bool {
-    if (depth >= 128) return false
-    resolved :: binding(state, annotation)
-    if (resolved.kind == .builtin) return resolved.data.builtin == .type
-    if (resolved.kind == .declaration) {
-        declaration :: resolved.data.declaration
-        if (ast.node_class(&state.tree, declaration) != .statement) return false
-        view :: ast.statement_decl(&state.tree, declaration)
-        return (view.mutability == .constant
-            and type_record_storage(state, view.initializer, depth + 1))
-    }
-    kind :: ast.expr_kind(&state.tree, annotation)
-    if (kind == .alias_expr)
-        return type_record_storage(state, ast.type_operand(&state.tree, annotation), depth + 1)
-    if (kind == .array_type)
-        return type_record_storage(state, ast.array_type(&state.tree, annotation).element, depth + 1)
-    if (kind != .record_type) return false
-    for (0..ast.record_field_count(&state.tree, annotation)) |i| {
-        field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, i))
-        if (field.type != null and type_record_storage(state, field.type?, depth + 1)) return true
-    }
-    return false
+    return type_storage_annotation(&state.tree, state.bindings.items, annotation, depth)
 }
 
 @hide:file
@@ -1607,8 +1627,19 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
     if (is_type(state, annotation)) return true
     type :: try canonical_type(state, annotation)
     if (type == no_node) return false
-    if (ast.expr_kind(&state.tree, type) == .array_type)
-        return try type_record_check(state, ast.array_type(&state.tree, type).element)
+    if (ast.expr_kind(&state.tree, type) == .array_type) {
+        if (!try type_step(state, type)) return false
+        descriptor :: ast.array_type(&state.tree, type)
+        if (descriptor.count) |count| {
+            value :: try evaluate(state, count)
+            if (value.kind != .integer or value.negative) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .invalid_array_length, ast.node_span(&state.tree, count))
+                return false
+            }
+        }
+        return try type_record_check(state, descriptor.element)
+    }
     for (0..ast.record_field_count(&state.tree, type)) |i| {
         field_id :: ast.record_field(&state.tree, type, i)
         field :: ast.field(&state.tree, field_id)
@@ -1853,6 +1884,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
                 }
                 child = descriptor.element
             }
+            if (type_record_storage(state, child, 0) and !try type_record_check(state, child)) return no_node
         }
         span :: ast.node_span(&state.tree, expression)
         length :: try ast.add_integer(state.builder, span, u64(count))
@@ -1983,6 +2015,18 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         state.evaluation_diagnostic = resolved.data.diagnostic
         return no_node
     }
+    if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)
+        and resolved.kind == .declaration
+        and ast.node_class(&state.tree, resolved.data.declaration) == .statement) {
+        declaration :: ast.statement_decl(&state.tree, resolved.data.declaration)
+        if (declaration.mutability != .constant or !try type_step(state, expression)) return no_node
+        if (declaration.type != null and !try same_type(state, annotation, declaration.type?)) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .type_mismatch, ast.node_span(&state.tree, expression))
+            return no_node
+        }
+        return try type_execution_value(state, declaration.initializer, annotation)
+    }
     if (try execution_array_storage(state, annotation)) {
         value :: try type_array_value(state, expression, annotation)
         if (value != no_node and !type_record_storage(state, annotation, 0)) {
@@ -2019,7 +2063,12 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         try arraylist.append(&state.rewrites.constraints, constraint)
         return concrete.node
     }
-    value :: try evaluate_ir(state, expression, annotation)
+    # check the leaf as an assignment, not as the evaluation wrapper's return:
+    # exact value-type failures belong to the source leaf and use type_mismatch.
+    contextual :: try ast.add_typed_constant(state.builder,
+        ast.node_span(&state.tree, expression), annotation, expression)
+    try refresh(state)
+    value :: try evaluate_ir(state, contextual, annotation)
     if (value.kind == .invalid) return no_node
     concrete :: try materialize(state, value)
     result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), annotation, concrete.node)
@@ -2708,8 +2757,30 @@ canonical_type proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
     return if (value.kind == .type) value.node else no_node
 }
 
+# metadata storage compares anonymous annotation shapes, including ordinary nested
+# fields. named definitions and nominal type results retain their original identity.
+@hide:file
+# ponytail: scan declaration syntax for nominal identity; index record origins if metadata-heavy builds make this hot.
+structural_type_record proc(state @State, id ast.NodeId) bool {
+    for (state.instances.items) |instance| {
+        if (instance.type == id) return false
+    }
+    for (0..ast.node_count(&state.tree)) |i| {
+        declaration :: ast.NodeId(i)
+        if (ast.node_class(&state.tree, declaration) != .statement
+            or ast.stmt_kind(&state.tree, declaration) != .declaration) continue
+        if (ast.statement_decl(&state.tree, declaration).initializer == id) return false
+    }
+    return true
+}
+
 @hide:file
 same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
+    return try same_type_context(state, left, right, false)
+}
+
+@hide:file
+same_type_context proc(state @mut State, left, right ast.NodeId, metadata bool) bool ! Error {
     if (is_type(state, left) or is_type(state, right))
         return is_type(state, left) and is_type(state, right)
     a :: try canonical_type(state, left)
@@ -2724,10 +2795,24 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
         return try type_subset(state, a, b) and try type_subset(state, b, a)
     if (kind != ast.expr_kind(&state.tree, b)) return false
     match kind {
+        .record_type: {
+            if (!metadata and (!type_record_storage(state, a, 0) or !type_record_storage(state, b, 0))) return false
+            if (!structural_type_record(state, a) or !structural_type_record(state, b)) return false
+            count :: ast.record_field_count(&state.tree, a)
+            if (count != ast.record_field_count(&state.tree, b)) return false
+            for (0..count) |i| {
+                p :: ast.field(&state.tree, ast.record_field(&state.tree, a, i))
+                q :: ast.field(&state.tree, ast.record_field(&state.tree, b, i))
+                if ((p.name == null) != (q.name == null)) return false
+                if (p.name != null and ast.name_id(&state.tree, p.name?) != ast.name_id(&state.tree, q.name?)) return false
+                if (p.type == null or q.type == null or !try same_type_context(state, p.type?, q.type?, true)) return false
+            }
+            return true
+        }
         .pointer_type: {
             p :: ast.pointer_type(&state.tree, a)
             q :: ast.pointer_type(&state.tree, b)
-            return p.mutable == q.mutable and p.many == q.many and try same_type(state, p.element, q.element)
+            return p.mutable == q.mutable and p.many == q.many and try same_type_context(state, p.element, q.element, metadata)
         }
         .array_type: {
             p :: ast.array_type(&state.tree, a)
@@ -2735,7 +2820,7 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
             if (p.mutable != q.mutable or p.count == null or q.count == null) return false
             pv :: try evaluate(state, p.count?)
             qv :: try evaluate(state, q.count?)
-            return try value_equal(state, pv, qv) and try same_type(state, p.element, q.element)
+            return try value_equal(state, pv, qv) and try same_type_context(state, p.element, q.element, metadata)
         }
         .slice_type: {
             p :: ast.slice_type(&state.tree, a)
@@ -2744,22 +2829,22 @@ same_type proc(state @mut State, left, right ast.NodeId) bool ! Error {
             if (p.sentinel) |sentinel| {
                 if (!try value_equal(state, try evaluate(state, sentinel), try evaluate(state, q.sentinel?))) return false
             }
-            return try same_type(state, p.element, q.element)
+            return try same_type_context(state, p.element, q.element, metadata)
         }
-        .optional_type: return try same_type(state, ast.type_operand(&state.tree, a), ast.type_operand(&state.tree, b))
+        .optional_type: return try same_type_context(state, ast.type_operand(&state.tree, a), ast.type_operand(&state.tree, b), metadata)
         .fallible_type: {
             p :: ast.binary_expr(&state.tree, a)
             q :: ast.binary_expr(&state.tree, b)
-            return try same_type(state, p.left, q.left) and try same_type(state, p.right, q.right)
+            return try same_type_context(state, p.left, q.left, metadata) and try same_type_context(state, p.right, q.right, metadata)
         }
         .function_type: {
             count :: ast.function_param_count(&state.tree, a)
             if (count != ast.function_param_count(&state.tree, b)) return false
-            if (!try same_type(state, ast.callable_result(&state.tree, a), ast.callable_result(&state.tree, b))) return false
+            if (!try same_type_context(state, ast.callable_result(&state.tree, a), ast.callable_result(&state.tree, b), metadata)) return false
             for (0..count) |i| {
                 p :: ast.param(&state.tree, ast.function_param(&state.tree, a, i)).type
                 q :: ast.param(&state.tree, ast.function_param(&state.tree, b, i)).type
-                if (!try same_type(state, p, q)) return false
+                if (!try same_type_context(state, p, q, metadata)) return false
             }
             return true
         }
@@ -2831,6 +2916,11 @@ string_hash proc(seed usize, text []u8) usize {
 
 @hide:file
 type_hash proc(state @mut State, id ast.NodeId) usize ! Error {
+    return try type_hash_context(state, id, false)
+}
+
+@hide:file
+type_hash_context proc(state @mut State, id ast.NodeId, metadata bool) usize ! Error {
     node :: try canonical_type(state, id)
     if (node == no_node) return 0
     resolved :: binding(state, node)
@@ -2838,44 +2928,54 @@ type_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     kind :: ast.expr_kind(&state.tree, node)
     hash := enum_index(kind)
     match kind {
+        .record_type: {
+            if ((!metadata and !type_record_storage(state, node, 0))
+                or !structural_type_record(state, node)) return mix(hash, usize(node))
+            for (0..ast.record_field_count(&state.tree, node)) |i| {
+                field :: ast.field(&state.tree, ast.record_field(&state.tree, node, i))
+                if (field.name) |name| hash = mix(hash, usize(ast.name_id(&state.tree, name)))
+                if (field.type) |annotation| hash = mix(hash, try type_hash_context(state, annotation, true))
+            }
+            return hash
+        }
         .pointer_type: {
             view :: ast.pointer_type(&state.tree, node)
             mutable :: if (view.mutable) usize(1) else usize(0)
             many :: if (view.many) usize(1) else usize(0)
             hash = mix(hash, mutable)
             hash = mix(hash, many)
-            return mix(hash, try type_hash(state, view.element))
+            return mix(hash, try type_hash_context(state, view.element, metadata))
         }
         .array_type: {
             view :: ast.array_type(&state.tree, node)
             mutable :: if (view.mutable) usize(1) else usize(0)
             hash = mix(hash, mutable)
             if (view.count) |count| hash = mix(hash, try value_hash(state, try evaluate(state, count)))
-            return mix(hash, try type_hash(state, view.element))
+            return mix(hash, try type_hash_context(state, view.element, metadata))
         }
         .slice_type: {
             view :: ast.slice_type(&state.tree, node)
             mutable :: if (view.mutable) usize(1) else usize(0)
             hash = mix(hash, mutable)
             if (view.sentinel) |sentinel| hash = mix(hash, try value_hash(state, try evaluate(state, sentinel)))
-            return mix(hash, try type_hash(state, view.element))
+            return mix(hash, try type_hash_context(state, view.element, metadata))
         }
-        .optional_type: return mix(hash, try type_hash(state, ast.type_operand(&state.tree, node)))
+        .optional_type: return mix(hash, try type_hash_context(state, ast.type_operand(&state.tree, node), metadata))
         .sum_type: {
             view :: ast.binary_expr(&state.tree, node)
             # set fingerprints must ignore ordering, grouping and repeated members.
             # colliding fingerprints still use full type equality in the cache chain.
-            return try type_hash(state, view.left) | try type_hash(state, view.right)
+            return try type_hash_context(state, view.left, metadata) | try type_hash_context(state, view.right, metadata)
         }
         .fallible_type: {
             view :: ast.binary_expr(&state.tree, node)
-            return mix(mix(hash, try type_hash(state, view.left)), try type_hash(state, view.right))
+            return mix(mix(hash, try type_hash_context(state, view.left, metadata)), try type_hash_context(state, view.right, metadata))
         }
         .function_type: {
-            hash = mix(hash, try type_hash(state, ast.callable_result(&state.tree, node)))
+            hash = mix(hash, try type_hash_context(state, ast.callable_result(&state.tree, node), metadata))
             for (0..ast.function_param_count(&state.tree, node)) |i| {
                 parameter :: ast.function_param(&state.tree, node, i)
-                hash = mix(hash, try type_hash(state, ast.param(&state.tree, parameter).type))
+                hash = mix(hash, try type_hash_context(state, ast.param(&state.tree, parameter).type, metadata))
             }
             return hash
         }

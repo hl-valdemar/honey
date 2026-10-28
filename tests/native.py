@@ -79,6 +79,180 @@ CASES = {
         }
         """, b"42\n", None,
     ),
+    "type_record_procedure_owned_results_inputs_and_cache_identity": (
+        """
+        Config :: struct { child type, counts [2]mut usize, bias i16 = 2 }
+        config proc() Config { return { child = i16, counts = [1, 2] } }
+        change proc(input Config) Config {
+            copied := input
+            copied.child = u8
+            copied.counts[1] = 3
+            return copied
+        }
+        Storage proc(input Config) type {
+            saved :: input
+            changed :: change(input)
+            if (input.child != i16 or saved.counts[1] != 2) return bool
+            if (changed.child != u8 or changed.counts[1] != 3) return bool
+            return struct { values [input.counts[1]]input.child, bias i16 = input.bias }
+        }
+        Selected :: alias Storage(config())
+        main proc() i16 {
+            value Selected :: { values = [19, 21] }
+            same Storage({ child = i16, counts = [1, 2] }) :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_record_procedure_nested_array_snapshots_and_nominal_leaves": (
+        """
+        Item :: struct { child type, counts [1]mut usize }
+        Config :: struct { items [2]mut Item }
+        config proc() Config {
+            Child :: struct { value i16 }
+            return { items = [{ child = Child, counts = [1] }, { child = Child, counts = [2] }] }
+        }
+        change proc(input Config) Config {
+            copied := input
+            copied.items[0].child = u8
+            copied.items[1].counts[0] = 3
+            return copied
+        }
+        Storage proc(input Config) type {
+            changed :: change(input)
+            if (input.items[0].child != input.items[1].child) return bool
+            if (input.items[0].child == changed.items[0].child) return bool
+            if (input.items[1].counts[0] != 2 or changed.items[1].counts[0] != 3) return bool
+            return struct { first input.items[0].child, second input.items[1].child }
+        }
+        main proc() i16 {
+            value Storage(config()) :: { first = { value = 19 }, second = { value = 23 } }
+            same Storage(config()) :: value
+            copied := same.first
+            copied = same.second
+            return same.first.value + copied.value
+        }
+        """, b"42\n", None,
+    ),
+    "type_record_procedure_tuple_results_and_erased_runtime_inputs": (
+        """
+        Pair :: struct { type, usize }
+        pair proc() Pair { return {i16, 2} }
+        copy proc(input Pair) Pair { return input }
+        Element proc(input Pair) type { return field!(input, "0") }
+        add proc($input Pair, value Element(input)) Element(input) {
+            return value + i16(field!(input, "1"))
+        }
+        forward proc(value i16) i16 { return add(copy(pair()), value) }
+        main proc() i16 {
+            if (add({i16, usize(1)}, 40) != 41) return 0
+            return forward(40)
+        }
+        """, b"42\n", None,
+    ),
+    "type_record_procedure_dependent_annotations_and_erased_cache_values": (
+        """
+        config proc($T type, value T) struct { child type, bias T, detail struct { bias T } } {
+            return { child = T, bias = value, detail = { bias = value } }
+        }
+        Storage proc($T type, input struct { child type, bias T, detail struct { bias T } }) type {
+            return struct { value input.child, bias T = input.detail.bias }
+        }
+        add proc($input struct { child type, bias i16, detail struct { bias i16 } }, value input.child) input.child {
+            return value + input.detail.bias
+        }
+        main proc() i16 {
+            value Storage(i16, config(i16, 2)) :: { value = 40 }
+            same Storage(i16, { child = i16, bias = 2, detail = { bias = 2 } }) :: value
+            if (add(config(i16, 1), same.value) != 41) return 0
+            return add(config(i16, 2), same.value)
+        }
+        """, b"42\n", None,
+    ),
+    "type_record_procedure_result_rejects_unknown_field": (
+        """
+        config proc() struct { child type } { return { child = i16, missing = 1 } }
+        main proc() config().child { return 42 }
+        """, b"", b"no such field",
+    ),
+    "type_record_procedure_result_rejects_duplicate_field": (
+        """
+        config proc() struct { child type } { return { child = i16, child = i8 } }
+        main proc() config().child { return 42 }
+        """, b"", b"more than once",
+    ),
+    "type_record_procedure_argument_rejects_missing_field": (
+        """
+        Selected proc(input struct { child type, count usize }) type { return input.child }
+        main proc() Selected({ child = i16 }) { return 42 }
+        """, b"", b"missing a required field",
+    ),
+    "type_record_procedure_result_rejects_non_type_leaf": (
+        """
+        config proc() struct { child type } { return { child = 42 } }
+        main proc() config().child { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_record_procedure_argument_rejects_exact_value_leaf_mismatch": (
+        """
+        Selected proc(input struct { child type, count usize }) type { return input.child }
+        Bad proc() type {
+            wrong u8 :: 2
+            return Selected({ child = i16, count = wrong })
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "type_record_procedure_erased_argument_rejects_exact_type_leaf_mismatch": (
+        """
+        add proc($input struct { child type }, value input.child) input.child { return value }
+        main proc() i16 {
+            wrong u8 :: 42
+            return add({ child = i16 }, wrong)
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "type_record_procedure_result_preserves_value_leaf_overflow": (
+        """
+        config proc() struct { child type, count i8 } { return { child = i16, count = 128 } }
+        main proc() config().child { return 42 }
+        """, b"", b"outside its runtime type",
+    ),
+    "type_record_procedure_rejects_runtime_dependency": (
+        """
+        config proc(wide bool) struct { child type } {
+            if (wide) return { child = i16 }
+            return { child = i8 }
+        }
+        read proc(wide bool) i16 {
+            value config(wide).child :: 42
+            return i16(value)
+        }
+        main proc() i16 { return read(true) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "type_record_procedure_nested_execution_shares_step_limit": (
+        """
+        config proc(count usize) struct { child type } {
+            for (0..count) |_| { }
+            return { child = i16 }
+        }
+        Selected proc() type {
+            for (0..usize(100)) |index| { input :: config(index + 100) }
+            return i16
+        }
+        main proc() Selected() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "type_record_procedure_results_do_not_enable_runtime_storage": (
+        """
+        config proc() struct { child type, count i16 } { return { child = i16, count = 42 } }
+        main proc() i16 {
+            input :: config()
+            return input.count
+        }
+        """, b"", b"",
+    ),
     "type_records_reject_unknown_initializer_field": (
         """
         Bad proc() type {
@@ -5902,7 +6076,47 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 18
+    sizing.write_text(textwrap.dedent("""
+        Config :: struct { child type, counts [2]mut usize, bias i16 = 2 }
+        record_config proc() Config { return { child = i16, counts = [1, 2] } }
+        FromRecord proc(input Config) type {
+            return struct { values [input.counts[1]]input.child, bias i16 = input.bias }
+        }
+        add proc($input Config, value input.child) input.child { return value + input.bias }
+        NominalConfig :: struct { child type }
+        nominal_config proc() NominalConfig {
+            return { child = struct { value i16 } }
+        }
+        FromNominal proc(input NominalConfig) type { return struct { value input.child } }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        Imported :: alias lib.FromRecord(lib.record_config())
+        main proc() i16 {
+            value Imported :: { values = [19, 21] }
+            same lib.FromRecord({ child = i16, counts = [1, 2] }) :: value
+            nominal lib.FromNominal(lib.nominal_config()) :: { value = { value = 40 } }
+            same_nominal lib.FromNominal(lib.nominal_config()) :: nominal
+            if (same_nominal.value.value != 40) return 0
+            return lib.add(lib.record_config(), same.values[0] + same.values[1])
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        Config :: struct { child type, rows [1]mut [1]mut type }
+        record_config proc() Config { return { child = i16, rows = [[i16]] } }
+        bad_config proc() Config {
+            copied := record_config()
+            copied.child = copied.rows[0][1]
+            return copied
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.bad_config().child { return 42 }\n')
+    check(app, executable, (b"", b"index out of bounds"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:5:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 20
 
 
 def check_dependency_provenance(temporary, executable):
