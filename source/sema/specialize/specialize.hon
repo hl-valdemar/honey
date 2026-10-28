@@ -2787,7 +2787,7 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
     return .next
 }
 
-# retain an array place, but freeze its indices at loop entry. snapshots then read
+# retain a collection place, but freeze its indices at loop entry. snapshots then read
 # the current owned root after body assignments without re-evaluating the place.
 @hide:file
 type_collection_place proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
@@ -2854,10 +2854,21 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
     try expand(state, snapshot)
     annotation :: try expression_type(state, snapshot, 0)
     if (annotation == no_node) return .invalid
+    tuple :: loop.is_inline and ast.expr_kind(&state.tree, annotation) == .record_type
+    if tuple {
+        for (0..ast.record_field_count(&state.tree, annotation)) |i| {
+            if (ast.field(&state.tree, ast.record_field(&state.tree, annotation, i)).name != null) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_for_iterable, span)
+                return .invalid
+            }
+        }
+    }
     collection :: try type_execution_value(state, snapshot, annotation)
     if (collection == no_node) return .invalid
     count := Value{}
-    if (try execution_array_storage(state, annotation)) {
+    if tuple {
+        count = Value{ kind = .integer, magnitude = u64(ast.record_field_count(&state.tree, annotation)) }
+    } else if try execution_array_storage(state, annotation) {
         count = Value{ kind = .integer,
             magnitude = u64(ast.array_element_count(&state.tree, ast.typed_constant(&state.tree, collection).value)) }
     } else {
@@ -2895,7 +2906,7 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
         return .invalid
     }
     place := no_node
-    if (ast.expr_kind(&state.tree, annotation) == .array_type)
+    if (tuple or ast.expr_kind(&state.tree, annotation) == .array_type)
         place = try type_collection_place(state, execution, loop.iterable)
     if (state.evaluation_diagnostic != diagnostics.no_diagnostic) return .invalid
     saved :: execution.locals.items.len
@@ -2907,12 +2918,15 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
         execution.locals.items = execution.locals.items[..saved]
         index :: try ast.add_integer(state.builder, span, u64(i))
         try refresh(state)
-        if (loop.capture) |capture| {
+        if loop.capture |capture| {
             current := collection
             if (place != no_node) current = try type_collection_read(state, execution, place)
-            element :: try ast.add_index(state.builder, span, current, index)
+            element :: if (tuple) try ast.add_selection(state.builder, span, current, index)
+                else try ast.add_index(state.builder, span, current, index)
             try refresh(state)
-            element_type :: try expression_type(state, element, 0)
+            element_type :: if (tuple)
+                ast.field(&state.tree, ast.record_field(&state.tree, annotation, i)).type?
+                else try expression_type(state, element, 0)
             value :: try type_execution_value(state, element, element_type)
             if (value == no_node) return .invalid
             try arraylist.append(&execution.locals, TypeLocal{
@@ -3519,14 +3533,9 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             )
                 return try builtin(state, id, .usize)
             if (base_kind != .record_type and base_kind != .union_type) return no_node
-            for (0..ast.record_field_count(&state.tree, base)) |i| {
-                field :: ast.field(&state.tree, ast.record_field(&state.tree, base, i))
-                if (field.name) |name| {
-                    if (ast.name_id(&state.tree, name) == ast.name_id(&state.tree, view.member))
-                        return try canonical_type(state, field.type?)
-                }
-            }
-            return no_node
+            slot :: type_record_slot(state, base, view.member)
+            if (slot == no_index) return no_node
+            return try canonical_type(state, ast.field(&state.tree, ast.record_field(&state.tree, base, slot)).type?)
         }
         .index: {
             view :: ast.index_expr(&state.tree, id)

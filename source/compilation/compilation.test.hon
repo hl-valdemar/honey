@@ -365,6 +365,14 @@ recompiles_imported_inline_for_without_retaining_expansions test {
             `            if (!value) return 0
             `        }
             `    }
+            `    inline for dep.metadata() |item, index| {
+            `        if (index == 0) {
+            `            if (item != i16) return 0
+            `        } else if (index == 1) {
+            `            exact i8 :: item
+            `            if (exact != 42) return 0
+            `        } else if (item.len != 2) return 0
+            `    }
             `    inline for (i8(0)..i8(2)) |outer| {
             `        inline for [i8(0), i8(1)] |inner| {
             `            for (0..usize(2)) |index| {
@@ -381,6 +389,7 @@ recompiles_imported_inline_for_without_retaining_expansions test {
         dependency_bytes := try owned_text(
             `values proc() [2]i16 { return [17, 20] }
             `types proc() [2]type { return [i16, bool] }
+            `metadata proc() struct { type, i8, string } { return {i16, 42, "ok"} }
             ,
         )
         defer arraylist.deinit(&dependency_bytes)

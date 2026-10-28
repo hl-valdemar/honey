@@ -11,6 +11,179 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "inline_for_heterogeneous_tuple_exact_captures_and_nested_values": (
+        """
+        Choice :: union(enum) { number i8, empty void }
+        values proc() struct { i8, bool, string, [2]i16, Choice, ?i16 } {
+            return {19, true, "ok", [10, 11], .number{2}, 0}
+        }
+        narrow proc(value i8) i16 { return i16(value) }
+        main proc() i16 {
+            total i16 := 0
+            inline for values() |value, index| {
+                at usize :: index
+                if (at == 0) {
+                    total = total + narrow(value)
+                } else if (at == 1) {
+                    if (!value) return -1
+                } else if (at == 2) {
+                    text string :: value
+                    if (text.len != 2) return -2
+                } else if (at == 3) {
+                    total = total + value[0] + value[1]
+                } else if (at == 4) {
+                    match value { .number |payload|: { total = total + narrow(payload) }, .empty: {} }
+                } else total = total + value?
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_mixed_type_value_tuple_generates_runtime_storage": (
+        """
+        Child :: struct { value i16 = 40 }
+        Metadata :: alias struct { type, usize, type, string }
+        metadata proc() Metadata { return {Child, 2, i16, "ok"} }
+        answer proc($input Metadata, bias i16) i16 {
+            total i16 := 0
+            inline for input |item, index| {
+                if (index == 0) {
+                    value item :: {}
+                    total = total + value.value
+                } else if (index == 1) {
+                    values [item]i16 :: [0, bias]
+                    total = total + values[1]
+                } else if (index == 2) {
+                    value item :: total
+                    total = value
+                } else if (item.len != 2) return -1
+            }
+            return total
+        }
+        main proc() i16 { return answer(metadata(), 2) }
+        """, b"42\n", None,
+    ),
+    "inline_for_tuple_literals_empty_shapes_and_static_transfers": (
+        """
+        main proc() i16 {
+            total i16 := 0
+            cleanups i16 := 0
+            inline for ({}) |_| { return false }
+            inline for ({i8(19), true, "stop", i16(99)}) |item, index| {
+                defer cleanups = cleanups + 1
+                if (index == 0) {
+                    total = total + i16(item)
+                } else if (index == 1) {
+                    continue
+                } else if (index == 2) {
+                    break
+                } else total = false
+                total = total + 20
+            }
+            return total + cleanups
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_type_producer_tuple_places_observe_updates_and_isolate_copies": (
+        """
+        Storage proc() type {
+            config := {i8, usize(1), "before"}
+            saved :: config
+            length usize := 0
+            inline for config |item, index| {
+                if (index == 0) {
+                    if (item != i8) return bool
+                    config.0 = i16
+                    config.1 = 2
+                    config.2 = "after"
+                } else if (index == 1) {
+                    length = item
+                } else if (item.len != 5) return bool
+            }
+            if (saved.0 != i8 or saved.1 != 1 or (saved.2).len != 6) return bool
+            Element :: config.0
+            return struct { values [length]Element }
+        }
+        main proc() i16 {
+            value Storage() :: { values = [19, 23] }
+            return value.values[0] + value.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_nested_tuple_projections_and_aggregate_copy_isolation": (
+        """
+        Item :: struct { values [2]mut i16 }
+        tuples proc() struct { struct { Item, bool }, string } {
+            return {{Item { values = [19, 23] }, true}, "ok"}
+        }
+        main proc() i16 {
+            input :: tuples()
+            total i16 := 0
+            inline for input.0 |item, index| {
+                if (index == 0) {
+                    copy := item
+                    copy.values[0] = 0
+                    total = item.values[0] + item.values[1]
+                } else if (!item) return -1
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_tuple_rejects_runtime_dependency_even_with_discard_capture": (
+        """
+        walk proc(value i16) i16 {
+            inline for ({i8(1), value}) |_| { break }
+            return 42
+        }
+        main proc() i16 { return walk(42) }
+        """, b"", b"compile-time",
+    ),
+    "inline_for_tuple_rejects_named_records": (
+        """
+        main proc() i16 {
+            inline for ({number = i16(42)}) |value| { return value }
+            return 0
+        }
+        """, b"", b"for-loop iteration requires",
+    ),
+    "inline_for_tuple_capture_is_immutable": (
+        """
+        main proc() i16 {
+            inline for ({i8(1), true}) |value, index| {
+                if (index == 0) value = 42
+            }
+            return 0
+        }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_for_tuple_preserves_narrow_overflow": (
+        """
+        main proc() i16 {
+            inline for ({i8(127), true}) |value, index| {
+                if (index == 0) next :: value + 1
+            }
+            return 42
+        }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "inline_for_tuple_rejects_storage_escape_before_break": (
+        """
+        values proc() struct { i16, []u8 } { return {42, "borrowed"} }
+        main proc() i16 {
+            inline for values() |_| { break }
+            return 42
+        }
+        """, b"", b"escape",
+    ),
+    "ordinary_for_still_rejects_heterogeneous_tuple": (
+        """
+        main proc() i16 {
+            for ({i16(42), true}) |_| {}
+            return 42
+        }
+        """, b"", b"for-loop iteration requires",
+    ),
     "inline_for_range_runtime_calls_and_constant_branches": (
         """
         add proc(value i16, bias i16) i16 { return value + bias }
