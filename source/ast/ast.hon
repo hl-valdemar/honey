@@ -11,7 +11,7 @@
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls or optional captures; else binds to the nearest if.
 #! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/&/try higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
@@ -400,6 +400,7 @@ ForView :: struct {
     pointer_capture bool
     index_capture bool
     body NodeId
+    is_inline bool = false
 }
 
 InvalidView :: struct {
@@ -994,6 +995,13 @@ add_for_stmt proc(
     }, span)
 }
 
+set_for_inline proc(builder @mut Builder, id NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .stmt_for)
+    flags :: &builder.storage.extra.items[usize(node.data1.extra) + 3]
+    flags^ = flags^ | 2
+}
+
 add_statement_decl proc(
     builder @mut Builder,
     span Span,
@@ -1310,8 +1318,9 @@ for_stmt proc(tree @Tree, id NodeId) ForView {
         capture = maybe_node_id(tree.storage.extra.items[extra]),
         index = maybe_node_id(tree.storage.extra.items[extra + 1]),
         pointer_capture = tree.storage.extra.items[extra + 2] != 0,
-        index_capture = tree.storage.extra.items[extra + 3] != 0,
+        index_capture = (tree.storage.extra.items[extra + 3] & 1) != 0,
         body = node.data0.node_id,
+        is_inline = (tree.storage.extra.items[extra + 3] & 2) != 0,
     }
 }
 

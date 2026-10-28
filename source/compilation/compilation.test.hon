@@ -338,6 +338,74 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
     }
 }
 
+recompiles_imported_inline_for_without_retaining_expansions test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        root_bytes := try owned_text(
+            `dep :: import "../dependency"
+            `touch proc(value i16) i16 { return value }
+            `main proc() i16 {
+            `    total i16 := 0
+            `    inline for dep.values() |value, index| {
+            `        at usize :: index
+            `        total = total + touch(value) + i16(at)
+            `    }
+            `    inline for dep.types() |T| {
+            `        if (T == i16) {
+            `            value T :: total
+            `            total = touch(value)
+            `        } else {
+            `            value T :: true
+            `            if (!value) return 0
+            `        }
+            `    }
+            `    inline for (i8(0)..i8(2)) |outer| {
+            `        inline for [i8(0), i8(1)] |inner| {
+            `            for (0..usize(2)) |index| {
+            `                if (index == 0) continue
+            `                total = total + i16(outer + inner)
+            `            }
+            `        }
+            `    }
+            `    return total
+            `}
+            ,
+        )
+        defer arraylist.deinit(&root_bytes)
+        dependency_bytes := try owned_text(
+            `values proc() [2]i16 { return [17, 20] }
+            `types proc() [2]type { return [i16, bool] }
+            ,
+        )
+        defer arraylist.deinit(&dependency_bytes)
+        root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
+        _ = try add_source(&session, dependency, "dependency/values.hon", &dependency_bytes, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for (0..modules.len) |index| {
+        outcome := try interpreter.run(mem.c_allocator, &modules[index], &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 recompiles_generated_records_without_borrowing_previous_ir test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

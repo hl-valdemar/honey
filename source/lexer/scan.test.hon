@@ -123,6 +123,25 @@ scans_loop_controls_with_exact_keyword_boundaries test {
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
+scans_inline_keyword_without_splitting_identifiers test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "inline for inlined inline_1 inline2", &pool, &diagnostic_store)
+    expected [6]TokenKind :: [.inline, .for, .ident, .ident, .ident, .eof]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(u32(0), state.tokens.items[0].span.start)
+    try testing.expect_equal(u32(6), state.tokens.items[0].span.end)
+    try testing.expect_equal("inlined", strpool.get_str(&pool, state.tokens.items[2].data.str_id)?)
+    try testing.expect_equal("inline_1", strpool.get_str(&pool, state.tokens.items[3].data.str_id)?)
+    try testing.expect_equal("inline2", strpool.get_str(&pool, state.tokens.items[4].data.str_id)?)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 scans_ranges_without_consuming_float_dots test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)

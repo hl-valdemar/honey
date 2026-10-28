@@ -1232,6 +1232,114 @@ parses_range_endpoints_and_capture_shapes test {
     try testing.expect_equal(ast.name_id(&tree, fourth.index?), ast.name_id(&tree, index_reference))
 }
 
+parses_inline_loops_and_clones_capture_metadata test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    inline for 0..=2 |item| {
+        `        for "ab" |byte, index| { continue }
+        `    }
+        `    for [1, 2] |value, index| {}
+        `    inline for [i32, u8] |@T, _| {}
+        `    inline for ("xy") |byte, index| continue
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    original :: ast.view(&builder, root)
+    mapping :: try mem.alloc(ast.NodeId, mem.c_allocator, ast.node_count(&original))
+    defer mem.free(mem.c_allocator, mapping)
+    mem.set(mapping, maxval!(ast.NodeId))
+    cloned :: try ast.clone_subtree(&builder, root, mapping)
+    tree :: ast.view(&builder, root)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    roots [2]ast.NodeId :: [root, cloned]
+    for (roots) |package| {
+        body :: ast.function_decl(&tree, ast.child(&tree, package, 0)).body
+        try testing.expect_equal(4, ast.block_statement_count(&tree, body))
+        first :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 0))
+        try testing.expect(first.is_inline and !first.pointer_capture and !first.index_capture)
+        try testing.expect(ast.range_expr(&tree, first.iterable).inclusive)
+        try testing.expect_equal("inline", ast.source_text(&tree, ast.Span{
+            start = first.span.start, end = first.span.start + 6, source = first.span.source,
+        }))
+        nested :: ast.for_stmt(&tree, ast.block_statement(&tree, first.body, 0))
+        try testing.expect(!nested.is_inline and nested.index_capture)
+        try testing.expect_equal(ast.ExprKind.literal_string, ast.expr_kind(&tree, nested.iterable))
+        ordinary :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
+        try testing.expect(!ordinary.is_inline and ordinary.index_capture)
+        try testing.expect_equal(2, ast.array_element_count(&tree, ordinary.iterable))
+        pointer :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 2))
+        try testing.expect(pointer.is_inline and pointer.pointer_capture and pointer.index_capture)
+        try testing.expect(pointer.index == null)
+        try testing.expect_equal("T", strpool.get_str(&strings, ast.name_id(&tree, pointer.capture?))?)
+        indexed :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 3))
+        try testing.expect(indexed.is_inline and !indexed.pointer_capture and indexed.index_capture)
+        try testing.expect_equal("index", strpool.get_str(&strings, ast.name_id(&tree, indexed.index?))?)
+        try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(
+            &tree, ast.block_statement(&tree, indexed.body, 0),
+        ))
+    }
+    original_body :: ast.function_decl(&tree, ast.child(&tree, root, 0)).body
+    cloned_body :: ast.function_decl(&tree, ast.child(&tree, cloned, 0)).body
+    first :: ast.for_stmt(&tree, ast.block_statement(&tree, original_body, 0))
+    copy :: ast.for_stmt(&tree, ast.block_statement(&tree, cloned_body, 0))
+    try testing.expect(copy.capture? != first.capture?)
+    try testing.expect_equal(mapping[usize(first.capture?)], copy.capture?)
+    try testing.expect_equal(first.span.start, copy.span.start)
+    try testing.expect_equal(first.span.end, copy.span.end)
+    try testing.expect_equal(first.span.source, copy.span.source)
+}
+
+rejects_malformed_inline_forms_without_losing_siblings test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    cases [7][]u8 :: [
+        "inline while true {}",
+        "inline match value { else: {} }",
+        "inline 0..2 |item| {}",
+        "inline inline for 0..2 |item| {}",
+        "inline",
+        "inline for 0..2 || {}",
+        "inline for 0..2 |item,| {}",
+    ]
+    for (cases) |header| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        source arraylist.ArrayList(u8) := arraylist.init(mem.c_allocator)
+        defer arraylist.deinit(&source)
+        for ("run proc() void {\n") |byte| try arraylist.append(&source, byte)
+        for (header) |byte| try arraylist.append(&source, byte)
+        for ("\ninline for (0..2) |item| continue\nkept :: 7\n}\nafter :: 9\n") |byte|
+            try arraylist.append(&source, byte)
+        scan_state := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&scan_state)
+        try lexer.scan(&scan_state, source.items, &strings, &diagnostic_store)
+        tree := try parse(mem.c_allocator, scan_state.tokens.items, source.items, &diagnostic_store)
+        defer ast.deinit(&tree)
+        try testing.expect(diagnostics.count(&diagnostic_store) > 0)
+        try testing.expect_equal(2, ast.package_decl_count(&tree))
+        body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+        try testing.expect_equal(3, ast.block_statement_count(&tree, body))
+        preserved :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 1))
+        try testing.expect(preserved.is_inline)
+        try testing.expect_equal(ast.StmtKind.continue_stmt, ast.stmt_kind(
+            &tree, ast.block_statement(&tree, preserved.body, 0),
+        ))
+        kept :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 2))
+        try testing.expect_equal("kept", ast.source_text(&tree, kept.name))
+        try testing.expect_equal("after", ast.source_text(
+            &tree, ast.statement_decl(&tree, ast.package_decl(&tree, 1)).name,
+        ))
+    }
+}
+
 rejects_bro_invalid_range_headers_without_losing_siblings test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)

@@ -11,6 +11,327 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "inline_for_range_runtime_calls_and_constant_branches": (
+        """
+        add proc(value i16, bias i16) i16 { return value + bias }
+        answer proc(bias i16) i16 {
+            total i16 := 0
+            inline for (i8(0)..i8(3)) |index| {
+                if (index == 0) {
+                    total = add(total, bias)
+                } else {
+                    total = add(total, i16(index))
+                }
+                if (index > 9) return false
+            }
+            return total
+        }
+        main proc() i16 { return answer(39) }
+        """, b"42\n", None,
+    ),
+    "inline_for_inferred_arrays_concretize_scalar_shorthand": (
+        """
+        signed proc(value i64) i64 { return value }
+        real proc(value f64) f64 { return value }
+        integer proc() int { return 23 }
+        floating proc() float { return 22.5 }
+        main proc() i64 {
+            total i64 := 0
+            inline for [int(19), integer()] |value| { total = total + signed(value) }
+            fraction f64 := 0.0
+            inline for [float(19.5), floating()] |value| { fraction = fraction + real(value) }
+            return total + i64(fraction) - 42
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_array_constants_and_usize_indices": (
+        """
+        data proc() [2]i16 { return [19, 22] }
+        at proc(index usize, value i16) i16 { return value + i16(index) }
+        main proc() i16 {
+            total i16 := 0
+            inline for data() |value, index| {
+                if (value == 19) {
+                    total = total + at(index, value)
+                } else if (value == 22) {
+                    total = total + at(index, value)
+                } else return false
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_string_bytes_embedded_nul_and_usize_indices": (
+        r"""
+        text proc() string { return "a\0b" }
+        at proc(index usize, byte u8) i16 {
+            if (byte == 0) return i16(index) + 39
+            return 1
+        }
+        main proc() i16 {
+            total i16 := 0
+            inline for text() |byte, index| {
+                if (index == 1) {
+                    if (byte != 0) return false
+                } else if (byte == 0) return false
+                total = total + at(index, byte)
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_type_array_specializes_each_runtime_body": (
+        """
+        types proc() [2]type { return [i16, bool] }
+        add proc(value i16) i16 { return value + 1 }
+        main proc() i16 {
+            total i16 := 0
+            inline for types() |T, index| {
+                if (T == i16) {
+                    value T :: 39
+                    total = total + add(value)
+                } else {
+                    value T :: true
+                    if (value) total = total + i16(index) + 1
+                }
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_narrow_signed_and_unsigned_inclusive_maxima": (
+        """
+        signed proc(value i8) i16 { return i16(value) }
+        unsigned proc(value u8) i16 { return i16(value) }
+        main proc() [3]i16 {
+            negative i16 := 0
+            inline for (i8(-2)..i8(0)) |value| { negative = negative + signed(value) }
+            high i16 := 0
+            inline for (i8(126)..=i8(127)) |value| { high = high + signed(value) }
+            top i16 := 0
+            inline for (u8(254)..=u8(255)) |value| { top = top + unsigned(value) }
+            return [negative, high, top]
+        }
+        """, b"[-3, 253, 509]\n", None,
+    ),
+    "inline_for_nested_inline_and_ordinary_loops": (
+        """
+        answer proc(length usize) i16 {
+            total i16 := 0
+            inline for [i16(10), i16(11)] |base| {
+                inline for (i8(0)..i8(2)) |offset| {
+                    if (offset == 0) continue
+                    for (0..length) |index| {
+                        if (index == 0) continue
+                        total = total + base
+                        break
+                    }
+                }
+            }
+            return total
+        }
+        main proc() i16 { return answer(3) + answer(2) }
+        """, b"42\n", None,
+    ),
+    "inline_for_static_break_continue_run_iteration_defers": (
+        """
+        walk proc(cleanups @mut i16) i16 {
+            total i16 := 0
+            inline for (i8(0)..i8(5)) |index| {
+                defer cleanups^ = cleanups^ + 1
+                if (index < 1) continue
+                if (index == 3) break
+                total = total + i16(index)
+            }
+            return total
+        }
+        main proc() i16 {
+            cleanups i16 := 0
+            total :: walk(&cleanups)
+            return total + cleanups + 35
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_static_transfers_skip_invalid_tail_and_later_iterations": (
+        """
+        main proc() i16 {
+            inline for (i8(0)..i8(3)) |index| {
+                if (index == 0) continue
+                if (index == 1) break
+                return false
+            }
+            return 42
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_tagged_match_transfers_prune_tail_and_payloads": (
+        """
+        Choice :: union(enum) { number i16, stop void }
+        choices proc() [4]Choice { return [.number{0}, .number{39}, .stop, .number{99}] }
+        main proc() i16 {
+            total i16 := 0
+            inline for choices() |choice| {
+                defer total = total + 1
+                match choice {
+                    .number |value|: {
+                        if (value == 0) continue
+                        total = total + value
+                        continue
+                    },
+                    .stop: break,
+                }
+                return false
+            }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_rejects_runtime_break": (
+        """
+        walk proc(stop bool) i16 {
+            inline for (i8(0)..i8(2)) |_| {
+                if (stop) break
+            }
+            return 42
+        }
+        main proc() i16 { return walk(true) }
+        """, b"", b"compile-time-resolvable",
+    ),
+    "inline_for_rejects_runtime_continue": (
+        """
+        walk proc(skip bool) i16 {
+            inline for [i16(1), i16(2)] |_| {
+                if (skip) continue
+            }
+            return 42
+        }
+        main proc() i16 { return walk(true) }
+        """, b"", b"compile-time-resolvable",
+    ),
+    "inline_for_runtime_return_runs_iteration_defer": (
+        """
+        find proc(take bool, cleanups @mut i16) i16 {
+            inline for [i16(1), i16(2), i16(3)] |value| {
+                defer cleanups^ = cleanups^ + 1
+                if (take and value == 2) return 40
+            }
+            return 0
+        }
+        main proc() i16 {
+            cleanups i16 := 0
+            value :: find(true, &cleanups)
+            return value + cleanups
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_runtime_error_return_runs_errdefer_only_on_error": (
+        """
+        Error :: enum { failed }
+        walk proc(fail bool, cleanups @mut i16) i16 ! Error {
+            inline for (i8(0)..i8(3)) |index| {
+                defer cleanups^ = cleanups^ + 1
+                errdefer cleanups^ = cleanups^ + 10
+                if (fail and index == 1) return .failed
+            }
+            return 39
+        }
+        main proc() [2]i16 {
+            failed i16 := 0
+            success i16 := 0
+            left :: walk(true, &failed) catch 30
+            right :: walk(false, &success) catch 0
+            return [left + failed, right + success]
+        }
+        """, b"[42, 42]\n", None,
+    ),
+    "inline_for_empty_ranges_arrays_strings_skip_invalid_typing": (
+        """
+        empty proc() [0]type { return [] }
+        main proc() i16 {
+            inline for (i8(2)..i8(-2)) |_| { return false }
+            inline for (i8(1)..i8(1)) |_| { return i8(128) }
+            inline for empty() |_| { return false }
+            inline for "" |_| { return i8(128) }
+            return 42
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_capture_keeps_narrow_arithmetic_overflow": (
+        """
+        main proc() i16 {
+            inline for (i8(127)..=i8(127)) |value| { next :: value + 1 }
+            return 42
+        }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "inline_for_capture_is_immutable": (
+        """
+        main proc() i16 {
+            inline for [i16(1)] |value| { value = 42 }
+            return 0
+        }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_for_index_is_immutable": (
+        """
+        main proc() i16 {
+            inline for "a" |_, index| { index = 42 }
+            return 0
+        }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "inline_for_rejects_runtime_range_bound": (
+        """
+        walk proc(length usize) i16 {
+            inline for (0..length) |_| {}
+            return 42
+        }
+        main proc() i16 { return walk(2) }
+        """, b"", b"compile-time value",
+    ),
+    "inline_for_rejects_runtime_array": (
+        """
+        walk proc(values [2]i16) i16 {
+            inline for values |_| {}
+            return 42
+        }
+        main proc() i16 { return walk([19, 23]) }
+        """, b"", b"compile-time value",
+    ),
+    "inline_for_rejects_runtime_string": (
+        """
+        walk proc(text string) i16 {
+            inline for text |_| {}
+            return 42
+        }
+        main proc() i16 { return walk("ok") }
+        """, b"", b"compile-time value",
+    ),
+    "inline_for_rejects_pointer_capture": (
+        """
+        main proc() i16 {
+            inline for [i16(42)] |@value| { return value^ }
+            return 0
+        }
+        """, b"", b"escape",
+    ),
+    "inline_for_rejects_borrowed_element_escape": (
+        """
+        data proc() [1][]u8 { return ["borrowed"] }
+        main proc() usize {
+            inline for data() |value| { return value.len }
+            return 0
+        }
+        """, b"", b"escape",
+    ),
+    "inline_for_expansion_is_bounded": (
+        """
+        main proc() i16 {
+            inline for (0..usize(100000)) |_| {}
+            return 42
+        }
+        """, b"", b"step limit",
+    ),
     "struct_type_literal_fields_contextual_defaults_and_required_null": (
         """
         present proc() ??i16 { return 2 }
@@ -6386,7 +6707,48 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:5:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 20
+    sizing.write_text(textwrap.dedent("""
+        values proc() [2]i16 { return [19, 22] }
+        types proc() [2]type { return [i16, bool] }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        add proc(value i16, index usize) i16 { return value + i16(index) }
+        main proc() i16 {
+            total i16 := 0
+            inline for lib.values() |value, index| { total = total + add(value, index) }
+            inline for lib.types() |T| {
+                if (T == i16) {
+                    value T :: total
+                    total = value
+                } else {
+                    value T :: true
+                    if (!value) return 0
+                }
+            }
+            return total
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        values proc() [1]i16 {
+            value i8 :: 127
+            overflow :: value + 1
+            return [i16(overflow)]
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() i16 {
+            inline for lib.values() |value| { return value }
+            return 0
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 22
 
 
 def check_dependency_provenance(temporary, executable):
@@ -6436,6 +6798,14 @@ def check_dependency_provenance(temporary, executable):
                 return 9223372036854775807 + 1
             }
         """, 4, 12, False),
+        ("""
+            fail proc() int {
+                inline for [int(9223372036854775807)] |value| {
+                    return value + 1
+                }
+                return 42
+            }
+        """, 5, 16, False),
         ("""
             fail proc() int {
                 a :: [42]

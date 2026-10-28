@@ -121,6 +121,8 @@ elaborate proc(
         id :: ast.NodeId(i)
         class :: ast.node_class(&original, id)
         if (class == .expression and ast.expr_kind(&original, id) == .comptime_expr) needed = true
+        if (class == .statement and ast.stmt_kind(&original, id) == .for_stmt
+            and ast.for_stmt(&original, id).is_inline) needed = true
         if (class == .expression and ast.expr_kind(&original, id) == .builtin_call) {
             name :: ast.builtin_call(&original, id).name
             text :: ast.source_text(&original, ast.node_span(&original, name))
@@ -231,6 +233,11 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     if (state.expanded.items[usize(id)] != 0) return
     state.expanded.items[usize(id)] = 1
     class :: ast.node_class(&state.tree, id)
+    if (class == .statement and ast.stmt_kind(&state.tree, id) == .for_stmt
+        and ast.for_stmt(&state.tree, id).is_inline) {
+        try expand_inline_for(state, id)
+        return
+    }
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .expression) {
         expression :: ast.statement_expr(&state.tree, id)
         if (
@@ -1520,6 +1527,8 @@ TypeExecution :: struct {
     returned ast.NodeId = no_node
     result_type ast.NodeId
     loop_depth usize = 0
+    inline_body ast.NodeId = no_node
+    inline_blocks ?@mut arraylist.ArrayList(ast.NodeId) = null
 }
 
 @hide:file
@@ -1607,6 +1616,152 @@ type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId
 nominal_type_value proc(state @State, id ast.NodeId) bool {
     kind :: ast.expr_kind(&state.tree, id)
     return kind == .record_type or kind == .union_type or kind == .enum_type or kind == .distinct_type
+}
+
+# transfers targeting an inline loop must be selected before checking runtime
+# bodies. nested loops own their transfers and are elaborated independently.
+@hide:file
+inline_has_transfer proc(state @State, id ast.NodeId) bool {
+    class :: ast.node_class(&state.tree, id)
+    if (class == .function) return false
+    if (class == .statement) {
+        kind :: ast.stmt_kind(&state.tree, id)
+        if (kind == .for_stmt or kind == .while_stmt) return false
+        if (kind == .break_stmt or kind == .continue_stmt) return true
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (inline_has_transfer(state, ast.child(&state.tree, id, i))) return true
+    }
+    return false
+}
+
+@hide:file
+inline_statement proc(state @mut State, id ast.NodeId) TypeFlow ! Error {
+    kind :: ast.stmt_kind(&state.tree, id)
+    if (kind == .break_stmt) return .break
+    if (kind == .continue_stmt) return .continue
+    if (kind == .block_stmt)
+        return try inline_block(state, ast.statement_block(&state.tree, id))
+    selected := no_node
+    if (kind == .if_stmt) {
+        conditional :: ast.if_stmt(&state.tree, id)
+        explicit :: ast.expr_kind(&state.tree, conditional.condition) == .comptime_expr
+        condition :: if (explicit) ast.comptime_operand(&state.tree, conditional.condition) else conditional.condition
+        try expand(state, condition)
+        if (conditional.capture == null and (explicit or branch_constant(state, condition, 0))) {
+            value :: try evaluate_ir(state, condition, try builtin(state, condition, .bool))
+            if (value.kind != .boolean) return .invalid
+            if (value.boolean) selected = conditional.then_block
+            else if (conditional.else_block) |other| selected = other
+            else selected = try ast.add_block(state.builder, conditional.span, &[])
+        }
+    }
+    if (kind == .expression) {
+        expression :: ast.statement_expr(&state.tree, id)
+        if (ast.expr_kind(&state.tree, expression) == .match_expr) {
+            subject :: ast.match_expr(&state.tree, expression).subject
+            explicit :: ast.expr_kind(&state.tree, subject) == .comptime_expr
+            try expand(state, subject)
+            if (explicit or branch_constant(state, subject, 0)) {
+                index :: try type_match_arm(state, expression)
+                if (index == no_index) return .invalid
+                arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, expression, index))
+                body :: try type_match_body(state, expression, arm)
+                if (body == no_node) return .invalid
+                if (!arm.expression) selected = body
+                else {
+                    statement :: try ast.add_expression_stmt(state.builder, body)
+                    statements [1]ast.NodeId :: [statement]
+                    selected = try ast.add_block(state.builder, ast.node_span(&state.tree, id), statements[..])
+                }
+            }
+        }
+    }
+    if (selected != no_node) {
+        try refresh(state)
+        flow :: try inline_block(state, selected)
+        replacement :: try ast.add_block_stmt(state.builder, selected)
+        try replace(state, id, replacement)
+        try refresh(state)
+        return flow
+    }
+    if (inline_has_transfer(state, id)) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .inline_loop_control, ast.node_span(&state.tree, id))
+        return .invalid
+    }
+    try expand(state, id)
+    return .next
+}
+
+@hide:file
+inline_block proc(state @mut State, block ast.NodeId) TypeFlow ! Error {
+    statements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&statements)
+    flow := TypeFlow.next
+    for (0..ast.block_statement_count(&state.tree, block)) |i| {
+        statement :: ast.block_statement(&state.tree, block, i)
+        if (!try type_step(state, statement)) return .invalid
+        flow = try inline_statement(state, statement)
+        if (flow == .invalid) return flow
+        kind :: ast.stmt_kind(&state.tree, statement)
+        if (kind != .break_stmt and kind != .continue_stmt) try arraylist.append(&statements, statement)
+        if (flow != .next) break
+    }
+    replacement :: try ast.add_block(state.builder, ast.node_span(&state.tree, block), statements.items)
+    try replace(state, block, replacement)
+    try refresh(state)
+    return flow
+}
+
+@hide:file
+expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
+    loop :: ast.for_stmt(&state.tree, id)
+    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+    state.type_execution_depth += 1
+    defer state.type_execution_depth -= 1
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    blocks := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&blocks)
+    execution := TypeExecution{
+        locals = arraylist.init(state.allocator),
+        mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
+        first_owned = ast.NodeId(0), result_type = no_node,
+        inline_body = loop.body, inline_blocks = &blocks,
+    }
+    defer arraylist.deinit(&execution.locals)
+    defer mem.free(state.allocator, execution.mapping)
+    mem.set(execution.mapping, no_node)
+    for (0..usize(2)) |i| {
+        capture :: if (i == 0) loop.capture else loop.index
+        if (capture) |node| {
+            resolved :: binding(state, node)
+            if (resolved.kind == .invalid) state.evaluation_diagnostic = resolved.data.diagnostic
+        }
+    }
+    if (loop.pointer_capture)
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, loop.span)
+    flow := TypeFlow.invalid
+    if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+        flow = try execute_type_for(state, &execution, id)
+    if (flow != .next or state.evaluation_diagnostic != diagnostics.no_diagnostic) {
+        if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_argument_required, loop.span)
+        invalid :: try ast.add_invalid_stmt(state.builder, loop.span, state.evaluation_diagnostic)
+        try replace(state, id, invalid)
+        try refresh(state)
+        return
+    }
+    statements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&statements)
+    for (blocks.items) |block| {
+        statement :: try ast.add_block_stmt(state.builder, block)
+        try arraylist.append(&statements, statement)
+    }
+    block :: try ast.add_block(state.builder, loop.span, statements.items)
+    replacement :: try ast.add_block_stmt(state.builder, block)
+    try replace(state, id, replacement)
+    try refresh(state)
 }
 
 # select with ordinary checked IR so patterns, overlap and exhaustiveness have
@@ -2373,6 +2528,13 @@ type_assignment_value proc(
 
 @hide:file
 execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
+    if (block == execution.inline_body) {
+        snapshot :: try type_snapshot(state, execution, block)
+        flow :: try inline_block(state, snapshot)
+        if (flow == .invalid) return flow
+        try arraylist.append(execution.inline_blocks?, snapshot)
+        return flow
+    }
     saved :: execution.locals.items.len
     defer execution.locals.items = execution.locals.items[..saved]
     for (0..ast.block_statement_count(&state.tree, block)) |i| {
@@ -3284,8 +3446,15 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .array_literal: {
             count :: ast.array_element_count(&state.tree, id)
             if (count == 0) return no_node
-            element :: try expression_type(state, ast.array_element(&state.tree, id, 0), depth + 1)
+            element := try expression_type(state, ast.array_element(&state.tree, id, 0), depth + 1)
             if (element == no_node) return no_node
+            # inferred values have concrete default widths even when a cast or
+            # procedure result used the int/float annotation shorthand.
+            scalar :: binding(state, element)
+            if (scalar.kind == .builtin) {
+                if (scalar.data.builtin == .int) element = try builtin(state, element, .i64)
+                if (scalar.data.builtin == .float) element = try builtin(state, element, .f64)
+            }
             length :: try ast.add_integer(state.builder, ast.node_span(&state.tree, id), u64(count))
             try refresh(state)
             result :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, id), length, element, false)

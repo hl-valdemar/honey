@@ -293,7 +293,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
     match current(state).kind {
         .if: return try parse_if(state)
         .while: return try parse_while(state, allow_else)
-        .for: return try parse_for(state, allow_else)
+        .for, .inline: return try parse_for(state, allow_else)
         .return: return try parse_return(state, allow_else)
         .break, .continue: return try parse_loop_control(state, allow_else)
         .defer, .errdefer: return try parse_cleanup(state, allow_else)
@@ -510,7 +510,10 @@ parse_captures proc(state @mut State) CaptureList ! ParseError {
 
 @hide:file
 parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
-    keyword :: try consume(state, .for)
+    keyword :: current(state)
+    inlined :: next_is(state, .inline)
+    if (inlined) state.next_token += 1
+    _ = try consume(state, .for)
     skip_newlines(state)
     iterable_start :: state.next_token
     iterable := try parse_guard_expr(state)
@@ -556,7 +559,7 @@ parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         and !next_is(state, .open_curly)
     ) state.next_token = after_captures
     body :: try parse_arm(state, allow_else)
-    return try ast.add_for_stmt(
+    id :: try ast.add_for_stmt(
         state.builder,
         ast.Span{
             start = keyword.span.start,
@@ -565,6 +568,8 @@ parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         },
         iterable, captures.item, captures.index, captures.pointer, captures.indexed, body,
     )
+    if (inlined) ast.set_for_inline(state.builder, id)
+    return id
 }
 
 @hide:file
@@ -599,7 +604,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             and !next_is(state, .newline) and !next_is(state, .eof)
             and !next_is(state, .else) and !next_is(state, .return)
             and !next_is(state, .if) and !next_is(state, .while)
-            and !next_is(state, .for)
+            and !next_is(state, .for) and !next_is(state, .inline)
             and !next_is(state, .break) and !next_is(state, .continue)
         ) {
             if (next_is(state, .ident) and next_n_is(state, 1, .equal)) break
@@ -850,7 +855,7 @@ starts_type proc(kind lexer.TokenKind) bool {
 @hide:file
 member_name proc(kind lexer.TokenKind) bool {
     return match kind {
-        .ident, .if, .else, .for, .while, .proc, .return, .break, .continue,
+        .ident, .if, .else, .for, .inline, .while, .proc, .return, .break, .continue,
         .true, .false, .and, .or, .mut, .struct, .enum, .union, .distinct,
         .alias, .match, .import, .test, .c_func, .null, .undefined, .try, .catch, .defer, .errdefer: true
         else: false
@@ -1071,7 +1076,7 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
     state.match_arm_body = true
     defer state.match_arm_body = previous
     statement_body :: match current(state).kind {
-        .open_curly, .return, .break, .continue, .if, .while, .for, .defer, .errdefer: true
+        .open_curly, .return, .break, .continue, .if, .while, .for, .inline, .defer, .errdefer: true
         else: false
     }
     if (statement_body or named_binding_starts(state)) {
@@ -1703,7 +1708,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 is_expression_boundary proc(kind lexer.TokenKind) bool {
     return match kind {
-        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .for, .defer, .errdefer, .eof: true
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .for, .inline, .defer, .errdefer, .eof: true
         else: false
     }
 }
@@ -1842,7 +1847,7 @@ recovery_closes_delimiters proc(state @State, paren_depth, square_depth usize) b
     for (state.next_token)..(state.tokens.len) |i| {
         kind :: state.tokens[i].kind
         match kind {
-            .open_curly, .close_curly, .eof, .if, .else, .while, .for,
+            .open_curly, .close_curly, .eof, .if, .else, .while, .for, .inline,
             .return, .break, .continue, .defer, .errdefer: return false
             .ident: {
                 if (i + 1 < state.tokens.len) {
