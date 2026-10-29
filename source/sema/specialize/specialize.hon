@@ -4349,6 +4349,18 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .literal_bool: return try builtin(state, id, .bool)
         .literal_string: return try builtin(state, id, .string)
         .literal_void: return try builtin(state, id, .void)
+        .match_expr: {
+            result := no_node
+            for (0..ast.match_arm_count(&state.tree, id)) |i| {
+                arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, id, i))
+                if (!arm.expression) return no_node
+                annotation :: try expression_type(state, arm.body, depth + 1)
+                if (annotation == no_node) continue
+                result = annotation
+                if (!flexible(state, arm.body)) return result
+            }
+            return result
+        }
         .builtin_call: {
             name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
             count :: ast.call_arg_count(&state.tree, id)

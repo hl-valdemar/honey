@@ -462,6 +462,35 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
+parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .if)
+    condition :: try parse_guard(state)
+    then_value :: try parse_expr(state)
+    skip_newlines(state)
+    if (!next_is(state, .else) or next_n_is(state, 1, .colon)) return .unexpected_token
+    state.next_token += 1
+    skip_newlines(state)
+    else_value :: try parse_expr(state)
+    span :: ast.Span{
+        start = keyword.span.start,
+        end = ast.builder_span(state.builder, else_value).end,
+        source = keyword.span.source,
+    }
+    # canonical boolean matches share inference, specialization and branch execution.
+    patterns [1]ast.NodeId :: [try ast.add_boolean(state.builder, keyword.span, true)]
+    then_arm :: try ast.add_match_arm(
+        state.builder, ast.builder_span(state.builder, then_value),
+        patterns[..], null, then_value, true, false,
+    )
+    else_arm :: try ast.add_match_arm(
+        state.builder, ast.builder_span(state.builder, else_value),
+        &[], null, else_value, true, true,
+    )
+    arms [2]ast.NodeId :: [then_arm, else_arm]
+    return try ast.add_match(state.builder, span, condition, arms[..])
+}
+
+@hide:file
 parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     keyword :: try consume(state, .while)
     condition :: try parse_guard(state)
@@ -640,6 +669,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
         and !next_is(state, .pipe)
         and !parenthesized_guard(state, condition_start)
         and ast.builder_expr_kind(state.builder, condition) != .call
+        and ast.builder_expr_kind(state.builder, condition) != .comptime_expr
         and ast.builder_expr_kind(state.builder, condition) != .invalid
     ) {
         diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, current(state).span)
@@ -828,6 +858,7 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
     if next_is(state, .enum) return try parse_enum_type(state)
     if next_is(state, .union) return try parse_union_type(state)
     if next_is(state, .match) return try parse_match(state)
+    if next_is(state, .if) return try parse_if_expr(state)
     if (next_is(state, .distinct) or next_is(state, .alias)) return try parse_type_wrapper(state)
     token :: try consume(state, .ident)
     type := try ast.add_identifier(state.builder, token.span, token.data.str_id)
@@ -883,6 +914,7 @@ starts_type proc(kind lexer.TokenKind) bool {
     return (
         kind == .ident or kind == .open_bracket or kind == .struct or kind == .c_struct or kind == .opaque
         or kind == .enum or kind == .union or kind == .distinct or kind == .alias or kind == .match
+        or kind == .if
         or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc or kind == .c_func
     )
 }
@@ -1658,6 +1690,7 @@ named_binding_starts proc(state @State) bool {
         next_is(state, .ident)
         and (next_n_is(state, 1, .double_colon) or next_n_is(state, 1, .colon_equal)
             or next_n_is(state, 1, .ident) or next_n_is(state, 1, .proc) or next_n_is(state, 1, .match)
+            or next_n_is(state, 1, .if)
             or next_n_is(state, 1, .at)
             or next_n_is(state, 1, .question)
             or (next_n_is(state, 1, .open_paren) and pointer_binding_starts(state))
@@ -1675,6 +1708,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         .union: return try parse_union_type(state)
         .distinct, .alias: return try parse_type_wrapper(state)
         .match: return try parse_match(state)
+        .if: return try parse_if_expr(state)
         .dollar: {
             state.next_token += 1
             _ = try consume(state, .open_paren)

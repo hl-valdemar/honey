@@ -7,12 +7,13 @@
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
+#! boolean value expressions also accept 'if' guard expr 'else' expr, canonicalized to matches; else is required.
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
 #! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
-#! braceless guards/iterables require parentheses unless they are calls or optional captures; else binds to the nearest if.
+#! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if.
 #! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/&/try higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
 

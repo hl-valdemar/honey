@@ -11,6 +11,105 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "conditional_expressions_evaluate_guard_once_and_only_selected_arm": (
+        """
+        next proc(calls @mut i16, value bool) bool { calls^ = calls^ + 1
+            return value }
+        main proc() [3]i16 {
+            calls i16 := 0
+            first i16 :: if next(&calls, true) 42 else divtrunc!(1, 0)
+            second i16 :: if next(&calls, false) divtrunc!(1, 0) else 7
+            return [first, second, calls]
+        }
+        """, b"[42, 7, 2]\n", None,
+    ),
+    "conditional_expressions_nest_bind_else_and_preserve_precedence": (
+        """
+        choose proc(a, b bool) i16 { return if (a) if (b) 1 else 40 else 3 + 4 }
+        main proc() [3]i16 {
+            return [choose(true, false) + 2, choose(false, true),
+                2 * (if (false) 10 else 21)]
+        }
+        """, b"[42, 7, 42]\n", None,
+    ),
+    "conditional_expressions_preserve_aggregate_copy_isolation": (
+        """
+        Item :: struct { values [1]mut i16 }
+        choose proc(flag bool, left, right Item) Item { return if (flag) left else right }
+        main proc() i16 {
+            left Item := { values = [42] }
+            right Item :: { values = [7] }
+            saved :: choose(true, left, right)
+            left.values[0] = 0
+            return saved.values[0]
+        }
+        """, b"42\n", None,
+    ),
+    "conditional_expressions_select_generated_types_and_specialized_bodies": (
+        """
+        Choose proc(wide bool) type { return if (wide) i16 else i8 }
+        length proc(flag bool) usize { return if (flag) 2 else 1 }
+        Box proc($wide bool) type {
+            return struct {
+                value Choose(wide)
+                items [length(wide)]i16
+                other (if (wide) i16 else i8)
+            }
+        }
+        select proc($flag bool, value i16) i16 {
+            return if $(flag) value else compile_error!("unselected")
+        }
+        main proc() [3]i16 {
+            value Box(true) :: { value = 40, items = [1, 2], other = 42 }
+            return [value.value, i16(value.items.len), select(true, value.other)]
+        }
+        """, b"[40, 2, 42]\n", None,
+    ),
+    "conditional_expressions_keep_outer_match_default": (
+        """
+        choose proc(flag bool) i16 {
+            return match flag {
+                true: (if (flag) 42
+                    else 1)
+                else: 7
+            }
+        }
+        main proc() i16 { return choose(false) }
+        """, b"7\n", None,
+    ),
+    "conditional_expressions_check_unselected_runtime_result_types": (
+        """
+        choose proc(flag bool) i16 { return if (flag) i16(42) else u8(1) }
+        main proc() i16 { return choose(true) }
+        """, b"42\n", b"incompatible value type",
+    ),
+    "conditional_expressions_require_else": (
+        "main proc() i16 { return if (true) 42 }",
+        b"", b"unexpected token",
+    ),
+    "conditional_expressions_preserve_optional_and_fallible_result_context": (
+        """
+        Error :: enum { failed }
+        optional proc(flag bool) ?i16 { return if (flag) 42 else null }
+        fallible proc(flag bool) i16 ! Error { return if (flag) 42 else .failed }
+        main proc() [3]i16 {
+            if (optional(false) != null) return [0, 0, 0]
+            return [optional(true)?, fallible(true) catch 0, fallible(false) catch 7]
+        }
+        """, b"[42, 42, 7]\n", None,
+    ),
+    "conditional_expressions_materialize_direct_constants": (
+        """
+        main proc() [2]i16 {
+            return [i16($(if (true) 42 else divtrunc!(1, 0))),
+                $(if (false) 0 else i16(7))]
+        }
+        """, b"[42, 7]\n", None,
+    ),
+    "conditional_expressions_reject_nonboolean_guards": (
+        "main proc() i16 { return if (1) 42 else 0 }",
+        b"", b"incompatible value type",
+    ),
     "integer_divtrunc_preserves_sign_and_single_evaluation": (
         """
         next proc(calls @mut i16) i16 { calls^ = calls^ + 1

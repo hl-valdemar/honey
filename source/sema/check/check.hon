@@ -1615,6 +1615,14 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
             return
         }
     }
+    if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .match_expr) {
+        state.cells[index].expected = expected
+        for 0..ast.match_arm_count(state.tree, id) |i| {
+            arm :: ast.match_arm_view(state.tree, ast.match_arm(state.tree, id, i))
+            if (arm.expression) try demand(state, arm.body, expected, code)
+        }
+        return
+    }
     if (expected.kind == .fallible) {
         descriptor :: state.arrays.items[usize(expected.array_type)]
         actual := group_type(state, id)
@@ -1689,14 +1697,6 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
         state.cells[index].expected = expected
         try demand(state, ast.unary_expr(state.tree, id).operand,
             state.pointers.items[usize(expected.pointer_type)].element, code)
-        return
-    }
-    if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .match_expr) {
-        state.cells[index].expected = expected
-        for 0..ast.match_arm_count(state.tree, id) |i| {
-            arm :: ast.match_arm_view(state.tree, ast.match_arm(state.tree, id, i))
-            if (arm.expression) try demand(state, arm.body, expected, code)
-        }
         return
     }
     literal_node :: state.cells[index].literal
