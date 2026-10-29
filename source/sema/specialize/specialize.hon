@@ -4349,6 +4349,21 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .literal_bool: return try builtin(state, id, .bool)
         .literal_string: return try builtin(state, id, .string)
         .literal_void: return try builtin(state, id, .void)
+        .builtin_call: {
+            name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
+            count :: ast.call_arg_count(&state.tree, id)
+            if ((mem.eql(name, "sizeof") or mem.eql(name, "alignof")) and count == 1)
+                return try builtin(state, id, .usize)
+            if ((mem.eql(name, "maxval") or mem.eql(name, "minval")) and count == 1)
+                return try canonical_type(state, ast.call_arg(&state.tree, id, 0))
+            if (mem.eql(name, "divtrunc") and count == 2) {
+                left :: ast.call_arg(&state.tree, id, 0)
+                right :: ast.call_arg(&state.tree, id, 1)
+                operand :: if (flexible(state, left)) right else left
+                return try expression_type(state, operand, depth + 1)
+            }
+            return no_node
+        }
         .catch_expr: {
             type :: try expression_type(state, ast.catch_expr(&state.tree, id).operand, depth + 1)
             if (type == no_node or ast.expr_kind(&state.tree, type) != .fallible_type) return no_node
@@ -4447,6 +4462,25 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 )
             )
                 return try builtin(state, id, .usize)
+            if (mem.eql(member, "ptr")) {
+                element := no_node
+                mutable := false
+                if (base_kind == .array_type) {
+                    element = ast.array_type(&state.tree, base).element
+                    mutable = ast.array_type(&state.tree, base).mutable
+                }
+                if (base_kind == .slice_type) {
+                    element = ast.slice_type(&state.tree, base).element
+                    mutable = ast.slice_type(&state.tree, base).mutable
+                }
+                if (binding(state, base).kind == .builtin and binding(state, base).data.builtin == .string)
+                    element = try builtin(state, id, .u8)
+                if (element != no_node) {
+                    result :: try ast.add_pointer_type(state.builder, view.span, element, mutable, true)
+                    try refresh(state)
+                    return result
+                }
+            }
             if (base_kind != .record_type and base_kind != .union_type) return no_node
             slot :: type_record_slot(state, base, view.member)
             if (slot == no_index) return no_node
@@ -4524,32 +4558,36 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
     resolved :: binding(state, pattern)
     if (resolved.kind == .declaration and parameter_index(state, function, resolved.data.declaration) != no_index)
         return try infer_value(state, function, pattern, Value{ kind = .type, node = actual }, arguments, contextual)
+    # only normalize the actual type: the pattern may still contain unbound
+    # parameters or a type-generator call whose arguments must be inferred.
+    concrete :: try canonical_type(state, actual)
+    if (concrete == no_node) return false
     kind :: ast.expr_kind(&state.tree, pattern)
-    actual_kind :: ast.expr_kind(&state.tree, actual)
+    actual_kind :: ast.expr_kind(&state.tree, concrete)
     match kind {
         .pointer_type: {
             if (actual_kind != .pointer_type) return false
             return try infer(state, function, ast.pointer_type(&state.tree, pattern).element,
-                ast.pointer_type(&state.tree, actual).element, arguments, contextual)
+                ast.pointer_type(&state.tree, concrete).element, arguments, contextual)
         }
         .slice_type: {
             element := no_node
-            if (actual_kind == .slice_type) element = ast.slice_type(&state.tree, actual).element
-            if (actual_kind == .array_type) element = ast.array_type(&state.tree, actual).element
+            if (actual_kind == .slice_type) element = ast.slice_type(&state.tree, concrete).element
+            if (actual_kind == .array_type) element = ast.array_type(&state.tree, concrete).element
             if (element == no_node) return false
             return try infer(state, function, ast.slice_type(&state.tree, pattern).element, element, arguments, contextual)
         }
         .array_type: {
             if (actual_kind != .array_type) return false
             p :: ast.array_type(&state.tree, pattern)
-            a :: ast.array_type(&state.tree, actual)
+            a :: ast.array_type(&state.tree, concrete)
             if (p.count) |count| {
                 if (a.count == null or !try infer_value(state, function, count, try evaluate(state, a.count?), arguments, false)) return false
             }
             return try infer(state, function, p.element, a.element, arguments, contextual)
         }
         .optional_type: {
-            element :: if (actual_kind == .optional_type) ast.type_operand(&state.tree, actual) else actual
+            element :: if (actual_kind == .optional_type) ast.type_operand(&state.tree, concrete) else concrete
             return try infer(state, function, ast.type_operand(&state.tree, pattern), element, arguments, contextual)
         }
         .call: {
@@ -4558,7 +4596,7 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
             for (0..(state.instances.items.len)) |i| {
                 instance :: state.instances.items[i]
                 if (instance.type == no_node or instance.function != callee.data.declaration) continue
-                if (try canonical_type(state, instance.type) != actual) continue
+                if (try canonical_type(state, instance.type) != concrete) continue
                 count :: ast.call_arg_count(&state.tree, pattern)
                 if (count != instance.arguments.len) return false
                 for (0..count) |j| {

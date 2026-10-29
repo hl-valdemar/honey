@@ -2014,3 +2014,76 @@ fallible_source_handlers_do_not_catch_runtime_allocation_failures test {
     }
     try testing.expect(succeeded and failures > 0)
 }
+
+keeps_generated_foreign_declarations_demand_driven_and_traps_interpreted_calls test {
+    source ::
+        `Handle :: opaque
+        `Packet :: c_struct { context ?*mut Handle, callback ?*c_func(_ c_int, _ c_int) void }
+        `unsupported c_func(_ Packet) Packet
+        `variadic c_func(_ c_int, ...) c_int
+        `single c_func(_ c_float) c_float
+        `extended c_func(_ c_longdouble) c_longdouble
+        `double c_func(_ c_double) c_double
+        `malloc c_func(_ c_ulong) ?*mut anyopaque
+        `@hide:file
+        `helper proc() int { if (true) return 42
+        `else return 0 }
+        `main proc() int { return helper() }
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+
+    foreign_module := try compile_owned(
+        "realloc c_func(_ ?*mut anyopaque, _ c_ulong) ?*mut anyopaque\nmain proc() bool { return realloc(null, 8) == null }\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&foreign_module)
+    foreign_outcome := try interpreter.run(mem.c_allocator, &foreign_module, &diagnostic_store)
+    defer interpreter.deinit(&foreign_outcome)
+    try expect_trap(foreign_outcome, &diagnostic_store, .unsupported_foreign_call)
+}
+
+diagnoses_demanded_unsupported_foreign_signatures_and_attributes test {
+    sources [5][]u8 :: [
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1) }\n",
+        "Handle :: opaque\ntake c_func(_ Handle) void\nmain proc() void { take(undefined) }\n",
+        "A :: opaque\nB :: opaque\nmain proc() void { a ?*A :: null\n b ?*B :: a }\n",
+        "@other:file\nhidden :: 1\nmain proc() int { return hidden }\n",
+        "@hide:package\nhidden :: 1\nmain proc() int { return hidden }\n",
+    ]
+    for sources |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap != null)
+    }
+}
+
+rejects_demanded_unavailable_c_floating_types_without_unknown_names test {
+    sources [2][]u8 :: [
+        "single c_func() c_float\nmain proc() void { single() }\n",
+        "extended c_func() c_longdouble\nmain proc() void { extended() }\n",
+    ]
+    for sources |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .invalid_operand)
+        for 0..diagnostics.count(&diagnostic_store) |index| {
+            diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(index))?
+            try testing.expect(diagnostic.code != .unknown_name)
+        }
+    }
+}

@@ -738,3 +738,57 @@ dependency_traps_keep_original_spans_and_remain_demand_driven test {
         }
     }
 }
+
+file_local_declarations_are_isolated_from_siblings_and_import_selection test {
+    callers [4][]u8 :: [
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.answer() }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.sibling() }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.leak() }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.helper() }\n",
+    ]
+    for callers |caller, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        root_bytes := try owned_text(caller)
+        defer arraylist.deinit(&root_bytes)
+        first_bytes := try owned_text(
+            `@hide:file
+            `helper proc() int { return 42 }
+            `@hide:file secret :: 7
+            `answer proc() int { return helper() }
+            ,
+        )
+        defer arraylist.deinit(&first_bytes)
+        second_bytes := try owned_text(
+            `@hide:file
+            `helper proc() int { return 99 }
+            `sibling proc() int { return helper() }
+            `leak proc() int { return secret }
+            ,
+        )
+        defer arraylist.deinit(&second_bytes)
+        root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
+        _ = try add_source(&session, dependency, "dependency/first.hon", &first_bytes, &diagnostic_store)
+        _ = try add_source(&session, dependency, "dependency/second.hon", &second_bytes, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        module := try compile(&session, root, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        if (index < 2) {
+            try testing.expect(outcome.trap == null)
+            expected :: if (index == 0) i64(42) else i64(99)
+            try testing.expect_equal(expected, outcome.value.data.integer)
+        } else {
+            diagnostic :: diagnostics.get(&diagnostic_store, outcome.trap?)?
+            try testing.expect_equal(diagnostics.Code.unknown_name, diagnostic.code)
+        }
+    }
+}

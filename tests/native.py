@@ -11,6 +11,66 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "integer_divtrunc_preserves_sign_and_single_evaluation": (
+        """
+        next proc(calls @mut i16) i16 { calls^ = calls^ + 1
+            return calls^ + 5 }
+        quotient proc(value i16) i16 { return divtrunc!(value, 3) }
+        main proc() [6]i16 {
+            calls i16 := 0
+            result :: divtrunc!(next(&calls), next(&calls))
+            return [result, calls, quotient(-7), quotient(7),
+                $(quotient(-7)), divtrunc!(-7, i16(-3))]
+        }
+        """, b"[0, 2, -2, 2, -2, 2]\n", None,
+    ),
+    "integer_divtrunc_rejects_zero": (
+        "main proc() u64 { return divtrunc!(maxval!(u64), 0) }",
+        b"", b"integer division by zero",
+    ),
+    "integer_divtrunc_checks_narrow_signed_overflow": (
+        "main proc() i8 { return divtrunc!(minval!(i8), -1) }",
+        b"", b"integer arithmetic overflow",
+    ),
+    "integer_divtrunc_checks_full_width_signed_overflow": (
+        "main proc() i64 { return divtrunc!(minval!(i64), -1) }",
+        b"", b"integer arithmetic overflow",
+    ),
+    "integer_divtrunc_rejects_float_operands": (
+        "main proc() f64 { return divtrunc!(7.0, 3.0) }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "integer_limits_reject_noninteger_types": (
+        "main proc() bool { return maxval!(bool) }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "integer_divtrunc_rejects_rigid_width_conflicts": (
+        "main proc() i16 { return divtrunc!(i8(7), i16(3)) }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "c_layout_records_and_nominal_opaque_pointers": (
+        """
+        Handle :: opaque
+        Other :: opaque
+        Header :: c_struct { tag c_uchar, value c_ulong }
+        main proc() c_ulong {
+            header Header := { tag = 2, value = 40 }
+            if (sizeof!(Header) != 16 or alignof!(Header) != 8) return 0
+            pointer ?*mut Handle :: ptrcast!(&header)
+            restored *mut Header :: ptrcast!(pointer?)
+            return restored.value + c_ulong(restored.tag)
+        }
+        """, b"42\n", None,
+    ),
+    "c_opaque_pointer_types_remain_nominal": (
+        """
+        Left :: opaque
+        Right :: opaque
+        consume proc(value ?*Left) bool { return value == null }
+        main proc() bool { value ?*Right :: null
+            return consume(value) }
+        """, b"", b"incompatible value type",
+    ),
     "runtime_undefined_nested_storage_and_copy_isolation": (
         """
         Item :: struct { values [2]mut i16, label string }
@@ -6643,6 +6703,17 @@ for integer_type, bits, signed in (
 ):
     minimum = -(1 << (bits - 1)) if signed else 0
     maximum = (1 << (bits - int(signed))) - 1
+    CASES[f"{integer_type}_limits_and_truncating_division"] = (
+        f"""
+        identity proc(value {integer_type}) {integer_type} {{ return value }}
+        main proc() [4]{integer_type} {{
+            return [identity(minval!({integer_type})), identity(maxval!({integer_type})),
+                divtrunc!(maxval!({integer_type}), 2), divtrunc!(minval!({integer_type}), 2)]
+        }}
+        """,
+        f"[{minimum}, {maximum}, {maximum // 2}, {-((-minimum) // 2) if minimum < 0 else 0}]\n".encode(),
+        None,
+    )
     CASES[f"{integer_type}_storage"] = (
         f"""
         seed [2]mut {integer_type} :: [{minimum}, {maximum}]
@@ -6967,7 +7038,22 @@ main proc() int { return missing }
     emitted = run(str(HONEY), "emit-llvm", str(single))
     assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
     check(single.parent, executable, (b"42\n", b"duplicate name"))
-    return len(cases) + 6
+    put("hidden/a.hon", "@hide:file\nhelper proc() int { return 20 }\nfirst proc() int { return helper() }\n")
+    put("hidden/b.hon", "@hide:file\nhelper proc() int { return 22 }\nsecond proc() int { return helper() }\n")
+    visibility_cases = (
+        ('import "../hidden"\nmain proc() int { return hidden.first() + hidden.second() }\n', b"42\n", None),
+        ('import "../hidden"\nmain proc() int { return hidden.helper() }\n', b"", b"unknown name"),
+        ('@hide:file\nprivate proc() int { return 42 }\nmain proc() int { return private() }\n', b"42\n", None),
+        ('@hide:package\nprivate proc() int { return 42 }\nmain proc() int { return private() }\n', b"", b"unexpected token"),
+    )
+    sibling.write_text("sibling proc(n int) int { return n }\n")
+    for text, stdout, error in visibility_cases:
+        main.write_text(text)
+        check(app, executable, (stdout, error))
+    sibling.write_text("@hide:file\nprivate proc() int { return 42 }\n")
+    main.write_text("main proc() int { return private() }\n")
+    check(app, executable, (b"", b"unknown name"))
+    return len(cases) + len(visibility_cases) + 7
 
 
 def check_record_packages(temporary, executable):
@@ -7625,6 +7711,153 @@ def check_dependency_provenance(temporary, executable):
                     hidden.rename(project)
                     executable.unlink()
     return len(cases) * 2
+
+def check_arraylist_packages(temporary, executable):
+    project = temporary / "arraylist"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+    source = project / "main.hon"
+    # A fixed-capacity test allocator lets the interpreter exercise the real
+    # library's growth/failure paths without executing foreign calls.
+    source.write_text(textwrap.dedent("""
+        import "@std/arraylist"
+        import "@std/mem"
+        State :: struct { storage *mut i16, fail bool = false, allocations usize = 0, releases usize = 0 }
+        allocate proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+            state @mut State :: ptrcast!(context?)
+            state.allocations = state.allocations + 1
+            if (state.fail or size > sizeof!([64]i16) or alignment > alignof!(i16)) return null
+            return ptrcast!(state.storage)
+        }
+        resize proc(
+            context ?@mut anyopaque, _ ?*mut u8, _ usize, size usize, alignment usize,
+        ) ?*mut u8 { return allocate(context, size, alignment) }
+        release proc(context ?@mut anyopaque, _ ?*mut u8, _ usize, _ usize) void {
+            state @mut State :: ptrcast!(context?)
+            state.releases = state.releases + 1
+        }
+        table mem.AllocatorVTable :: { alloc = allocate, realloc = resize, free = release }
+        fail proc(allocator mem.Allocator) void ! mem.AllocError {
+            list := arraylist.init(i16, allocator)
+            defer arraylist.deinit(&list)
+            try arraylist.append(&list, 42)
+            return .out_of_memory
+        }
+        main proc() i16 ! mem.AllocError {
+            storage [64]mut i16 := undefined
+            state State := { storage = (&storage).ptr }
+            allocator mem.Allocator :: { context = &state, vtable = &table }
+            list := arraylist.init(i16, allocator)
+            if (list.items.len != 0 or list.capacity != 0 or state.allocations != 0) return -1
+            if (arraylist.pop(&list) != null) return -2
+            for (i16(0)..20) |value| { try arraylist.append(&list, value) }
+            if (list.items.len != 20 or list.capacity < 20) return -3
+            for list.items |value, index| { if (value != i16(index)) return -4 }
+            previous_capacity :: list.capacity
+            previous_calls :: state.allocations
+            try arraylist.reserve(&list, previous_capacity)
+            if (state.allocations != previous_calls) return -5
+            state.fail = true
+            arraylist.reserve(&list, previous_capacity + 1) catch |err| {
+                if (err != .out_of_memory) return -6
+            }
+            if (list.capacity != previous_capacity or list.items.len != 20 or list.items[19] != 19) return -7
+            if (state.allocations != previous_calls + 1) return -8
+            if (arraylist.pop(&list)? != 19 or list.items.len != 19) return -9
+            arraylist.clear(&list)
+            if (list.items.len != 0 or list.capacity != previous_capacity) return -10
+            state.fail = false
+            try arraylist.append(&list, 42)
+            if (list.items[0] != 42 or state.allocations != previous_calls + 1) return -11
+            arraylist.deinit(&list)
+            if (list.items.len != 0 or list.capacity != 0 or state.releases != 1) return -12
+            arraylist.deinit(&list)
+            if (state.releases != 1) return -13
+            fail(allocator) catch {}
+            if (state.releases != 2) return -14
+            state.fail = true
+            arraylist.append(&list, 1) catch {}
+            if (list.items.len != 0 or list.capacity != 0) return -15
+            return 42
+        }
+    """).strip() + "\n")
+    check(source, executable, (b"42\n", None))
+    source.write_text(textwrap.dedent("""
+        import "@std/arraylist"
+        import "@std/mem"
+        Empty :: struct {}
+        main proc() i16 ! mem.AllocError {
+            list := arraylist.init(Empty, mem.c_allocator)
+            defer arraylist.deinit(&list)
+            try arraylist.reserve(&list, 20)
+            for (0..21) |_| { try arraylist.append(&list, Empty{}) }
+            if (list.items.len != 21 or list.capacity < 21) return -1
+            if (arraylist.pop(&list) == null or list.items.len != 20) return -2
+            arraylist.clear(&list)
+            if (list.items.len != 0 or arraylist.pop(&list) != null) return -3
+            return 42
+        }
+    """).strip() + "\n")
+    check(source, executable, (b"42\n", None))
+    native_cases = (
+        """
+        import "@std/arraylist"
+        import "@std/mem"
+        Item :: struct { number i16, values [2]mut i16 }
+        main proc() i16 ! mem.AllocError {
+            list := arraylist.init(Item, mem.c_allocator)
+            defer arraylist.deinit(&list)
+            for (i16(0)..32) |value| {
+                try arraylist.append(&list, Item{ number = value, values = [value, 2] })
+            }
+            if (list.items.len != 32 or list.capacity < 32) return -1
+            saved :: list.items[20]
+            list.items[20].values[0] = 0
+            if (saved.values[0] != 20) return -2
+            for list.items |item, index| { if (item.number != i16(index)) return -3 }
+            if (arraylist.pop(&list)?.number != 31) return -4
+            arraylist.clear(&list)
+            try arraylist.append(&list, saved)
+            return list.items[0].number + list.items[0].values[0] + list.items[0].values[1]
+        }
+        """,
+        """
+        import "@std/mem"
+        main proc() i16 {
+            allocator :: mem.c_allocator
+            if (mem.raw_alloc(allocator, 16, 3) != null) return -1
+            initial :: mem.raw_alloc(allocator, 16, 64)
+            if initial |bytes| {
+                values *mut i16 :: ptrcast!(bytes)
+                values[0] = 40
+                values[1] = 2
+                resized :: mem.raw_realloc(allocator, bytes, 16, 128, 64)
+                if resized |grown| {
+                    defer mem.raw_free(allocator, grown, 128, 64)
+                    result *i16 :: ptrcast!(grown)
+                    return result[0] + result[1]
+                }
+                mem.raw_free(allocator, bytes, 16, 64)
+            }
+            return -2
+        }
+        """,
+    )
+    for text in native_cases:
+        source.write_text(textwrap.dedent(text).strip() + "\n")
+        interpreted = run(str(HONEY), "run", str(source))
+        assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+        assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+        assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+        for optimization in ("-O0", "-O2"):
+            built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+            assert outcome(built) == (0, b"", b""), outcome(built)
+            assert outcome(run(str(executable))) == (0, b"42\n", b""), optimization
+            executable.unlink()
+    return 2, len(native_cases)
+
 
 def check_allocator_libc(temporary, executable):
     source = temporary / "allocator_libc.hon"
@@ -8299,6 +8532,8 @@ def main():
             check(source, executable, (stdout, error))
             count += 1
         allocator_count = check_allocator_libc(temporary, executable)
+        arraylist_count, arraylist_native_count = check_arraylist_packages(temporary, executable)
+        count += arraylist_count
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -8325,7 +8560,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count} native allocator program, LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count} native allocator programs, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":

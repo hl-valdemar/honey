@@ -1975,3 +1975,68 @@ rejects_malformed_inline_match_captures test {
         try testing.expect(diagnostics.count(&diagnostic_store) > 0)
     }
 }
+
+parses_generated_foreign_bindings_and_preserves_callable_metadata test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Handle :: opaque
+        `Record :: c_struct {
+        `    context ?*mut Handle
+        `    callback ?*c_func(_ c_int, _ ?*anyopaque) void
+        `}
+        `printf c_func(_ ?*c_char, ...) c_int
+        `@hide:file
+        `helper proc() int {
+        `    if (true) return 42
+        `    else return 0
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(4, ast.package_decl_count(&tree))
+    handle_type :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    record :: ast.statement_decl(&tree, ast.package_decl(&tree, 1)).initializer
+    try testing.expect(ast.record_opaque(&tree, handle_type))
+    try testing.expect(ast.record_c_layout(&tree, record))
+    callback :: ast.type_operand(&tree, ast.field(&tree, ast.record_field(&tree, record, 1)).type?)
+    try testing.expect(ast.callable_foreign(&tree, callback))
+    try testing.expect_equal(2, ast.function_param_count(&tree, callback))
+    try testing.expect(ast.callable_variadic(&tree, ast.package_decl(&tree, 2)))
+    helper :: ast.package_decl(&tree, 3)
+    try testing.expect(ast.file_local(&tree, helper))
+    branch :: ast.if_stmt(&tree, ast.block_statement(&tree, ast.function_decl(&tree, helper).body, 0))
+    try testing.expect(branch.else_block != null)
+}
+
+keeps_match_default_arm_after_newline_single_statement_if test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc(value int) void {
+        `    match value {
+        `        1: if (true) return
+        `        else: return
+        `    }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    expression :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(2, ast.match_arm_count(&tree, expression))
+    first :: ast.match_arm_view(&tree, ast.match_arm(&tree, expression, 0))
+    branch :: ast.if_stmt(&tree, ast.block_statement(&tree, first.body, 0))
+    try testing.expect(branch.else_block == null)
+    try testing.expect(ast.match_arm_view(&tree, ast.match_arm(&tree, expression, 1)).catch_all)
+}

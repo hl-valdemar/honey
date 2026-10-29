@@ -150,10 +150,10 @@ scans_ranges_without_consuming_float_dots test {
     state := init(mem.c_allocator)
     defer deinit(&state)
     try scan(&state, "0..10 0..=10 1.5..2.5 |@item, _| ... 1.", &pool, &diagnostic_store)
-    expected [19]TokenKind :: [
+    expected [18]TokenKind :: [
         .int, .range, .int, .int, .range_inclusive, .int,
         .float, .range, .float, .pipe, .at, .ident, .comma, .ident, .pipe,
-        .range, .dot, .invalid, .eof,
+        .ellipsis, .invalid, .eof,
     ]
     try testing.expect_equal(expected.len, state.tokens.items.len)
     for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)

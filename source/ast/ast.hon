@@ -208,6 +208,10 @@ Node :: struct {
     main NodeData = NodeData{ node_id = no_node }
     data0 NodeData = NodeData{ node_id = no_node }
     data1 NodeData = NodeData{ node_id = no_node }
+    file_local bool = false
+    foreign_type bool = false
+    variadic bool = false
+    is_opaque bool = false
 }
 
 @hide:file
@@ -1107,6 +1111,38 @@ function_external proc(tree @Tree, id NodeId) bool {
     node :: get_node(&tree.storage, id)
     if (node.kind != .func_decl) return false
     return tree.storage.extra.items[usize(node.data1.extra) - 1] != 0
+}
+
+set_file_local proc(builder @mut Builder, id NodeId) void {
+    builder.storage.nodes.items[usize(id)].file_local = true
+}
+
+file_local proc(tree @Tree, id NodeId) bool {
+    return get_node(&tree.storage, id).file_local
+}
+
+set_callable_foreign proc(builder @mut Builder, id NodeId) void {
+    builder.storage.nodes.items[usize(id)].foreign_type = true
+}
+
+callable_foreign proc(tree @Tree, id NodeId) bool {
+    return function_external(tree, id) or get_node(&tree.storage, id).foreign_type
+}
+
+set_callable_variadic proc(builder @mut Builder, id NodeId) void {
+    builder.storage.nodes.items[usize(id)].variadic = true
+}
+
+callable_variadic proc(tree @Tree, id NodeId) bool {
+    return get_node(&tree.storage, id).variadic
+}
+
+set_record_opaque proc(builder @mut Builder, id NodeId) void {
+    builder.storage.nodes.items[usize(id)].is_opaque = true
+}
+
+record_opaque proc(tree @Tree, id NodeId) bool {
+    return get_node(&tree.storage, id).is_opaque
 }
 
 function_generic proc(tree @Tree, id NodeId) bool {

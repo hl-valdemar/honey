@@ -114,6 +114,24 @@ parse_package proc(state @mut State) ast.NodeId ! (mem.AllocError | diagnostics.
 
 @hide:file
 parse_decl proc(state @mut State) ast.NodeId ! ParseError {
+    if (next_is(state, .at)) {
+        start :: try consume(state, .at)
+        name :: try consume(state, .ident)
+        _ = try consume(state, .colon)
+        qualifier :: try consume(state, .ident)
+        skip_newlines(state)
+        declaration :: try parse_decl(state)
+        if (
+            !mem.eql(state.builder.source[usize(name.span.start)..usize(name.span.end)], "hide")
+            or !mem.eql(state.builder.source[usize(qualifier.span.start)..usize(qualifier.span.end)], "file")
+        ) {
+            span :: ast.Span{ start = start.span.start, end = qualifier.span.end, source = start.span.source }
+            diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, span)
+            return try ast.add_invalid_decl(state.builder, span, diagnostic)
+        }
+        ast.set_file_local(state.builder, declaration)
+        return declaration
+    }
     if (
         next_is(state, .import) or next_is(state, .test)
         or (next_is(state, .ident) and next_n_is(state, 1, .double_colon) and next_n_is(state, 2, .import))
@@ -158,7 +176,7 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
 
     params arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
     defer arraylist.deinit(&params)
-    try parse_parameters(state, &params)
+    variadic :: try parse_parameters(state, &params)
     _ = try consume(state, .close_paren)
     return_type :: try parse_type(state)
     body :: if (external) try ast.add_block(state.builder, ast.builder_span(state.builder, return_type), &[]) else try parse_block(state)
@@ -177,17 +195,24 @@ parse_func_decl proc(state @mut State) ast.NodeId ! ParseError {
         body,
     )
     if (external) ast.set_function_external(state.builder, id)
+    if (variadic) ast.set_callable_variadic(state.builder, id)
     return id
 }
 
 @hide:file
 parse_parameters proc(
     state @mut State, params @mut arraylist.ArrayList(ast.NodeId),
-) void ! ParseError {
+) bool ! ParseError {
     skip_newlines(state)
     names arraylist.ArrayList(ParameterName) := arraylist.init(state.allocator)
     defer arraylist.deinit(&names)
     while !next_is(state, .close_paren) {
+        if (next_is(state, .ellipsis)) {
+            state.next_token += 1
+            skip_newlines(state)
+            if (!next_is(state, .close_paren)) return .unexpected_token
+            return true
+        }
         arraylist.clear(&names)
         while true {
             start :: current(state).span.start
@@ -221,6 +246,7 @@ parse_parameters proc(
             skip_newlines(state)
         }
     }
+    return false
 }
 
 @hide:file
@@ -278,7 +304,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
     if (
         next_is(state, .ident)
         and (next_n_is(state, 1, .ident)
-            or next_n_is(state, 1, .struct)
+            or next_n_is(state, 1, .struct) or next_n_is(state, 1, .c_struct) or next_n_is(state, 1, .opaque)
             or next_n_is(state, 1, .enum) or next_n_is(state, 1, .union)
             or next_n_is(state, 1, .distinct)
             or next_n_is(state, 1, .match)
@@ -298,7 +324,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .break, .continue: return try parse_loop_control(state, allow_else)
         .defer, .errdefer: return try parse_cleanup(state, allow_else)
         .open_curly: return try ast.add_block_stmt(state.builder, try parse_block(state))
-        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket, .struct,
+        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket, .struct, .c_struct, .opaque, .c_func,
         .enum, .union, .distinct, .alias, .dot, .match, .ampersand, .at, .star, .question, .null, .undefined, .try, .dollar: {
             expression :: try parse_expr(state)
             if next_is(state, .equal) return try parse_assignment(state, expression, allow_else)
@@ -406,13 +432,11 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
     condition :: try parse_guard(state)
     capture :: try parse_optional_capture(state)
-    braced :: next_is(state, .open_curly)
     then_block :: try parse_arm(state, true)
-    # only a braced arm permits its else on a later line.
     after_then :: state.next_token
-    if (braced) skip_newlines(state)
+    skip_newlines(state)
     alternative ?ast.NodeId := null
-    if next_is(state, .else) {
+    if (next_is(state, .else) and !next_n_is(state, 1, .colon)) {
         state.next_token += 1
         alternative = try parse_arm(state, true)
     } else {
@@ -744,7 +768,8 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
         state.next_token += 1
         mutable :: next_is(state, .mut)
         if (mutable) state.next_token += 1
-        if (next_is(state, .proc)) return try parse_function_type(state, token.span, mutable or token.kind == .star)
+        if (next_is(state, .proc) or next_is(state, .c_func))
+            return try parse_function_type(state, token.span, mutable or (token.kind == .star and !next_is(state, .c_func)))
         element :: try parse_type_atom(state)
         return try ast.add_pointer_type(state.builder, ast.Span{
             start = token.span.start,
@@ -792,8 +817,14 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
             count, element, mutable,
         )
     }
-    if next_is(state, .proc) return try parse_function_type(state, current(state).span, false)
-    if next_is(state, .struct) return try parse_record_type(state)
+    if (next_is(state, .proc) or next_is(state, .c_func)) return try parse_function_type(state, current(state).span, false)
+    if (next_is(state, .struct) or next_is(state, .c_struct)) return try parse_record_type(state)
+    if (next_is(state, .opaque)) {
+        token :: try consume(state, .opaque)
+        id :: try ast.add_record_type(state.builder, token.span, &[])
+        ast.set_record_opaque(state.builder, id)
+        return id
+    }
     if next_is(state, .enum) return try parse_enum_type(state)
     if next_is(state, .union) return try parse_union_type(state)
     if next_is(state, .match) return try parse_match(state)
@@ -824,11 +855,12 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.NodeId ! ParseError {
-    _ = try consume(state, .proc)
+    external :: next_is(state, .c_func)
+    _ = try consume_either(state, &[.proc, .c_func])
     _ = try consume(state, .open_paren)
     params := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&params)
-    try parse_parameters(state, &params)
+    variadic :: try parse_parameters(state, &params)
     _ = try consume(state, .close_paren)
     result :: try parse_type(state)
     span :: ast.Span{
@@ -840,15 +872,18 @@ parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.Nod
         diagnostic :: try diagnostics.add(state.diagnostics, .invalid_pointer_type, span)
         return try ast.add_invalid_expr(state.builder, span, diagnostic)
     }
-    return try ast.add_function_type(state.builder, span, result, params.items)
+    id :: try ast.add_function_type(state.builder, span, result, params.items)
+    if (external) ast.set_callable_foreign(state.builder, id)
+    if (variadic) ast.set_callable_variadic(state.builder, id)
+    return id
 }
 
 @hide:file
 starts_type proc(kind lexer.TokenKind) bool {
     return (
-        kind == .ident or kind == .open_bracket or kind == .struct
+        kind == .ident or kind == .open_bracket or kind == .struct or kind == .c_struct or kind == .opaque
         or kind == .enum or kind == .union or kind == .distinct or kind == .alias or kind == .match
-        or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc
+        or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc or kind == .c_func
     )
 }
 
@@ -856,7 +891,7 @@ starts_type proc(kind lexer.TokenKind) bool {
 member_name proc(kind lexer.TokenKind) bool {
     return match kind {
         .ident, .if, .else, .for, .inline, .while, .proc, .return, .break, .continue,
-        .true, .false, .and, .or, .mut, .struct, .enum, .union, .distinct,
+        .true, .false, .and, .or, .mut, .struct, .c_struct, .opaque, .enum, .union, .distinct,
         .alias, .match, .import, .test, .c_func, .null, .undefined, .try, .catch, .defer, .errdefer: true
         else: false
     }
@@ -1126,8 +1161,11 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
 
 @hide:file
 parse_record_type proc(state @mut State) ast.NodeId ! ParseError {
-    keyword :: try consume(state, .struct)
-    return try parse_record(state, null, keyword.span.start, true)
+    keyword :: try consume_either(state, &[.struct, .c_struct])
+    id :: try parse_record(state, null, keyword.span.start, true)
+    if (keyword.kind == .c_struct and ast.builder_expr_kind(state.builder, id) == .record_type)
+        ast.set_record_c_layout(state.builder, id)
+    return id
 }
 
 @hide:file
@@ -1631,8 +1669,8 @@ named_binding_starts proc(state @State) bool {
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
-        .at, .star, .question, .proc: return try parse_type(state)
-        .struct: return try parse_record_type(state)
+        .at, .star, .question, .proc, .c_func, .opaque: return try parse_type(state)
+        .struct, .c_struct: return try parse_record_type(state)
         .enum: return try parse_enum_type(state)
         .union: return try parse_union_type(state)
         .distinct, .alias: return try parse_type_wrapper(state)

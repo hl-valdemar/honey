@@ -590,6 +590,8 @@ execute proc(
             .add, .subtract, .multiply, .divide: {
                 left :: frames.items[frame_index].values[usize(instruction.left)]
                 right :: frames.items[frame_index].values[usize(instruction.right)]
+                if (instruction.op == .divide and instruction.type != .float and right.data.unsigned == 0)
+                    return try runtime_trap(diagnostic_store, .division_by_zero, instruction.span)
                 if instruction.type == .float {
                     result f64 := 0
                     match instruction.op {
@@ -924,6 +926,10 @@ checked_integer proc(op ir.Op, left i64, right i64) ?i64 {
             }
             return left * right
         }
+        .divide: {
+            if (left == minimum and right == -1) return null
+            return divtrunc!(left, right)
+        }
         else: unreachable
     }
 }
@@ -964,6 +970,7 @@ checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {
             if (right != 0 and left > divtrunc!(maxval!(u64), right)) return null
             return left * right
         }
+        .divide: return divtrunc!(left, right)
         else: unreachable
     }
 }

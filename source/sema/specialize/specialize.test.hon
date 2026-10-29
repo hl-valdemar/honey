@@ -1,0 +1,129 @@
+import "@std/mem"
+import "@source/ast"
+import "@source/diagnostics"
+import "@source/strpool"
+sema :: import "@source/sema"
+typecheck :: import "@source/sema/check"
+import "@std/testing"
+import "@source/lexer"
+import "@source/parser"
+
+@hide:file
+expect_specialization proc(
+    source []u8, expected diagnostics.Code, expected_count usize,
+) void ! (mem.AllocError | diagnostics.CapacityError | strpool.InternError | testing.Error) {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parser.parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    tree := ast.view(&builder, root)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
+    defer sema.deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    elaborated := try elaborate(mem.c_allocator, &builder, root, &resolution, &strings, &diagnostic_store)
+    defer deinit(&elaborated)
+    tree = ast.view(&builder, root)
+    checked := try typecheck.check_elaborated(mem.c_allocator, &tree, &resolution, elaborated.constraints.items, &diagnostic_store)
+    defer typecheck.deinit(&checked)
+    if (expected_count == 0) {
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        for (0..ast.package_decl_count(&tree)) |i| {
+            declaration :: ast.package_decl(&tree, i)
+            if (ast.node_class(&tree, declaration) != .function) continue
+            try testing.expect(!ast.function_generic(&tree, declaration))
+            for (0..ast.function_param_count(&tree, declaration)) |j|
+                try testing.expect(!ast.param(&tree, ast.function_param(&tree, declaration, j)).comptime)
+        }
+    } else {
+        count := usize(0)
+        for (diagnostic_store.list.items) |diagnostic| {
+            if (diagnostic.code == expected) count += 1
+        }
+        try testing.expect_equal(expected_count, count)
+    }
+}
+
+infers_nested_nominal_pointer_parameters_and_readonly_slice_views test {
+    try expect_specialization(
+        `Storage proc($T type) type { return struct { items []mut T, capacity usize } }
+        `make proc($T type, values []mut T) Storage(T) {
+        `    return Storage(T) { items = values, capacity = values.len }
+        `}
+        `observe proc($T type, values []T) usize { return values.len }
+        `reserve proc($T type, storage @mut Storage(T), count usize) void {
+        `    _ = observe(storage.items.ptr[..count])
+        `}
+        `append proc($T type, storage @mut Storage(T), value T) void {
+        `    reserve(storage, storage.items.len)
+        `    storage.items[0] = value
+        `}
+        `release proc($T type, storage @mut Storage(T)) void {
+        `    allocation :: storage.items.ptr[..storage.capacity]
+        `    _ = observe(allocation)
+        `}
+        `forward proc(storage @mut Storage(i16)) void {
+        `    append(storage, 7)
+        `    release(storage)
+        `}
+        `main proc() i16 {
+        `    values [2]mut i16 := [1, 2]
+        `    storage := make(i16, values[..])
+        `    forward(&storage)
+        `    append(&storage, 9)
+        `    release(&storage)
+        `    return storage.items[0]
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+rejects_conflicting_rigid_types_and_unrelated_nominal_generators test {
+    try expect_specialization(
+        `same proc($T type, left, right T) void {}
+        `main proc() void { same(i16(1), u8(2)) }
+        , .cannot_infer_generic, 1,
+    )
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T } }
+        `Other proc($T type) type { return struct { value T } }
+        `read proc($T type, value @Box(T)) void {}
+        `main proc() void {
+        `    value Other(i16) :: { value = 1 }
+        `    read(&value)
+        `}
+        , .cannot_infer_generic, 1,
+    )
+    try expect_specialization(
+        `unknown proc($T type, value usize) void {}
+        `main proc() void { unknown(1) }
+        , .cannot_infer_generic, 1,
+    )
+}
+
+preserves_rigid_inference_before_contextual_literals test {
+    try expect_specialization(
+        `same proc($T type, left, right T) T { return right }
+        `main proc() i16 { return same(i16(1), 2) }
+        , .cannot_infer_generic, 0,
+    )
+}
+
+infers_integer_builtin_results_from_their_type_or_rigid_operand test {
+    try expect_specialization(
+        `same proc($T type, left, right T) T { return right }
+        `main proc() i16 {
+        `    upper :: same(maxval!(i16), i16(1))
+        `    lower :: same(minval!(i16), i16(2))
+        `    left :: same(divtrunc!(i16(8), 2), i16(3))
+        `    right :: same(divtrunc!(8, i16(2)), i16(4))
+        `    return upper + lower + left + right
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}

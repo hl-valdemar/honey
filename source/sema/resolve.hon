@@ -18,6 +18,7 @@ BuiltinType :: enum {
     c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
     c_char, c_uchar, c_short, c_ushort
     type
+    unavailable
 }
 
 @hide:file
@@ -53,9 +54,13 @@ builtins [_]Builtin :: [
     { name = "c_longlong", type = .c_longlong },
     { name = "c_ulonglong", type = .c_ulonglong },
     { name = "c_char", type = .c_char },
+    { name = "c_schar", type = .c_char },
     { name = "c_uchar", type = .c_uchar },
     { name = "c_short", type = .c_short },
     { name = "c_ushort", type = .c_ushort },
+    { name = "c_double", type = .f64 },
+    { name = "c_float", type = .unavailable },
+    { name = "c_longdouble", type = .unavailable },
     { name = "type", type = .type },
 ]
 
@@ -194,6 +199,7 @@ resolve_packages proc(
         for (0..ast.package_decl_count_at(tree, root)) |i| {
             id :: ast.package_decl_at(tree, root, i)
             file_scopes[usize(ast.node_span(tree, id).source)].parent = scope
+            if (ast.file_local(tree, id)) continue
             match ast.decl_kind(tree, id) {
                 .statement: try predeclare(&state, scope, id, ast.statement_decl(tree, id).name)
                 .function: try predeclare(&state, scope, id, ast.function_decl(tree, id).name)
@@ -204,6 +210,18 @@ resolve_packages proc(
             match err {
                 .key_exists: unreachable
                 else: return err
+            }
+        }
+    }
+    for (roots) |root| {
+        for (0..ast.package_decl_count_at(tree, root)) |i| {
+            id :: ast.package_decl_at(tree, root, i)
+            if (!ast.file_local(tree, id)) continue
+            scope :: &file_scopes[usize(ast.node_span(tree, id).source)]
+            match ast.decl_kind(tree, id) {
+                .statement: try predeclare(&state, scope, id, ast.statement_decl(tree, id).name)
+                .function: try predeclare(&state, scope, id, ast.function_decl(tree, id).name)
+                .import, .invalid: {}
             }
         }
     }
@@ -316,6 +334,10 @@ predeclare proc(
     name_span ast.Span,
 ) void ! (mem.AllocError | diagnostics.CapacityError) {
     name :: ast.name_id(state.tree, id)
+    if (mem.eql(ast.source_text(state.tree, name_span), "_")) {
+        state.bindings[usize(id)] = Binding{ kind = .declaration, data = BindingData{ declaration = id } }
+        return
+    }
     if hashmap.get(&scope.names, name) |_| {
         diagnostic :: try diagnostics.add(state.diagnostics, .duplicate_name, name_span)
         state.bindings[usize(id)] = Binding{

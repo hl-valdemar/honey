@@ -133,6 +133,7 @@ lower_module proc(
         id :: ast.package_decl(tree, i)
         match ast.decl_kind(tree, id) {
             .function: {
+                if (ast.function_external(tree, id) and typecheck.type_of(checked, id).kind == .none) continue
                 function :: try add_function(&module, ast.node_span(tree, id))
                 storage[usize(id)] = Storage{ kind = .function, index = u32(function) }
             }
@@ -157,7 +158,9 @@ lower_module proc(
     for (0..ast.package_decl_count(tree)) |i| {
         id :: ast.package_decl(tree, i)
         match ast.decl_kind(tree, id) {
-            .function: try lower_function(&state, id)
+            .function: {
+                if (storage[usize(id)].kind == .function) try lower_function(&state, id)
+            }
             .statement: {
                 if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) continue
                 if (typecheck.type_of(checked, id).kind != .type_value) try lower_global(&state, id)
@@ -1734,6 +1737,23 @@ lower_builtin proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
         if (state.terminated or child.kind == .pointer or child.kind == .function) return payload
         present :: try constant(state, ir.Value{ type = .bool, data = ir.ValueData{ boolean = true } }, span)
         return try record_pair(state, try array_shape(state, type), present, payload, span)
+    }
+    if (mem.eql(name, "maxval") or mem.eql(name, "minval")) {
+        type :: lower_type(state, typecheck.type_of(state.checked, id))
+        value := ir.Value{ type = type }
+        if (mem.eql(name, "maxval")) value.data = ir.ValueData{ unsigned = ir.integer_max(type) }
+        else value.data = ir.ValueData{ integer = ir.integer_min(type) }
+        return try constant(state, value, span)
+    }
+    if (mem.eql(name, "divtrunc")) {
+        left :: try lower_expression(state, ast.call_arg(tree, id, 0))
+        if (state.terminated) return ir.no_value
+        right :: try lower_expression(state, ast.call_arg(tree, id, 1))
+        if (state.terminated) return ir.no_value
+        return try emit(state, ir.Instruction{
+            op = .divide, type = lower_type(state, typecheck.type_of(state.checked, id)),
+            left = left, right = right, span = span,
+        })
     }
     if (mem.eql(name, "sizeof") or mem.eql(name, "alignof")) {
         checked :: typecheck.type_of(state.checked, ast.call_arg(tree, id, 0))

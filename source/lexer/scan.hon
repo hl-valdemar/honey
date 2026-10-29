@@ -42,6 +42,8 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "or", .or },
     { "mut", .mut },
     { "struct", .struct },
+    { "c_struct", .c_struct },
+    { "opaque", .opaque },
     { "enum", .enum },
     { "union", .union },
     { "distinct", .distinct },
@@ -169,8 +171,9 @@ scan proc(
 
         if (char == '.' and cursor + 1 < program.len and program[cursor + 1] == '.') {
             inclusive :: cursor + 2 < program.len and program[cursor + 2] == '='
-            width :: if (inclusive) 3 else 2
-            range_kind :: if (inclusive) .range_inclusive else .range
+            variadic :: cursor + 2 < program.len and program[cursor + 2] == '.'
+            width :: if (inclusive or variadic) 3 else 2
+            range_kind :: if (inclusive) .range_inclusive else if (variadic) .ellipsis else .range
             try add_token(state, Token{
                 span = make_span(source, cursor, cursor + width),
                 kind = range_kind,

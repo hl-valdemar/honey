@@ -316,6 +316,22 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                     else: unreachable
                 }
                 try io.print("  %r{} = {s} double %r{}, %r{}\n", output, {result, opcode, left, right})
+            } else if (instruction.op == .divide) {
+                bits :: ir.integer_bits(instruction.type)
+                zero :: fresh(state)
+                try io.print("  %r{} = icmp eq i{} %r{}, 0\n", output, {zero, bits, right})
+                try check_failure(state, zero, .division_by_zero, instruction.span)
+                if (!ir.unsigned_integer(instruction.type)) {
+                    minimum :: fresh(state)
+                    negative_one :: fresh(state)
+                    overflow :: fresh(state)
+                    try io.print("  %r{} = icmp eq i{} %r{}, {}\n", output, {minimum, bits, left, ir.integer_min(instruction.type)})
+                    try io.print("  %r{} = icmp eq i{} %r{}, -1\n", output, {negative_one, bits, right})
+                    try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {overflow, minimum, negative_one})
+                    try check_failure(state, overflow, .integer_overflow, instruction.span)
+                }
+                opcode []u8 :: if (ir.unsigned_integer(instruction.type)) "udiv" else "sdiv"
+                try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, bits, left, right})
             } else {
                 opcode []u8 :: match instruction.op {
                     .add: "add"
