@@ -4118,6 +4118,9 @@ collect_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
             state.cells[usize(capture)].local = true
             binding :: sema.binding(state.resolution, capture)
             if (binding.kind == .invalid) state.cells[usize(capture)].type = invalid_type(binding.data.diagnostic)
+            if (ast.match_expr(state.tree, id).optional_capture and i == 0) {
+                state.cells[usize(subject)].capture = capture
+            }
             try depend(state, capture, arm.body)
         }
         saved_arm :: state.narrowing_arm
@@ -4135,12 +4138,21 @@ collect_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
 
 @hide:file
 infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
-    subject :: try infer_shape(state, ast.match_expr(state.tree, id).subject, defaults)
+    view :: ast.match_expr(state.tree, id)
+    subject :: try infer_shape(state, view.subject, defaults)
     if (subject.kind == .invalid) {
         seed(state, id, subject)
         return subject
     }
     key := subject
+    if (view.optional_capture) {
+        if (subject.kind != .none and subject.kind != .optional) {
+            try fail(state, id, .condition_not_bool, ast.node_span(state.tree, view.subject))
+            seed(state, id, state.types[usize(id)])
+            return state.types[usize(id)]
+        }
+        if (subject.kind == .optional) key = Type{ kind = .bool }
+    }
     tagged := false
     if (subject.kind == .record) {
         descriptor :: state.records.items[usize(subject.record_type)]
@@ -4151,7 +4163,7 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         if (tagged) key = descriptor.tag_type
     }
     if (
-        subject.kind != .none and !numeric_kind(subject.kind) and subject.kind != .bool
+        !view.optional_capture and subject.kind != .none and !numeric_kind(subject.kind) and subject.kind != .bool
         and !(subject.kind == .enumeration and subject.nominal == ast.NodeId(maxval!(u32))) and !tagged
     ) {
         try fail(state, id, .invalid_match_subject, ast.node_span(state.tree, id))
@@ -4167,6 +4179,10 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         arm :: ast.match_arm_view(state.tree, arm_id)
         payload := Type{}
         capture_valid := tagged and !arm.catch_all
+        if (view.optional_capture and subject.kind == .optional and i == 0) {
+            payload = state.arrays.items[usize(subject.array_type)].element
+            capture_valid = true
+        }
         for 0..ast.match_pattern_count(state.tree, arm_id) |j| {
             pattern :: ast.match_pattern(state.tree, arm_id, j)
             kind :: ast.expr_kind(state.tree, pattern)
@@ -4191,7 +4207,7 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             }
         }
         if (arm.capture) |capture| {
-            if (key.kind != .none and (!capture_valid or payload.kind == .void or payload.kind == .none)) {
+            if (key.kind != .none and (!capture_valid or (!view.optional_capture and payload.kind == .void) or payload.kind == .none)) {
                 try fail(state, id, .invalid_match_capture, ast.node_span(state.tree, capture))
             } else if (payload.kind != .none and state.cells[usize(capture)].type.kind != .invalid) {
                 seed(state, capture, payload)
@@ -4317,9 +4333,17 @@ interval_overlap proc(left, right PatternInterval) bool {
 
 @hide:file
 validate_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
-    subject :: state.types[usize(ast.match_expr(state.tree, id).subject)]
+    view :: ast.match_expr(state.tree, id)
+    subject :: state.types[usize(view.subject)]
     if (subject.kind == .invalid) return
     key := subject
+    if (view.optional_capture) {
+        if (subject.kind != .optional) {
+            try fail(state, id, .condition_not_bool, ast.node_span(state.tree, view.subject))
+            return
+        }
+        key = Type{ kind = .bool }
+    }
     if (subject.kind == .record) key = state.records.items[usize(subject.record_type)].tag_type
     if (key.kind != .enumeration and !numeric_kind(key.kind) and key.kind != .bool) {
         try fail(state, id, .invalid_match_subject, ast.node_span(state.tree, id))
@@ -4724,9 +4748,11 @@ matching_narrowing_arm proc(state @State, id ast.NodeId) ast.NodeId {
     arm := state.cells[usize(id)].narrowing_arm
     while (arm != ast.NodeId(maxval!(u32))) {
         owner :: state.cells[usize(arm)].match_owner
-        subject :: ast.match_expr(state.tree, owner).subject
-        original :: sema.binding(state.resolution, subject)
-        if (original.kind == .declaration and original.data.declaration == binding.data.declaration) return arm
+        view :: ast.match_expr(state.tree, owner)
+        if (!view.optional_capture) {
+            original :: sema.binding(state.resolution, view.subject)
+            if (original.kind == .declaration and original.data.declaration == binding.data.declaration) return arm
+        }
         arm = state.cells[usize(arm)].enclosing_arm
     }
     return ast.NodeId(maxval!(u32))

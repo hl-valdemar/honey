@@ -1335,14 +1335,22 @@ specialize_match proc(state @mut State, id, statement ast.NodeId) bool ! Error {
             annotation = try expression_type(state, subject, 0)
             if (annotation != no_node) annotation = try inline_match_shape(state, annotation)
         }
-        if (annotation == no_node or ast.expr_kind(&state.tree, annotation) != .union_type) break
-        pattern :: ast.match_pattern(&state.tree, arm_id, 0)
-        if (ast.expr_kind(&state.tree, pattern) != .enum_literal) continue
-        slot :: type_record_slot(state, annotation, ast.enum_literal(&state.tree, pattern))
-        if (slot == no_index) continue
-        field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, slot))
-        if (field.type) |type| {
-            hashmap.put(&state.capture_types, arm.capture?, type) catch |err| {
+        if (annotation == no_node) break
+        payload := no_node
+        if (ast.match_expr(&state.tree, id).optional_capture) {
+            if (ast.expr_kind(&state.tree, annotation) != .optional_type) break
+            payload = ast.type_operand(&state.tree, annotation)
+        } else {
+            if (ast.expr_kind(&state.tree, annotation) != .union_type) break
+            pattern :: ast.match_pattern(&state.tree, arm_id, 0)
+            if (ast.expr_kind(&state.tree, pattern) != .enum_literal) continue
+            slot :: type_record_slot(state, annotation, ast.enum_literal(&state.tree, pattern))
+            if (slot == no_index) continue
+            field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, slot))
+            if (field.type) |type| payload = type
+        }
+        if (payload != no_node) {
+            hashmap.put(&state.capture_types, arm.capture?, payload) catch |err| {
                 match err {
                     .key_exists: unreachable
                     else: return err
@@ -2508,6 +2516,7 @@ expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
 type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     try expand_inline_match(state, id, no_node)
     if (ast.expr_kind(&state.tree, id) != .match_expr) return no_index
+    optional_capture :: ast.match_expr(&state.tree, id).optional_capture
     if (!try expand_type_matches(state, ast.match_expr(&state.tree, id).subject)) return no_index
     try expand(state, ast.match_expr(&state.tree, id).subject)
     arms := arraylist.init(ast.NodeId, state.allocator)
@@ -2581,6 +2590,8 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     }
     selector :: try ast.add_match(state.builder, ast.node_span(&state.tree, id),
         dispatch, arms.items)
+    if (optional_capture)
+        ast.set_match_optional(state.builder, selector)
     try refresh(state)
     # selector arms contain only indices. do not specialize this synthetic match
     # again while its checked evaluation expands the wrapper.
@@ -2595,6 +2606,13 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
 @hide:file
 type_match_capture proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
     subject :: ast.match_expr(&state.tree, id).subject
+    if (ast.match_expr(&state.tree, id).optional_capture) {
+        unwrapped :: try ast.add_unary(state.builder,
+            ast.node_span(&state.tree, subject), .unwrap, subject)
+        try refresh(state)
+        child :: try expression_type(state, unwrapped, 0)
+        return try type_execution_value(state, unwrapped, child)
+    }
     annotation :: try expression_type(state, subject, 0)
     value :: if (type_record_storage(state, annotation, 0))
         try evaluate_expected(state, subject, annotation) else try evaluate_ir(state, subject, annotation)

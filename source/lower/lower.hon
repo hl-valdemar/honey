@@ -1043,6 +1043,7 @@ lower_match proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
     subject_type :: typecheck.type_of(state.checked, view.subject)
     tagged :: subject_type.kind == .record
     discriminant := subject
+    if (view.optional_capture) discriminant = try optional_present(state, subject, subject_type, span)
     if (tagged) {
         tag_type :: typecheck.record_type(state.checked, subject_type.record_type).tag_type
         discriminant = try emit(state, ir.Instruction{
@@ -1095,6 +1096,7 @@ lower_match proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
                 if (arm_view.capture) |capture| {
                     capture_type :: typecheck.type_of(state.checked, capture)
                     captured := subject
+                    if (view.optional_capture) captured = try optional_payload(state, subject, subject_type, span)
                     if (tagged) captured = try emit(state, ir.Instruction{
                         op = .field, type = lower_type(state, capture_type), array_type = try array_shape(state, capture_type),
                         left = subject, slot = u32(typecheck.union_variant_index(state.checked, pattern)), span = ast.node_span(tree, pattern),

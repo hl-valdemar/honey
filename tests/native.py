@@ -110,6 +110,192 @@ CASES = {
         "main proc() i16 { return if (1) 42 else 0 }",
         b"", b"incompatible value type",
     ),
+    "optional_conditional_expressions_evaluate_once_and_keep_branches_lazy": (
+        """
+        next proc(calls @mut i16, value ?i16) ?i16 {
+            calls^ = calls^ + 1
+            return value
+        }
+        main proc() [3]i16 {
+            calls i16 := 0
+            first i16 :: if next(&calls, 42) |payload| payload else divtrunc!(1, 0)
+            second i16 :: if next(&calls, null) |payload| divtrunc!(payload, 0) else 7
+            return [first, second, calls]
+        }
+        """, b"[42, 7, 2]\n", None,
+    ),
+    "optional_conditional_expressions_keep_nested_presence_and_else_binding": (
+        """
+        identity proc($T type, value T) T { return value }
+        choose proc(value ??i16) i16 {
+            return if value |inner| if identity(inner) |payload| payload else 7 else 3
+        }
+        main proc() [3]i16 {
+            return [choose(some!(null)), choose(null), choose(some!(some!(42)))]
+        }
+        """, b"[7, 3, 42]\n", None,
+    ),
+    "optional_conditional_expressions_snapshot_aggregate_payloads": (
+        """
+        Item :: struct { values [1]mut i16 }
+        replace proc(value @mut ?Item) i16 {
+            value^ = Item { values = [0] }
+            return 0
+        }
+        main proc() [2]i16 {
+            original ?Item := Item { values = [42] }
+            saved i16 :: if original |payload| replace(&original) + payload.values[0] else -1
+            return [saved, (original?).values[0]]
+        }
+        """, b"[42, 0]\n", None,
+    ),
+    "optional_conditional_expressions_preserve_narrow_payload_types": (
+        """
+        identity proc($T type, value T) T { return value }
+        exact proc(value i8) i16 { return i16(value) }
+        choose proc(value ?i8) i16 { return if value |payload| exact(identity(payload)) else 7 }
+        main proc() [2]i16 { return [choose(42), choose(null)] }
+        """, b"[42, 7]\n", None,
+    ),
+    "optional_conditional_expressions_capture_pointer_callback_slice_and_zero_size": (
+        """
+        increment proc(value i16) i16 { return value + 2 }
+        read_pointer proc(value ?@i16) i16 { return if value |pointer| pointer^ else 7 }
+        invoke proc(value ?@proc(value i16) i16) i16 {
+            return if value |callback| callback(40) else 8
+        }
+        sum proc(value ?[]i16) i16 {
+            return if value |items| items[0] + items[1] else 9
+        }
+        empty proc(value ?[0]i16) i16 { return if value |items| i16(items.len) else 10 }
+        main proc() [8]i16 {
+            value i16 :: 42
+            items [2]i16 :: [19, 23]
+            return [read_pointer(&value), read_pointer(null), invoke(increment), invoke(null),
+                sum(items[..]), sum(null), empty([]), empty(null)]
+        }
+        """, b"[42, 7, 42, 8, 42, 9, 0, 10]\n", None,
+    ),
+    "optional_conditional_expressions_preserve_optional_and_fallible_context": (
+        """
+        Error :: enum { failed }
+        optional proc(value ?i16) ?i16 { return if value |payload| payload + 2 else null }
+        fallible proc(value ?i16) i16 ! Error {
+            return if value |payload| payload + 2 else .failed
+        }
+        main proc() [3]i16 {
+            if (optional(null) != null) return [0, 0, 0]
+            return [optional(40)?, fallible(40) catch 0, fallible(null) catch 7]
+        }
+        """, b"[42, 42, 7]\n", None,
+    ),
+    "optional_conditional_expressions_materialize_compile_time_scalars": (
+        """
+        choose proc(value ?i8) i16 { return if value |payload| i16(payload) + 2 else 7 }
+        nested proc(value ??i16) i16 {
+            return if value |inner| if inner |payload| payload else 11 else 13
+        }
+        main proc() [4]i16 {
+            return [$(choose(40)), $(choose(null)), $(nested(some!(null))), $(nested(null))]
+        }
+        """, b"[42, 7, 11, 13]\n", None,
+    ),
+    "optional_conditional_expressions_generate_types_and_captured_defaults": (
+        """
+        Choose proc(value ?usize) type { return if value |_| i16 else i8 }
+        Box proc(count ?usize) type {
+            return if count |length| struct { values [length]i16, bias i16 = i16(length) }
+                else struct { value i16 = 7 }
+        }
+        main proc() [3]i16 {
+            first Box(2) :: { values = [19, 21] }
+            same Box(usize(2)) :: first
+            absent Box(null) :: {}
+            narrow Choose(null) :: 5
+            wide Choose(2) :: 40
+            return [same.values[0] + same.values[1] + same.bias, absent.value,
+                wide + i16(narrow)]
+        }
+        """, b"[42, 7, 45]\n", None,
+    ),
+    "optional_conditional_expressions_own_compile_time_aggregate_captures": (
+        """
+        Config :: struct { name string, counts [2]usize }
+        Storage proc(config ?Config) type {
+            return if config |payload| struct {
+                items [payload.counts[0]]i16
+                name string = payload.name
+            } else struct { value i16 = 7 }
+        }
+        main proc() i16 {
+            value Storage(Config { name = "abc", counts = [2, 1] }) :: { items = [19, 20] }
+            return value.items[0] + value.items[1] + i16(value.name.len)
+        }
+        """, b"42\n", None,
+    ),
+    "optional_conditional_expressions_specialize_selected_capture_only": (
+        """
+        present proc($value ?i8) i16 {
+            return if $(value) |payload| i16(payload) + 2 else compile_error!("absent")
+        }
+        absent proc($value ?i8) i16 {
+            return if $(value) |_| compile_error!("present") else 7
+        }
+        select proc($value ?i8) i16 {
+            return if $(value) |payload| i16(payload) + 2 else 7
+        }
+        main proc() [6]i16 {
+            return [present(40), absent(null), select(40), select(null), select(1), select(40)]
+        }
+        """, b"[42, 7, 42, 7, 3, 42]\n", None,
+    ),
+    "optional_conditional_expressions_keep_compile_time_narrow_overflow": (
+        """
+        narrow proc(value ?i8) i8 { return if value |payload| payload + 1 else 0 }
+        main proc() i8 { return $(narrow(127)) }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "optional_conditional_expressions_reject_runtime_explicit_comptime_subject": (
+        """
+        choose proc(value ?i16) i16 { return if $(value) |payload| payload else 0 }
+        main proc() i16 { return choose(42) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "optional_conditional_expressions_reject_nonoptional_subject": (
+        "main proc() i16 { return if true |payload| 42 else 0 }",
+        b"", b"condition",
+    ),
+    "optional_conditional_expressions_capture_does_not_reach_else": (
+        "main proc() i16 { value ?i16 :: null\nreturn if value |payload| 42 else payload }",
+        b"", b"unknown name",
+    ),
+    "optional_conditional_expressions_capture_does_not_escape": (
+        """
+        main proc() i16 {
+            value ?i16 :: 42
+            saved i16 :: if value |payload| payload else 0
+            return saved + payload
+        }
+        """, b"", b"unknown name",
+    ),
+    "optional_conditional_expressions_reject_capture_shadowing": (
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |value| value else 0 }",
+        b"", b"duplicate name or forbidden shadowing",
+    ),
+    "optional_conditional_expressions_check_unselected_result_types": (
+        """
+        choose proc(value ?i16) i16 { return if value |payload| payload else u8(7) }
+        main proc() i16 { return choose(42) }
+        """, b"42\n", b"incompatible value type",
+    ),
+    "optional_conditional_expressions_require_else": (
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |payload| payload }",
+        b"", b"unexpected token",
+    ),
+    "optional_conditional_expressions_reject_pointer_capture_syntax": (
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |@payload| payload^ else 0 }",
+        b"", b"unexpected token",
+    ),
     "integer_divtrunc_preserves_sign_and_single_evaluation": (
         """
         next proc(calls @mut i16) i16 { calls^ = calls^ + 1

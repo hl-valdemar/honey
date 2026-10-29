@@ -7,7 +7,7 @@
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
-#! boolean value expressions also accept 'if' guard expr 'else' expr, canonicalized to matches; else is required.
+#! value expressions also accept 'if' guard ['|' identifier '|'] expr 'else' expr, canonicalized to matches; else is required.
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
@@ -207,6 +207,7 @@ NodeData :: union {
 @hide:file foreign_type_flag u8 :: 0b0010
 @hide:file variadic_flag u8 :: 0b0100
 @hide:file opaque_flag u8 :: 0b1000
+@hide:file optional_match_flag u8 :: 0b0001_0000
 
 @hide:file
 Node :: struct {
@@ -348,8 +349,17 @@ FieldView :: struct {
 }
 
 EnumTypeView :: struct { backing ?NodeId }
-UnionTypeView :: struct { tag ?NodeId, auto_tag bool }
-MatchView :: struct { subject NodeId }
+
+UnionTypeView :: struct {
+    tag ?NodeId,
+    auto_tag bool,
+}
+
+MatchView :: struct {
+    subject NodeId,
+    optional_capture bool = false,
+}
+
 MatchArmView :: struct {
     capture ?NodeId
     body NodeId
@@ -831,6 +841,13 @@ add_match proc(builder @mut Builder, span Span, subject NodeId, arms []NodeId) N
         data0 = NodeData{ extra = u32(start) },
         data1 = NodeData{ extra = u32(builder.storage.extra.items.len) },
     }, span)
+}
+
+#! marks the canonical presence match emitted for an optional-capture conditional.
+set_match_optional proc(builder @mut Builder, id NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .expr_match)
+    node.flags = node.flags | optional_match_flag
 }
 
 add_match_arm proc(
@@ -1747,7 +1764,10 @@ enum_literal proc(tree @Tree, id NodeId) NodeId {
 match_expr proc(tree @Tree, id NodeId) MatchView {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .expr_match)
-    return MatchView{ subject = node.main.node_id }
+    return MatchView{
+        subject = node.main.node_id,
+        optional_capture = (node.flags & optional_match_flag) != 0,
+    }
 }
 
 match_arm_count proc(tree @Tree, id NodeId) usize {

@@ -528,8 +528,17 @@ recompiles_generated_records_without_borrowing_previous_ir test {
             `        [child, 2, "owned"],
             `    )
             `}
+            `Captured proc(value ?i16) type {
+            `    return if value |payload| struct { value i16 = payload } else bool
+            `}
+            `selected proc($value ?i16) i16 {
+            `    return if $(value) |payload| payload else 7
+            `}
             `main proc() i16 {
             `    parent Parent(40) :: {}
+            `    captured Captured(40) :: {}
+            `    absent Captured(null) :: false
+            `    if (absent or captured.value != selected(40) or selected(null) != 7) return 0
             `    same Parent(40) :: parent
             `    child Child(40) :: same.child
             `    if (Child(40) == Child(41) or Parent(40) == Parent(41)) return 0

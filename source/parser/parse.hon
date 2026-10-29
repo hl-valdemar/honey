@@ -465,6 +465,7 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
 parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
     condition :: try parse_guard(state)
+    capture :: try parse_optional_capture(state)
     then_value :: try parse_expr(state)
     skip_newlines(state)
     if (!next_is(state, .else) or next_n_is(state, 1, .colon)) return .unexpected_token
@@ -476,18 +477,20 @@ parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
         end = ast.builder_span(state.builder, else_value).end,
         source = keyword.span.source,
     }
-    # canonical boolean matches share inference, specialization and branch execution.
+    # canonical matches share inference, specialization and branch execution.
     patterns [1]ast.NodeId :: [try ast.add_boolean(state.builder, keyword.span, true)]
     then_arm :: try ast.add_match_arm(
         state.builder, ast.builder_span(state.builder, then_value),
-        patterns[..], null, then_value, true, false,
+        patterns[..], capture, then_value, true, false,
     )
     else_arm :: try ast.add_match_arm(
         state.builder, ast.builder_span(state.builder, else_value),
         &[], null, else_value, true, true,
     )
     arms [2]ast.NodeId :: [then_arm, else_arm]
-    return try ast.add_match(state.builder, span, condition, arms[..])
+    result :: try ast.add_match(state.builder, span, condition, arms[..])
+    if (capture != null) ast.set_match_optional(state.builder, result)
+    return result
 }
 
 @hide:file
