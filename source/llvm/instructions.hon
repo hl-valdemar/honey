@@ -304,6 +304,22 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             operand :: try load(state, instruction.left)
             try io.print("  %r{} = xor i1 %r{}, true\n", output, {result, operand})
         }
+        .bit_not: {
+            operand :: try load(state, instruction.left)
+            try io.print("  %r{} = xor i{} %r{}, -1\n", output, {result, ir.integer_bits(instruction.type), operand})
+        }
+        .bit_and, .bit_or, .bit_xor: {
+            left :: try load(state, instruction.left)
+            right :: try load(state, instruction.right)
+            opcode []u8 :: match instruction.op {
+                .bit_and: "and"
+                .bit_or: "or"
+                .bit_xor: "xor"
+                else: unreachable
+            }
+            try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, ir.integer_bits(instruction.type), left, right})
+        }
+        .shift_left, .shift_right, .shift_left_saturating: result = try emit_shift(state, instruction)
         .add, .subtract, .multiply, .divide: {
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
@@ -386,6 +402,58 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         }
     }
     try store(state, instruction.destination, result)
+}
+
+@hide:file
+emit_shift proc(state @mut State, instruction ir.Instruction) usize ! io.WriteError {
+    output :: state.output
+    left :: try load(state, instruction.left)
+    right :: try load(state, instruction.right)
+    bits :: ir.integer_bits(instruction.type)
+    count_bits :: ir.integer_bits(state.values[usize(instruction.right)].kind)
+    invalid :: fresh(state)
+    try io.print("  %r{} = icmp uge i{} %r{}, {}\n", output, {invalid, count_bits, right, bits})
+    count := right
+    if (instruction.op == .shift_left_saturating) {
+        # keep every evaluated LLVM shift in range, including the discarded saturation path.
+        count = fresh(state)
+        try io.print("  %r{} = select i1 %r{}, i{} 0, i{} %r{}\n", output, {count, invalid, count_bits, count_bits, right})
+    } else {
+        try check_failure(state, invalid, .invalid_shift_count, instruction.span)
+    }
+    if (count_bits != bits) {
+        converted :: fresh(state)
+        conversion []u8 :: if (count_bits < bits) "zext" else "trunc"
+        try io.print("  %r{} = {s} i{} %r{} to i{}\n", output, {converted, conversion, count_bits, count, bits})
+        count = converted
+    }
+    shifted :: fresh(state)
+    signed :: !ir.unsigned_integer(instruction.type)
+    right_opcode []u8 :: if (signed) "ashr" else "lshr"
+    opcode []u8 :: if (instruction.op == .shift_right) right_opcode else "shl"
+    try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {shifted, opcode, bits, left, count})
+    if (instruction.op != .shift_left_saturating) return shifted
+    restored :: fresh(state)
+    lost :: fresh(state)
+    overflow :: fresh(state)
+    nonzero :: fresh(state)
+    saturate :: fresh(state)
+    try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {restored, right_opcode, bits, shifted, count})
+    try io.print("  %r{} = icmp ne i{} %r{}, %r{}\n", output, {lost, bits, restored, left})
+    try io.print("  %r{} = or i1 %r{}, %r{}\n", output, {overflow, invalid, lost})
+    try io.print("  %r{} = icmp ne i{} %r{}, 0\n", output, {nonzero, bits, left})
+    try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {saturate, overflow, nonzero})
+    limit :: fresh(state)
+    if (signed) {
+        negative :: fresh(state)
+        try io.print("  %r{} = icmp slt i{} %r{}, 0\n", output, {negative, bits, left})
+        try io.print("  %r{} = select i1 %r{}, i{} {}, i{} {}\n", output, {limit, negative, bits, ir.integer_min(instruction.type), bits, ir.integer_max(instruction.type)})
+    } else {
+        try io.print("  %r{} = or i{} 0, {}\n", output, {limit, bits, ir.integer_max(instruction.type)})
+    }
+    result :: fresh(state)
+    try io.print("  %r{} = select i1 %r{}, i{} %r{}, i{} %r{}\n", output, {result, saturate, bits, limit, bits, shifted})
+    return result
 }
 
 #! compares the complete sentinel value, including nested aggregate fields.

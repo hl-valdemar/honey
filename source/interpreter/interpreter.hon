@@ -587,6 +587,29 @@ execute proc(
                 operand :: frames.items[frame_index].values[usize(instruction.left)]
                 value = ir.Value{ type = .bool, data = ir.ValueData{ boolean = !operand.data.boolean } }
             }
+            .bit_not: {
+                operand :: frames.items[frame_index].values[usize(instruction.left)]
+                mask :: maxval!(u64) >> u64(64 - ir.integer_bits(instruction.type))
+                value = integer_from_bits(instruction.type, operand.data.unsigned xor mask)
+            }
+            .bit_and, .bit_or, .bit_xor: {
+                left :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                right :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                bits u64 :: match instruction.op {
+                    .bit_and: left & right
+                    .bit_or: left | right
+                    .bit_xor: left xor right
+                    else: unreachable
+                }
+                value = integer_from_bits(instruction.type, bits)
+            }
+            .shift_left, .shift_right, .shift_left_saturating: {
+                left :: frames.items[frame_index].values[usize(instruction.left)]
+                count :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                if (instruction.op != .shift_left_saturating and count >= u64(ir.integer_bits(instruction.type)))
+                    return try runtime_trap(diagnostic_store, .invalid_shift_count, instruction.span)
+                value = shift_integer(instruction.op, left, count)
+            }
             .add, .subtract, .multiply, .divide: {
                 left :: frames.items[frame_index].values[usize(instruction.left)]
                 right :: frames.items[frame_index].values[usize(instruction.right)]
@@ -899,6 +922,46 @@ runtime_trap proc(
     span diagnostics.Span,
 ) Outcome ! (mem.AllocError | diagnostics.CapacityError) {
     return Outcome{ trap = try diagnostics.add(diagnostic_store, code, span) }
+}
+
+@hide:file
+integer_from_bits proc(type ir.Type, bits u64) ir.Value {
+    data := ir.ValueData{ unsigned = bits }
+    match type {
+        .i8: data = ir.ValueData{ integer = i64(ptrcast!(@i8, &bits)^) }
+        .i16: data = ir.ValueData{ integer = i64(ptrcast!(@i16, &bits)^) }
+        .i32: data = ir.ValueData{ integer = i64(ptrcast!(@i32, &bits)^) }
+        .int, .isize: data = ir.ValueData{ integer = ptrcast!(@i64, &bits)^ }
+        .u8: data = ir.ValueData{ unsigned = u64(ptrcast!(@u8, &bits)^) }
+        .u16: data = ir.ValueData{ unsigned = u64(ptrcast!(@u16, &bits)^) }
+        .u32: data = ir.ValueData{ unsigned = u64(ptrcast!(@u32, &bits)^) }
+        .u64, .usize: {}
+        else: unreachable
+    }
+    return ir.Value{ type = type, data = data }
+}
+
+@hide:file
+shift_integer proc(op ir.Op, left ir.Value, count u64) ir.Value {
+    width :: u64(ir.integer_bits(left.type))
+    mask :: maxval!(u64) >> (64 - width)
+    bits :: left.data.unsigned & mask
+    signed :: !ir.unsigned_integer(left.type)
+    negative :: signed and left.data.integer < 0
+    if (op == .shift_left_saturating) {
+        if (bits == 0) return left
+        limit :: if (negative) 1 + (mask >> 1) else ir.integer_max(left.type)
+        magnitude :: if (negative) 1 + (bits xor mask) else bits
+        if (count >= width) return integer_from_bits(left.type, limit)
+        if (magnitude > (limit >> count)) return integer_from_bits(left.type, limit)
+    }
+    if (op == .shift_right) {
+        shifted := bits >> count
+        if (negative) shifted = shifted | (mask xor (mask >> count))
+        return integer_from_bits(left.type, shifted)
+    }
+    # discard high bits before shifting so the bootstrap's checked arithmetic cannot overflow.
+    return integer_from_bits(left.type, (bits & (mask >> count)) << count)
 }
 
 @hide:file

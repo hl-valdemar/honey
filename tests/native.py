@@ -11,6 +11,135 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "distinct_bitwise_results_preserve_nominal_type": (
+        """
+        Flags :: distinct u16
+        Signed :: distinct i8
+        exact proc(value Flags) Flags { return value }
+        main proc() [4]i16 {
+            flags Flags := 21
+            flags <<= u8(1)
+            flags xor= 3
+            flags &= 63
+            flags |= 2
+            signed Signed := -3
+            signed >>= u64(1)
+            return [i16(exact(flags)), i16(~Flags(65500)),
+                i16(signed), i16(Signed(-2) <<| 7)]
+        }
+        """, b"[43, 35, -2, -128]\n", None,
+    ),
+    "compound_updates_evaluate_places_once_before_rhs": (
+        """
+        Box :: struct { values [2]mut i16 }
+        place proc(box @mut Box, trace @mut i16) @mut i16 {
+            trace^ = trace^ * 10 + 1
+            return &box.values[0]
+        }
+        rhs proc(box @mut Box, trace @mut i16) i16 {
+            trace^ = trace^ * 10 + 2
+            box.values[0] = 100
+            return 2
+        }
+        index proc(trace @mut i16) usize {
+            trace^ = trace^ * 10 + 3
+            return 1
+        }
+        main proc() [4]i16 {
+            box Box := { values = [40, 6] }
+            trace i16 := 0
+            place(&box, &trace)^ += rhs(&box, &trace)
+            box.values[index(&trace)] *= 7
+            count i16 := 0
+            for (0..3) |_| { defer count += 1 }
+            return [box.values[0], box.values[1], trace, count]
+        }
+        """, b"[42, 42, 123, 3]\n", None,
+    ),
+    "compound_bitwise_and_float_updates": (
+        """
+        main proc() [4]i16 {
+            value u8 := 255
+            value &= 15
+            value xor= 3
+            value |= 1
+            value <<= 1
+            value >>= 1
+            value <<|= u64(1000)
+            number i16 := 20
+            number += 3
+            number -= 2
+            number *= 2
+            real f64 := 84
+            real /= 2
+            return [i16(value), number, i16(real), i16(~u8(213))]
+        }
+        """, b"[255, 42, 42, 42]\n", None,
+    ),
+    "bitwise_precedence_and_type_composition": (
+        """
+        A :: enum { first }
+        B :: enum { second }
+        Error :: A | B
+        fail proc() i16 ! Error { return .first }
+        main proc() [3]i16 {
+            return [i16(u8(1) | 2 xor 3 & 6), i16(u8(3) << (1 + 1)),
+                fail() catch |error| match error { .first: 42, .second: 0 }]
+        }
+        """, b"[0, 12, 42]\n", None,
+    ),
+    "bitwise_constants_and_type_producer_updates": (
+        """
+        Fixed proc() type {
+            counts [2]mut usize := [1, 2]
+            counts[0] <<= 2
+            counts[1] |= 1
+            total usize := counts[0]
+            total += counts[1]
+            return struct { values [total]i16, answer i16 = i16(~u8(213)) }
+        }
+        compute proc() u8 {
+            value u8 := 21
+            value <<= 1
+            return value
+        }
+        choose proc($value u8) i16 {
+            if ((value & 3) == 2) return 42
+            else return missing_member(value)
+        }
+        main proc() [4]i16 {
+            generated Fixed() :: { values = [0, 0, 0, 0, 0, 0, 0] }
+            array [(usize(1) << 2)]i16 :: [0, 0, 0, 0]
+            return [generated.answer, i16($(compute())), choose($(u8(21) << 1)),
+                i16(generated.values.len + array.len)]
+        }
+        missing_member proc(value u8) bool { return true }
+        """, b"[42, 42, 42, 11]\n", None,
+    ),
+    "compound_signed_overflow": (
+        "main proc() i8 { value i8 := 127\nvalue += 1\nreturn value }",
+        b"", b"integer arithmetic overflow",
+    ),
+    "compound_readonly_place": (
+        "main proc() i16 { values [1]i16 := [40]\nvalues[0] += 2\nreturn 0 }",
+        b"", b"indexed assignment requires a writable array element",
+    ),
+    "bitwise_float_rejected": (
+        "main proc() f64 { return f64(1) & 2 }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "shift_signed_count_rejected": (
+        "main proc() i16 { return i16(1) << i16(2) }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "shift_known_count_rejected_even_untaken": (
+        "main proc() i16 { if (false) { _ = u8(1) << 8 }\nreturn 42 }",
+        b"42\n", b"shift count must be smaller than the integer bit width",
+    ),
+    "shift_runtime_count_traps": (
+        "shift proc(count u64) u8 { return u8(1) << count }\nmain proc() u8 { return shift(256) }",
+        b"", b"shift count must be smaller than the integer bit width",
+    ),
     "yielding_blocks_nest_and_copy_before_scoped_cleanup": (
         """
         Item :: struct { values [1]mut i16 }
@@ -7304,6 +7433,26 @@ for integer_type, bits, signed in (
 ):
     minimum = -(1 << (bits - 1)) if signed else 0
     maximum = (1 << (bits - int(signed))) - 1
+    CASES[f"{integer_type}_bitwise_boundaries"] = (
+        f"""
+        shift proc(value {integer_type}, count u64) [4]{integer_type} {{
+            return [value << count, value >> count, value <<| count, ~value]
+        }}
+        main proc() [8]{integer_type} {{
+            high :: shift(maxval!({integer_type}), {bits - 1})
+            huge :: shift_zero({integer_type}(0), maxval!(u64))
+            return [high[0], high[1], high[2], high[3],
+                {integer_type}(1) <<| maxval!(u64), huge,
+                minval!({integer_type}) <<| maxval!(u64),
+                minval!({integer_type}) >> u8({bits - 1})]
+        }}
+        shift_zero proc(value {integer_type}, count u64) {integer_type} {{ return value <<| count }}
+        """,
+        (f"[{- (1 << (bits - 1)) if signed else 1 << (bits - 1)}, "
+         f"{0 if signed else 1}, {maximum}, {minimum}, {maximum}, 0, {minimum}, "
+         f"{-1 if signed else 0}]\n").encode(),
+        None,
+    )
     CASES[f"{integer_type}_limits_and_truncating_division"] = (
         f"""
         identity proc(value {integer_type}) {integer_type} {{ return value }}

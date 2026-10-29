@@ -11,7 +11,7 @@ reports_invalid_input_and_keeps_scanning test {
     state := init(mem.c_allocator)
     defer deinit(&state)
 
-    try scan(&state, "if name # comment\n~1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
+    try scan(&state, "if name # comment\n%1. 2 3.5 \"hi\"", &pool, &diagnostic_store)
 
     try testing.expect_equal(9, state.tokens.items.len)
     try testing.expect_equal(TokenKind.if, state.tokens.items[0].kind)
@@ -266,7 +266,7 @@ scans_import_keywords_and_preserves_source_in_tokens_and_diagnostics test {
     state := init(mem.c_allocator)
     defer deinit(&state)
     state.source_id = diagnostics.SourceId(7)
-    try scan(&state, "import test ~\n1.\n\"unfinished", &pool, &diagnostic_store)
+    try scan(&state, "import test %\n1.\n\"unfinished", &pool, &diagnostic_store)
     try testing.expect_equal(TokenKind.import, state.tokens.items[0].kind)
     try testing.expect_equal(TokenKind.test, state.tokens.items[1].kind)
     for (state.tokens.items) |token| try testing.expect_equal(state.source_id, token.span.source)
@@ -288,5 +288,31 @@ reserves_yield_without_splitting_identifiers test {
     try testing.expect_equal(expected.len, state.tokens.items.len)
     for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
     try testing.expect_equal("yield", strpool.get_str(&pool, state.tokens.items[0].data.str_id)?)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+scans_bitwise_operators_and_contiguous_compounds test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    source :: "~ & | xor << >> <<| += -= *= /= &= |= xor= <<= >>= <<|= xor_flag xor = << |= <<| ="
+    try scan(&state, source, &pool, &diagnostic_store)
+    expected [25]TokenKind :: [
+        .tilde, .ampersand, .pipe, .xor, .shift_left, .shift_right, .shift_left_saturating,
+        .plus_equal, .minus_equal, .star_equal, .slash_equal,
+        .ampersand_equal, .pipe_equal, .xor_equal,
+        .shift_left_equal, .shift_right_equal, .shift_left_saturating_equal,
+        .ident, .xor, .equal, .shift_left, .pipe_equal, .shift_left_saturating, .equal, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    xor_span :: state.tokens.items[13].span
+    try testing.expect_equal("xor=", source[usize(xor_span.start)..usize(xor_span.end)])
+    saturating_span :: state.tokens.items[16].span
+    try testing.expect_equal("<<|=", source[usize(saturating_span.start)..usize(saturating_span.end)])
+    try testing.expect_equal("xor_flag", strpool.get_str(&pool, state.tokens.items[17].data.str_id)?)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }

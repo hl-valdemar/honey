@@ -64,10 +64,11 @@ emit proc(
         try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?, false)
         try io.write_all(output, "\n")
     }
-    memory_codes [7]diagnostics.Code :: [
+    memory_codes [_]diagnostics.Code :: [
         .null_unwrap, .invalid_slice_bounds, .sentinel_mismatch,
         .overlapping_memory_copy, .unsupported_foreign_call, .invalid_pointer_access,
         .division_by_zero,
+        .invalid_shift_count,
     ]
     for (memory_codes) |code| {
         try io.print("@memory_{s} = private constant ", output, {memory_symbol(code)})
@@ -504,6 +505,7 @@ memory_symbol proc(code diagnostics.Code) []u8 {
         .unsupported_foreign_call: "unsupported_foreign_call"
         .invalid_pointer_access: "invalid_pointer_access"
         .division_by_zero: "division_by_zero"
+        .invalid_shift_count: "invalid_shift_count"
         else: unreachable
     }
 }

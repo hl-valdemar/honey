@@ -2,8 +2,8 @@
 #! * type ..... -> type_sum ['!' type]; type_sum -> type_atom {'|' type_atom}; type_atom includes '(' type ')', identifier {'.' member | '(' [expr {',' expr} [',']] ')' | '[' expr ']'}, '?' type_atom, ('@' | '*') ['mut'] type_atom, ['@'] 'proc' '(' parameters ')' type, '[' (expr | '_') ']' ['mut'] type_atom, '[' [';' expr] ']' ['mut'] type_atom, record/enum/union declarations, and ('distinct' | 'alias') type.
 #! * binding ... -> :: | :=
 #! * literal .. -> int | float | string | 'true' | 'false' | 'null'
-#! * op ....... -> '+' | '-' | '*' | '/' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
+#! * op ....... -> '+' | '-' | '*' | '/' | '&' | 'xor' | '|' | '<<' | '>>' | '<<|' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
+#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '~' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
@@ -14,9 +14,11 @@
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
-#! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if.
-#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/&/try higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! assignment_op is '=' or a contiguous compound: '+=', '-=', '*=', '/=', '&=', '|=', 'xor=', '<<=', '>>=', '<<|='.
+#! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if. bitwise-OR headers require parentheses before captures.
+#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -, !, ~, &, try higher than multiplication/division, addition/subtraction, shifts << / >> / <<|, bitwise &/xor/|, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
+#! compound assignments share their target with the canonical binary value's left operand; lowering evaluates the place and loads its old value once before the RHS.
 #! binary operators associate left; unary operators associate right.
 
 import "@std/debug"
@@ -118,6 +120,7 @@ Mutability :: enum {
 UnaryOperator :: enum {
     negate
     logical_not
+    bit_not
     address_of
     dereference
     unwrap
@@ -126,6 +129,8 @@ UnaryOperator :: enum {
 BinaryOperator :: enum {
     add, subtract
     multiply, divide
+    bit_and, bit_or, bit_xor
+    shift_left, shift_right, shift_left_saturating
     equal, not_equal
     less, less_equal
     greater, greater_equal
@@ -214,6 +219,7 @@ NodeData :: union {
 @hide:file variadic_flag u8 :: 0b0100
 @hide:file opaque_flag u8 :: 0b1000
 @hide:file optional_match_flag u8 :: 0b00010000
+@hide:file compound_assignment_flag u8 :: 0b00100000
 
 @hide:file
 Node :: struct {
@@ -405,6 +411,7 @@ AssignmentView :: struct {
     span Span
     target NodeId
     value NodeId
+    compound bool = false
 }
 
 WhileView :: struct {
@@ -1023,6 +1030,12 @@ add_assignment_stmt proc(
     }, span)
 }
 
+set_assignment_compound proc(builder @mut Builder, id NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .stmt_assignment)
+    node.flags = node.flags | compound_assignment_flag
+}
+
 add_while_stmt proc(
     builder @mut Builder,
     span Span,
@@ -1416,6 +1429,7 @@ assignment_stmt proc(tree @Tree, id NodeId) AssignmentView {
         span = get_span(&tree.storage, id),
         target = node.main.node_id,
         value = node.data0.node_id,
+        compound = (node.flags & compound_assignment_flag) != 0,
     }
 }
 

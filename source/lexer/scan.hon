@@ -41,6 +41,7 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "false", .false },
     { "and", .and },
     { "or", .or },
+    { "xor", .xor },
     { "mut", .mut },
     { "struct", .struct },
     { "c_struct", .c_struct },
@@ -107,12 +108,16 @@ scan proc(
         if is_alpha(char) or char == '_' {
             start :: cursor
             result :: try scan_ident(start, program, pool)
+            compound :: result.kind == .xor and result.end < program.len and program[result.end] == '='
+            extra :: if (compound) usize(1) else 0
+            end :: result.end + extra
+            kind :: if (compound) TokenKind.xor_equal else result.kind
             try add_token(state, Token{
-                span = make_span(source, start, result.end),
-                kind = result.kind,
+                span = make_span(source, start, end),
+                kind = kind,
                 data = TokenData{ str_id = result.str_id },
             })
-            cursor = result.end
+            cursor = end
             continue
         }
 
@@ -281,12 +286,37 @@ scan proc(
             continue
         }
 
+        if (
+            (char == '<' or char == '>') and cursor + 1 < program.len
+            and program[cursor + 1] == char
+        ) {
+            saturating :: char == '<' and cursor + 2 < program.len and program[cursor + 2] == '|'
+            width :: if (saturating) usize(3) else 2
+            compound :: cursor + width < program.len and program[cursor + width] == '='
+            kind TokenKind := .shift_right
+            if (saturating) {
+                kind = if (compound) .shift_left_saturating_equal else .shift_left_saturating
+            } else if (char == '<') {
+                kind = if (compound) .shift_left_equal else .shift_left
+            } else if (compound) kind = .shift_right_equal
+            extra :: if (compound) usize(1) else 0
+            end :: cursor + width + extra
+            try add_token(state, Token{
+                span = make_span(source, cursor, end),
+                kind = kind,
+            })
+            cursor = end
+            continue
+        }
+
         if (cursor + 1 < program.len and program[cursor + 1] == '=') {
             comparison ?TokenKind :: match char {
                 '=': .equal_equal
                 '!': .not_equal
                 '<': .less_equal
                 '>': .greater_equal
+                '&': .ampersand_equal
+                '|': .pipe_equal
                 else: null
             }
             if (comparison) |value| {
@@ -302,6 +332,7 @@ scan proc(
         kind ?TokenKind :: match char {
             '=': .equal
             '!': .bang
+            '~': .tilde
             '<': .less
             '>': .greater
             ',': .comma

@@ -125,6 +125,8 @@ elaborate proc(
         if (class == .expression
             and (ast.expr_kind(&original, id) == .comptime_expr or ast.expr_kind(&original, id) == .block_expr))
             needed = true
+        if (class == .expression and ast.expr_kind(&original, id) == .binary
+            and ast.binary_expr(&original, id).operator == .bit_or) needed = true
         if (class == .statement and ast.stmt_kind(&original, id) == .for_stmt
             and ast.for_stmt(&original, id).is_inline) needed = true
         if (class == .match_arm and ast.match_arm_view(&original, id).is_inline) needed = true
@@ -451,6 +453,14 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .binary) {
         view :: ast.binary_expr(&state.tree, id)
+        if (view.operator == .bit_or
+            and (is_type(state, try expression_type(state, view.left, 0))
+                or is_type(state, try expression_type(state, view.right, 0)))) {
+            composed :: try ast.add_binary_type(state.builder, view.span, view.left, view.right, false)
+            try replace(state, id, composed)
+            try refresh(state)
+            return
+        }
         if (
             (view.operator == .equal or view.operator == .not_equal)
             and branch_constant(state, view.left, 0) and branch_constant(state, view.right, 0)
@@ -1502,7 +1512,7 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .unary: {
             view :: ast.unary_expr(&state.tree, id)
             return (
-                (view.operator == .negate or view.operator == .logical_not)
+                (view.operator == .negate or view.operator == .logical_not or view.operator == .bit_not)
                 and branch_constant(state, view.operand, depth + 1)
             )
         }
@@ -1955,6 +1965,15 @@ contextual_literal proc(state @State, id ast.NodeId) bool {
     kind :: ast.expr_kind(&state.tree, id)
     if (kind == .builtin_call)
         return mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "some")
+    if (kind == .unary) return ast.unary_expr(&state.tree, id).operator == .bit_not and flexible(state, id)
+    if (kind == .binary) {
+        operator :: ast.binary_expr(&state.tree, id).operator
+        return (
+            (operator == .bit_and or operator == .bit_or or operator == .bit_xor
+                or operator == .shift_left or operator == .shift_right or operator == .shift_left_saturating)
+            and flexible(state, id)
+        )
+    }
     return kind == .record_literal or kind == .array_literal or kind == .enum_literal or kind == .block_expr
 }
 
@@ -3963,6 +3982,7 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
             if (target != assignment.target) {
                 normalized :: try ast.add_assignment_stmt(state.builder,
                     ast.node_span(&state.tree, statement), target, assignment.value)
+                if (assignment.compound) ast.set_assignment_compound(state.builder, normalized)
                 try refresh(state)
                 # synthesized places still need local substitution in snapshots.
                 previous :: execution.mapping.len
@@ -4442,6 +4462,8 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         .alias_expr: return try evaluate(state, ast.type_operand(&state.tree, id))
         .unary: {
             view :: ast.unary_expr(&state.tree, id)
+            if (view.operator == .bit_not)
+                return try evaluate_ir(state, id, try expression_type(state, id, 0))
             value := try evaluate(state, view.operand)
             if (view.operator == .negate and value.kind == .integer) value.negative = value.magnitude != 0 and !value.negative
             else if (view.operator == .negate and value.kind == .real) value.magnitude = value.magnitude xor (u64(1) << 63)
@@ -4484,6 +4506,9 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
 evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
     view :: ast.binary_expr(&state.tree, id)
     if (view.operator == .divide) return try evaluate_ir(state, id, try builtin(state, id, .float))
+    if (view.operator == .bit_and or view.operator == .bit_or or view.operator == .bit_xor
+        or view.operator == .shift_left or view.operator == .shift_right or view.operator == .shift_left_saturating)
+        return try evaluate_ir(state, id, try expression_type(state, id, 0))
     left :: try evaluate(state, view.left)
     if (left.kind == .invalid) return Value{}
     if (left.kind == .boolean) {
@@ -4978,6 +5003,8 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 or view.operator == .less_equal or view.operator == .greater or view.operator == .greater_equal
                 or view.operator == .logical_and or view.operator == .logical_or
             ) return try builtin(state, id, .bool)
+            if ((view.operator == .bit_and or view.operator == .bit_or or view.operator == .bit_xor)
+                and flexible(state, view.left)) return try expression_type(state, view.right, depth + 1)
             return try expression_type(state, view.left, depth + 1)
         }
         .selection: {
@@ -5326,12 +5353,14 @@ flexible proc(state @State, id ast.NodeId) bool {
     if (kind == .literal_int or kind == .literal_float) return true
     if (kind == .unary) {
         view :: ast.unary_expr(&state.tree, id)
-        return view.operator == .negate and flexible(state, view.operand)
+        return (view.operator == .negate or view.operator == .bit_not) and flexible(state, view.operand)
     }
     if (kind == .binary) {
         view :: ast.binary_expr(&state.tree, id)
         return (
-            (view.operator == .add or view.operator == .subtract or view.operator == .multiply or view.operator == .divide)
+            (view.operator == .add or view.operator == .subtract or view.operator == .multiply or view.operator == .divide
+                or view.operator == .bit_and or view.operator == .bit_or or view.operator == .bit_xor
+                or view.operator == .shift_left or view.operator == .shift_right or view.operator == .shift_left_saturating)
             and flexible(state, view.left) and flexible(state, view.right)
         )
     }

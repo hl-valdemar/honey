@@ -438,7 +438,7 @@ check_elaborated proc(
             match ast.expr_kind(tree, id) {
                 .unary: {
                     expression :: ast.unary_expr(tree, id)
-                    if (expression.operator == .negate) try require_numeric(&state, id, expression.operand)
+                    if (expression.operator == .negate or expression.operator == .bit_not) try require_numeric(&state, id, expression.operand)
                 }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
@@ -464,7 +464,7 @@ check_elaborated proc(
             match ast.expr_kind(tree, id) {
                 .unary: {
                     expression :: ast.unary_expr(tree, id)
-                    if (expression.operator == .negate) try numeric_operand(&state, id, expression.operand)
+                    if (expression.operator == .negate or expression.operator == .bit_not) try numeric_operand(&state, id, expression.operand)
                 }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
@@ -473,7 +473,11 @@ check_elaborated proc(
                         if (!bool_equality(&state, id)) try comparison_operands(&state, id)
                     } else {
                         try numeric_operand(&state, id, expression.left)
-                        try numeric_operand(&state, id, expression.right)
+                        if (shift(expression.operator)) {
+                            count_group :: root(&state, usize(expression.right))
+                            if (state.cells[count_group].type.kind == .none and state.cells[count_group].demand == .none)
+                                try impose(&state, expression.right, .usize, .invalid_operand, expression.span)
+                        } else try numeric_operand(&state, id, expression.right)
                         if (expression.operator == .divide) {
                             try impose(&state, id, .float, .integer_division, expression.span)
                         }
@@ -1370,10 +1374,10 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         }
         .unary: {
             expression :: ast.unary_expr(tree, id)
-            if (expression.operator == .negate) state.cells[usize(id)].producer = id
+            if (expression.operator == .negate or expression.operator == .bit_not) state.cells[usize(id)].producer = id
             if (expression.operator == .logical_not) {
                 state.cells[usize(id)].type = Type{ kind = .bool }
-            } else if (expression.operator == .negate) {
+            } else if (expression.operator == .negate or expression.operator == .bit_not) {
                 state.cells[usize(id)].numeric = true
             }
             operand :: expression.operand
@@ -1568,6 +1572,27 @@ comparison proc(operator ast.BinaryOperator) bool {
 @hide:file
 logical proc(operator ast.BinaryOperator) bool {
     return operator == .logical_and or operator == .logical_or
+}
+
+@hide:file
+shift proc(operator ast.BinaryOperator) bool {
+    return operator == .shift_left or operator == .shift_right or operator == .shift_left_saturating
+}
+
+@hide:file
+bitwise proc(operator ast.BinaryOperator) bool {
+    return operator == .bit_and or operator == .bit_or or operator == .bit_xor or shift(operator)
+}
+
+@hide:file
+integer_width proc(kind TypeKind) usize {
+    return match kind {
+        .i8, .u8: 8
+        .i16, .u16: 16
+        .i32, .u32: 32
+        .int, .isize, .u64, .usize: 64
+        else: 0
+    }
 }
 
 @hide:file
@@ -2153,7 +2178,9 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         return
                     }
                     operand :: state.types[usize(expression.operand)]
-                    if (operand.kind != .invalid and (!numeric_kind(operand.kind) or unsigned_kind(operand.kind))) try fail(state, id, .invalid_operand, ast.node_span(tree, id))
+                    if (expression.operator == .bit_not) {
+                        if (operand.kind != .invalid and !integer_kind(operand.kind)) try fail(state, id, .invalid_operand, expression.span)
+                    } else if (operand.kind != .invalid and (!numeric_kind(operand.kind) or unsigned_kind(operand.kind))) try fail(state, id, .invalid_operand, ast.node_span(tree, id))
                 }
                 .binary: {
                     expression :: ast.binary_expr(tree, id)
@@ -2165,6 +2192,21 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     left :: state.types[usize(expression.left)]
                     right :: state.types[usize(expression.right)]
                     if (left.kind == .invalid or right.kind == .invalid) return
+                    if (shift(expression.operator)) {
+                        if (!integer_kind(left.kind) or !unsigned_kind(right.kind)) {
+                            try fail(state, id, .invalid_operand, expression.span)
+                        } else if (expression.operator != .shift_left_saturating) {
+                            if (evaluate_integer(state, expression.right, true)) |count| {
+                                if (count.negative or count.magnitude >= u64(integer_width(left.kind)))
+                                    try fail(state, id, .invalid_shift_count, expression.span)
+                            }
+                        }
+                        return
+                    }
+                    if (bitwise(expression.operator) and (!integer_kind(left.kind) or !integer_kind(right.kind))) {
+                        try fail(state, id, .invalid_operand, expression.span)
+                        return
+                    }
                     if (pointer_addition(state, id)) {
                         if (right.kind != .usize or right.nominal != ast.NodeId(maxval!(u32))) try fail(state, id, .invalid_operand, expression.span)
                         return
@@ -2379,6 +2421,53 @@ constant_integer proc(state @mut State, id ast.NodeId) ?ConstantInteger {
 }
 
 @hide:file
+constant_bits proc(value ConstantInteger, mask u64) u64 {
+    if (value.negative) return (value.magnitude - 1) xor mask
+    return value.magnitude & mask
+}
+
+@hide:file
+constant_from_bits proc(bits u64, kind TypeKind) ConstantInteger {
+    mask :: maxval!(u64) >> u64(64 - integer_width(kind))
+    negative :: !unsigned_kind(kind) and bits > (mask >> 1)
+    magnitude :: if (negative) 1 + (bits xor mask) else bits
+    return ConstantInteger{
+        magnitude = magnitude,
+        negative = negative,
+    }
+}
+
+@hide:file
+constant_bitwise proc(state @mut State, id ast.NodeId, left, right ConstantInteger) ?ConstantInteger {
+    view :: ast.binary_expr(state.tree, id)
+    family :: bound_family(state, id)
+    kind :: if (family == .none) TypeKind.int else family
+    width :: integer_width(kind)
+    if (width == 0 or !integer_fits(left, kind)) return null
+    mask :: maxval!(u64) >> u64(64 - width)
+    a :: constant_bits(left, mask)
+    b :: constant_bits(right, mask)
+    if (view.operator == .bit_and) return constant_from_bits(a & b, kind)
+    if (view.operator == .bit_or) return constant_from_bits(a | b, kind)
+    if (view.operator == .bit_xor) return constant_from_bits(a xor b, kind)
+    if (right.negative) return null
+    count :: right.magnitude
+    if (view.operator == .shift_left_saturating) {
+        signed_limit :: if (left.negative) 1 + (mask >> 1) else mask >> 1
+        limit :: if (unsigned_kind(kind)) mask else signed_limit
+        if (left.magnitude == 0) return left
+        if (count >= u64(width) or left.magnitude > (limit >> count))
+            return ConstantInteger{ magnitude = limit, negative = left.negative }
+    } else if (count >= u64(width)) return null
+    if (view.operator == .shift_right) {
+        shifted :: a >> count
+        bits :: if (left.negative) shifted | (mask xor (mask >> count)) else shifted
+        return constant_from_bits(bits, kind)
+    }
+    return constant_from_bits((a << count) & mask, kind)
+}
+
+@hide:file
 evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?ConstantInteger {
     if (state.cells[usize(id)].constant_visiting) return null
     state.cells[usize(id)].constant_visiting = true
@@ -2431,8 +2520,15 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
         }
         .unary: {
             view :: ast.unary_expr(state.tree, id)
-            if (view.operator != .negate) return null
+            if (view.operator != .negate and view.operator != .bit_not) return null
             if (evaluate_integer(state, view.operand, allow_local)) |value| {
+                if (view.operator == .bit_not) {
+                    family :: bound_family(state, id)
+                    kind :: if (family == .none) TypeKind.int else family
+                    if (!integer_kind(kind) or !integer_fits(value, kind)) return null
+                    mask :: maxval!(u64) >> u64(64 - integer_width(kind))
+                    return constant_from_bits(constant_bits(value, mask) xor mask, kind)
+                }
                 return ConstantInteger{ magnitude = value.magnitude, negative = value.magnitude != 0 and !value.negative }
             }
             return null
@@ -2443,6 +2539,7 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
             right := ConstantInteger{ magnitude = 0 }
             if (evaluate_integer(state, view.left, allow_local)) |value| left = value else return null
             if (evaluate_integer(state, view.right, allow_local)) |value| right = value else return null
+            if (bitwise(view.operator)) return constant_bitwise(state, id, left, right)
             if (view.operator == .multiply) {
                 if (right.magnitude != 0 and left.magnitude > divtrunc!(maxval!(u64), right.magnitude)) return null
                 magnitude :: left.magnitude * right.magnitude
@@ -3422,6 +3519,7 @@ bound_family proc(state @mut State, id ast.NodeId) TypeKind {
     if (ast.expr_kind(state.tree, producer) == .unary) return bound_family(state, ast.unary_expr(state.tree, producer).operand)
     view :: ast.binary_expr(state.tree, producer)
     left :: bound_family(state, view.left)
+    if (shift(view.operator)) return left
     right :: bound_family(state, view.right)
     if (left == .float or right == .float) return .float
     if (integer_kind(left)) return left

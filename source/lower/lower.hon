@@ -927,6 +927,36 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         }
         .assignment_stmt: {
             assignment :: ast.assignment_stmt(tree, id)
+            if (assignment.compound) {
+                if (trap_type(state, id)) return
+                expression :: ast.binary_expr(tree, assignment.value)
+                address :: try lower_place(state, assignment.target)
+                if (state.terminated) return
+                checked :: typecheck.type_of(state.checked, assignment.target)
+                type :: lower_type(state, checked)
+                old :: try emit(state, ir.Instruction{
+                    op = .load_address, type = type, left = address,
+                    array_type = try array_shape(state, checked), span = ast.node_span(tree, assignment.target),
+                })
+                right :: try lower_expression(state, expression.right)
+                if (state.terminated) return
+                value :: if (expression.operator == .add and type == .pointer) {
+                    pointer :: typecheck.pointer_type(state.checked, checked.pointer_type)
+                    yield try emit(state, ir.Instruction{
+                        op = .pointer_offset, type = type, left = old, right = right,
+                        pointee = lower_type(state, pointer.element),
+                        array_type = try array_shape(state, pointer.element), span = ast.node_span(tree, id),
+                    })
+                } else try emit(state, ir.Instruction{
+                    op = binary_op(expression.operator), type = type, left = old, right = right,
+                    span = ast.node_span(tree, id),
+                })
+                _ = try emit(state, ir.Instruction{
+                    op = .store_address, type = .void, left = address, right = value,
+                    span = ast.node_span(tree, assignment.target),
+                })
+                return
+            }
             if (
                 ast.expr_kind(tree, assignment.target) == .index
                 or ast.expr_kind(tree, assignment.target) == .unary
@@ -1013,6 +1043,29 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
             if (statement.value == null and state.return_type.kind == .fallible) value = try wrap_fallible(state, value, state.return_type, false, statement.span)
             try lower_return(state, value, statement.span)
         }
+    }
+}
+
+@hide:file
+binary_op proc(operator ast.BinaryOperator) ir.Op {
+    return match operator {
+        .add: .add
+        .subtract: .subtract
+        .multiply: .multiply
+        .divide: .divide
+        .bit_and: .bit_and
+        .bit_or: .bit_or
+        .bit_xor: .bit_xor
+        .shift_left: .shift_left
+        .shift_right: .shift_right
+        .shift_left_saturating: .shift_left_saturating
+        .equal: .equal
+        .not_equal: .not_equal
+        .less: .less
+        .less_equal: .less_equal
+        .greater: .greater
+        .greater_equal: .greater_equal
+        .logical_and, .logical_or: unreachable
     }
 }
 
@@ -2199,6 +2252,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             op ir.Op :: match expression.operator {
                 .negate: .negate
                 .logical_not: .logical_not
+                .bit_not: .bit_not
                 .address_of, .dereference, .unwrap: unreachable
             }
             return try emit(state, ir.Instruction{ op = op, type = type, left = operand, span = span })
@@ -2231,19 +2285,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     array_type = try array_shape(state, pointer.element), span = span,
                 })
             }
-            op ir.Op :: match expression.operator {
-                .add: .add
-                .subtract: .subtract
-                .multiply: .multiply
-                .divide: .divide
-                .equal: .equal
-                .not_equal: .not_equal
-                .less: .less
-                .less_equal: .less_equal
-                .greater: .greater
-                .greater_equal: .greater_equal
-                .logical_and, .logical_or: unreachable
-            }
+            op :: binary_op(expression.operator)
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
         .call: {

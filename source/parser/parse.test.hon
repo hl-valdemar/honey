@@ -1544,7 +1544,7 @@ preserves_array_error_ids_control_bodies_and_following_siblings test {
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `main proc() void {
-        `    bad [~]i64 :: [~, 2]
+        `    bad [%]i64 :: [%, 2]
         `    while (items[0) { break }
         `    for items[0 |i| { continue }
         `    unfinished :: [1,
@@ -2241,4 +2241,137 @@ keeps_yielding_match_and_catch_bodies_as_raw_blocks test {
     constant :: ast.call_arg(&tree, call, 1)
     try testing.expect_equal(ast.ExprKind.comptime_expr, ast.expr_kind(&tree, constant))
     try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, ast.comptime_operand(&tree, constant)))
+}
+
+parses_bitwise_precedence_and_left_associativity test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source :: "bits :: ~a + b * c << d >> e <<| f & g xor h | i < j == k and l or m\n"
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    expression := ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    operators [11]ast.BinaryOperator :: [
+        .logical_or, .logical_and, .equal, .less,
+        .bit_or, .bit_xor, .bit_and,
+        .shift_left_saturating, .shift_right, .shift_left, .add,
+    ]
+    for (operators) |operator| {
+        binary :: ast.binary_expr(&tree, expression)
+        try testing.expect_equal(operator, binary.operator)
+        if (operator == .add) {
+            product :: ast.binary_expr(&tree, binary.right)
+            try testing.expect_equal(ast.BinaryOperator.multiply, product.operator)
+        }
+        expression = binary.left
+    }
+    complement :: ast.unary_expr(&tree, expression)
+    try testing.expect_equal(ast.UnaryOperator.bit_not, complement.operator)
+    try testing.expect_equal("a", ast.source_text(&tree, ast.node_span(&tree, complement.operand)))
+}
+
+parses_compound_operators_in_statement_contexts test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    items[next()].field += rhs()
+        `    value -= 1
+        `    value *= 2
+        `    value /= 3
+        `    value &= mask
+        `    value |= mask
+        `    value xor= mask
+        `    value <<= count
+        `    value >>= count
+        `    value <<|= count
+        `    value = 4
+        `    match value { 0: value += 1, else: value -= 1 }
+        `    result :: { value |= mask }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    tree := ast.view(&builder, root)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    operators [10]ast.BinaryOperator :: [
+        .add, .subtract, .multiply, .divide, .bit_and, .bit_or, .bit_xor,
+        .shift_left, .shift_right, .shift_left_saturating,
+    ]
+    for (operators) |operator, index| {
+        assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, body, index))
+        try testing.expect(assignment.compound)
+        binary :: ast.binary_expr(&tree, assignment.value)
+        try testing.expect_equal(operator, binary.operator)
+    }
+    try testing.expect(!ast.assignment_stmt(&tree, ast.block_statement(&tree, body, 10)).compound)
+    match_value :: ast.statement_expr(&tree, ast.block_statement(&tree, body, 11))
+    for (usize(0)..usize(2)) |index| {
+        arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, match_value, index))
+        try testing.expect(!arm.expression)
+        try testing.expect(ast.assignment_stmt(&tree, ast.block_statement(&tree, arm.body, 0)).compound)
+    }
+    block_value :: ast.statement_decl(&tree, ast.block_statement(&tree, body, 12)).initializer
+    try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, block_value))
+}
+
+keeps_type_composition_and_capture_pipes_with_bitwise_or test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Alias :: A | B
+        `Error :: A | B
+        `Fallible :: T ! (A | B)
+        `run proc(value A | B) T ! (A | B) {
+        `    if (flags | mask) |item| { item }
+        `    while (flags | mask) |item| { break }
+        `    for (flags | mask) |item, index| { continue }
+        `    if value |item| { item }
+        `    while value |item| { break }
+        `    for values |item| { continue }
+        `    if check_flags(flags | mask) { return }
+        `    while values[flags | mask] { break }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for (usize(0)..usize(2)) |index| {
+        expression :: ast.statement_decl(&tree, ast.package_decl(&tree, index)).initializer
+        try testing.expect_equal(ast.BinaryOperator.bit_or, ast.binary_expr(&tree, expression).operator)
+    }
+    fallible :: ast.statement_decl(&tree, ast.package_decl(&tree, 2)).initializer
+    try testing.expect_equal(ast.ExprKind.fallible_type, ast.expr_kind(&tree, fallible))
+    try testing.expect_equal(ast.ExprKind.sum_type, ast.expr_kind(&tree, ast.binary_expr(&tree, fallible).right))
+    function_id :: ast.package_decl(&tree, 3)
+    annotation :: ast.param(&tree, ast.function_param(&tree, function_id, 0)).type
+    try testing.expect_equal(ast.ExprKind.sum_type, ast.expr_kind(&tree, annotation))
+    body :: ast.function_decl(&tree, function_id).body
+    condition :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect(condition.capture != null)
+    try testing.expect_equal(ast.BinaryOperator.bit_or, ast.binary_expr(&tree, condition.condition).operator)
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 1))
+    try testing.expect(loop.capture != null)
+    try testing.expect_equal(ast.BinaryOperator.bit_or, ast.binary_expr(&tree, loop.condition).operator)
+    iteration :: ast.for_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect(iteration.capture != null and iteration.index != null)
+    try testing.expect_equal(ast.BinaryOperator.bit_or, ast.binary_expr(&tree, iteration.iterable).operator)
+    try testing.expect(ast.if_stmt(&tree, ast.block_statement(&tree, body, 3)).capture != null)
+    try testing.expect(ast.while_stmt(&tree, ast.block_statement(&tree, body, 4)).capture != null)
+    try testing.expect(ast.for_stmt(&tree, ast.block_statement(&tree, body, 5)).capture != null)
 }

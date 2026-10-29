@@ -847,3 +847,50 @@ yielding_blocks_recompile_owned_constants_and_generated_types test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+compound_updates_and_type_composition_recompile_without_retaining_rewrites test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        bytes := try owned_text(
+            `A :: enum { first }
+            `B :: enum { second }
+            `Errors :: A | B
+            `Box proc() type {
+            `    counts [1]mut usize := [1]
+            `    counts[0] <<= 1
+            `    return struct { values [counts[0]]i16 }
+            `}
+            `compute proc() u8 {
+            `    value u8 := 21
+            `    value <<= 1
+            `    return value
+            `}
+            `main proc() i16 {
+            `    box Box() :: { values = [40, 2] }
+            `    answer i16 := i16($(compute()))
+            `    answer xor= box.values[0] + box.values[1]
+            `    return answer + 42
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        _ = try add_source(&session, root, "operators.hon", &bytes, &diagnostic_store)
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

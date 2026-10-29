@@ -30,7 +30,7 @@ State :: struct {
     next_token usize
     paren_depth usize = 0
     allow_record_literals bool = true
-    allow_sum_types bool = true
+    allow_bit_or bool = true
     match_arm_body bool = false
 }
 
@@ -254,16 +254,16 @@ parse_block proc(state @mut State) ast.NodeId ! ParseError {
     open :: try consume(state, .open_curly)
     previous_depth :: state.paren_depth
     previous_record_literals :: state.allow_record_literals
-    previous_sum_types :: state.allow_sum_types
+    previous_bit_or :: state.allow_bit_or
     previous_match_arm_body :: state.match_arm_body
     state.paren_depth = 0
     state.allow_record_literals = true
-    state.allow_sum_types = true
+    state.allow_bit_or = true
     state.match_arm_body = false
     defer {
         state.paren_depth = previous_depth
         state.allow_record_literals = previous_record_literals
-        state.allow_sum_types = previous_sum_types
+        state.allow_bit_or = previous_bit_or
         state.match_arm_body = previous_match_arm_body
     }
     statements arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
@@ -325,10 +325,10 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .break, .continue: return try parse_loop_control(state, allow_else)
         .defer, .errdefer: return try parse_cleanup(state, allow_else)
         .open_curly: return try ast.add_block_stmt(state.builder, try parse_block(state))
-        .ident, .int, .float, .string, .true, .false, .minus, .bang, .open_paren, .open_bracket, .struct, .c_struct, .opaque, .c_func,
+        .ident, .int, .float, .string, .true, .false, .minus, .bang, .tilde, .open_paren, .open_bracket, .struct, .c_struct, .opaque, .c_func,
         .enum, .union, .distinct, .alias, .dot, .match, .ampersand, .at, .star, .question, .null, .undefined, .try, .dollar: {
             expression :: try parse_expr(state)
-            if next_is(state, .equal) return try parse_assignment(state, expression, allow_else)
+            if (is_assignment_operator(current(state).kind)) return try parse_assignment(state, expression, allow_else)
             return try ast.add_expression_stmt(state.builder, expression)
         }
         else: return .unexpected_token
@@ -431,8 +431,9 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
 
 @hide:file
 parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.NodeId ! ParseError {
-    _ = try consume(state, .equal)
-    value :: try parse_expr(state)
+    operator :: assignment_operator(current(state).kind)
+    state.next_token += 1
+    value := try parse_expr(state)
     if (
         !next_is(state, .newline)
         and !next_is(state, .close_curly)
@@ -440,17 +441,15 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
         and !(allow_else and next_is(state, .else))
         and !(state.match_arm_body and next_is(state, .comma))
     ) return .unexpected_token
-    end :: state.tokens[state.next_token - 1].span.end
-    return try ast.add_assignment_stmt(
-        state.builder,
-        ast.Span{
-            start = ast.builder_span(state.builder, target).start,
-            end = end,
-            source = state.builder.source_id,
-        },
-        target,
-        value,
-    )
+    span :: ast.Span{
+        start = ast.builder_span(state.builder, target).start,
+        end = state.tokens[state.next_token - 1].span.end,
+        source = state.builder.source_id,
+    }
+    if (operator) |binary| value = try ast.add_binary(state.builder, span, binary, target, value)
+    id :: try ast.add_assignment_stmt(state.builder, span, target, value)
+    if (operator != null) ast.set_assignment_compound(state.builder, id)
+    return id
 }
 
 @hide:file
@@ -657,13 +656,13 @@ parse_for proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
 @hide:file
 parse_guard_expr proc(state @mut State) ast.NodeId ! ParseError {
     previous :: state.allow_record_literals
-    previous_sum_types :: state.allow_sum_types
+    previous_bit_or :: state.allow_bit_or
     state.allow_record_literals = false
-    # capture pipes stay boundaries even when an index/call permits record literals.
-    state.allow_sum_types = false
+    # top-level header pipes delimit captures; nested expressions may use bitwise OR.
+    state.allow_bit_or = false
     defer {
         state.allow_record_literals = previous
-        state.allow_sum_types = previous_sum_types
+        state.allow_bit_or = previous_bit_or
     }
     return try parse_expr(state)
 }
@@ -689,7 +688,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             and !next_is(state, .for) and !next_is(state, .inline)
             and !next_is(state, .break) and !next_is(state, .continue)
         ) {
-            if (next_is(state, .ident) and next_n_is(state, 1, .equal)) break
+            if (next_is(state, .ident) and is_assignment_operator(state.tokens[state.next_token + 1].kind)) break
             state.next_token += 1
         }
     }
@@ -952,7 +951,7 @@ starts_type proc(kind lexer.TokenKind) bool {
 member_name proc(kind lexer.TokenKind) bool {
     return match kind {
         .ident, .if, .else, .for, .inline, .while, .proc, .return, .yield, .break, .continue,
-        .true, .false, .and, .or, .mut, .struct, .c_struct, .opaque, .enum, .union, .distinct,
+        .true, .false, .and, .or, .xor, .mut, .struct, .c_struct, .opaque, .enum, .union, .distinct,
         .alias, .match, .import, .test, .c_func, .null, .undefined, .try, .catch, .defer, .errdefer: true
         else: false
     }
@@ -1193,7 +1192,7 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
         body = try parse_arm(state, false)
     } else {
         value :: try parse_expr(state)
-        if next_is(state, .equal) {
+        if (is_assignment_operator(current(state).kind)) {
             statement :: try parse_assignment(state, value, false)
             statements [1]ast.NodeId :: [statement]
             body = try ast.add_block(state.builder, ast.builder_span(state.builder, statement), statements[..])
@@ -1391,6 +1390,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
         }
         operator ast.UnaryOperator :: match token.kind {
             .bang: .logical_not
+            .tilde: .bit_not
             .ampersand: .address_of
             else: .negate
         }
@@ -1477,11 +1477,10 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             left_grouped = false
             continue
         }
-        if (token.kind == .bang or (token.kind == .pipe and state.allow_sum_types)) {
-            power :: if (token.kind == .bang) BindingPowerScalar(1) else BindingPowerScalar(2)
-            if (power < min_bp) break
+        if (token.kind == .bang) {
+            if (BindingPowerScalar(1) < min_bp) break
             state.next_token += 1
-            right :: try parse_expr_bp(state, BindingPowerScalar(u32(power) + 1))
+            right :: try parse_type(state)
             left = try ast.add_binary_type(state.builder, ast.Span{
                 start = state.tokens[expression_start].span.start,
                 end = state.tokens[state.next_token - 1].span.end,
@@ -1509,6 +1508,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             left_grouped = false
             continue
         }
+        if (token.kind == .pipe and !state.allow_bit_or) break
         if (infix_binding_power(token.kind)) |power| {
             if (power.left < min_bp) break
             state.next_token += 1
@@ -1553,6 +1553,9 @@ validate_range_bound proc(
 parse_call proc(state @mut State, callee ast.NodeId, start u32, builtin bool) ast.NodeId ! ParseError {
     _ = try consume(state, .open_paren)
     previous :: state.allow_record_literals
+    previous_bit_or :: state.allow_bit_or
+    state.allow_bit_or = true
+    defer state.allow_bit_or = previous_bit_or
     state.allow_record_literals = true
     defer state.allow_record_literals = previous
     state.paren_depth += 1
@@ -1591,6 +1594,9 @@ parse_call proc(state @mut State, callee ast.NodeId, start u32, builtin bool) as
 parse_index proc(state @mut State, base ast.NodeId, start u32) ast.NodeId ! ParseError {
     _ = try consume(state, .open_bracket)
     previous :: state.allow_record_literals
+    previous_bit_or :: state.allow_bit_or
+    state.allow_bit_or = previous_bit_or or index_has_close(state)
+    defer state.allow_bit_or = previous_bit_or
     state.allow_record_literals = true
     defer state.allow_record_literals = previous
     first ?ast.NodeId := null
@@ -1622,6 +1628,22 @@ parse_index proc(state @mut State, base ast.NodeId, start u32) ast.NodeId ! Pars
 }
 
 @hide:file
+index_has_close proc(state @State) bool {
+    # keep malformed guard indices from consuming a capture list and its body.
+    depth := usize(1)
+    for (state.next_token)..(state.tokens.len) |index| {
+        kind :: state.tokens[index].kind
+        if (kind == .eof or (kind == .newline and depth == 1)) return false
+        if (kind == .open_paren or kind == .open_bracket or kind == .open_curly) depth += 1
+        if (kind == .close_paren or kind == .close_bracket or kind == .close_curly) {
+            depth -= 1
+            if (depth == 0) return kind == .close_bracket
+        }
+    }
+    return false
+}
+
+@hide:file
 array_starts_type proc(state @State) bool {
     depth usize := 0
     curly_depth := usize(0)
@@ -1650,6 +1672,9 @@ array_starts_type proc(state @State) bool {
 parse_array_literal proc(state @mut State) ast.NodeId ! ParseError {
     open :: try consume(state, .open_bracket)
     previous :: state.allow_record_literals
+    previous_bit_or :: state.allow_bit_or
+    state.allow_bit_or = true
+    defer state.allow_bit_or = previous_bit_or
     state.allow_record_literals = true
     defer state.allow_record_literals = previous
     elements arraylist.ArrayList(ast.NodeId) := arraylist.init(state.allocator)
@@ -1708,7 +1733,7 @@ pointer_binding_starts proc(state @State) bool {
         }
         if (depth != 0) continue
         if (kind == .double_colon or kind == .colon_equal) return true
-        if (kind == .newline or kind == .eof or kind == .equal) return false
+        if (kind == .newline or kind == .eof or is_assignment_operator(kind)) return false
     }
     return false
 }
@@ -1744,6 +1769,7 @@ brace_starts_block proc(state @State) bool {
             and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) return true
         if (depth == 1) {
             if (kind == .double_colon or kind == .colon_equal) return true
+            if (kind != .equal and is_assignment_operator(kind)) return true
             previous :: if (index > first) state.tokens[index - 1].kind else lexer.TokenKind.open_curly
             if (previous != .dot and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) {
                 match kind {
@@ -1777,6 +1803,9 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             state.next_token += 1
             _ = try consume(state, .open_paren)
             previous :: state.allow_record_literals
+            previous_bit_or :: state.allow_bit_or
+            state.allow_bit_or = true
+            defer state.allow_bit_or = previous_bit_or
             state.allow_record_literals = true
             defer state.allow_record_literals = previous
             state.paren_depth += 1
@@ -1812,6 +1841,9 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         .open_paren: {
             state.next_token += 1
             previous :: state.allow_record_literals
+            previous_bit_or :: state.allow_bit_or
+            state.allow_bit_or = true
+            defer state.allow_bit_or = previous_bit_or
             state.allow_record_literals = true
             defer state.allow_record_literals = previous
             state.paren_depth += 1
@@ -1910,7 +1942,7 @@ skip_operand_newlines proc(state @mut State) void {
     # a missing operand must not consume the declaration or assignment on the next line.
     if (
         named_binding_starts(state)
-        or (next_is(state, .ident) and next_n_is(state, 1, .equal))
+        or (next_is(state, .ident) and is_assignment_operator(state.tokens[state.next_token + 1].kind))
     ) state.next_token = start
 }
 
@@ -2083,7 +2115,7 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 @hide:file
 prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
     return match kind {
-        .minus, .bang, .ampersand, .try: BindingPowerScalar(50)
+        .minus, .bang, .tilde, .ampersand, .try: BindingPowerScalar(50)
         else: null
     }
 }
@@ -2095,6 +2127,8 @@ infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
         .and: BindingPower{ left = BindingPowerScalar(4), right = BindingPowerScalar(5) }
         .equal_equal, .not_equal: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
         .less, .less_equal, .greater, .greater_equal: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
+        .ampersand, .xor, .pipe: BindingPower{ left = BindingPowerScalar(22), right = BindingPowerScalar(23) }
+        .shift_left, .shift_right, .shift_left_saturating: BindingPower{ left = BindingPowerScalar(25), right = BindingPowerScalar(26) }
         .plus, .minus: BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) }
         .star, .slash: BindingPower{ left = BindingPowerScalar(40), right = BindingPowerScalar(41) }
         else: null
@@ -2110,6 +2144,12 @@ binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
         .minus: .subtract
         .star: .multiply
         .slash: .divide
+        .ampersand: .bit_and
+        .pipe: .bit_or
+        .xor: .bit_xor
+        .shift_left: .shift_left
+        .shift_right: .shift_right
+        .shift_left_saturating: .shift_left_saturating
         .equal_equal: .equal
         .not_equal: .not_equal
         .less: .less
@@ -2117,5 +2157,27 @@ binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
         .greater: .greater
         .greater_equal: .greater_equal
         else: unreachable
+    }
+}
+
+@hide:file
+is_assignment_operator proc(kind lexer.TokenKind) bool {
+    return kind == .equal or assignment_operator(kind) != null
+}
+
+@hide:file
+assignment_operator proc(kind lexer.TokenKind) ?ast.BinaryOperator {
+    return match kind {
+        .plus_equal: .add
+        .minus_equal: .subtract
+        .star_equal: .multiply
+        .slash_equal: .divide
+        .ampersand_equal: .bit_and
+        .pipe_equal: .bit_or
+        .xor_equal: .bit_xor
+        .shift_left_equal: .shift_left
+        .shift_right_equal: .shift_right
+        .shift_left_saturating_equal: .shift_left_saturating
+        else: null
     }
 }
