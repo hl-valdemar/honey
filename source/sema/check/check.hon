@@ -122,7 +122,7 @@ Storage :: struct {
     allocator mem.Allocator
 }
 
-#! owns node-indexed types, aggregate descriptors, initializer mappings, and function fallthrough obligations; release with deinit.
+#! owns node-indexed types, aggregate descriptors, initializer mappings, and function/value-block fallthrough obligations; release with deinit.
 #! borrows the caller-owned AST for signature comparisons; diagnostic IDs refer to the caller-owned store.
 Result :: struct { storage Storage }
 
@@ -140,6 +140,8 @@ Role :: enum {
     invalid,
     body,
     return_stmt,
+    yield_stmt,
+    value_body,
     if_stmt,
     assignment_stmt,
     while_stmt,
@@ -186,6 +188,9 @@ Cell :: struct {
     enclosing_arm ast.NodeId = ast.NodeId(maxval!(u32))
     match_owner ast.NodeId = ast.NodeId(maxval!(u32))
     narrowed_type Type = Type{}
+    yield_owner ast.NodeId = ast.NodeId(maxval!(u32))
+    first_yield ast.NodeId = ast.NodeId(maxval!(u32))
+    next_yield ast.NodeId = ast.NodeId(maxval!(u32))
 }
 
 @hide:file
@@ -226,6 +231,7 @@ State :: struct {
     collecting_assignment bool = false
     has_assignments bool = false
     pointer_depth usize = 0
+    yield_owner ast.NodeId = ast.NodeId(maxval!(u32))
 }
 
 #! borrows `resolution` and `diagnostic_store` during checking; Result retains the AST borrow for signature comparisons.
@@ -599,6 +605,28 @@ check_elaborated proc(
             }
         }
     }
+    for 0..count |i| {
+        id :: ast.NodeId(i)
+        explicit :: cells[i].role == .expression and ast.expr_kind(tree, id) == .block_expr
+        if (!explicit and cells[i].role != .value_body) continue
+        result :: types[i]
+        if (result.kind == .none or result.kind == .void or result.kind == .invalid) continue
+        body :: if (explicit) ast.block_expr(tree, id) else id
+        if (!block_falls_through(&state, body)) continue
+        diagnostic :: try diagnostics.add(diagnostic_store, .missing_yield, ast.node_span(tree, body))
+        hashmap.put(&fallthroughs, id, diagnostic) catch |err| {
+            match err {
+                .key_exists: unreachable
+                else: return err
+            }
+        }
+        if (explicit) hashmap.put(&fallthroughs, body, diagnostic) catch |err| {
+            match err {
+                .key_exists: unreachable
+                else: return err
+            }
+        }
+    }
     return Result{ storage = Storage{
         tree = tree,
         types = types,
@@ -622,10 +650,10 @@ type_of proc(result @Result, id ast.NodeId) Type {
     return result.storage.types[usize(id)]
 }
 
-#! returns the original diagnostic for a function's nonvoid fallthrough, independent of body errors.
-#! null means the function has no fallthrough obligation; lowering still owns trap placement.
-fallthrough_diagnostic proc(result @Result, function ast.NodeId) ?diagnostics.DiagnosticId {
-    return hashmap.get(&result.storage.fallthroughs, function)
+#! returns the original diagnostic for a function or value block's nonvoid fallthrough.
+#! null means there is no fallthrough obligation; lowering still owns trap placement.
+fallthrough_diagnostic proc(result @Result, owner ast.NodeId) ?diagnostics.DiagnosticId {
+    return hashmap.get(&result.storage.fallthroughs, owner)
 }
 
 array_type_count proc(result @Result) usize {
@@ -824,6 +852,8 @@ join proc(state @mut State, left, right ast.NodeId) void {
 
 @hide:file
 depend proc(state @mut State, source, dependent ast.NodeId) void ! mem.AllocError {
+    # a value block keeps its result type when only an unexecuted path is invalid.
+    if (state.cells[usize(dependent)].role == .value_body) return
     next :: state.cells[usize(source)].first_edge
     try arraylist.append(&state.edges, Edge{ dependent = dependent, next = next })
     state.cells[usize(source)].first_edge = state.edges.items.len - 1
@@ -1036,6 +1066,17 @@ collect_capture proc(state @mut State, id, body ast.NodeId) void ! mem.AllocErro
 }
 
 @hide:file
+collect_value_block proc(state @mut State, body, owner ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    saved_owner :: state.yield_owner
+    state.yield_owner = owner
+    defer state.yield_owner = saved_owner
+    # both explicit and implicit bodies preserve errors on their executed paths.
+    state.cells[usize(body)].role = .value_body
+    state.cells[usize(body)].assignment_value = state.collecting_assignment
+    try collect_block(state, body, state.return_annotation, state.in_loop)
+}
+
+@hide:file
 collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop bool) void ! (mem.AllocError | diagnostics.CapacityError) {
     saved_annotation :: state.return_annotation
     saved_loop :: state.in_loop
@@ -1046,7 +1087,7 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
         state.in_loop = saved_loop
     }
     tree :: state.tree
-    state.cells[usize(id)].role = .body
+    if (state.cells[usize(id)].role == .none) state.cells[usize(id)].role = .body
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
         match ast.stmt_kind(tree, statement) {
@@ -1063,6 +1104,23 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                     state.diagnostics, .cleanup_control_flow, ast.node_span(tree, statement),
                 ))
                 if (ast.return_stmt(tree, statement).value) |value| {
+                    try collect_expression(state, value)
+                    try depend(state, value, statement)
+                }
+            }
+            .yield_stmt: {
+                state.cells[usize(statement)].role = .yield_stmt
+                state.cells[usize(statement)].type = Type{ kind = .void }
+                owner :: state.yield_owner
+                state.cells[usize(statement)].yield_owner = owner
+                if (owner == ast.NodeId(maxval!(u32))) {
+                    code :: if (state.in_cleanup) diagnostics.Code.cleanup_control_flow else diagnostics.Code.yield_outside_block
+                    try fail(state, statement, code, ast.node_span(tree, statement))
+                } else {
+                    state.cells[usize(statement)].next_yield = state.cells[usize(owner)].first_yield
+                    state.cells[usize(owner)].first_yield = statement
+                }
+                if (ast.yield_stmt(tree, statement).value) |value| {
                     try collect_expression(state, value)
                     try depend(state, value, statement)
                 }
@@ -1165,7 +1223,7 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 cleanup :: ast.cleanup_stmt(tree, statement)
                 state.cells[usize(statement)].role = .cleanup
                 state.cells[usize(statement)].type = Type{ kind = .void }
-                result :: state.types[usize(return_annotation)]
+                result :: if (return_annotation == ast.NodeId(maxval!(u32))) Type{} else state.types[usize(return_annotation)]
                 if (ast.stmt_kind(tree, statement) == .errdefer_stmt and result.kind != .fallible and result.kind != .invalid) {
                     state.cells[usize(statement)].type = invalid_type(try diagnostics.add(
                         state.diagnostics, .errdefer_outside_fallible, cleanup.span,
@@ -1177,9 +1235,12 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                         state.arrays.items[usize(result.array_type)].error_type else result
                 }
                 saved_cleanup :: state.in_cleanup
+                saved_owner :: state.yield_owner
+                state.yield_owner = ast.NodeId(maxval!(u32))
                 state.in_cleanup = true
                 try collect_block(state, cleanup.body, return_annotation, false)
                 state.in_cleanup = saved_cleanup
+                state.yield_owner = saved_owner
             }
             .break_stmt, .continue_stmt: {
                 state.cells[usize(statement)].role = .loop_control
@@ -1198,7 +1259,7 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
             .invalid: collect_invalid(state, statement)
         }
         source :: if (ast.stmt_kind(tree, statement) == .expression) ast.statement_expr(tree, statement) else statement
-        try depend(state, source, id)
+        if (state.cells[usize(id)].role != .value_body) try depend(state, source, id)
     }
 }
 
@@ -1212,6 +1273,9 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
     state.cells[usize(id)].in_cleanup = state.in_cleanup
     state.cells[usize(id)].narrowing_arm = state.narrowing_arm
     match ast.expr_kind(tree, id) {
+        .block_expr: {
+            try collect_value_block(state, ast.block_expr(tree, id), id)
+        }
         .comptime_expr: try fail(state, id, .comptime_argument_required, ast.node_span(tree, id))
         .typed_constant: {
             value :: ast.typed_constant(tree, id)
@@ -1235,7 +1299,8 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
                 state.cells[usize(capture)].type = Type{}
             }
             if (expression.handler_is_block) {
-                try collect_block(state, expression.handler, state.return_annotation, state.in_loop)
+                try collect_value_block(state, expression.handler, expression.handler)
+                try depend(state, expression.handler, id)
             } else try collect_expression(state, expression.handler)
         }
         .literal_int: {
@@ -1615,11 +1680,20 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
             return
         }
     }
+    if (
+        state.cells[usize(id)].role == .value_body
+        or (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .block_expr)
+    ) {
+        state.cells[index].expected = expected
+        try demand_yields(state, id, expected, code)
+        seed(state, id, expected)
+        return
+    }
     if (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .match_expr) {
         state.cells[index].expected = expected
         for 0..ast.match_arm_count(state.tree, id) |i| {
             arm :: ast.match_arm_view(state.tree, ast.match_arm(state.tree, id, i))
-            if (arm.expression) try demand(state, arm.body, expected, code)
+            try demand(state, arm.body, expected, code)
         }
         return
     }
@@ -1981,9 +2055,23 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
         try validate_match(state, id)
         return
     }
+    if (state.cells[usize(id)].role == .yield_stmt) {
+        owner :: state.cells[usize(id)].yield_owner
+        if (owner == ast.NodeId(maxval!(u32)) or state.types[usize(id)].kind == .invalid) return
+        expected :: state.types[usize(owner)]
+        if (expected.kind == .none or expected.kind == .invalid) return
+        if (ast.yield_stmt(tree, id).value) |value| {
+            actual :: state.types[usize(value)]
+            if (actual.kind != .invalid and !assignable_value(state, value, actual, expected)) {
+                try fail(state, value, .yield_type_mismatch, ast.node_span(tree, value))
+            }
+        }
+        return
+    }
     match state.cells[usize(id)].role {
         .declaration: {
             declaration :: ast.statement_decl(tree, id)
+            if (!expression_falls_through(state, declaration.initializer)) return
             if (declaration.type == null and state.types[usize(declaration.initializer)].kind == .null) {
                 try fail(state, declaration.initializer, .cannot_infer_type, ast.node_span(tree, declaration.initializer))
             }
@@ -2013,6 +2101,10 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
         }
         .return_stmt: {
             statement :: ast.return_stmt(tree, id)
+            if (state.cells[usize(id)].return_annotation == ast.NodeId(maxval!(u32))) {
+                try fail(state, id, .return_type_mismatch, statement.span)
+                return
+            }
             expected :: state.types[usize(state.cells[usize(id)].return_annotation)]
             if (expected.kind == .invalid) return
             if (state.types[usize(id)].kind == .invalid) return
@@ -2195,37 +2287,84 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
 
 
 @hide:file
+BlockFlow :: struct {
+    falls bool = true
+    yields bool = false
+}
+
+@hide:file
 block_falls_through proc(state @State, id ast.NodeId) bool {
+    return block_flow(state, id).falls
+}
+
+@hide:file
+value_block_completes proc(state @State, id ast.NodeId) bool {
+    flow :: block_flow(state, id)
+    return flow.falls or flow.yields
+}
+
+@hide:file
+expression_falls_through proc(state @State, id ast.NodeId) bool {
     tree :: state.tree
+    match ast.expr_kind(tree, id) {
+        .block_expr: return value_block_completes(state, ast.block_expr(tree, id))
+        .match_expr: {
+            if (!state.exhaustive[usize(id)]) return true
+            for 0..ast.match_arm_count(tree, id) |i| {
+                arm :: ast.match_arm_view(tree, ast.match_arm(tree, id, i))
+                if (arm.expression) {
+                    if (expression_falls_through(state, arm.body)) return true
+                } else if (value_block_completes(state, arm.body)) return true
+            }
+            return false
+        }
+        else: return true
+    }
+}
+
+@hide:file
+block_flow proc(state @State, id ast.NodeId) BlockFlow {
+    tree :: state.tree
+    result := BlockFlow{}
     for (0..ast.block_statement_count(tree, id)) |i| {
         statement :: ast.block_statement(tree, id, i)
         kind :: ast.stmt_kind(tree, statement)
         source :: if (kind == .expression) ast.statement_expr(tree, statement) else statement
-        if (state.types[usize(source)].kind == .invalid) return false
+        if (state.types[usize(source)].kind == .invalid) {
+            result.falls = false
+            return result
+        }
         match kind {
-            .return_stmt, .break_stmt, .continue_stmt, .invalid: return false
-            .block_stmt: if (!block_falls_through(state, ast.statement_block(tree, statement))) return false
+            .yield_stmt: {
+                result.yields = true
+                result.falls = false
+            }
+            .return_stmt, .break_stmt, .continue_stmt, .invalid: result.falls = false
+            .block_stmt: {
+                nested :: block_flow(state, ast.statement_block(tree, statement))
+                result.yields = result.yields or nested.yields
+                result.falls = nested.falls
+            }
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
-                then_falls :: block_falls_through(state, conditional.then_block)
+                then_flow :: block_flow(state, conditional.then_block)
+                result.yields = result.yields or then_flow.yields
                 if (conditional.else_block) |other| {
-                    if (!then_falls and !block_falls_through(state, other)) return false
+                    else_flow :: block_flow(state, other)
+                    result.yields = result.yields or else_flow.yields
+                    result.falls = then_flow.falls or else_flow.falls
                 }
             }
-            .expression: {
-                if (ast.expr_kind(tree, source) == .match_expr and state.exhaustive[usize(source)]) {
-                    falls := false
-                    for 0..ast.match_arm_count(tree, source) |j| {
-                        arm :: ast.match_arm_view(tree, ast.match_arm(tree, source, j))
-                        if (arm.expression or block_falls_through(state, arm.body)) falls = true
-                    }
-                    if (!falls) return false
-                }
-            }
+            .while_stmt: result.yields = result.yields or block_flow(state, ast.while_stmt(tree, statement).body).yields
+            .for_stmt: result.yields = result.yields or block_flow(state, ast.for_stmt(tree, statement).body).yields
+            .expression: result.falls = expression_falls_through(state, source)
+            .declaration: result.falls = expression_falls_through(state, ast.statement_decl(tree, statement).initializer)
+            .assignment_stmt: result.falls = expression_falls_through(state, ast.assignment_stmt(tree, statement).value)
             else: {}
         }
+        if (!result.falls) return result
     }
-    return true
+    return result
 }
 
 @hide:file
@@ -2803,12 +2942,47 @@ unify_elements proc(state @mut State, left, right ast.NodeId) void ! (mem.AllocE
 }
 
 @hide:file
+demand_yields proc(state @mut State, owner ast.NodeId, expected Type, code diagnostics.Code) void ! (mem.AllocError | diagnostics.CapacityError) {
+    yield_id := state.cells[usize(owner)].first_yield
+    while (yield_id != ast.NodeId(maxval!(u32))) {
+        if (ast.yield_stmt(state.tree, yield_id).value) |value| try demand(state, value, expected, code)
+        yield_id = state.cells[usize(yield_id)].next_yield
+    }
+}
+
+@hide:file
+infer_value_block proc(state @mut State, owner ast.NodeId, defaults bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    expected := state.cells[root(state, usize(owner))].expected
+    yield_id := state.cells[usize(owner)].first_yield
+    while (yield_id != ast.NodeId(maxval!(u32))) {
+        if (ast.yield_stmt(state.tree, yield_id).value) |value| {
+            if (expected.kind != .none) try demand(state, value, expected, .yield_type_mismatch)
+            actual :: try infer_shape(state, value, defaults)
+            if (expected.kind == .none and actual.kind != .none and actual.kind != .invalid) expected = actual
+        }
+        yield_id = state.cells[usize(yield_id)].next_yield
+    }
+    if (expected.kind == .none and defaults and state.cells[usize(owner)].first_yield == ast.NodeId(maxval!(u32))) {
+        expected = Type{ kind = .void }
+    }
+    if (expected.kind != .none) {
+        try demand_yields(state, owner, expected, .yield_type_mismatch)
+        seed(state, owner, expected)
+    }
+    return group_type(state, owner)
+}
+
+@hide:file
 infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
     index :: root(state, usize(id))
     if (state.cells[index].visiting) return state.cells[index].type
     if (state.cells[index].type.kind == .invalid) return state.cells[index].type
     state.cells[index].visiting = true
     defer state.cells[index].visiting = false
+    if (
+        state.cells[usize(id)].role == .value_body
+        or (state.cells[usize(id)].role == .expression and ast.expr_kind(state.tree, id) == .block_expr)
+    ) return try infer_value_block(state, id, defaults)
     if (state.cells[usize(id)].role == .loop_capture and state.cells[usize(id)].for_loop != ast.NodeId(maxval!(u32))) {
         loop :: ast.for_stmt(state.tree, state.cells[usize(id)].for_loop)
         actual :: try infer_shape(state, loop.iterable, defaults)
@@ -3186,7 +3360,7 @@ apply_contexts proc(state @mut State, assignment_values, early bool) void ! (mem
             view :: ast.statement_decl(tree, id)
             if (view.type) |annotation| try context_demand(state, view.initializer, state.types[usize(annotation)], .type_mismatch, early)
         }
-        if (!assignment_values and state.cells[i].role == .return_stmt) {
+        if (!assignment_values and state.cells[i].role == .return_stmt and state.cells[i].return_annotation != ast.NodeId(maxval!(u32))) {
             if (ast.return_stmt(tree, id).value) |value| {
                 try context_demand(state, value, state.types[usize(state.cells[i].return_annotation)], .return_type_mismatch, early)
             }
@@ -4130,7 +4304,7 @@ collect_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
         if (arm.expression) {
             try collect_expression(state, arm.body)
         } else {
-            try collect_block(state, arm.body, state.return_annotation, state.in_loop)
+            try collect_value_block(state, arm.body, arm.body)
         }
         state.narrowing_arm = saved_arm
     }
@@ -4173,7 +4347,6 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     result :: root(state, usize(id))
     expected := state.cells[result].expected
     has_block := false
-    has_value := false
     for 0..ast.match_arm_count(state.tree, id) |i| {
         arm_id :: ast.match_arm(state.tree, id, i)
         arm :: ast.match_arm_view(state.tree, arm_id)
@@ -4221,20 +4394,16 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
                 }
             }
         }
-        if (arm.expression) {
-            has_value = true
+        if (arm.expression or state.cells[usize(arm.body)].first_yield != ast.NodeId(maxval!(u32))) {
             actual :: try infer_shape(state, arm.body, defaults)
             if (expected.kind == .none and actual.kind != .none and actual.kind != .invalid) expected = actual
         } else has_block = true
     }
-    if (has_block and !has_value) expected = Type{ kind = .void }
-    if (has_block and has_value and defaults) {
-        try fail(state, id, .type_mismatch, ast.node_span(state.tree, id))
-    }
+    if (expected.kind == .none and has_block and defaults) expected = Type{ kind = .void }
     if (expected.kind != .none) {
         for 0..ast.match_arm_count(state.tree, id) |i| {
             arm :: ast.match_arm_view(state.tree, ast.match_arm(state.tree, id, i))
-            if (arm.expression) try demand(state, arm.body, expected, .type_mismatch)
+            try demand(state, arm.body, expected, .type_mismatch)
         }
         seed(state, id, expected)
     }
@@ -4685,10 +4854,8 @@ infer_fallible_expression proc(state @mut State, id ast.NodeId, defaults bool) T
     if (catching) {
         expression :: ast.catch_expr(state.tree, id)
         if (expression.capture) |capture| seed_capture(state, capture, descriptor.error_type)
-        if (!expression.handler_is_block) {
-            try demand(state, expression.handler, descriptor.element, .catch_type_mismatch)
-            _ = try infer_shape(state, expression.handler, defaults)
-        }
+        try demand(state, expression.handler, descriptor.element, .catch_type_mismatch)
+        _ = try infer_shape(state, expression.handler, defaults)
     }
     return group_type(state, id)
 }
@@ -4706,9 +4873,7 @@ validate_fallible_expression proc(state @mut State, id ast.NodeId) void ! (mem.A
     descriptor :: state.arrays.items[usize(source.array_type)]
     if (catching) {
         expression :: ast.catch_expr(state.tree, id)
-        if (expression.handler_is_block) {
-            if (descriptor.element.kind != .void and block_falls_through(state, expression.handler)) try fail(state, expression.handler, .catch_type_mismatch, ast.node_span(state.tree, expression.handler))
-        } else {
+        if (!expression.handler_is_block) {
             actual :: state.types[usize(expression.handler)]
             if (actual.kind != .invalid and !assignable_value(state, expression.handler, actual, descriptor.element)) try fail(state, expression.handler, .catch_type_mismatch, ast.node_span(state.tree, expression.handler))
         }

@@ -2040,3 +2040,205 @@ keeps_match_default_arm_after_newline_single_statement_if test {
     try testing.expect(branch.else_block == null)
     try testing.expect(ast.match_arm_view(&tree, ast.match_arm(&tree, expression, 1)).catch_all)
 }
+
+parses_value_blocks_and_clones_yield_children test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc(flag bool) int {
+        `    result :: {
+        `        local :: 3
+        `        { if (flag) yield local }
+        `        yield { yield 4 }
+        `    }
+        `    return if (flag) { yield result } else { yield 5 }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    root :: try parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    original :: ast.view(&builder, root)
+    mapping :: try mem.alloc(ast.NodeId, mem.c_allocator, ast.node_count(&original))
+    defer mem.free(mem.c_allocator, mapping)
+    mem.set(mapping, maxval!(ast.NodeId))
+    cloned :: try ast.clone_subtree(&builder, root, mapping)
+    tree :: ast.view(&builder, root)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    roots [2]ast.NodeId :: [root, cloned]
+    for (roots) |package| {
+        function :: ast.function_decl(&tree, ast.child(&tree, package, 0))
+        value :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0)).initializer
+        try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, value))
+        try testing.expect_equal(ast.NodeClass.expression, ast.node_class(&tree, value))
+        block :: ast.block_expr(&tree, value)
+        try testing.expect_equal(3, ast.block_statement_count(&tree, block))
+        ordinary :: ast.statement_block(&tree, ast.block_statement(&tree, block, 1))
+        branch :: ast.if_stmt(&tree, ast.block_statement(&tree, ordinary, 0))
+        first :: ast.block_statement(&tree, branch.then_block, 0)
+        try testing.expect_equal(ast.StmtKind.yield_stmt, ast.stmt_kind(&tree, first))
+        try testing.expect_equal(ast.NodeClass.statement, ast.node_class(&tree, first))
+        try testing.expect_equal("yield local", ast.source_text(&tree, ast.yield_stmt(&tree, first).span))
+        last :: ast.yield_stmt(&tree, ast.block_statement(&tree, block, 2))
+        try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, last.value?))
+        nested :: ast.block_statement(&tree, ast.block_expr(&tree, last.value?), 0)
+        try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, ast.yield_stmt(&tree, nested).value?))
+        conditional :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 1)).value?
+        for (0..ast.match_arm_count(&tree, conditional)) |index| {
+            arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, conditional, index))
+            try testing.expect(arm.expression)
+            try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, arm.body))
+        }
+    }
+    first_function :: ast.function_decl(&tree, ast.child(&tree, root, 0))
+    first_value :: ast.statement_decl(&tree, ast.block_statement(&tree, first_function.body, 0)).initializer
+    copied_value :: mapping[usize(first_value)]
+    try testing.expect(copied_value != first_value)
+    try testing.expect_equal(mapping[usize(ast.block_expr(&tree, first_value))], ast.block_expr(&tree, copied_value))
+}
+
+parses_value_blocks_starting_with_named_assignments test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() i16 {
+        `    value ?i16 :: 42
+        `    return if value |payload| { payload = 7
+        `        yield payload
+        `    } else 0
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    conditional :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 1)).value?
+    arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, conditional, 0))
+    try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, arm.body))
+    block :: ast.block_expr(&tree, arm.body)
+    try testing.expect_equal(2, ast.block_statement_count(&tree, block))
+    first :: ast.block_statement(&tree, block, 0)
+    try testing.expect_equal(ast.StmtKind.assignment_stmt, ast.stmt_kind(&tree, first))
+    assignment :: ast.assignment_stmt(&tree, first)
+    try testing.expect_equal("payload", ast.source_text(&tree, ast.node_span(&tree, assignment.target)))
+    try testing.expect_equal("7", ast.source_text(&tree, ast.node_span(&tree, assignment.value)))
+    last :: ast.block_statement(&tree, block, 1)
+    try testing.expect_equal(ast.StmtKind.yield_stmt, ast.stmt_kind(&tree, last))
+    try testing.expect_equal("payload", ast.source_text(&tree, ast.node_span(&tree, ast.yield_stmt(&tree, last).value?)))
+}
+
+preserves_record_literals_alongside_value_blocks test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `empty :: {}
+        `single :: {1}
+        `pair :: {1, 2}
+        `keyed :: { value = { yield 3 } }
+        `keyword :: { yield = 4 }
+        `choose :: if (true) { value = 7 } else { value = 8 }
+        `conditional :: {if (true) 1 else 2}
+        `block :: { if (true) yield 9 }
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(8, ast.package_decl_count(&tree))
+    for (usize(0)..usize(5)) |index| {
+        value :: ast.statement_decl(&tree, ast.package_decl(&tree, index)).initializer
+        try testing.expect_equal(ast.ExprKind.record_literal, ast.expr_kind(&tree, value))
+    }
+    choose :: ast.statement_decl(&tree, ast.package_decl(&tree, 5)).initializer
+    for (usize(0)..usize(2)) |index| {
+        arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, choose, index))
+        try testing.expect_equal(ast.ExprKind.record_literal, ast.expr_kind(&tree, arm.body))
+    }
+    conditional :: ast.statement_decl(&tree, ast.package_decl(&tree, 6)).initializer
+    try testing.expect_equal(ast.ExprKind.record_literal, ast.expr_kind(&tree, conditional))
+    block :: ast.statement_decl(&tree, ast.package_decl(&tree, 7)).initializer
+    try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, block))
+}
+
+requires_yield_values_and_recovers_following_statements test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() int {
+        `    value :: {
+        `        yield
+        `        after :: 2
+        `        if (true) yield else yield 3
+        `        yield 4 5
+        `        yield after
+        `    }
+        `    return value
+        `}
+        `tail :: 7
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(3, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    value :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0)).initializer
+    block :: ast.block_expr(&tree, value)
+    try testing.expect_equal(5, ast.block_statement_count(&tree, block))
+    missing :: ast.yield_stmt(&tree, ast.block_statement(&tree, block, 0))
+    try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, missing.value?))
+    try testing.expect_equal(ast.StmtKind.declaration, ast.stmt_kind(&tree, ast.block_statement(&tree, block, 1)))
+    try testing.expect_equal(ast.StmtKind.invalid, ast.stmt_kind(&tree, ast.block_statement(&tree, block, 3)))
+    last :: ast.yield_stmt(&tree, ast.block_statement(&tree, block, 4))
+    try testing.expect_equal("after", ast.source_text(&tree, ast.node_span(&tree, last.value?)))
+}
+
+keeps_yielding_match_and_catch_bodies_as_raw_blocks test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() int {
+        `    selected :: match 1 { 1: { yield 2 }, else: yield 3 }
+        `    recovered :: selected catch |err| { yield err }
+        `    return use({ yield recovered }, $({ yield 4 }))
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    function :: ast.function_decl(&tree, ast.package_decl(&tree, 0))
+    selected :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 0)).initializer
+    for (usize(0)..usize(2)) |index| {
+        arm :: ast.match_arm_view(&tree, ast.match_arm(&tree, selected, index))
+        try testing.expect(!arm.expression)
+        try testing.expect_equal(ast.NodeClass.block, ast.node_class(&tree, arm.body))
+        try testing.expect_equal(ast.StmtKind.yield_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, arm.body, 0)))
+    }
+    recovered :: ast.statement_decl(&tree, ast.block_statement(&tree, function.body, 1)).initializer
+    handler :: ast.catch_expr(&tree, recovered)
+    try testing.expect(handler.handler_is_block)
+    try testing.expect_equal(ast.NodeClass.block, ast.node_class(&tree, handler.handler))
+    try testing.expect_equal(ast.StmtKind.yield_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, handler.handler, 0)))
+    call :: ast.return_stmt(&tree, ast.block_statement(&tree, function.body, 2)).value?
+    try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, ast.call_arg(&tree, call, 0)))
+    constant :: ast.call_arg(&tree, call, 1)
+    try testing.expect_equal(ast.ExprKind.comptime_expr, ast.expr_kind(&tree, constant))
+    try testing.expect_equal(ast.ExprKind.block_expr, ast.expr_kind(&tree, ast.comptime_operand(&tree, constant)))
+}

@@ -321,6 +321,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .while: return try parse_while(state, allow_else)
         .for, .inline: return try parse_for(state, allow_else)
         .return: return try parse_return(state, allow_else)
+        .yield: return try parse_yield(state, allow_else)
         .break, .continue: return try parse_loop_control(state, allow_else)
         .defer, .errdefer: return try parse_cleanup(state, allow_else)
         .open_curly: return try ast.add_block_stmt(state.builder, try parse_block(state))
@@ -383,6 +384,31 @@ parse_return proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         },
         value,
     )
+}
+
+@hide:file
+parse_yield proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    keyword :: try consume(state, .yield)
+    value :: if (
+        next_is(state, .newline) or next_is(state, .close_curly) or next_is(state, .eof)
+        or (state.match_arm_body and next_is(state, .comma))
+        or (allow_else and next_is(state, .else))
+    ) {
+        diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, keyword.span)
+        yield try ast.add_invalid_expr(state.builder, keyword.span, diagnostic)
+    } else {
+        yield try parse_expr(state)
+    }
+    if (
+        !next_is(state, .newline) and !next_is(state, .close_curly) and !next_is(state, .eof)
+        and !(allow_else and next_is(state, .else))
+        and !(state.match_arm_body and next_is(state, .comma))
+    ) return .unexpected_token
+    return try ast.add_yield_stmt(state.builder, ast.Span{
+        start = keyword.span.start,
+        end = state.tokens[state.next_token - 1].span.end,
+        source = keyword.span.source,
+    }, value)
 }
 
 @hide:file
@@ -925,7 +951,7 @@ starts_type proc(kind lexer.TokenKind) bool {
 @hide:file
 member_name proc(kind lexer.TokenKind) bool {
     return match kind {
-        .ident, .if, .else, .for, .inline, .while, .proc, .return, .break, .continue,
+        .ident, .if, .else, .for, .inline, .while, .proc, .return, .yield, .break, .continue,
         .true, .false, .and, .or, .mut, .struct, .c_struct, .opaque, .enum, .union, .distinct,
         .alias, .match, .import, .test, .c_func, .null, .undefined, .try, .catch, .defer, .errdefer: true
         else: false
@@ -1158,7 +1184,7 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
     state.match_arm_body = true
     defer state.match_arm_body = previous
     statement_body :: match current(state).kind {
-        .open_curly, .return, .break, .continue, .if, .while, .for, .inline, .defer, .errdefer: true
+        .open_curly, .return, .yield, .break, .continue, .if, .while, .for, .inline, .defer, .errdefer: true
         else: false
     }
     body ast.NodeId := undefined
@@ -1702,6 +1728,41 @@ named_binding_starts proc(state @State) bool {
 }
 
 @hide:file
+brace_starts_block proc(state @State) bool {
+    first := state.next_token + 1
+    while (first < state.tokens.len and state.tokens[first].kind == .newline) first += 1
+    # empty records and braces without statement markers retain record syntax.
+    if (first >= state.tokens.len or state.tokens[first].kind == .close_curly) return false
+    depth := usize(0)
+    for (state.next_token)..(state.tokens.len) |index| {
+        kind :: state.tokens[index].kind
+        if (kind == .eof) return false
+        if (depth > 0
+            and (state.tokens[first].kind == .if or state.tokens[first].kind == .open_curly)
+            and (kind == .yield or kind == .return or kind == .defer or kind == .errdefer)
+            and state.tokens[index - 1].kind != .dot
+            and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) return true
+        if (depth == 1) {
+            if (kind == .double_colon or kind == .colon_equal) return true
+            previous :: if (index > first) state.tokens[index - 1].kind else lexer.TokenKind.open_curly
+            if (previous != .dot and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) {
+                match kind {
+                    .yield, .return, .break, .continue, .while, .for, .inline, .defer, .errdefer: return true
+                    else: {}
+                }
+            }
+        }
+        if (kind == .open_curly or kind == .open_paren or kind == .open_bracket) depth += 1
+        if (kind == .close_curly or kind == .close_paren or kind == .close_bracket) {
+            if (depth == 0) return false
+            depth -= 1
+            if (depth == 0) return false
+        }
+    }
+    return false
+}
+
+@hide:file
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
@@ -1736,6 +1797,10 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
             }, member_id)
         }
         .open_curly: {
+            if (state.allow_record_literals and brace_starts_block(state)) {
+                body :: try parse_block(state)
+                return try ast.add_block_expr(state.builder, ast.builder_span(state.builder, body), body)
+            }
             if (state.allow_record_literals) return try parse_record_literal(state, null, token.span.start)
             diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, token.span)
             return try ast.add_invalid_expr(state.builder, token.span, diagnostic)
@@ -1808,7 +1873,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 is_expression_boundary proc(kind lexer.TokenKind) bool {
     return match kind {
-        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .if, .while, .for, .inline, .defer, .errdefer, .eof: true
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .yield, .if, .while, .for, .inline, .defer, .errdefer, .eof: true
         else: false
     }
 }

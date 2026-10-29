@@ -411,6 +411,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .return_stmt: {
                 if (ast.return_stmt(tree, statement).value) |value| try resolve_expr(state, scope, value)
             }
+            .yield_stmt: try resolve_expr(state, scope, ast.yield_stmt(tree, statement).value?)
             .break_stmt, .continue_stmt: {}
             .block_stmt: try resolve_arm(state, scope, ast.statement_block(tree, statement))
             .defer_stmt, .errdefer_stmt: {
@@ -539,6 +540,7 @@ resolve_expr proc(
     tree :: state.tree
     match ast.expr_kind(tree, id) {
         .comptime_expr: try resolve_expr(state, scope, ast.comptime_operand(tree, id))
+        .block_expr: try resolve_arm(state, scope, ast.block_expr(tree, id))
         .typed_constant: {
             value :: ast.typed_constant(tree, id)
             try resolve_expr(state, scope, value.type)

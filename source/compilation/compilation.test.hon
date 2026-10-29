@@ -801,3 +801,49 @@ file_local_declarations_are_isolated_from_siblings_and_import_selection test {
         }
     }
 }
+
+yielding_blocks_recompile_owned_constants_and_generated_types test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        bytes := try owned_text(
+            `Choose proc(wide bool) type {
+            `    return { Selected := i8
+            `        if (wide) Selected = i16
+            `        yield Selected }
+            `}
+            `Box proc(wide bool) type {
+            `    return struct { value Choose(wide) = { yield 42 } }
+            `}
+            `compute proc() i16 {
+            `    return { value i16 := 40
+            `        defer value = 0
+            `        yield value + 2 }
+            `}
+            `main proc() i16 {
+            `    value Box(true) :: {}
+            `    constant :: $(compute())
+            `    return { yield if (constant == value.value) constant else -1 }
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        _ = try add_source(&session, root, "yielding.hon", &bytes, &diagnostic_store)
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

@@ -37,6 +37,9 @@ Code :: enum {
     cannot_infer_type
     missing_return
     return_type_mismatch
+    yield_outside_block
+    missing_yield
+    yield_type_mismatch
     condition_not_bool
     invalid_assignment_target
     break_outside_loop
@@ -181,6 +184,9 @@ messages :: $enummap.init(Code, []u8, {
     cannot_infer_type = "cannot infer a type without a type anchor",
     missing_return = "nonvoid function can finish without returning a value",
     return_type_mismatch = "return does not match the function result type",
+    yield_outside_block = "yield requires an enclosing value block",
+    missing_yield = "nonvoid value block can finish without yielding a value",
+    yield_type_mismatch = "yield does not match the value block result type",
     condition_not_bool = "condition must have type bool",
     invalid_assignment_target = "assignment requires a mutable local binding",
     break_outside_loop = "break requires an enclosing loop",
@@ -253,7 +259,7 @@ messages :: $enummap.init(Code, []u8, {
     incompatible_propagated_error = "propagated errors are not a subset of the function error channel",
     catch_type_mismatch = "catch handler must produce the success type or terminate",
     errdefer_outside_fallible = "errdefer requires an enclosing fallible function",
-    cleanup_control_flow = "cleanup cannot escape with return, break, continue, or try",
+    cleanup_control_flow = "cleanup cannot transfer control out of itself",
     comptime_argument_required = "generic argument must be a compile-time value",
     cannot_infer_generic = "cannot infer consistent compile-time arguments from runtime arguments",
     specialization_cycle = "compile-time specialization depends on its unfinished result",

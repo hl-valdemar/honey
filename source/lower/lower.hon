@@ -25,6 +25,15 @@ LoopTargets :: struct {
 }
 
 @hide:file
+ValueTarget :: struct {
+    join ir.BlockId
+    slot u32
+    type typecheck.Type
+    cleanup_depth usize
+    reached bool = false
+}
+
+@hide:file
 State :: struct {
     tree @ast.Tree
     resolution @sema.Resolution
@@ -40,6 +49,7 @@ State :: struct {
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
     loop ?LoopTargets = null
+    value_target ?@mut ValueTarget = null
     return_type typecheck.Type = typecheck.Type{}
     fallthrough_block ?ast.NodeId = null
     fallthrough_diagnostic ?diagnostics.DiagnosticId = null
@@ -412,6 +422,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     state.block = ir.BlockId(0)
     state.terminated = false
     state.loop = null
+    state.value_target = null
     state.fallthrough_block = declaration.body
     state.fallthrough_diagnostic = typecheck.fallthrough_diagnostic(state.checked, id)
     state.return_type = typecheck.type_of(state.checked, declaration.return_type)
@@ -560,7 +571,52 @@ lower_block proc(state @mut State, block ast.NodeId, fresh_scope bool) void ! (m
 }
 
 @hide:file
+lower_value_block proc(state @mut State, block, owner ast.NodeId, type typecheck.Type) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, block)
+    runtime :: lower_type(state, type)
+    shape :: try array_shape(state, type)
+    slot := u32(0)
+    if (runtime != .void) slot = u32(try ir.add_local(state.module, ir.FunctionId(state.function), runtime, shape))
+    join :: try add_block(state)
+    reached :: try lower_value_body(state, block, owner, type, slot, join)
+    state.block = join
+    state.terminated = !reached
+    if (!reached) state.module.functions.items[state.function].blocks.items[usize(join)].terminator = ir.Terminator{ kind = .unreachable }
+    if (!reached or runtime == .void) return ir.no_value
+    return try emit(state, ir.Instruction{ op = .load_local, type = runtime, array_type = shape, slot = slot, span = span })
+}
+
+@hide:file
+lower_value_body proc(state @mut State, block, owner ast.NodeId, type typecheck.Type, slot u32, join ir.BlockId) bool ! (mem.AllocError | diagnostics.CapacityError) {
+    if (trap_type(state, block)) return false
+    target := ValueTarget{ join = join, slot = slot, type = type, cleanup_depth = state.cleanups.items.len }
+    previous_target :: state.value_target
+    state.value_target = &target
+    defer state.value_target = previous_target
+    previous_fallthrough :: state.fallthrough_block
+    previous_diagnostic :: state.fallthrough_diagnostic
+    state.fallthrough_block = block
+    state.fallthrough_diagnostic = typecheck.fallthrough_diagnostic(state.checked, owner)
+    defer state.fallthrough_block = previous_fallthrough
+    defer state.fallthrough_diagnostic = previous_diagnostic
+    try predeclare_locals(state, block)
+    try lower_block(state, block, true)
+    if (!state.terminated) {
+        # checking permits an implicit result only for void blocks.
+        state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+            kind = .jump, target = join, span = ast.node_span(state.tree, block),
+        }
+        target.reached = true
+        state.terminated = true
+    }
+    return target.reached
+}
+
+@hide:file
 lower_cleanups proc(state @mut State, depth usize, error_value ir.ValueId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    previous_target :: state.value_target
+    state.value_target = null
+    defer state.value_target = previous_target
     index := state.cleanups.items.len
     while (index > depth) {
         index -= 1
@@ -932,6 +988,23 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
                 span = declaration.span,
             })
         }
+        .yield_stmt: {
+            statement :: ast.yield_stmt(tree, id)
+            if (state.value_target) |target| {
+                value :: try lower_as(state, statement.value?, target.type)
+                if (state.terminated or trap_type(state, id)) return
+                if (lower_type(state, target.type) != .void) _ = try emit(state, ir.Instruction{
+                    op = .store_local, left = value, slot = target.slot, span = statement.span,
+                })
+                try lower_cleanups(state, target.cleanup_depth, ir.no_value)
+                if (state.terminated) return
+                state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                    kind = .jump, target = target.join, span = statement.span,
+                }
+                target.reached = true
+                state.terminated = true
+            } else if (!trap_type(state, id)) unreachable
+        }
         .return_stmt: {
             statement :: ast.return_stmt(tree, id)
             value := ir.no_value
@@ -1067,7 +1140,6 @@ lower_match proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
             local :: try ir.add_local(state.module, ir.FunctionId(state.function), lower_type(state, capture_type), try array_shape(state, capture_type))
             state.storage[usize(capture)] = Storage{ kind = .local, index = u32(local) }
         }
-        if (!arm_view.expression) try predeclare_locals(state, arm_view.body)
         patterns :: ast.match_pattern_count(tree, arm)
         if (arm_view.catch_all) {
             state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
@@ -1119,7 +1191,10 @@ lower_match proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
             if (!state.terminated and runtime != .void) _ = try emit(state, ir.Instruction{
                 op = .store_local, left = value, slot = result_slot, span = span,
             })
-        } else try lower_block(state, arm_view.body, true)
+        } else {
+            reached :: try lower_value_body(state, arm_view.body, arm_view.body, type, result_slot, join)
+            if (reached) falls = true
+        }
         if (!state.terminated) {
             falls = true
             state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
@@ -1602,8 +1677,7 @@ lower_catch proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
     }
     if (!trap_type(state, expression.handler)) {
         if (expression.handler_is_block) {
-            try predeclare_locals(state, expression.handler)
-            try lower_block(state, expression.handler, true)
+            _ = try lower_value_body(state, expression.handler, expression.handler, type, slot, join)
         } else {
             fallback :: try lower_as(state, expression.handler, type)
             if (!state.terminated and runtime != .void) _ = try emit(state, ir.Instruction{
@@ -1933,6 +2007,10 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         }
         .enum_literal: {
             if (!trap_type(state, id)) unreachable
+        }
+        .block_expr: {
+            if (trap_type(state, id)) return ir.no_value
+            return try lower_value_block(state, ast.block_expr(tree, id), id, typecheck.type_of(state.checked, id))
         }
         .match_expr: return try lower_match(state, id)
         .try_expr: return try lower_try(state, id)

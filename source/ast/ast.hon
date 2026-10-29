@@ -8,11 +8,13 @@
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
 #! value expressions also accept 'if' guard ['|' identifier '|'] expr 'else' expr, canonicalized to matches; else is required.
+#! bare braces containing statement syntax form a value block; contextual record literals keep their initializer grammar.
+#! 'yield' requires an expression on the same line and targets the nearest enclosing value construct, not a statement block.
 #! * block .... -> '{' {stmt} '}'
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr '=' expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if.
 #! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -/!/&/try higher than multiplication/division, addition/subtraction, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! binary operators associate left; unary operators associate right.
@@ -82,6 +84,7 @@ ExprKind :: enum {
     comptime_expr
     literal_void
     literal_undefined
+    block_expr
 }
 
 DeclKind :: enum {
@@ -96,6 +99,7 @@ StmtKind :: enum {
     expression
     assignment_stmt
     return_stmt
+    yield_stmt
     break_stmt
     continue_stmt
     if_stmt
@@ -190,6 +194,8 @@ NodeKind :: enum {
     literal_float_value
     literal_void
     literal_undefined
+    expr_block
+    stmt_yield
 }
 
 @hide:file
@@ -207,7 +213,7 @@ NodeData :: union {
 @hide:file foreign_type_flag u8 :: 0b0010
 @hide:file variadic_flag u8 :: 0b0100
 @hide:file opaque_flag u8 :: 0b1000
-@hide:file optional_match_flag u8 :: 0b0001_0000
+@hide:file optional_match_flag u8 :: 0b00010000
 
 @hide:file
 Node :: struct {
@@ -956,11 +962,25 @@ add_block_stmt proc(builder @mut Builder, body NodeId) NodeId ! mem.AllocError {
     }, builder_span(builder, body))
 }
 
+add_block_expr proc(builder @mut Builder, span Span, body NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_block,
+        main = NodeData{ node_id = body },
+    }, span)
+}
+
 add_return_stmt proc(builder @mut Builder, span Span, value ?NodeId) NodeId ! mem.AllocError {
     raw_value :: if (value) |id| id else no_node
     return try add_node(builder, Node{
         kind = .stmt_return,
         main = NodeData{ node_id = raw_value },
+    }, span)
+}
+
+add_yield_stmt proc(builder @mut Builder, span Span, value NodeId) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .stmt_yield,
+        main = NodeData{ node_id = value },
     }, span)
 }
 
@@ -1316,6 +1336,7 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_decl: .declaration
         .stmt_expr: .expression
         .stmt_return: .return_stmt
+        .stmt_yield: .yield_stmt
         .stmt_break: .break_stmt
         .stmt_continue: .continue_stmt
         .stmt_if: .if_stmt
@@ -1352,12 +1373,27 @@ statement_block proc(tree @Tree, id NodeId) NodeId {
     return node.main.node_id
 }
 
+block_expr proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_block)
+    return node.main.node_id
+}
+
 return_stmt proc(tree @Tree, id NodeId) ReturnView {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .stmt_return)
     return ReturnView{
         span = get_span(&tree.storage, id),
         value = maybe_node_id(u32(node.main.node_id)),
+    }
+}
+
+yield_stmt proc(tree @Tree, id NodeId) ReturnView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .stmt_yield)
+    return ReturnView{
+        span = get_span(&tree.storage, id),
+        value = node.main.node_id,
     }
 }
 
@@ -1543,6 +1579,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_catch: .catch_expr
         .expr_typed_constant: .typed_constant
         .expr_comptime: .comptime_expr
+        .expr_block: .block_expr
         .literal_float_value: .literal_float
         .literal_void: .literal_void
         .literal_undefined: .literal_undefined
@@ -1954,7 +1991,7 @@ node_layout proc(node Node) NodeLayout {
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
         .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_union_tag_type, .expr_enum_literal,
-        .expr_try, .expr_comptime: layout.direct_children = 1
+        .expr_try, .expr_comptime, .expr_block: layout.direct_children = 1
         .expr_call, .expr_builtin_call, .expr_function_type, .expr_array_literal,
         .expr_record_type, .expr_record_literal, .expr_enum_type, .expr_match,
         .block, .package: {
@@ -2003,7 +2040,7 @@ node_layout proc(node Node) NodeLayout {
             layout.extra_count = 3
             layout.extra_children = 7
         }
-        .stmt_expr, .stmt_return, .stmt_block, .stmt_defer, .stmt_errdefer: {
+        .stmt_expr, .stmt_return, .stmt_yield, .stmt_block, .stmt_defer, .stmt_errdefer: {
             layout.class = .statement
             layout.direct_children = 1
             if (node.kind == .stmt_defer or node.kind == .stmt_errdefer)

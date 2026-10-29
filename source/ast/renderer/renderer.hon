@@ -72,6 +72,12 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 }
                 try append_text(renderer, "\n")
             }
+            .yield_stmt: {
+                try append_text(renderer, "yield ")
+                value :: ast.yield_stmt(tree, statement).value?
+                try append_text(renderer, ast.source_text(tree, ast.node_span(tree, value)))
+                try append_text(renderer, "\n")
+            }
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 try append_text(renderer, "if ")

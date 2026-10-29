@@ -275,3 +275,18 @@ scans_import_keywords_and_preserves_source_in_tokens_and_diagnostics test {
         try testing.expect_equal(state.source_id, diagnostic.span.source)
     }
 }
+
+reserves_yield_without_splitting_identifiers test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "yield yielding yield_1 .yield", &pool, &diagnostic_store)
+    expected [6]TokenKind :: [.yield, .ident, .ident, .dot, .yield, .eof]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal("yield", strpool.get_str(&pool, state.tokens.items[0].data.str_id)?)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}

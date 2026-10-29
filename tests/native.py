@@ -11,6 +11,322 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "yielding_blocks_nest_and_copy_before_scoped_cleanup": (
+        """
+        Item :: struct { values [1]mut i16 }
+        main proc() [3]i16 {
+            trace i16 := 0
+            source Item := { values = [40] }
+            saved Item :: {
+                defer trace = trace * 10 + 1
+                inner i16 :: {
+                    defer trace = trace * 10 + 2
+                    yield 2
+                }
+                {
+                    defer source.values[0] = 0
+                    source.values[0] = source.values[0] + inner
+                    yield source
+                }
+                trace = -1
+            }
+            return [saved.values[0], source.values[0], trace]
+        }
+        """, b"[42, 0, 21]\n", None,
+    ),
+    "yielding_blocks_preserve_loop_and_function_transfers": (
+        """
+        choose proc(flag bool) i16 {
+            value i16 :: {
+                if (flag) return 7
+                yield 42
+            }
+            return value
+        }
+        main proc() [3]i16 {
+            total i16 := 0
+            cleanups i16 := 0
+            for (0..5) |index| {
+                value i16 :: {
+                    defer cleanups = cleanups + 1
+                    if (index == 0) continue
+                    if (index == 3) break
+                    yield i16(index)
+                }
+                total = total + value
+            }
+            return [total, cleanups, choose(true) + choose(false)]
+        }
+        """, b"[3, 4, 49]\n", None,
+    ),
+    "yielding_blocks_leave_inner_loops_on_yield": (
+        """
+        main proc() [2]i16 {
+            cleanups i16 := 0
+            value i16 :: {
+                for (0..3) |index| {
+                    defer cleanups = cleanups + 1
+                    if (index == 0) continue
+                    yield 42
+                }
+                yield 0
+            }
+            return [value, cleanups]
+        }
+        """, b"[42, 2]\n", None,
+    ),
+    "yielding_match_catch_and_conditional_blocks_are_lazy": (
+        """
+        Error :: enum { failed }
+        fail proc(flag bool) i16 ! Error {
+            if (flag) return .failed
+            return 40
+        }
+        choose proc(flag bool) i16 {
+            return match flag {
+                true: { value :: fail(false) catch { yield 0 }
+                    yield value + 2 },
+                false: { yield fail(true) catch { yield 7 } },
+            }
+        }
+        main proc() [3]i16 {
+            return [choose(true), choose(false),
+                if (true) { yield 42 } else { yield divtrunc!(1, 0) }]
+        }
+        """, b"[42, 7, 42]\n", None,
+    ),
+    "yielding_blocks_contextual_optional_fallible_and_aggregate_values": (
+        """
+        Error :: enum { failed }
+        Item :: struct { value i16 }
+        optional proc(flag bool) ?i16 {
+            return { if (flag) yield 42
+                yield null }
+        }
+        fallible proc(flag bool) i16 ! Error {
+            return { if (flag) yield 42
+                yield .failed }
+        }
+        item proc(flag bool) Item {
+            return if (flag) { yield { value = 42 } } else { value = 7 }
+        }
+        main proc() [4]i16 {
+            if (optional(false) != null) return [0, 0, 0, 0]
+            return [optional(true)?, fallible(true) catch 0,
+                fallible(false) catch { yield 7 }, item(true).value]
+        }
+        """, b"[42, 42, 7, 42]\n", None,
+    ),
+    "yielding_blocks_propagate_errors_and_run_only_reached_cleanup": (
+        """
+        Error :: enum { failed }
+        fail proc() i16 ! Error { return .failed }
+        compute proc(trace @mut i16, flag bool) i16 ! Error {
+            value i16 :: {
+                defer trace^ = trace^ * 10 + 1
+                errdefer trace^ = trace^ * 10 + 2
+                if (flag) yield 42
+                yield try fail()
+            }
+            return value
+        }
+        main proc() [4]i16 {
+            success i16 := 0
+            failure i16 := 0
+            left :: compute(&success, true) catch 0
+            right :: compute(&failure, false) catch 7
+            return [left, right, success, failure]
+        }
+        """, b"[42, 7, 1, 21]\n", None,
+    ),
+    "yielding_blocks_preserve_narrow_types_and_compile_time_values": (
+        """
+        exact proc(value i8) i16 { return i16(value) }
+        compute proc() i8 {
+            return {
+                total i8 := 0
+                for (i8(0)..i8(3)) |index| total = total + index
+                yield total + 39
+            }
+        }
+        main proc() [3]i16 {
+            return [exact({ yield i8(42) }), i16($(compute())),
+                i16($({ value i8 :: 7
+                    yield value }))]
+        }
+        """, b"[42, 42, 7]\n", None,
+    ),
+    "yielding_blocks_generate_types_defaults_and_specialized_bodies": (
+        """
+        Choose proc(wide bool) type {
+            return {
+                Selected := i8
+                if (wide) Selected = i16
+                yield Selected
+            }
+        }
+        Box proc(wide bool) type {
+            count usize :: { yield if (wide) 2 else 1 }
+            return struct {
+                values [count]Choose(wide)
+                bias i16 = { yield 7 }
+            }
+        }
+        select proc($flag bool, value i16) i16 {
+            return { if (flag) yield value
+                yield compile_error!("unselected") }
+        }
+        main proc() [3]i16 {
+            value Box(true) :: { values = [40, 2] }
+            return [select(true, value.values[0] + value.values[1]),
+                value.bias, i16(value.values.len)]
+        }
+        """, b"[42, 7, 2]\n", None,
+    ),
+    "yielding_blocks_keep_match_and_catch_capture_scopes": (
+        """
+        Choice :: union(enum) { value i8, empty void }
+        Error :: union(enum) { failed i8 }
+        fail proc() i16 ! Error { return .failed{7} }
+        choose proc(value Choice) i16 {
+            return match value {
+                .value |payload|: { yield i16(payload) },
+                .empty: { yield fail() catch |error| {
+                    yield match error {
+                        .failed |code|: { yield i16(code) },
+                    }
+                } },
+            }
+        }
+        main proc() [2]i16 { return [choose(.value{42}), choose(.empty)] }
+        """, b"[42, 7]\n", None,
+    ),
+    "yielding_blocks_allow_local_yields_inside_cleanup": (
+        """
+        main proc() i16 {
+            value i16 := 0
+            {
+                defer value = { yield 42 }
+            }
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "yielding_blocks_require_yield_operands": (
+        "main proc() i16 { return { yield } }",
+        b"", b"unexpected token",
+    ),
+    "yielding_blocks_preserve_yield_capture_immutability": (
+        """
+        main proc() i16 {
+            value ?i16 :: 42
+            return if value |payload| { payload = 7
+                yield payload } else 0
+        }
+        """, b"", b"assignment requires a mutable local binding",
+    ),
+    "yielding_blocks_reject_yield_outside_value_sources": (
+        "main proc() i16 { yield 42 }",
+        b"", b"yield requires an enclosing value block",
+    ),
+    "yielding_blocks_check_fallthrough_without_trapping_yielded_paths": (
+        """
+        choose proc(flag bool) i16 {
+            return { if (flag) yield 42 }
+        }
+        main proc() i16 { return choose(true) }
+        """, b"42\n", b"nonvoid value block can finish without yielding a value",
+    ),
+    "yielding_blocks_trap_reached_missing_value_paths": (
+        """
+        choose proc(flag bool) i16 {
+            return { if (flag) yield 42 }
+        }
+        main proc() i16 { return choose(false) }
+        """, b"", b"nonvoid value block can finish without yielding a value",
+    ),
+    "yielding_blocks_reject_incompatible_runtime_yields": (
+        """
+        choose proc(flag bool) i16 {
+            return { if (flag) yield i16(42)
+                yield u8(7) }
+        }
+        main proc() i16 { return choose(true) }
+        """, b"42\n", b"yield does not match the value block result type",
+    ),
+    "yielding_blocks_reject_outward_cleanup_yields": (
+        """
+        main proc() i16 {
+            return { defer { yield 7 }
+                yield 42 }
+        }
+        """, b"", b"cleanup cannot",
+    ),
+    "yielding_blocks_preserve_type_control_mutation_captures_and_cleanup": (
+        """
+        Choose proc(input ?bool) type {
+            Selected := i8
+            Element :: {
+                Selected = i8
+                defer Selected = i16
+                for (0..3) |index| {
+                    if (index == 1) {
+                        yield if input |flag| { yield if (flag) bool else i8 }
+                            else { yield i16 }
+                    }
+                }
+                yield i8
+            }
+            return struct { flag Element, value Selected }
+        }
+        main proc() i16 {
+            value Choose(true) :: { flag = true, value = 42 }
+            return if (value.flag) value.value else 0
+        }
+        """, b"42\n", None,
+    ),
+    "yielding_blocks_preserve_runtime_aliases_callbacks_and_void_results": (
+        """
+        add proc(value i16) i16 { return value + 2 }
+        noop proc() void {}
+        nothing proc() void { return { yield noop() } }
+        main proc() [2]i16 {
+            values [1]mut i16 := [40]
+            pointer @mut i16 :: { yield &values[0] }
+            view []mut i16 :: { yield values[..] }
+            callback @proc(value i16) i16 :: { yield add }
+            pointer^ = callback(view[0])
+            ({ yield nothing() })
+            return [values[0], view[0]]
+        }
+        """, b"[42, 42]\n", None,
+    ),
+    "yielding_blocks_keep_compile_time_logical_guards_lazy": (
+        """
+        Choose proc() type {
+            Selected := i8
+            if (false and { Selected = i16
+                yield true }) Selected = bool
+            if (true or { Selected = bool
+                yield false }) {}
+            return Selected
+        }
+        exact proc(value i8) i16 { return i16(value) }
+        main proc() i16 {
+            value Choose() :: 42
+            return exact(value)
+        }
+        """, b"42\n", None,
+    ),
+    "yielding_blocks_check_skipped_compile_time_guard_result_types": (
+        """
+        Bad proc() type {
+            if (false and { yield 1 }) return bool
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"operator requires compatible operand types",
+    ),
     "conditional_expressions_evaluate_guard_once_and_only_selected_arm": (
         """
         next proc(calls @mut i16, value bool) bool { calls^ = calls^ + 1
@@ -7880,6 +8196,20 @@ def check_dependency_provenance(temporary, executable):
         fail proc() int { return dependency.fail() }
     """).strip() + "\n")
     cases = [
+        ("""
+            fail proc() int {
+                return {
+                    yield 9223372036854775807 + 1
+                }
+            }
+        """, 5, 15, False),
+        ("""
+            fail proc() int {
+                return {
+                    yield missing
+                }
+            }
+        """, 5, 15, True),
         ("""
             fail proc() int {
                 return `
