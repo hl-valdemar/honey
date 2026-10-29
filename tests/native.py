@@ -11,6 +11,165 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "runtime_undefined_nested_storage_and_copy_isolation": (
+        """
+        Item :: struct { values [2]mut i16, label string }
+        fill proc() Item {
+            item Item := undefined
+            for (usize(0)..item.values.len) |i| { item.values[i] = i16(i) + 19 }
+            item.label = "yes"
+            return item
+        }
+        main proc() i16 {
+            item := fill()
+            saved :: item
+            pointer :: &item
+            pointer.values[0] = 0
+            return saved.values[0] + saved.values[1] + i16(saved.label.len)
+        }
+        """, b"42\n", None,
+    ),
+    "ordinary_constant_procedures_fill_undefined_arrays": (
+        """
+        values proc() [2]mut i16 {
+            result [2]mut i16 := undefined
+            for (usize(0)..result.len) |i| { result[i] = i16(i) + 20 }
+            return result
+        }
+        main proc() i16 { result :: $(values())
+            return result[0] + result[1] + 1 }
+        """, b"42\n", None,
+    ),
+    "ordinary_constants_reject_partial_undefined_snapshots": (
+        """
+        values proc() [2]mut i16 {
+            result [2]mut i16 := undefined
+            result[0] = 42
+            saved :: result
+            result[1] = 0
+            return saved
+        }
+        main proc() [2]mut i16 { return $(values()) }
+        """, b"", b"read before initialization",
+    ),
+    "ordinary_constants_reject_undefined_optional_presence": (
+        """
+        missing proc() ?i16 { value ?i16 := undefined
+            return value }
+        main proc() ?i16 { return $(missing()) }
+        """, b"", b"read before initialization",
+    ),
+    "ordinary_constants_reject_undefined_union_tags": (
+        """
+        Choice :: union(enum) { value i16, empty void }
+        missing proc() Choice { value Choice := undefined
+            return value }
+        main proc() Choice { return $(missing()) }
+        """, b"", b"read before initialization",
+    ),
+    "undefined_zero_leaf_shapes_cross_runtime_and_constant_calls": (
+        """
+        empty proc() [2]mut [0]i16 {
+            rows [2]mut [0]i16 := undefined
+            return rows
+        }
+        main proc() usize {
+            runtime :: empty()
+            constant :: $(empty())
+            return runtime.len + constant.len
+        }
+        """, b"4\n", None,
+    ),
+    "some_nested_present_null_survives_constant_roundtrip": (
+        """
+        nested proc() ??i16 { return some!(null) }
+        present proc() ??i16 { return some!(some!(42)) }
+        main proc() i16 {
+            first ??i16 :: $(nested())
+            second ??i16 :: $(present())
+            absent ??i16 :: null
+            if (first == null or first? != null or absent != null) return -1
+            return second??
+        }
+        """, b"42\n", None,
+    ),
+    "some_optional_specialization_keys_preserve_every_presence_layer": (
+        """
+        Box proc($value ??i16) type { return struct { value ??i16 = value } }
+        main proc() i16 {
+            empty Box(null) :: {}
+            nested Box(some!(null)) :: {}
+            present Box(some!(some!(42))) :: {}
+            same Box(some!(some!(42))) :: present
+            if (empty.value != null or nested.value == null or nested.value? != null) return -1
+            if (Box(null) == Box(some!(null))) return -2
+            if (Box(some!(some!(42))) == Box(some!(some!(41)))) return -3
+            return same.value??
+        }
+        """, b"42\n", None,
+    ),
+    "generic_contextual_literals_use_rigid_arguments_in_either_order": (
+        """
+        Key :: enum { first, last }
+        choose proc($T type, value T, anchor @T) T { return value }
+        payload proc($T type, anchor @T, value struct { item T }) T { return value.item }
+        main proc() i16 {
+            key Key :: .first
+            selected :: choose(.last, &key)
+            other :: payload(&key, { item = .first })
+            return match selected { .last: match other { .first: 42, else: 0 }, else: 0 }
+        }
+        """, b"42\n", None,
+    ),
+    "generic_contextual_enum_rejects_unknown_member": (
+        """
+        Key :: enum { first }
+        choose proc($T type, anchor @T, value T) T { return value }
+        main proc() i16 { key Key :: .first
+            choose(&key, .missing)
+            return 42 }
+        """, b"", b"record has no such field",
+    ),
+    "generic_contextual_only_call_cannot_infer_nominal_type": (
+        """
+        choose proc($T type, value T) T { return value }
+        main proc() i16 { choose(.first)
+            return 42 }
+        """, b"", b"cannot infer consistent compile-time arguments",
+    ),
+    "generic_contextual_arguments_do_not_hide_rigid_type_conflicts": (
+        """
+        First :: enum { first }
+        Second :: enum { first }
+        choose proc($T type, left @T, right @T, value T) T { return value }
+        main proc() i16 {
+            left First :: .first
+            right Second :: .first
+            choose(&left, &right, .first)
+            return 42
+        }
+        """, b"", b"cannot infer consistent compile-time arguments",
+    ),
+    "undefined_rejects_immutable_local": (
+        "main proc() i16 { value i16 :: undefined\nreturn value }",
+        b"", b"undefined requires a concrete mutable local declaration",
+    ),
+    "undefined_rejects_untyped_local": (
+        "main proc() i16 { value := undefined\nreturn 42 }",
+        b"", b"undefined requires a concrete mutable local declaration",
+    ),
+    "undefined_rejects_noninitializer_expression": (
+        "main proc() i16 { return undefined }",
+        b"", b"undefined requires a concrete mutable local declaration",
+    ),
+    "undefined_rejects_inferred_array_length": (
+        "main proc() i16 { values [_]mut i16 := undefined\nreturn 42 }",
+        b"", b"undefined requires a concrete mutable local declaration",
+    ),
+    "undefined_rejects_global_storage": (
+        "value i16 := undefined\nmain proc() i16 { return value }",
+        b"", b"undefined requires a concrete mutable local declaration",
+    ),
     "inline_match_composed_enums_keep_static_sum_tags_and_runtime_dispatch": (
         """
         First :: enum { skipped, first }
@@ -2896,15 +3055,6 @@ CASES = {
         }
         main proc() Bad() { return 42 }
         """, b"", b"compile-time execution exceeds its recursion or step limit",
-    ),
-    "type_arrays_undefined_does_not_enable_runtime_storage": (
-        """
-        main proc() i16 {
-            values [1]mut i16 := undefined
-            values[0] = 42
-            return values[0]
-        }
-        """, b"", b"generic argument must be a compile-time value",
     ),
     "value_arrays_undefined_loop_initialization_generates_storage": (
         """
@@ -7840,6 +7990,55 @@ def check_typeinfo_packages(temporary, executable):
                 }
                 if (values.present[2]) return -1
                 return values.values[0] + values.values[1]
+            }
+            """, b"42\n", None,
+        ),
+        "real_enummap_init_get_sparse_alias_and_absence": (
+            """
+            import "@std/meta"
+            import "@std/enummap"
+            Key :: enum(i16) { last = -7, first = 3, missing = 90 }
+            KeyAlias :: alias Key
+            main proc() i16 {
+                values :: enummap.init(KeyAlias, i16, { last = 19, first = 23 })
+                empty :: enummap.init(Key, i16, {})
+                if (enummap.get(&values, .missing) != null) return -1
+                if (enummap.get(&empty, .first) != null) return -2
+                return enummap.get(&values, .last)? + enummap.get(Key, i16, &values, .first)?
+            }
+            """, b"42\n", None,
+        ),
+        "real_enummap_composed_keys_and_owned_aggregate_values": (
+            """
+            import "@std/meta"
+            import "@std/enummap"
+            First :: enum { first, absent }
+            Second :: enum { last }
+            Keys :: alias (First | (Second | First))
+            Item :: struct { values [2]mut i16 }
+            main proc() i16 {
+                source Item := { values = [19, 23] }
+                values :: enummap.init(Keys, Item, { first = source })
+                source.values[0] = 0
+                copy := enummap.get(&values, .first)?
+                copy.values[1] = 0
+                retained :: enummap.get(&values, .first)?
+                if (enummap.get(&values, .last) != null or enummap.get(&values, .absent) != null) return -1
+                return retained.values[0] + retained.values[1]
+            }
+            """, b"42\n", None,
+        ),
+        "real_enummap_all_entries_materialize_at_compile_time": (
+            """
+            import "@std/meta"
+            import "@std/enummap"
+            Key :: enum { first, last }
+            known proc() enummap.EnumMap(Key, i16) {
+                return enummap.init(Key, i16, { first = 19, last = 23 })
+            }
+            main proc() i16 {
+                values :: $(known())
+                return enummap.get(&values, .first)? + enummap.get(&values, .last)?
             }
             """, b"42\n", None,
         ),

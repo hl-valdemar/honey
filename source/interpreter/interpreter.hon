@@ -229,6 +229,13 @@ execute proc(
         value := ir.Value{}
         match instruction.op {
             .constant: value = instruction.constant
+            .undefined_value: {
+                destination :: &frames.items[frame_index].values[usize(instruction.destination)]
+                if (ir.aggregate(instruction.type)) {
+                    mem.set(destination.data.elements, ir.Value{ type = .invalid, uninitialized = true })
+                } else destination^ = ir.Value{ type = instruction.type, uninitialized = true }
+                continue
+            }
             .load_local: {
                 local :: &frames.items[frame_index].locals[usize(instruction.slot)]
                 if (!local.initialized) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
@@ -663,6 +670,7 @@ execute proc(
                 value = ir.Value{ type = .bool, data = ir.ValueData{ boolean = result } }
             }
         }
+        if (value.uninitialized) return try runtime_trap(diagnostic_store, .read_before_initialization, instruction.span)
         if (instruction.destination != ir.no_value) copy_value(module, &frames.items[frame_index].values[usize(instruction.destination)], value)
     }
     unreachable

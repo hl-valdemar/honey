@@ -1725,8 +1725,16 @@ lower_slice proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
 lower_builtin proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     tree :: state.tree
     span :: ast.node_span(tree, id)
-    name :: ast.source_text(tree, ast.node_span(tree, ast.builtin_call(tree, id).name))
+    name :: ast.literal_text(tree, ast.builtin_call(tree, id).name)
     if (trap_type(state, id)) return ir.no_value
+    if (mem.eql(name, "some")) {
+        type :: typecheck.type_of(state.checked, id)
+        child :: typecheck.array_type(state.checked, type.array_type).element
+        payload :: try lower_as(state, ast.call_arg(tree, id, 0), child)
+        if (state.terminated or child.kind == .pointer or child.kind == .function) return payload
+        present :: try constant(state, ir.Value{ type = .bool, data = ir.ValueData{ boolean = true } }, span)
+        return try record_pair(state, try array_shape(state, type), present, payload, span)
+    }
     if (mem.eql(name, "sizeof") or mem.eql(name, "alignof")) {
         checked :: typecheck.type_of(state.checked, ast.call_arg(tree, id, 0))
         type :: lower_type(state, checked)
@@ -1893,7 +1901,15 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (!trap_type(state, id)) trap(state, try diagnostics.add(state.diagnostics, .type_not_value, span), span)
         }
         .alias_expr: return try lower_expression(state, ast.type_operand(tree, id))
-        .enum_literal, .literal_undefined: {
+        .literal_undefined: {
+            if (trap_type(state, id)) return ir.no_value
+            checked :: typecheck.type_of(state.checked, id)
+            return try emit(state, ir.Instruction{
+                op = .undefined_value, type = lower_type(state, checked),
+                array_type = try array_shape(state, checked), span = span,
+            })
+        }
+        .enum_literal: {
             if (!trap_type(state, id)) unreachable
         }
         .match_expr: return try lower_match(state, id)

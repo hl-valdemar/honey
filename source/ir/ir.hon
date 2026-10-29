@@ -88,6 +88,8 @@ Value :: struct {
     type Type = .void
     array_type ArrayId = no_array
     raw bool = false
+    # interpreter poison survives copies; native storage uses LLVM poison directly.
+    uninitialized bool = false
     data ValueData = ValueData{ integer = 0 }
 }
 
@@ -126,6 +128,7 @@ ArrayStorage :: struct {
 
 Op :: enum {
     constant
+    undefined_value
     load_local
     store_local
     assign_local
@@ -372,6 +375,7 @@ aggregate_item proc(module @Module, value Value, index usize) Value {
     raw :: value.raw or shape.is_union
     if (!aggregate(type)) {
         if (raw) return read_storage(module, type, child, value.data.elements[start..], true)
+        if (value.data.elements[start].uninitialized) return Value{ type = type, uninitialized = true }
         return value.data.elements[start]
     }
     width = if (raw) storage_size(module, type, child) else module.arrays.items[usize(child)].cells
@@ -438,6 +442,9 @@ read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, r
     bits u64 := 0
     size :: storage_size(module, type, shape)
     count :: if (size > 8) usize(8) else size
+    for (0..count) |i| {
+        if (cells[i].uninitialized) return Value{ type = type, uninitialized = true }
+    }
     for (0..count) |i| bits += cells[i].data.unsigned << u64(i * 8)
     data := ValueData{ unsigned = bits }
     match type {
@@ -485,7 +492,7 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
         byte u64 := 0
         if (i < 8) byte = (bits >> u64(i * 8)) & 255
         else byte = (u64(string_bytes(module, value.data.string).len) >> u64((i - 8) * 8)) & 255
-        cells[i] = Value{ type = .u8, data = ValueData{ unsigned = byte } }
+        cells[i] = Value{ type = .u8, uninitialized = value.uninitialized, data = ValueData{ unsigned = byte } }
     }
 }
 

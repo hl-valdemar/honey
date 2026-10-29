@@ -17,6 +17,12 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print(", ptr %v{}\n", output, {u32(instruction.destination)})
             return
         }
+        .undefined_value: {
+            try io.write_all(output, "  store ")
+            try write_type(output, state.module, type)
+            try io.print(" poison, ptr %v{}\n", output, {u32(instruction.destination)})
+            return
+        }
         .load_local: {
             try check_local(state, instruction.slot, true, instruction.span)
             try io.print("  %r{} = load ", output, {result})

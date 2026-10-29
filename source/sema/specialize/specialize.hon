@@ -1571,10 +1571,19 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
                 if (view.comptime) continue
                 argument :: runtime_arguments.items[position]
                 position += 1
-                contextual :: flexible(state, argument)
+                contextual := flexible(state, argument) or contextual_literal(state, argument)
+                if (ast.expr_kind(&state.tree, argument) == .record_literal) {
+                    annotation :: ast.record_literal(&state.tree, argument).type
+                    contextual = annotation == null or ast.expr_kind(&state.tree, annotation?) == .enum_literal
+                }
                 if (contextual != (phase == 1)) continue
                 actual :: try expression_type(state, argument, 0)
-                if (actual == no_node or !try infer(state, function, view.type, actual, arguments, contextual)) {
+                # contextual literals need not have an independent type; the rewritten
+                # call checks them against the substituted signature after inference.
+                if (
+                    (actual == no_node or !try infer(state, function, view.type, actual, arguments, contextual))
+                    and !contextual
+                ) {
                     try reject(state, call, .cannot_infer_generic)
                     return
                 }
@@ -1872,6 +1881,8 @@ evaluation_owned proc(state @State, id ast.NodeId, flags []mut u8) void {
 @hide:file
 contextual_literal proc(state @State, id ast.NodeId) bool {
     kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .builtin_call)
+        return mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "some")
     return kind == .record_literal or kind == .array_literal or kind == .enum_literal
 }
 
@@ -1937,6 +1948,17 @@ serialize_value proc(
     state @mut State, module @ir.Module, checked @typecheck.Result,
     type typecheck.Type, value ir.Value, span ast.Span,
 ) ast.NodeId ! Error {
+    uninitialized := value.uninitialized
+    if (ir.aggregate(value.type)) {
+        if (module.arrays.items[usize(value.array_type)].is_union)
+            uninitialized = ir.union_tag(module, value).uninitialized
+        else if (type.kind == .optional)
+            uninitialized = ir.aggregate_item(module, value, 0).uninitialized
+    }
+    if (uninitialized) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+        return no_node
+    }
     result := no_node
     if (type.kind == .array) {
         array :: typecheck.array_type(checked, type.array_type)
@@ -2013,7 +2035,12 @@ serialize_value proc(
             result = try ast.add_literal(state.builder, .null, span)
         } else {
             child :: ir.aggregate_item(module, value, 1)
-            return try serialize_value(state, module, checked, container.element, child, span)
+            payload :: try serialize_value(state, module, checked, container.element, child, span)
+            if (payload == no_node) return no_node
+            name :: try ast.add_generated_identifier(state.builder, span,
+                try strpool.intern(state.strings, "some"), "some")
+            arguments [1]ast.NodeId :: [payload]
+            result = try ast.add_builtin_call(state.builder, span, name, arguments[..])
         }
     } else if (ir.integer_bits(value.type) != 0 and type.kind != .pointer) {
         negative :: !ir.unsigned_integer(value.type) and value.data.integer < 0
@@ -2063,6 +2090,9 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
         }
         return true
     }
+    if (kind == .builtin_call and contextual_literal(state, left) and contextual_literal(state, right)) {
+        return try constant_equal(state, ast.call_arg(&state.tree, left, 0), ast.call_arg(&state.tree, right, 0))
+    }
     if (kind == .enum_literal)
         return ast.name_id(&state.tree, ast.enum_literal(&state.tree, left)) == ast.name_id(&state.tree, ast.enum_literal(&state.tree, right))
     return try value_equal(state, try evaluate(state, left), try evaluate(state, right))
@@ -2092,6 +2122,8 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
         }
         return result
     }
+    if (kind == .builtin_call and contextual_literal(state, id))
+        return mix(hash, try constant_hash(state, ast.call_arg(&state.tree, id, 0)))
     if (kind == .enum_literal) return mix(hash, usize(ast.name_id(&state.tree, ast.enum_literal(&state.tree, id))))
     return try value_hash(state, try evaluate(state, id))
 }
@@ -2199,7 +2231,8 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     source_type :: typecheck.type_of(&checked, result_type)
     node :: try serialize_value(state, &module, &checked, source_type, value, span)
     if (node == no_node) {
-        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
+        if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
         return Value{}
     }
     if (ir.aggregate(value.type) or source_type.kind == .enumeration or source_type.kind == .void)

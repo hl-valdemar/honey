@@ -174,6 +174,66 @@ supports_bare_void_value_returns_and_fallthrough test {
     }
 }
 
+constructs_present_optionals_without_losing_nested_null_or_repeating_values test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `next proc(calls @mut i16) i16 {
+        `    calls^ = calls^ + 1
+        `    return 42
+        `}
+        `nested proc() ??i16 { return some!(null) }
+        `Box :: struct { values [2]i16 }
+        `main proc() bool {
+        `    calls i16 := 0
+        `    absent ??i16 :: null
+        `    present ??i16 :: nested()
+        `    full ??i16 :: some!(some!(42))
+        `    exact i16 :: 42
+        `    value ?i16 :: some!(exact)
+        `    once ?i16 :: some!(next(&calls))
+        `    boxed ?Box :: some!(Box{ values = [20, 22] })
+        `    pointer ?@i16 :: some!(&exact)
+        `    nested_pointer ??@i16 :: some!(null)
+        `    return (
+        `        absent == null and present != null and present? == null
+        `        and full != null and full? != null and full?? == 42
+        `        and value? == 42 and once? == 42 and calls == 1
+        `        and boxed?.values[0] + boxed?.values[1] == 42
+        `        and pointer?^ == 42 and nested_pointer != null and nested_pointer? == null
+        `    )
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.bool, outcome.value.type)
+    try testing.expect(outcome.value.data.boolean)
+}
+
+rejects_some_without_optional_context_wrong_arity_and_inexact_payloads test {
+    sources [6][]u8 :: [
+        "main proc() ?i16 { return some!() }\n",
+        "main proc() ?i16 { return some!(1, 2) }\n",
+        "main proc() bool { return some!(true) }\n",
+        "main proc() ?i16 { return some!(true) }\n",
+        "main proc() ?i16 { value i32 :: 42\nreturn some!(value) }\n",
+        "main proc() ?i16 { return some!(null) }\n",
+    ]
+    for (sources) |source, i| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        code diagnostics.Code :: if (i < 2) .argument_count_mismatch else if (i == 2) .invalid_operand else .type_mismatch
+        try expect_trap(outcome, &diagnostic_store, code)
+    }
+}
+
 preserves_demanded_diagnostic_identity_and_source_location test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

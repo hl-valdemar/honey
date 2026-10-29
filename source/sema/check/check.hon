@@ -924,6 +924,20 @@ collect_declaration proc(state @mut State, id ast.NodeId) void ! (mem.AllocError
         state.cells[usize(id)].fixed = true
         state.cells[usize(id)].type = invalid_type(binding.data.diagnostic)
     }
+    if (ast.expr_kind(state.tree, declaration.initializer) == .literal_undefined) {
+        type :: state.cells[usize(id)].type
+        if (
+            !state.cells[usize(id)].local or declaration.mutability != .variable
+            or type.kind == .none or type.kind == .type_value or has_inferred_count(state, type)
+        ) {
+            try fail(state, declaration.initializer, .invalid_undefined, ast.node_span(state.tree, declaration.initializer))
+        } else {
+            state.cells[usize(declaration.initializer)].role = .expression
+            seed(state, declaration.initializer, type)
+        }
+        try depend(state, declaration.initializer, id)
+        return
+    }
     try collect_expression(state, declaration.initializer)
     if (
         type_syntax(ast.expr_kind(state.tree, declaration.initializer))
@@ -1201,7 +1215,7 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
         .literal_null: state.cells[usize(id)].type = Type{ kind = .null }
         .literal_void: state.cells[usize(id)].type = Type{ kind = .void }
-        .literal_undefined: try fail(state, id, .comptime_argument_required, ast.node_span(tree, id))
+        .literal_undefined: try fail(state, id, .invalid_undefined, ast.node_span(tree, id))
         .builtin_call: try collect_builtin(state, id)
         .slice: {
             view :: ast.slice_expr(tree, id)
@@ -1548,6 +1562,17 @@ demand proc(state @mut State, id ast.NodeId, expected Type, code diagnostics.Cod
         if (mem.eql(name, "ptrcast") or mem.eql(name, "constcast")) {
             state.cells[index].expected = expected
             seed(state, id, expected)
+            return
+        }
+        if (mem.eql(name, "some") and expected.kind != .fallible) {
+            state.cells[index].expected = expected
+            if (expected.kind == .optional) {
+                seed(state, id, expected)
+                if (ast.call_arg_count(state.tree, id) == 1) {
+                    try demand(state, ast.call_arg(state.tree, id, 0),
+                        state.arrays.items[usize(expected.array_type)].element, code)
+                }
+            }
             return
         }
     }
@@ -2368,7 +2393,7 @@ c_abi_type proc(state @State, type Type) bool {
 
 @hide:file
 builtin_name proc(state @State, id ast.NodeId) []u8 {
-    return ast.source_text(state.tree, ast.node_span(state.tree, ast.builtin_call(state.tree, id).name))
+    return ast.literal_text(state.tree, ast.builtin_call(state.tree, id).name)
 }
 
 @hide:file
@@ -2460,13 +2485,31 @@ infer_builtin proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.A
     layout :: mem.eql(name, "sizeof") or mem.eql(name, "alignof")
     cast :: mem.eql(name, "ptrcast") or mem.eql(name, "constcast")
     memory :: mem.eql(name, "memcopy") or mem.eql(name, "memset")
-    valid_count :: (layout and count == 1) or (cast and (count == 1 or count == 2)) or (memory and count == 2)
+    some :: mem.eql(name, "some")
+    valid_count :: (layout and count == 1) or (cast and (count == 1 or count == 2)) or (memory and count == 2) or (some and count == 1)
     if (!valid_count) {
-        code diagnostics.Code :: if (layout or cast or memory) .argument_count_mismatch else .invalid_operand
+        code diagnostics.Code :: if (layout or cast or memory or some) .argument_count_mismatch else .invalid_operand
         if (defaults) try fail(state, id, code, span)
         return group_type(state, id)
     }
     if (layout) return group_type(state, id)
+    if (some) {
+        result :: state.cells[root(state, usize(id))].expected
+        if (result.kind != .optional) {
+            if (defaults) try fail(state, id, .invalid_operand, span)
+            return group_type(state, id)
+        }
+        child :: state.arrays.items[usize(result.array_type)].element
+        operand :: ast.call_arg(state.tree, id, 0)
+        try demand(state, operand, child, .type_mismatch)
+        actual :: try infer_shape(state, operand, defaults)
+        if (
+            defaults and actual.kind != .none and actual.kind != .invalid
+            and !assignable_value(state, operand, actual, child)
+        ) try fail(state, operand, .type_mismatch, ast.node_span(state.tree, operand))
+        seed(state, id, result)
+        return group_type(state, id)
+    }
     if (cast) {
         result := state.cells[root(state, usize(id))].expected
         if (count == 2) result = state.types[usize(ast.call_arg(state.tree, id, 0))]
