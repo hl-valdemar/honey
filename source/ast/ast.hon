@@ -202,16 +202,19 @@ NodeData :: union {
     binary_operator BinaryOperator
 }
 
+@hide:file file_local_flag u8 :: 1
+@hide:file foreign_type_flag u8 :: 2
+@hide:file variadic_flag u8 :: 4
+@hide:file opaque_flag u8 :: 8
+
 @hide:file
 Node :: struct {
     kind NodeKind
+    # use the padding before the payload words rather than enlarging every node.
+    flags u8 = 0
     main NodeData = NodeData{ node_id = no_node }
     data0 NodeData = NodeData{ node_id = no_node }
     data1 NodeData = NodeData{ node_id = no_node }
-    file_local bool = false
-    foreign_type bool = false
-    variadic bool = false
-    is_opaque bool = false
 }
 
 @hide:file
@@ -1114,35 +1117,39 @@ function_external proc(tree @Tree, id NodeId) bool {
 }
 
 set_file_local proc(builder @mut Builder, id NodeId) void {
-    builder.storage.nodes.items[usize(id)].file_local = true
+    node :: &builder.storage.nodes.items[usize(id)]
+    node.flags = node.flags | file_local_flag
 }
 
 file_local proc(tree @Tree, id NodeId) bool {
-    return get_node(&tree.storage, id).file_local
+    return (tree.storage.nodes.items[usize(id)].flags & file_local_flag) != 0
 }
 
 set_callable_foreign proc(builder @mut Builder, id NodeId) void {
-    builder.storage.nodes.items[usize(id)].foreign_type = true
+    node :: &builder.storage.nodes.items[usize(id)]
+    node.flags = node.flags | foreign_type_flag
 }
 
 callable_foreign proc(tree @Tree, id NodeId) bool {
-    return function_external(tree, id) or get_node(&tree.storage, id).foreign_type
+    return function_external(tree, id) or (tree.storage.nodes.items[usize(id)].flags & foreign_type_flag) != 0
 }
 
 set_callable_variadic proc(builder @mut Builder, id NodeId) void {
-    builder.storage.nodes.items[usize(id)].variadic = true
+    node :: &builder.storage.nodes.items[usize(id)]
+    node.flags = node.flags | variadic_flag
 }
 
 callable_variadic proc(tree @Tree, id NodeId) bool {
-    return get_node(&tree.storage, id).variadic
+    return (tree.storage.nodes.items[usize(id)].flags & variadic_flag) != 0
 }
 
 set_record_opaque proc(builder @mut Builder, id NodeId) void {
-    builder.storage.nodes.items[usize(id)].is_opaque = true
+    node :: &builder.storage.nodes.items[usize(id)]
+    node.flags = node.flags | opaque_flag
 }
 
 record_opaque proc(tree @Tree, id NodeId) bool {
-    return get_node(&tree.storage, id).is_opaque
+    return (tree.storage.nodes.items[usize(id)].flags & opaque_flag) != 0
 }
 
 function_generic proc(tree @Tree, id NodeId) bool {
