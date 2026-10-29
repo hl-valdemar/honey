@@ -10,7 +10,7 @@ build Honey from this directory:
 bro build
 ```
 
-the bootstrap must support contextual `&[]` literals for mutable slices; collection initialization and reset use these literals instead of a dedicated empty-slice helper. if the installed `bro` predates that feature, use `../brolang/build/brolang build` after rebuilding Bro. zero-sized elements with nonzero logical lengths still use the memory module's specialized storage handling.
+the bootstrap must support contextual `&[]` literals for mutable slices and prefixed integer literals (`0b`, `0o`, `0x`); collection initialization uses contextual empty slices and AST flag masks use binary spelling. if the installed `bro` predates either feature, rebuild Bro with `make -C ../brolang build` and use `../brolang/build/brolang build`. zero-sized elements with nonzero logical lengths still use the memory module's specialized storage handling.
 
 run a source file with the interpreter:
 
