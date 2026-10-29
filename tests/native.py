@@ -7585,6 +7585,507 @@ def check_fallible_packages_and_entry(temporary, executable):
     return count
 
 
+def check_typeinfo_packages(temporary, executable):
+    project = temporary / "typeinfo"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    (project / "std").mkdir()
+    for package in ("meta", "enummap"):
+        (project / "std" / package).symlink_to(ROOT / "std" / package, target_is_directory=True)
+
+    cases = {
+        "categories_specialize_generic_calls": (
+            """
+            reflection :: import "@std/meta"
+            Error :: enum { failed }
+            Choice :: union(enum) { number i16, empty void }
+            Raw :: union { number i16, flag bool }
+            category proc($T type) i16 {
+                return match typeinfo!(T) {
+                    .integer: 1,
+                    .bool: 2,
+                    .float: 3,
+                    .void: 4,
+                    .anyopaque: 5,
+                    .pointer: 6,
+                    .slice: 7,
+                    .optional: 8,
+                    .function: 9,
+                    .union: 10,
+                    .fallible: 11,
+                    else: -1,
+                }
+            }
+            widen proc($T type, value T) i16 {
+                return match typeinfo!(T) {
+                    .integer: i16(value),
+                    .bool: match value { true: 23, false: 0 },
+                    else: value.missing,
+                }
+            }
+            main proc() [14]i16 {
+                return [
+                    category(i8), category(bool), category(f64), category(void),
+                    category(anyopaque), category(@mut i16), category([]u8),
+                    category(?i16), category(proc(value i16) i16),
+                    category(Choice), category(i16 ! Error), category(Raw),
+                    category(string), widen(i8(19)) + widen(true),
+                ]
+            }
+            """, b"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 10, 6, 42]\n", None,
+        ),
+        "arrays_and_immediate_distinct_backing": (
+            """
+            import "@std/meta"
+            Inner :: distinct u16
+            Outer :: distinct Inner
+            Other :: distinct u16
+            OuterAlias :: alias Outer
+            ArrayAlias :: alias [3]Inner
+            array_matches proc($T, $Child type, $length usize) bool {
+                return match typeinfo!(T) {
+                    .array |info|: info.child == Child and info.len == length,
+                    else: false,
+                }
+            }
+            backing_matches proc($T, $Backing type) bool {
+                return match typeinfo!(T) {
+                    .distinct |backing|: backing == Backing,
+                    else: false,
+                }
+            }
+            main proc() bool {
+                return $(
+                    array_matches(ArrayAlias, Inner, 3)
+                    and array_matches([0]bool, bool, 0)
+                    and array_matches([2]mut i16, i16, 2)
+                    and !array_matches(ArrayAlias, Other, 3)
+                    and backing_matches(Inner, u16)
+                    and backing_matches(OuterAlias, Inner)
+                    and !backing_matches(Outer, u16)
+                    and OuterAlias == Outer and Inner != Other
+                )
+            }
+            """, b"true\n", None,
+        ),
+        "record_tuple_names_order_exact_types_and_layout": (
+            """
+            import "@std/meta"
+            Child :: struct { value i16 }
+            Other :: struct { value i16 }
+            Record :: struct { child Child, maybe ?i8, pointer @u8 }
+            RecordAlias :: alias Record
+            Tuple :: alias struct { i8, Child, bool }
+            Packet :: struct_type!(.c, ["value"], [i16], [null])
+            same_name proc(left, right []u8) bool {
+                if (left.len != right.len) return false
+                for left |byte, index| {
+                    if (byte != right[index]) return false
+                }
+                return true
+            }
+            valid proc() bool {
+                match typeinfo!(RecordAlias) {
+                    .record |info|: {
+                        if (info.is_tuple or info.layout != .auto) return false
+                        if (!same_name(info.name?, "Record") or info.fields.len != 3) return false
+                        if (!same_name(info.fields[0].name, "child") or info.fields[0].index != 0) return false
+                        if (!same_name(info.fields[1].name, "maybe") or info.fields[1].index != 1) return false
+                        if (!same_name(info.fields[2].name, "pointer") or info.fields[2].index != 2) return false
+                        if (info.fields[0].type != Child or info.fields[0].type == Other) return false
+                        if (info.fields[1].type != ?i8 or info.fields[2].type != @u8) return false
+                    }
+                    else: return false,
+                }
+                match typeinfo!(Tuple) {
+                    .record |info|: {
+                        if (!info.is_tuple or info.name != null or info.layout != .auto) return false
+                        if (info.fields.len != 3) return false
+                        inline for info.fields |field, index| {
+                            if (field.index != index or field.name.len != 1) return false
+                            if (field.name[0] != u8(48 + index)) return false
+                            if (index == 0 and field.type != i8) return false
+                            if (index == 1 and field.type != Child) return false
+                            if (index == 2 and field.type != bool) return false
+                        }
+                    }
+                    else: return false,
+                }
+                match typeinfo!(struct { value i16 }) {
+                    .record |info|: if (info.name != null or info.is_tuple) return false,
+                    else: return false,
+                }
+                return match typeinfo!(Packet) {
+                    .record |info|: info.layout == .c and !info.is_tuple,
+                    else: false,
+                }
+            }
+            main proc() bool { return $(valid()) }
+            """, b"true\n", None,
+        ),
+        "enum_metadata_uses_declaration_order_not_discriminants": (
+            """
+            import "@std/meta"
+            Sparse :: enum(i16) { last = -7, first = 3, middle = 90 }
+            SparseAlias :: alias Sparse
+            Other :: enum(i16) { last = -7, first = 3, middle = 90 }
+            valid proc() bool {
+                return match typeinfo!(SparseAlias) {
+                    .enum |info|: (
+                        info.fields.len == 3
+                        and info.fields[0].index == 0
+                        and info.fields[1].index == 1
+                        and info.fields[2].index == 2
+                        and info.fields[0].name.len == 4 and info.fields[0].name[0] == 108
+                        and info.fields[1].name.len == 5 and info.fields[1].name[0] == 102
+                        and info.fields[2].name.len == 6 and info.fields[2].name[0] == 109
+                        and info.fields[0].type == Sparse
+                        and info.fields[1].type == SparseAlias
+                        and info.fields[2].type != Other
+                    ),
+                    else: false,
+                }
+            }
+            main proc() [3]mut i16 {
+                if (!$(valid())) return [0, 0, 0]
+                values [3]mut i16 := [0, 0, 0]
+                match typeinfo!(SparseAlias) {
+                    .enum |info|: inline for info.fields |field, index| {
+                        values[index] = i16(field!(SparseAlias, field.name))
+                    }
+                    else: compile_error!("expected enum"),
+                }
+                return values
+            }
+            """, b"[-7, 3, 90]\n", None,
+        ),
+        "record_fields_drive_field_access_and_generic_inference": (
+            """
+            import "@std/meta"
+            Record :: struct { small i8, wide i16, enabled bool }
+            convert proc($T type, value T) i16 {
+                return match typeinfo!(T) {
+                    .integer: i16(value),
+                    .bool: match value { true: 2, false: 0 },
+                    else: compile_error!("unsupported field"),
+                }
+            }
+            sum proc($T type, value T) i16 {
+                total i16 := 0
+                match typeinfo!(T) {
+                    .record |info|: inline for info.fields |field| {
+                        total = total + convert(field!(value, field.name))
+                    }
+                    else: compile_error!("expected record"),
+                }
+                return total
+            }
+            main proc() i16 {
+                value Record :: { small = 19, wide = 21, enabled = true }
+                return sum(value)
+            }
+            """, b"42\n", None,
+        ),
+        "reflected_fields_generate_owned_schema_and_defaults": (
+            """
+            import "@std/meta"
+            Source :: struct { left i16, right i16 }
+            Defaults proc($T type, $default i16) type {
+                match typeinfo!(T) {
+                    .record |info|: {
+                        names [info.fields.len]mut []u8 := undefined
+                        types [info.fields.len]mut type := undefined
+                        defaults [info.fields.len]mut ?i16 := undefined
+                        inline for info.fields |field, index| {
+                            names[index] = field.name
+                            types[index] = field.type
+                            defaults[index] = default
+                        }
+                        return struct_type!(info.layout, names, types, defaults)
+                    }
+                    else: compile_error!("expected record"),
+                }
+            }
+            main proc() i16 {
+                first Defaults(Source, 21) := {}
+                saved :: first
+                field!(first, "left") = 0
+                same Defaults(Source, 21) :: saved
+                return same.left + same.right
+            }
+            """, b"42\n", None,
+        ),
+        "real_meta_enum_field_struct_defaults": (
+            """
+            import "@std/meta"
+            Key :: enum(i16) { last = -7, first = 3, middle = 90 }
+            Values :: alias meta.EnumFieldStruct(Key, i16, 21)
+            main proc() i16 {
+                values Values :: { last = 19, first = 23 }
+                empty Values :: {}
+                if (values.middle != 21 or empty.last != 21 or empty.first != 21) return -1
+                return values.last + field!(values, "first")
+            }
+            """, b"42\n", None,
+        ),
+        "real_enummap_generates_ordinal_storage": (
+            """
+            import "@std/meta"
+            import "@std/enummap"
+            Key :: enum(i16) { last = -7, first = 3, missing = 90 }
+            KeyAlias :: alias Key
+            main proc() i16 {
+                values enummap.EnumMap(KeyAlias, i16) :: {
+                    present = [true, true, false], values = [19, 23, 0],
+                }
+                if (values.present[2]) return -1
+                return values.values[0] + values.values[1]
+            }
+            """, b"42\n", None,
+        ),
+        "metadata_slices_cross_producers_without_losing_type_identity": (
+            """
+            import "@std/meta"
+            Id :: distinct i16
+            Record :: struct { value Id }
+            retain proc(fields []meta.FieldInfo) []meta.FieldInfo { return fields }
+            describe_fields proc($T type) []meta.FieldInfo {
+                return match typeinfo!(T) {
+                    .record |info|: retain(info.fields),
+                    .enum |info|: retain(info.fields),
+                    else: compile_error!("expected fields"),
+                }
+            }
+            Storage proc() type {
+                source :: describe_fields(Record)
+                copy := source[0]
+                copy.type = bool
+                if (copy.type != bool or source[0].type != Id) return bool
+                if (describe_fields(struct {}).len != 0) return bool
+                return struct_type!(.auto, [source[0].name], [source[0].type], [Id(42)])
+            }
+            main proc() i16 {
+                value Storage() :: {}
+                return i16(value.value)
+            }
+            """, b"42\n", None,
+        ),
+        "composed_enum_metadata_preserves_members_and_sum_identity": (
+            """
+            import "@std/meta"
+            First :: enum { one, two }
+            Second :: enum { three }
+            Keys :: alias (First | (Second | First))
+            valid proc() bool {
+                match typeinfo!(Keys) {
+                    .enum |info|: {
+                        if (info.fields.len != 3) return false
+                        inline for info.fields |field, index| {
+                            if (field.index != index or field.type != Keys) return false
+                            selected Keys :: field!(Keys, field.name)
+                            if (index == 0 and selected != .one) return false
+                            if (index == 1 and selected != .two) return false
+                            if (index == 2 and selected != .three) return false
+                        }
+                        return true
+                    }
+                    else: return false,
+                }
+            }
+            main proc() bool { return $(valid()) }
+            """, b"true\n", None,
+        ),
+        "inline_metadata_match_keeps_static_tags_and_type_payloads": (
+            """
+            import "@std/meta"
+            Id :: distinct i16
+            score proc($T type) i16 {
+                match typeinfo!(T) {
+                    inline |payload, tag|: {
+                        if (tag == .array) {
+                            if (payload.child == i16) return i16(payload.len)
+                            return 0
+                        } else if (tag == .distinct) {
+                            if (payload == i16) return 40
+                            return 0
+                        } else {
+                            return 0
+                        }
+                    },
+                }
+            }
+            main proc() i16 { return score([2]i16) + score(Id) + score(bool) }
+            """, b"42\n", None,
+        ),
+        "active_metadata_payloads_support_direct_checked_projection": (
+            """
+            import "@std/meta"
+            Id :: distinct i16
+            Storage proc() type {
+                if (typeinfo!(Id).distinct != i16) return bool
+                child :: typeinfo!([2]Id).array.child
+                count :: typeinfo!([2]Id).array.len
+                return struct { values [count]child }
+            }
+            main proc() i16 {
+                value Storage() :: { values = [Id(19), Id(23)] }
+                if (typeinfo!(Storage()).record.fields[0].index != 0) return 0
+                return i16(value.values[0]) + i16(value.values[1])
+            }
+            """, b"42\n", None,
+        ),
+    }
+    for name, text, error in (
+        ("missing_argument", "main proc() i16 { typeinfo!()\nreturn 42 }", b"argument count"),
+        ("extra_argument", "main proc() i16 { typeinfo!(i16, bool)\nreturn 42 }", b"argument count"),
+        ("non_type_argument", "main proc() i16 { typeinfo!(42)\nreturn 42 }", b"must name a type"),
+        (
+            "overlapping_patterns",
+            "main proc() i16 { return match typeinfo!(i16) { .integer: 42, .integer: 0, else: 0 } }",
+            b"duplicate or overlapping match pattern",
+        ),
+        (
+            "non_exhaustive_match",
+            "main proc() i16 { return match typeinfo!(i16) { .integer: 42 } }",
+            b"match is not exhaustive",
+        ),
+        (
+            "void_payload_capture",
+            "main proc() i16 { return match typeinfo!(i16) { .integer |value|: 42, else: 0 } }",
+            b"payload capture requires compatible nonvoid tagged union variants",
+        ),
+        (
+            "incompatible_payload_capture",
+            "main proc() i16 { return match typeinfo!(i16) { .array, .record |info|: 42, else: 0 } }",
+            b"payload capture requires compatible nonvoid tagged union variants",
+        ),
+        (
+            "field_bounds",
+            """
+            Bad proc() type {
+                match typeinfo!(struct { value i16 }) {
+                    .record |info|: return info.fields[1].type,
+                    else: return bool,
+                }
+            }
+            main proc() i16 { value Bad() :: 42
+                return value }
+            """,
+            b"index out of bounds",
+        ),
+        (
+            "inactive_metadata_payload_projection",
+            "main proc() usize { return typeinfo!(i16).array.len }",
+            b"tagged union field is not active",
+        ),
+        (
+            "metadata_slice_elements_remain_readonly",
+            """
+            Bad proc() type {
+                match typeinfo!(struct { value i16 }) {
+                    .record |info|: {
+                        fields := info.fields
+                        fields[0].type = bool
+                        return fields[0].type
+                    }
+                    else: return bool,
+                }
+            }
+            main proc() Bad() { return 42 }
+            """,
+            b"indexed assignment requires a writable array element",
+        ),
+        (
+            "runtime_metadata_escape",
+            "main proc() i16 { info :: typeinfo!(i16)\nreturn 42 }",
+            b"record fields require a concrete value type",
+        ),
+    ):
+        cases[name] = ('import "@std/meta"\n' + text, b"", error)
+    cases["missing_meta_import"] = (
+        "main proc() i16 { typeinfo!(i16)\nreturn 42 }",
+        b"", b"typeinfo! requires importing @std/meta",
+    )
+    cases["relative_meta_import_is_not_reflection_opt_in"] = (
+        'import "../std/meta"\nmain proc() i16 { typeinfo!(i16)\nreturn 42 }',
+        b"", b"typeinfo! requires importing @std/meta",
+    )
+
+    for name, (text, stdout, error) in cases.items():
+        app = project / name
+        app.mkdir()
+        (app / "main.hon").write_text(textwrap.dedent(text).strip() + "\n")
+        check(app, executable, (stdout, error))
+
+    library = project / "library"
+    library.mkdir()
+    definition = library / "types.hon"
+    definition.write_text(textwrap.dedent("""
+        import "@std/meta"
+        Record :: struct { value i16 }
+        Alias :: alias Record
+        Other :: struct { value i16 }
+        Child proc($T type) type {
+            return match typeinfo!(T) {
+                .record |info|: info.fields[0].type,
+                else: bool,
+            }
+        }
+    """).strip() + "\n")
+    app = project / "import_identity"
+    app.mkdir()
+    source = app / "main.hon"
+    source.write_text(textwrap.dedent("""
+        import "@std/meta"
+        lib :: import "../library"
+        Record :: struct { value i16 }
+        same_record proc($T type) bool {
+            return match typeinfo!(T) {
+                .array |info|: info.child == lib.Record and info.child != Record and info.child != lib.Other,
+                else: false,
+            }
+        }
+        main proc() i16 {
+            if (!$(same_record([1]lib.Alias))) return -1
+            value lib.Child(lib.Alias) :: 42
+            return value
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    definition.write_text(textwrap.dedent("""
+        import "@std/meta"
+        Bad proc() type {
+            match typeinfo!(struct { value i16 }) {
+                .record |info|: return info.fields[1].type,
+                else: return bool,
+            }
+        }
+    """).strip() + "\n")
+    source.write_text('lib :: import "../library"\nmain proc() lib.Bad() { return 42 }\n')
+    check(app, executable, (b"", b"index out of bounds"))
+    diagnosed = run(str(HONEY), "run", str(app))
+    assert diagnosed.stderr.startswith(f"{definition.resolve()}:4:".encode()), outcome(diagnosed)
+    assert len(diagnosed.stderr.splitlines()) == 1, outcome(diagnosed)
+    sibling = project / "sibling_import"
+    sibling.mkdir()
+    (sibling / "metadata.hon").write_text('reflection :: import "@std/meta"\n')
+    (sibling / "main.hon").write_text(
+        "main proc() i16 { return match typeinfo!(i16) { .integer: 42, else: 0 } }\n"
+    )
+    check(sibling, executable, (b"42\n", None))
+    malformed = project / "malformed"
+    (malformed / "std" / "meta").mkdir(parents=True)
+    (malformed / "build.hon").write_text("# project root\n")
+    metadata = (ROOT / "std/meta/meta.hon").read_text()
+    (malformed / "std/meta/meta.hon").write_text(metadata.replace("    type type\n", "    type usize\n"))
+    (malformed / "main.hon").write_text(
+        'import "@std/meta"\n'
+        "main proc() i16 { return match typeinfo!(i16) { .integer: 42, else: 0 } }\n"
+    )
+    check(malformed, executable, (b"", b"@std/meta declarations do not match the compiler reflection ABI"))
+    return len(cases) + 4
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -7604,6 +8105,7 @@ def main():
         count += check_record_packages(temporary, executable)
         count += check_data_model_packages(temporary, executable)
         count += check_specialization_packages(temporary, executable)
+        count += check_typeinfo_packages(temporary, executable)
         count += check_fallible_packages_and_entry(temporary, executable)
         count += check_dependency_provenance(temporary, executable)
         source = ROOT / "programs/factorial.hon"

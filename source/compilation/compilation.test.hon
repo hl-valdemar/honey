@@ -557,6 +557,118 @@ recompiles_generated_records_without_borrowing_previous_ir test {
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
 }
 
+recompiles_imported_typeinfo_without_borrowing_metadata test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        metadata :: try add_package(&session)
+        root_bytes := try owned_text(
+            `meta :: import "@std/meta"
+            `Id :: distinct i16
+            `Keys :: enum { left, right }
+            `Source :: struct { value Id }
+            `describe proc($T type) meta.TypeInfo { return typeinfo!(T) }
+            `identity proc($T type, value T) T { return value }
+            `Storage proc() type {
+            `    match describe(Keys) {
+            `        .enum |info|: {
+            `            names [info.fields.len]mut []u8 := undefined
+            `            types [info.fields.len]mut type := undefined
+            `            defaults [info.fields.len]mut ?Id := undefined
+            `            inline for info.fields |field, index| {
+            `                if (field.index != index or field.type != Keys) compile_error!("invalid enum field")
+            `                names[index] = field.name
+            `                types[index] = Id
+            `                defaults[index] = Id(40)
+            `            }
+            `            return struct_type!(.auto, names, types, defaults)
+            `        }
+            `        else: compile_error!("expected enum")
+            `    }
+            `}
+            `main proc() i16 {
+            `    match describe([2]Id) {
+            `        .array |info|: {
+            `            if (info.child != Id or info.len != 2) return 0
+            `        }
+            `        else: return 0
+            `    }
+            `    match describe(Id) {
+            `        .distinct |backing|: if (backing != i16) return 0
+            `        else: return 0
+            `    }
+            `    match describe(Source) {
+            `        .record |info|: {
+            `            if (info.fields.len != 1 or info.is_tuple or info.layout != .auto) return 0
+            `            inline for info.fields |field, index| {
+            `                if (field.type != Id or field.index != index or field.name.len != 5) return 0
+            `            }
+            `        }
+            `        else: return 0
+            `    }
+            `    storage Storage() :: {}
+            `    left Id :: identity(Id, storage.left)
+            `    right Id :: identity(Id, storage.right)
+            `    return i16(left) + i16(right) - 38
+            `}
+            ,
+        )
+        defer arraylist.deinit(&root_bytes)
+        metadata_bytes := try owned_text(
+            `Layout :: enum { auto, c }
+            `ArrayInfo :: struct { child type, len usize }
+            `FieldInfo :: struct { name []u8, type type, index usize }
+            `RecordInfo :: struct { name ?[]u8, fields []FieldInfo, is_tuple bool, layout Layout }
+            `EnumInfo :: struct { fields []FieldInfo }
+            `TypeInfo :: union(enum) {
+            `    invalid void
+            `    void void
+            `    noreturn void
+            `    anyopaque void
+            `    bool void
+            `    integer void
+            `    float void
+            `    array ArrayInfo
+            `    pointer void
+            `    slice void
+            `    range void
+            `    optional void
+            `    function void
+            `    enum EnumInfo
+            `    record RecordInfo
+            `    union void
+            `    fallible void
+            `    distinct type
+            `}
+            ,
+        )
+        defer arraylist.deinit(&metadata_bytes)
+        root_source :: try add_source(&session, root, "app/main.hon", &root_bytes, &diagnostic_store)
+        _ = try add_source(&session, metadata, "std/meta/meta.hon", &metadata_bytes, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = metadata,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for (0..modules.len) |index| {
+        outcome := try interpreter.run(mem.c_allocator, &modules[index], &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 dependency_traps_keep_original_spans_and_remain_demand_driven test {
     mains [2][]u8 :: [
         `dep :: import "../dependency"
