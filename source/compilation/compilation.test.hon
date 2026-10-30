@@ -946,3 +946,60 @@ computed_callbacks_recompile_without_retaining_interpreter_function_ids test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+computed_byte_slices_recompile_without_borrowing_evaluation_storage test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `main proc() i16 {
+            `    packet :: $(lib.make())
+            `    if (packet.bytes.len != 4 or packet.suffix.len != 3) return -1
+            `    if (packet.bytes[0] != 255 or packet.bytes[1] != 0) return -2
+            `    if (packet.bytes[2] != 128 or packet.bytes[3] != 42) return -3
+            `    if (packet.suffix[0] != 65 or packet.suffix[1] != 0) return -4
+            `    if (packet.suffix[2] != 66 or packet.suffix.ptr[3] != 0) return -5
+            `    return 42
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/byte_slices/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `Packet :: struct { bytes []u8, suffix [;0]u8 }
+            `make proc() Packet {
+            `    bytes [4]mut u8 := undefined
+            `    bytes[0] = 255
+            `    bytes[1] = 0
+            `    bytes[2] = 128
+            `    bytes[3] = 42
+            `    return Packet { bytes = bytes[..], suffix = "xA\0B"[1..;0] }
+            `}
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/byte_slices/library/bytes.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

@@ -2331,13 +2331,14 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     return try evaluate(state, id)
 }
 
-# values leaving the temporary interpreter must own no interpreter addresses or module IDs.
-# rebuild contextual source literals and source-bound callback references before releasing it.
+# values leaving temporary evaluation must own no interpreter addresses or module IDs.
+# snapshot readonly bytes and rebuild source literals/references before releasing its backing.
 @hide:file
 serialize_value proc(
     state @mut State,
     module @ir.Module,
     checked @typecheck.Result,
+    outcome @interpreter.Outcome,
     functions []ast.NodeId,
     type typecheck.Type,
     value ir.Value,
@@ -2355,13 +2356,53 @@ serialize_value proc(
         return no_node
     }
     result := no_node
-    if (type.kind == .array) {
+    if (type.kind == .slice) {
+        slice :: typecheck.array_type(checked, type.array_type)
+        if (
+            slice.mutable or slice.element.kind != .u8 or slice.element.nominal != no_node
+            or (slice.sentinel != null and slice.sentinel? != 0)
+        ) return no_node
+        pointer :: ir.aggregate_item(module, value, 0)
+        length :: ir.aggregate_item(module, value, 1)
+        if (pointer.uninitialized or length.uninitialized) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+            return no_node
+        }
+        if (
+            length.data.unsigned != 0
+            and interpreter.evaluation_byte(outcome, module, pointer, usize(length.data.unsigned - 1)) == null
+        ) return no_node
+        bytes :: try mem.alloc(u8, state.allocator, usize(length.data.unsigned))
+        defer mem.free(state.allocator, bytes)
+        for (bytes) |_, index| {
+            byte :: interpreter.evaluation_byte(outcome, module, pointer, index)
+            if (byte == null) return no_node
+            if (byte?.uninitialized) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                return no_node
+            }
+            bytes[index] = u8(byte?.data.unsigned)
+        }
+        if (slice.sentinel != null) {
+            sentinel :: interpreter.evaluation_byte(outcome, module, pointer, bytes.len)
+            if (sentinel == null) return no_node
+            if (sentinel?.uninitialized) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                return no_node
+            }
+            if (sentinel?.data.unsigned != 0) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .sentinel_mismatch, span)
+                return no_node
+            }
+        }
+        result = try ast.add_string(state.builder, span, bytes)
+    } else if (type.kind == .array) {
         array :: typecheck.array_type(checked, type.array_type)
         elements := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&elements)
         for (0..array.len) |i| {
             child :: ir.aggregate_item(module, value, i)
-            node :: try serialize_value(state, module, checked, functions, array.element, child, span)
+            node :: try serialize_value(state, module, checked, outcome, functions, array.element, child, span)
             if (node == no_node) return no_node
             try arraylist.append(&elements, node)
         }
@@ -2381,7 +2422,7 @@ serialize_value proc(
                 return result
             }
             child :: ir.aggregate_item(module, value, i)
-            node :: try serialize_value(state, module, checked, functions, field.type, child, span)
+            node :: try serialize_value(state, module, checked, outcome, functions, field.type, child, span)
             if (node == no_node) return no_node
             name := field.name
             if (name != null) name = try member_name(state, name?)
@@ -2396,7 +2437,7 @@ serialize_value proc(
         index :: if (failed) usize(1) else usize(0)
         channel :: if (failed) container.error_type else container.element
         child :: ir.aggregate_item(module, value, index)
-        result = try serialize_value(state, module, checked, functions, channel, child, span)
+        result = try serialize_value(state, module, checked, outcome, functions, channel, child, span)
         if (result == no_node) return no_node
         # keep named success/error types distinct even when their members overlap.
         annotation := no_node
@@ -2425,12 +2466,12 @@ serialize_value proc(
                 value.data.function == maxval!(ir.FunctionId)
                 else value.data.unsigned == maxval!(u64)
             if (absent) result = try ast.add_literal(state.builder, .null, span)
-            else result = try serialize_value(state, module, checked, functions, container.element, value, span)
+            else result = try serialize_value(state, module, checked, outcome, functions, container.element, value, span)
         } else if (!ir.aggregate_item(module, value, 0).data.boolean) {
             result = try ast.add_literal(state.builder, .null, span)
         } else {
             child :: ir.aggregate_item(module, value, 1)
-            payload :: try serialize_value(state, module, checked, functions, container.element, child, span)
+            payload :: try serialize_value(state, module, checked, outcome, functions, container.element, child, span)
             if (payload == no_node) return no_node
             name :: try ast.add_generated_identifier(state.builder, span,
                 try strpool.intern(state.strings, "some"), "some")
@@ -2635,13 +2676,16 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     value :: outcome.value
     source_type :: typecheck.type_of(&checked, result_type)
-    node :: try serialize_value(state, &module, &checked, functions.items, source_type, value, span)
+    node :: try serialize_value(state, &module, &checked, &outcome, functions.items, source_type, value, span)
     if (node == no_node) {
         if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
         return Value{}
     }
-    if (ir.aggregate(value.type) or source_type.kind == .enumeration or source_type.kind == .void)
+    if (
+        (ir.aggregate(value.type) and source_type.kind != .slice)
+        or source_type.kind == .enumeration or source_type.kind == .void
+    )
         return Value{ kind = .aggregate, node = node, annotation = result_type }
     result := try evaluate(state, node)
     result.annotation = result_type

@@ -1771,7 +1771,10 @@ CASES = {
     ),
     "inline_for_tuple_rejects_storage_escape_before_break": (
         """
-        values proc() struct { i16, []u8 } { return {42, "borrowed"} }
+        values proc() struct { i16, @i16 } {
+            local i16 :: 2
+            return {42, &local}
+        }
         main proc() i16 {
             inline for values() |_| { break }
             return 42
@@ -2090,9 +2093,21 @@ CASES = {
         }
         """, b"", b"escape",
     ),
-    "inline_for_rejects_borrowed_element_escape": (
+    "inline_for_materializes_readonly_byte_slice_elements": (
         """
         data proc() [1][]u8 { return ["borrowed"] }
+        main proc() usize {
+            inline for data() |value| { return value.len }
+            return 0
+        }
+        """, b"8\n", None,
+    ),
+    "inline_for_rejects_mutable_byte_slice_element_escape": (
+        """
+        data proc() [1][]mut u8 {
+            values [1]mut u8 := [42]
+            return [values[..]]
+        }
         main proc() usize {
             inline for data() |value| { return value.len }
             return 0
@@ -5210,10 +5225,206 @@ CASES = {
         main proc() i16 { return $(make()).pointer^ }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_aggregate_rejects_slice_escape": (
+    "comptime_aggregate_materializes_readonly_byte_slices": (
         """
         make proc() [1][]u8 { return ["borrowed"] }
         main proc() usize { return $(make())[0].len }
+        """, b"8\n", None,
+    ),
+    "comptime_byte_slices_preserve_subviews_and_zero_sentinel": (
+        """
+        subview proc() []u8 { return "unused42ignored"[6..8] }
+        terminated proc() [;0]u8 { return "unused42"[6..;0] }
+        main proc() [5]u8 {
+            plain :: $(subview())
+            zero [;0]u8 :: $(terminated())
+            return [plain[0], plain[1], zero[0], zero[1], zero.ptr[zero.len]]
+        }
+        """, b"[52, 50, 52, 50, 0]\n", None,
+    ),
+    "comptime_byte_slices_own_filled_local_arrays": (
+        """
+        make proc(seed u8) []u8 {
+            values [3]mut u8 := undefined
+            for (0..usize(3)) |index| values[index] = seed + u8(index)
+            copy := values
+            values[0] = 99
+            return copy[1..]
+        }
+        main proc() [4]u8 {
+            first :: $(make(40))
+            second :: $(make(10))
+            return [first[0], first[1], second[0], second[1]]
+        }
+        """, b"[41, 42, 11, 12]\n", None,
+    ),
+    "comptime_byte_slices_materialize_immutable_globals_and_raw_fields": (
+        """
+        bytes [4]u8 :: [9, 40, 2, 8]
+        Views :: struct { rows [2][]u8 }
+        make proc() Views { return { rows = [bytes[1..3], bytes[2..3]] } }
+        main proc() [3]u8 {
+            views :: $(make())
+            return [views.rows[0][0], views.rows[0][1], views.rows[1][0]]
+        }
+        """, b"[40, 2, 2]\n", None,
+    ),
+    "comptime_byte_slices_preserve_nested_optional_tagged_and_fallible_channels": (
+        """
+        Failure :: struct { text []u8 }
+        Choice :: union(enum) { data struct { rows [2]?[]u8 }, empty void }
+        Packet :: struct { choice ?Choice, result []u8 ! Failure }
+        make proc(fail bool) Packet {
+            values [2]mut u8 := [40, 2]
+            result []u8 ! Failure := values[..]
+            if (fail) result = Failure { text = values[1..] }
+            return {
+                choice = Choice { data = { rows = [values[..1], null] } },
+                result = result,
+            }
+        }
+        main proc() [4]u8 {
+            good :: $(make(false))
+            bad :: $(make(true))
+            choice :: good.choice?
+            if (choice.data.rows[1] != null) return [0, 0, 0, 0]
+            success :: good.result catch ""
+            failure :: bad.result catch |err| err.text
+            return [choice.data.rows[0]?[0], success[0], success[1], failure[0]]
+        }
+        """, b"[40, 40, 2, 2]\n", None,
+    ),
+    "comptime_byte_slices_normalize_generic_cache_content": (
+        """
+        make proc() []u8 {
+            values [2]mut u8 := [40, 2]
+            return values[..]
+        }
+        same proc() []u8 { return "(\\x28\\x02)"[1..3] }
+        other proc() []u8 { return "\\x28\\x03" }
+        Token proc($bytes []u8) type { return struct {} }
+        score proc($bytes []u8) u8 { return bytes[0] + bytes[1] }
+        main proc() u8 {
+            if (Token(make()) != Token(same())) return 0
+            if (Token(make()) != Token("\\x28\\x02")) return 0
+            if (Token(make()) == Token(other())) return 0
+            return score(make())
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_byte_slices_supply_generated_defaults": (
+        """
+        make proc() []u8 {
+            values [2]mut u8 := [40, 2]
+            return values[..]
+        }
+        Generated proc() type {
+            return struct_type!(.auto, ["bytes"], [[]u8], [make()])
+        }
+        main proc() u8 {
+            value Generated() :: {}
+            return value.bytes[0] + value.bytes[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_byte_slices_preserve_nul_high_bytes_and_empty_views": (
+        r"""
+        make proc() []u8 { return "!\x00\x80\xff?"[1..4] }
+        empty proc() []u8 { return "ignored"[3..3] }
+        zero proc() [;0]u8 { return ""[..;0] }
+        main proc() [6]usize {
+            bytes :: $(make())
+            plain :: $(empty())
+            terminated :: $(zero())
+            return [usize(bytes[0]), usize(bytes[1]), usize(bytes[2]),
+                plain.len, terminated.len, usize(terminated.ptr[0])]
+        }
+        """, b"[0, 128, 255, 0, 0, 0]\n", None,
+    ),
+    "comptime_byte_slices_reject_uninitialized_source_bytes": (
+        """
+        make proc() []u8 {
+            values [2]mut u8 := undefined
+            values[0] = 42
+            return values[..]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"local value was read before initialization",
+    ),
+    "comptime_byte_slices_ignore_unobserved_uninitialized_bytes": (
+        """
+        make proc() []u8 {
+            values [3]mut u8 := undefined
+            values[1] = 42
+            return values[1..2]
+        }
+        main proc() u8 { return $(make())[0] }
+        """, b"42\n", None,
+    ),
+    "comptime_byte_slices_reject_invalid_ranges": (
+        """
+        make proc() []u8 {
+            values [1]u8 :: [42]
+            return values[..2]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"slice",
+    ),
+    "comptime_byte_slices_reject_oversized_pointer_views_before_allocation": (
+        """
+        make proc() []u8 {
+            values [1]u8 :: [42]
+            return values.ptr[..maxval!(usize)]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_byte_slices_recheck_zero_sentinel_after_mutation": (
+        """
+        make proc() [;0]u8 {
+            values [2]mut u8 := [42, 0]
+            view [;0]u8 :: values[..1;0]
+            values[1] = 7
+            return view
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"sentinel",
+    ),
+    "comptime_aggregate_rejects_mutable_byte_slice_escape": (
+        """
+        make proc() [1][]mut u8 {
+            values [1]mut u8 := [42]
+            return [values[..]]
+        }
+        main proc() usize { return $(make())[0].len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_aggregate_rejects_nonbyte_slice_escape": (
+        """
+        make proc() []i16 {
+            values [1]i16 :: [42]
+            return values[..]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_aggregate_rejects_nominal_byte_slice_escape": (
+        """
+        Byte :: distinct u8
+        make proc() []Byte {
+            values [1]Byte :: [42]
+            return values[..]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_aggregate_rejects_nonzero_sentinel_byte_slice_escape": (
+        """
+        make proc() [;1]u8 {
+            values [2]u8 :: [42, 1]
+            return values[..1;1]
+        }
+        main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
     "comptime_tagged_union_preserves_tags_and_nested_raw_payloads": (
@@ -8776,7 +8987,31 @@ def check_specialization_packages(temporary, executable):
         }
     """).strip() + "\n")
     check(app, executable, (b"42\n", None))
-    return 23
+    sizing.write_text(textwrap.dedent("""
+        bytes [3]u8 :: [9, 40, 2]
+        view proc() []u8 { return bytes[1..] }
+        filled proc() []u8 {
+            local [2]mut u8 := undefined
+            local[0] = 40
+            local[1] = 2
+            return local[..]
+        }
+        Token proc($value []u8) type { return struct {} }
+        Generated proc() type {
+            return struct_type!(.auto, ["value"], [[]u8], [filled()])
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() [3]u8 {
+            value lib.Generated() :: {}
+            direct :: $(lib.view())
+            if (lib.Token(lib.view()) != lib.Token(lib.filled())) return [0, 0, 0]
+            return [direct[0], value.value[1], $(lib.filled())[0]]
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"[40, 2, 40]\n", None))
+    return 24
 
 
 def check_dependency_provenance(temporary, executable):

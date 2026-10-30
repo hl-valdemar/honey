@@ -9,12 +9,27 @@ Outcome :: struct {
     trap ?diagnostics.DiagnosticId = null
     allocator ?mem.Allocator = null
     owned_elements ?[]mut ir.Value = null
+    evaluation_memory ?[]mut EvaluationMemory = null
 }
 
-#! release an escaped aggregate with its retained allocator; scalar and trap outcomes need no allocation.
-#! strings and aggregate descriptors borrow the module, which must outlive this outcome.
+#! releases result storage and any retained compile-time evaluation memory.
+#! string IDs and aggregate descriptors borrow the module, which must outlive this outcome.
 deinit proc(outcome @mut Outcome) void {
     if (outcome.owned_elements) |elements| mem.free(outcome.allocator?, elements)
+    if (outcome.evaluation_memory) |owned| {
+        memory :: &owned[0]
+        allocator :: outcome.allocator?
+        for (memory.frames.items) |frame| free_frame(allocator, frame)
+        arraylist.deinit(&memory.frames)
+        arraylist.deinit(&memory.pointers)
+        mem.free(allocator, memory.globals)
+        mem.free(allocator, memory.aggregate_globals)
+        mem.free(allocator, memory.strings)
+        mem.free(allocator, memory.string_cells)
+        mem.free(allocator, memory.scratch)
+        mem.free(allocator, owned)
+    }
+    outcome.evaluation_memory = null
     outcome.owned_elements = null
     outcome.allocator = null
     outcome.value = ir.Value{}
@@ -82,6 +97,31 @@ Frame :: struct {
     addresses []mut Address
 }
 
+@hide:file
+EvaluationMemory :: struct {
+    globals []mut GlobalState
+    aggregate_globals []mut ir.Value
+    strings []mut StringView
+    string_cells []mut ir.Value
+    scratch []mut ir.Value
+    pointers arraylist.ArrayList(Pointer)
+    frames arraylist.ArrayList(Frame)
+}
+
+#! borrows one checked byte from retained evaluation storage; null means an invalid pointer/range.
+evaluation_byte proc(outcome @Outcome, module @ir.Module, pointer ir.Value, index usize) ?ir.Value {
+    if (outcome.evaluation_memory == null) return null
+    memory :: &outcome.evaluation_memory?[0]
+    handle :: pointer.data.unsigned
+    if (handle >= u64(memory.pointers.items.len)) return null
+    location := memory.pointers.items[usize(handle)]
+    if (index > maxval!(usize) - location.byte_offset) return null
+    location.byte_offset += index
+    if (pointer_address(module, location, .u8, ir.no_array)) |address|
+        return read_address(module, address, memory.scratch)
+    return null
+}
+
 #! executes typed IR with invocation/global storage released on every exit.
 #! aggregate results own flat storage released by `deinit`; string IDs and shapes resolve through `module`.
 run proc(
@@ -93,8 +133,7 @@ run proc(
 }
 
 #! executes an isolated compile-time module with bounded work and stack depth.
-#! ownership and diagnostic identities follow run.
-#! temporary execution storage uses `allocator` and is released before returning.
+#! result backing, including addressed completed frames, remains owned by the outcome until `deinit`.
 run_evaluation proc(
     allocator mem.Allocator,
     module @ir.Module,
@@ -119,8 +158,9 @@ execute proc(
         return Outcome{ trap = module.entry_diagnostic }
     }
 
+    transferred := false
     globals :: try mem.alloc(GlobalState, allocator, module.globals.items.len)
-    defer mem.free(allocator, globals)
+    defer if (!transferred) mem.free(allocator, globals)
     mem.set(globals, GlobalState{})
     global_cells usize := 0
     for (module.globals.items) |global| {
@@ -130,7 +170,7 @@ execute proc(
         global_cells += cells
     }
     aggregate_globals :: try mem.alloc(ir.Value, allocator, global_cells)
-    defer mem.free(allocator, aggregate_globals)
+    defer if (!transferred) mem.free(allocator, aggregate_globals)
     global_offset usize := 0
     for (module.globals.items) |global, i| {
         if (!ir.aggregate(global.type)) continue
@@ -144,7 +184,7 @@ execute proc(
         if (shape.byte_size > scratch_size) scratch_size = shape.byte_size
     }
     scratch :: try mem.alloc(ir.Value, allocator, scratch_size)
-    defer mem.free(allocator, scratch)
+    defer if (!transferred) mem.free(allocator, scratch)
     source_scratch :: try mem.alloc(ir.Value, allocator, scratch_size)
     defer mem.free(allocator, source_scratch)
     string_size usize := 0
@@ -153,9 +193,9 @@ execute proc(
         string_size += string.len + 1
     }
     string_cells :: try mem.alloc(ir.Value, allocator, string_size)
-    defer mem.free(allocator, string_cells)
+    defer if (!transferred) mem.free(allocator, string_cells)
     strings :: try mem.alloc(StringView, allocator, module.strings.items.len)
-    defer mem.free(allocator, strings)
+    defer if (!transferred) mem.free(allocator, strings)
     string_offset usize := 0
     for (module.strings.items) |string, index| {
         cells :: string_cells[string_offset..string_offset + string.len + 1]
@@ -165,7 +205,12 @@ execute proc(
         string_offset += cells.len
     }
     pointers := arraylist.init(Pointer, allocator)
-    defer arraylist.deinit(&pointers)
+    defer if (!transferred) arraylist.deinit(&pointers)
+    retained := arraylist.init(Frame, allocator)
+    defer if (!transferred) {
+        for (retained.items) |frame| free_frame(allocator, frame)
+        arraylist.deinit(&retained)
+    }
     frames := arraylist.init(Frame, allocator)
     defer {
         for (frames.items) |frame| free_frame(allocator, frame)
@@ -211,6 +256,21 @@ execute proc(
                 globals[global_index].status = .ready
             }
             if (frames.items.len == 1) {
+                if $(bounded) {
+                    if (pointers.items.len != 0 and (ir.aggregate(value.type) or value.type == .pointer)) {
+                        owned :: try mem.alloc(EvaluationMemory, allocator, 1)
+                        errdefer mem.free(allocator, owned)
+                        try arraylist.append(&retained, completed)
+                        _ = arraylist.pop(&frames)
+                        owned[0] = EvaluationMemory{
+                            globals = globals, aggregate_globals = aggregate_globals,
+                            strings = strings, string_cells = string_cells, scratch = scratch,
+                            pointers = pointers, frames = retained,
+                        }
+                        transferred = true
+                        return Outcome{ value = value, allocator = allocator, evaluation_memory = owned }
+                    }
+                }
                 if (ir.aggregate(value.type)) {
                     escaped :: try mem.alloc(ir.Value, allocator, value.data.elements.len)
                     memcopy!(escaped, value.data.elements)
@@ -220,6 +280,14 @@ execute proc(
                 return Outcome{ value = value }
             }
             if (completed.destination != ir.no_value) copy_value(module, &frames.items[frame_index - 1].values[usize(completed.destination)], value)
+            if $(bounded) {
+                # ponytail: retain address-bearing frames until snapshotting; trace live roots if memory grows.
+                if (completed.addresses.len != 0) {
+                    try arraylist.append(&retained, completed)
+                    _ = arraylist.pop(&frames)
+                    continue
+                }
+            }
             _ = arraylist.pop(&frames)
             free_frame(allocator, completed)
             continue

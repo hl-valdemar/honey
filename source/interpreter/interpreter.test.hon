@@ -494,6 +494,67 @@ frames_and_globals_are_freed_at_every_allocation_boundary_and_trap test {
     try testing.expect_equal(usize(0), state.live)
 }
 
+evaluation_backing_survives_returns_and_releases_at_every_allocation_boundary test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    types [1]ir.Type :: [.u8]
+    helper :: try add_function(&module, types[..], 0, .pointer)
+    try emit(&module, helper, ir.Instruction{
+        op = .constant, type = .u8, destination = ir.ValueId(0),
+        constant = ir.Value{ type = .u8, data = ir.ValueData{ unsigned = 42 } },
+    })
+    try emit(&module, helper, ir.Instruction{ op = .store_local, left = ir.ValueId(0) })
+    try emit(&module, helper, ir.Instruction{
+        op = .address_local, type = .address, pointee = .u8, destination = ir.ValueId(1),
+    })
+    try emit(&module, helper, ir.Instruction{
+        op = .pointer_from_address, type = .pointer, left = ir.ValueId(1), destination = ir.ValueId(2),
+    })
+    return_value(&module, helper, ir.ValueId(2))
+    main :: try add_function(&module, &[], 0, .pointer)
+    module.entry = main
+    try emit(&module, main, function_value(0, helper))
+    try emit(&module, main, ir.Instruction{
+        op = .call, type = .pointer, left = ir.ValueId(0), destination = ir.ValueId(1),
+    })
+    return_value(&module, main, ir.ValueId(1))
+    trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
+    for [false, true] |trap| {
+        if (trap) module.functions.items[usize(main)].blocks.items[0].terminator =
+            ir.Terminator{ kind = .trap, diagnostic = trap_id }
+        succeeded := false
+        for (usize(0)..usize(64)) |limit| {
+            state := AllocationState{ remaining = limit }
+            allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+            outcome := run_evaluation(allocator, &module, &store) catch |error| {
+                match error {
+                    .out_of_memory: {}
+                    else: return .expectation_failed
+                }
+                try testing.expect_equal(usize(0), state.live)
+                continue
+            }
+            defer deinit(&outcome)
+            if (trap) {
+                try testing.expect_equal(trap_id, outcome.trap?)
+            } else {
+                try testing.expect(outcome.trap == null)
+                byte :: evaluation_byte(&outcome, &module, outcome.value, 0)
+                try testing.expect(byte != null)
+                try testing.expect_equal(u64(42), byte?.data.unsigned)
+                try testing.expect(evaluation_byte(&outcome, &module, outcome.value, 1) == null)
+            }
+            deinit(&outcome)
+            try testing.expect_equal(usize(0), state.live)
+            succeeded = true
+            break
+        }
+        try testing.expect(succeeded)
+    }
+}
+
 runtime_diagnostic_allocation_failure_is_infrastructure_error_and_frees_frames test {
     module := ir.init(mem.c_allocator)
     defer ir.deinit(&module)
