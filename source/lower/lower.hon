@@ -1,3 +1,4 @@
+import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
 import "@std/strconv"
@@ -2096,6 +2097,35 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .typed_constant: {
             if (trap_type(state, id)) return ir.no_value
             return try lower_as(state, ast.typed_constant(tree, id).value, typecheck.type_of(state.checked, id))
+        }
+        .union_constant: {
+            if (trap_type(state, id)) return ir.no_value
+            bytes :: ast.union_constant(tree, id).value
+            text :: ast.literal_text(tree, bytes)
+            count :: ir.storage_size(state.module, .record, shape)
+            byte_shape :: try ir.add_array(state.module, .u8, ir.no_array, count, false)
+            scratch :: state.arguments.items.len
+            defer state.arguments.items = state.arguments.items.ptr[..scratch]
+            cursor := usize(1)
+            while (cursor < text.len - 1) {
+                byte :: ast.string_next(text, &cursor) catch |_| {
+                    trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
+                    return ir.no_value
+                }
+                element :: try constant(state, ir.Value{ type = .u8, data = ir.ValueData{ unsigned = u64(byte) } }, span)
+                try arraylist.append(&state.arguments, element)
+            }
+            debug.assert(state.arguments.items.len - scratch == count)
+            block :: &state.module.functions.items[state.function].blocks.items[usize(state.block)]
+            start :: block.arguments.items.len
+            for (state.arguments.items[scratch..]) |element| try arraylist.append(&block.arguments, element)
+            payload :: try emit(state, ir.Instruction{
+                op = .array_literal, type = .array, array_type = byte_shape,
+                arguments_start = start, arguments_count = count, span = span,
+            })
+            return try emit(state, ir.Instruction{
+                op = .union_literal, type = .record, array_type = shape, left = payload, span = span,
+            })
         }
         .invalid: {
             invalid :: ast.invalid(tree, id)

@@ -5736,12 +5736,176 @@ CASES = {
         main proc() i16 { return $(make()) catch |err| err.pointer^ }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_untagged_union_remains_an_escape_trap": (
+    "comptime_untagged_union_preserves_scalar_and_ieee_bits": (
         """
-        Storage :: union { number i16, bits u16 }
-        make proc() Storage { return Storage { number = 42 } }
-        main proc() i16 { return $(make()).number }
+        Storage :: union { real f64, bits u64 }
+        make proc(bits u64) Storage { return Storage { bits = bits } }
+        main proc() bool {
+            one :: $(make(4607182418800017408))
+            zero :: $(make(9223372036854775808))
+            nan :: $(make(9221120237041090626))
+            return (
+                one.real == 1.0 and zero.bits == 9223372036854775808
+                and nan.bits == 9221120237041090626
+            )
+        }
+        """, b"true\n", None,
+    ),
+    "comptime_untagged_union_owns_padding_tail_bytes_and_copies": (
+        """
+        Pair :: struct { small u8, large u64 }
+        Storage :: union { small u8, rows [2]mut Pair, words [4]mut u64, bytes [32]u8 }
+        make proc(prefix u64) Storage {
+            value := Storage { words = [prefix, 40, maxval!(u64), 2] }
+            value.small = 9
+            return value
+        }
+        Token proc($value Storage) type { return struct {} }
+        main proc() [8]u64 {
+            if (Token(make(maxval!(u64))) == Token(make(9))) return [0, 0, 0, 0, 0, 0, 0, 0]
+            value := $(make(maxval!(u64)))
+            saved :: value
+            value.small = 0
+            value.rows[0].large = 99
+            other :: $(make(maxval!(u64)))
+            return [u64(saved.small), u64(saved.bytes[1]), u64(saved.bytes[7]),
+                saved.rows[0].large, u64(saved.bytes[17]), u64(saved.bytes[23]),
+                other.rows[1].large, value.rows[0].large]
+        }
+        """, b"[9, 255, 255, 40, 255, 255, 2, 99]\n", None,
+    ),
+    "comptime_untagged_union_cache_identity_and_generated_defaults": (
+        """
+        Produced proc() type { return union { small u16, words [2]mut u16, bits u32 } }
+        Storage :: alias Produced()
+        make proc(tail u16) Storage {
+            value := Storage { words = [0, tail] }
+            value.small = 40
+            return value
+        }
+        Token proc($value Storage) type { return struct {} }
+        Fixed proc($value Storage) type { return struct { values [usize(value.words[1])]i16 } }
+        score proc($value Storage) u16 { return value.small + value.words[1] }
+        Generated proc() type {
+            return struct_type!(.auto, ["value"], [Storage], [make(2)])
+        }
+        main proc() u16 {
+            if (Token(make(2)) != Token(Storage { bits = 131112 })) return 0
+            if (Token(make(2)) != Token(Storage { words = [40, 2] })) return 0
+            if (Token(make(2)) == Token(make(3))) return 0
+            first Fixed(make(2)) :: { values = [20, 20] }
+            same Fixed(Storage { words = [40, 2] }) :: first
+            generated Generated() :: {}
+            if (generated.value.words[1] != 2 or same.values[1] != 20) return 0
+            return score(make(2))
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_untagged_union_preserves_zero_size_and_nominal_members": (
+        """
+        Number :: distinct u16
+        Kind :: enum(u16) { answer = 42 }
+        Storage :: union { number Number, kind Kind }
+        Empty :: union { bytes [0]u8, record struct {} }
+        make proc() Storage { return Storage { kind = .answer } }
+        empty proc() Empty { return Empty { bytes = [] } }
+        exact proc(value Storage) Number { return value.number }
+        main proc() u16 {
+            zero :: $(empty())
+            if (sizeof!(Empty) != 0 or zero.bytes.len != 0) return 0
+            return u16(exact($(make())))
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_untagged_union_nested_optional_tagged_and_fallible_channels": (
+        """
+        Storage :: union { small u16, words [2]u16 }
+        Choice :: union(enum) { data Storage, empty void }
+        Failure :: struct { value Storage }
+        Packet :: struct {
+            maybe [2]?Storage
+            choice Choice
+            success Storage ! Failure
+            failure Storage ! Failure
+        }
+        make proc() Packet {
+            value Storage :: { words = [40, 2] }
+            return {
+                maybe = [value, null], choice = .data{value},
+                success = value, failure = Failure { value = value },
+            }
+        }
+        score proc(value Storage) u16 { return value.words[0] + value.words[1] }
+        main proc() [4]u16 {
+            packet :: $(make())
+            if (packet.maybe[1] != null) return [0, 0, 0, 0]
+            good :: packet.success catch Storage { small = 0 }
+            bad :: packet.failure catch |err| err.value
+            return [score(packet.maybe[0]?), score(packet.choice.data), score(good), score(bad)]
+        }
+        """, b"[42, 42, 42, 42]\n", None,
+    ),
+    "comptime_untagged_union_rejects_source_pointer": (
+        """
+        Storage :: union { bits u64, pointer @i16 }
+        make proc() Storage {
+            value i16 :: 42
+            return Storage { pointer = &value }
+        }
+        main proc() u64 { return $(make()).bits }
         """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_rejects_inactive_pointer_layout": (
+        """
+        Storage :: union { bits u64, pointer ?@i16 }
+        make proc() Storage { return Storage { bits = 0 } }
+        main proc() u64 { return $(make()).bits }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_rejects_inactive_callback_layout": (
+        """
+        Storage :: union { bits u64, callback @proc(value i16) i16 }
+        make proc() Storage { return Storage { bits = 42 } }
+        main proc() u64 { return $(make()).bits }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_rejects_inactive_string_layout": (
+        """
+        Storage :: union { bits [2]u64, text string }
+        make proc() Storage { return Storage { bits = [0, 0] } }
+        main proc() u64 { return $(make()).bits[0] }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_rejects_nested_inactive_slice_layout": (
+        """
+        Storage :: union { bits [2]u64, rows [1]struct { bytes []u8 } }
+        make proc() Storage { return Storage { bits = [0, 0] } }
+        main proc() u64 { return $(make()).bits[0] }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_untagged_union_rejects_uninitialized_tail_bytes": (
+        """
+        Storage :: union { small u8, words [2]mut u64 }
+        make proc() Storage {
+            value Storage := undefined
+            value.small = 42
+            return value
+        }
+        main proc() u8 { return $(make()).small }
+        """, b"", b"read before initialization",
+    ),
+    "comptime_untagged_union_rejects_uninitialized_padding_bytes": (
+        """
+        Pair :: struct { small u8, large u64 }
+        Storage :: union { pair Pair, words [2]u64 }
+        make proc() Storage {
+            value Storage := undefined
+            value.pair.small = 1
+            value.pair.large = 42
+            return value
+        }
+        main proc() u64 { return $(make()).pair.large }
+        """, b"", b"read before initialization",
     ),
     "comptime_float_bits_survive_aggregate_materialization": (
         """
@@ -9127,7 +9291,45 @@ def check_specialization_packages(temporary, executable):
         }
     """).strip() + "\n")
     check(app, executable, (b"[40, 2, 40]\n", None))
-    return 24
+    sizing.write_text(textwrap.dedent("""
+        Storage :: union { small u16, words [2]mut u16 }
+        make proc() Storage {
+            value := Storage { words = [0, 2] }
+            value.small = 40
+            return value
+        }
+        Token proc($value Storage) type { return struct {} }
+        Generated proc() type {
+            return struct_type!(.auto, ["value"], [Storage], [make()])
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() u16 {
+            direct :: $(lib.make())
+            value lib.Generated() :: {}
+            if (lib.Token(lib.make()) != lib.Token(lib.Storage { words = [40, 2] })) return 0
+            return direct.small + value.value.words[1]
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    sizing.write_text(textwrap.dedent("""
+        Storage :: union { small u8, words [2]u64 }
+        make proc() Storage {
+            value u8 :: 255
+            overflow :: value + 1
+            return Storage { words = [u64(overflow), 2] }
+        }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        main proc() u8 { return $(lib.make()).small }
+    """).strip() + "\n")
+    check(app, executable, (b"", b"integer arithmetic overflow"))
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.stderr.startswith(f"{sizing.resolve()}:4:".encode()), outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    return 26
 
 
 def check_dependency_provenance(temporary, executable):

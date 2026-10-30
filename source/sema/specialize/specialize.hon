@@ -1706,7 +1706,8 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         )
     }
     match ast.expr_kind(&state.tree, id) {
-        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void: return true
+        .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void,
+        .union_constant: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
         .enum_literal: return true
         .record_literal: {
@@ -2332,6 +2333,32 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     return try evaluate(state, id)
 }
 
+# raw union snapshots cannot distinguish addresses from overlapping integer bits.
+# require every view to be address-free before retaining the complete representation.
+@hide:file
+union_bytes_materializable proc(checked @typecheck.Result, type typecheck.Type, depth usize) bool {
+    if (depth >= 128) return false
+    match type.kind {
+        .int, .i8, .i16, .i32, .isize, .u8, .u16, .u32, .u64, .usize,
+        .float, .bool, .void, .enumeration: return true
+        .array, .optional: {
+            return union_bytes_materializable(checked, typecheck.array_type(checked, type.array_type).element, depth + 1)
+        }
+        .fallible: {
+            channels :: typecheck.array_type(checked, type.array_type)
+            return (union_bytes_materializable(checked, channels.element, depth + 1)
+                and union_bytes_materializable(checked, channels.error_type, depth + 1))
+        }
+        .record: {
+            for (typecheck.record_type(checked, type.record_type).fields) |field| {
+                if (!union_bytes_materializable(checked, field.type, depth + 1)) return false
+            }
+            return true
+        }
+        else: return false
+    }
+}
+
 # values leaving temporary evaluation must own no interpreter addresses or module IDs.
 # snapshot readonly bytes and rebuild source literals/references before releasing their backing.
 @hide:file
@@ -2417,8 +2444,25 @@ serialize_value proc(
         result = try ast.add_array_literal(state.builder, span, elements.items)
     } else if (type.kind == .record) {
         record :: typecheck.record_type(checked, type.record_type)
-        # untagged storage has no active member; choosing one could discard bytes.
-        if (record.is_union and record.tag_type.kind != .enumeration) return no_node
+        if (record.is_union and record.tag_type.kind != .enumeration) {
+            if (!union_bytes_materializable(checked, type, 0)) return no_node
+            bytes :: try mem.alloc(u8, state.allocator, value.data.elements.len)
+            defer mem.free(state.allocator, bytes)
+            for (value.data.elements) |byte, index| {
+                if (byte.uninitialized) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                    return no_node
+                }
+                bytes[index] = u8(byte.data.unsigned)
+            }
+            annotation :: if (type.nominal != no_node) type.nominal
+                else if (record.declaration != no_node) record.declaration else record.source
+            concrete :: try materialize(state, Value{ kind = .type, node = annotation })
+            literal :: try ast.add_string(state.builder, span, bytes)
+            result = try ast.add_union_constant(state.builder, span, concrete.node, literal)
+            try refresh(state)
+            return result
+        }
         fields := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&fields)
         for (record.fields) |field, i| {
@@ -2513,9 +2557,9 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
     kind :: ast.expr_kind(&state.tree, left)
     if (kind != ast.expr_kind(&state.tree, right)) return false
     if (kind == .literal_void) return true
-    if (kind == .typed_constant) {
-        a :: ast.typed_constant(&state.tree, left)
-        b :: ast.typed_constant(&state.tree, right)
+    if (kind == .typed_constant or kind == .union_constant) {
+        a :: if (kind == .union_constant) ast.union_constant(&state.tree, left) else ast.typed_constant(&state.tree, left)
+        b :: if (kind == .union_constant) ast.union_constant(&state.tree, right) else ast.typed_constant(&state.tree, right)
         return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
     }
     if (kind == .slice) {
@@ -2561,8 +2605,8 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     kind :: ast.expr_kind(&state.tree, id)
     hash :: enum_index(kind)
     if (kind == .literal_void) return hash
-    if (kind == .typed_constant) {
-        value :: ast.typed_constant(&state.tree, id)
+    if (kind == .typed_constant or kind == .union_constant) {
+        value :: if (kind == .union_constant) ast.union_constant(&state.tree, id) else ast.typed_constant(&state.tree, id)
         return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
     }
     if (kind == .slice) {
@@ -4803,6 +4847,10 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         return Value{}
     }
     match kind {
+        .union_constant: {
+            value :: ast.union_constant(&state.tree, id)
+            return Value{ kind = .aggregate, node = id, annotation = value.type }
+        }
         .typed_constant: {
             view :: ast.typed_constant(&state.tree, id)
             if (!is_type(state, view.type) and type_record_storage(state, view.type, 0)) {
@@ -5287,8 +5335,9 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
         .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
             return try builtin(state, id, .type)
-        .typed_constant: {
-            annotation :: ast.typed_constant(&state.tree, id).type
+        .typed_constant, .union_constant: {
+            annotation :: if (kind == .union_constant) ast.union_constant(&state.tree, id).type
+                else ast.typed_constant(&state.tree, id).type
             return if (is_type(state, annotation)) annotation else try canonical_type(state, annotation)
         }
         .literal_int: return try builtin(state, id, .i64)
