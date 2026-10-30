@@ -4,14 +4,14 @@ import "@source/ir"
 import "@source/diagnostics"
 
 @hide:file
-bitwise_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+bitwise_opcodes :: $enummap.init_default(ir.Op, []u8, "", {
     bit_and = "and",
     bit_or = "or",
     bit_xor = "xor",
 })
 
 @hide:file
-float_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+float_opcodes :: $enummap.init_default(ir.Op, []u8, "", {
     add = "fadd",
     subtract = "fsub",
     multiply = "fmul",
@@ -19,14 +19,14 @@ float_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
 })
 
 @hide:file
-integer_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+integer_opcodes :: $enummap.init_default(ir.Op, []u8, "", {
     add = "add",
     subtract = "sub",
     multiply = "mul",
 })
 
 @hide:file
-float_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
+float_predicates :: $enummap.init_default(ir.Op, []u8, "", {
     equal = "oeq",
     not_equal = "une",
     less = "olt",
@@ -36,7 +36,7 @@ float_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
 })
 
 @hide:file
-integer_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
+integer_predicates :: $enummap.init_default(ir.Op, []u8, "", {
     equal = "eq",
     not_equal = "ne",
     less = "lt",
@@ -46,7 +46,7 @@ integer_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
 })
 
 @hide:file
-conversion_upper_bounds :: $enummap.init_filled(ir.Type, []u8, "", {
+conversion_upper_bounds :: $enummap.init_default(ir.Type, []u8, "", {
     i8 = "1.280000e+02",
     i16 = "3.276800e+04",
     i32 = "2.147483648e+09",
@@ -387,7 +387,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                     minimum :: fresh(state)
                     negative_one :: fresh(state)
                     overflow :: fresh(state)
-                    try io.print("  %r{} = icmp eq i{} %r{}, {}\n", output, {minimum, bits, left, ir.integer_min(instruction.type)})
+                    try io.print("  %r{} = icmp eq i{} %r{}, {}\n", output, {minimum, bits, left, enummap.get(&ir.integer_minima, instruction.type)?})
                     try io.print("  %r{} = icmp eq i{} %r{}, -1\n", output, {negative_one, bits, right})
                     try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {overflow, minimum, negative_one})
                     try check_failure(state, overflow, .integer_overflow, instruction.span)
@@ -472,9 +472,9 @@ emit_shift proc(state @mut State, instruction ir.Instruction) usize ! io.WriteEr
     if (signed) {
         negative :: fresh(state)
         try io.print("  %r{} = icmp slt i{} %r{}, 0\n", output, {negative, bits, left})
-        try io.print("  %r{} = select i1 %r{}, i{} {}, i{} {}\n", output, {limit, negative, bits, ir.integer_min(instruction.type), bits, ir.integer_max(instruction.type)})
+        try io.print("  %r{} = select i1 %r{}, i{} {}, i{} {}\n", output, {limit, negative, bits, enummap.get(&ir.integer_minima, instruction.type)?, bits, enummap.get(&ir.integer_maxima, instruction.type)?})
     } else {
-        try io.print("  %r{} = or i{} 0, {}\n", output, {limit, bits, ir.integer_max(instruction.type)})
+        try io.print("  %r{} = or i{} 0, {}\n", output, {limit, bits, enummap.get(&ir.integer_maxima, instruction.type)?})
     }
     result :: fresh(state)
     try io.print("  %r{} = select i1 %r{}, i{} %r{}, i{} %r{}\n", output, {result, saturate, bits, limit, bits, shifted})
@@ -684,13 +684,13 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
     }
     if (!source_unsigned and (destination_unsigned or destination_bits < source_bits)) {
         failed :: fresh(state)
-        try io.print("  %r{} = icmp slt i{} %r{}, {}\n", output, {failed, source_bits, operand, ir.integer_min(destination)})
+        try io.print("  %r{} = icmp slt i{} %r{}, {}\n", output, {failed, source_bits, operand, enummap.get(&ir.integer_minima, destination)?})
         try check_failure(state, failed, .integer_overflow, instruction.span)
     }
     if (destination_bits < source_bits or (source_unsigned and !destination_unsigned and destination_bits == source_bits)) {
         failed :: fresh(state)
         predicate []u8 :: if (source_unsigned) "ugt" else "sgt"
-        try io.print("  %r{} = icmp {s} i{} %r{}, {}\n", output, {failed, predicate, source_bits, operand, ir.integer_max(destination)})
+        try io.print("  %r{} = icmp {s} i{} %r{}, {}\n", output, {failed, predicate, source_bits, operand, enummap.get(&ir.integer_maxima, destination)?})
         try check_failure(state, failed, .integer_overflow, instruction.span)
     }
     if (source_bits == destination_bits) return operand

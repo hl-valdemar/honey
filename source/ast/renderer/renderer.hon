@@ -54,7 +54,7 @@ render_function proc(
 render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, depth usize) void ! mem.AllocError {
     for 0..ast.block_statement_count(tree, block) |index| {
         statement :: ast.block_statement(tree, block, index)
-        for 0..depth |_| try append_text(renderer, "  ")
+        for (0..depth) |_| try append_text(renderer, "  ")
         match ast.stmt_kind(tree, statement) {
             .declaration: try render_statement(renderer, tree, statement, "")
             .expression: {
@@ -65,6 +65,22 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
             }
             .break_stmt: try append_text(renderer, "break\n")
             .continue_stmt: try append_text(renderer, "continue\n")
+            .block_stmt: {
+                try append_text(renderer, "block\n")
+                try render_block(renderer, tree, ast.statement_block(tree, statement), depth + 1)
+            }
+            .defer_stmt, .errdefer_stmt: {
+                cleanup :: ast.cleanup_stmt(tree, statement)
+                keyword :: if (ast.stmt_kind(tree, statement) == .errdefer_stmt) "errdefer" else "defer"
+                try append_text(renderer, keyword)
+                if (cleanup.capture) |capture| {
+                    try append_text(renderer, " |")
+                    try append_text(renderer, ast.source_text(tree, ast.node_span(tree, capture)))
+                    try append_text(renderer, "|")
+                }
+                try append_text(renderer, "\n")
+                try render_block(renderer, tree, cleanup.body, depth + 1)
+            }
             .return_stmt: {
                 try append_text(renderer, "return")
                 if (ast.return_stmt(tree, statement).value) |value| {
@@ -86,7 +102,7 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 try append_text(renderer, "\n")
                 try render_block(renderer, tree, conditional.then_block, depth + 1)
                 if (conditional.else_block) |alternative| {
-                    for 0..depth |_| try append_text(renderer, "  ")
+                    for (0..depth) |_| try append_text(renderer, "  ")
                     try append_text(renderer, "else\n")
                     try render_block(renderer, tree, alternative, depth + 1)
                 }
@@ -99,7 +115,7 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 if (assignment.compound) {
                     binary :: ast.binary_expr(tree, value)
                     try append_text(renderer, " ")
-                    try append_text(renderer, assignment_operator_text(binary.operator))
+                    try append_text(renderer, enummap.get(&assignment_operator_texts, binary.operator)?)
                     try append_text(renderer, "= ")
                     value = binary.right
                 } else {
@@ -126,7 +142,7 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 else try append_text(renderer, "_")
                 if (loop.index_capture) {
                     try append_text(renderer, ", ")
-                    if (loop.index) |index| try append_text(renderer, ast.source_text(tree, ast.node_span(tree, index)))
+                    if (loop.index) |index_capture| try append_text(renderer, ast.source_text(tree, ast.node_span(tree, index_capture)))
                     else try append_text(renderer, "_")
                 }
                 try append_text(renderer, "|\n")
@@ -152,7 +168,8 @@ render_statement proc(
         try append_text(renderer, " ")
         try append_text(renderer, ast.source_text(tree, ast.node_span(tree, type)))
     }
-    try append_text(renderer, if (statement.mutability == .constant) " :: " else " := ")
+    binding :: if (statement.mutability == .constant) " :: " else " := "
+    try append_text(renderer, binding)
     try append_text(renderer, ast.source_text(tree, ast.node_span(tree, statement.initializer)))
     try append_text(renderer, "\n")
 }
@@ -163,7 +180,7 @@ append_text proc(renderer @mut Renderer, text []u8) void ! mem.AllocError {
 }
 
 @hide:file
-assignment_operator_texts :: $enummap.init_filled(
+assignment_operator_texts :: $enummap.init_default(
     ast.BinaryOperator, []u8, "", {
         add = "+",
         subtract = "-",
@@ -178,7 +195,3 @@ assignment_operator_texts :: $enummap.init_filled(
     },
 )
 
-@hide:file
-assignment_operator_text proc(operator ast.BinaryOperator) []u8 {
-    return enummap.get(&assignment_operator_texts, operator)?
-}

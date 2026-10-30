@@ -9045,11 +9045,11 @@ def check_typeinfo_packages(temporary, executable):
             import "@std/enummap"
             Key :: enum(i16) { absent = -3, present_null = 8, present_value = 21 }
             main proc() i16 {
-                values :: $(enummap.init_filled(Key, ?i16, null, {
+                values :: $(enummap.init_default(Key, ?i16, null, {
                     present_null = some!(null),
                     present_value = some!(some!(i16(42))),
                 }))
-                empty :: $(enummap.init_filled(Key, i16, i16(99), {}))
+                empty :: $(enummap.init_default(Key, i16, i16(99), {}))
                 if (enummap.get(&values, .absent) != null or enummap.get(&empty, .absent) != null) return -1
                 payload :: enummap.get(&values, .present_null)
                 if (payload == null or payload? != null) return -2

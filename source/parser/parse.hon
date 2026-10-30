@@ -432,7 +432,7 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
 
 @hide:file
 parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.NodeId ! ParseError {
-    operator :: assignment_operator(current(state).kind)
+    operator :: enummap.get(&assignment_operators, current(state).kind)
     state.next_token += 1
     value := try parse_expr(state)
     if (
@@ -939,7 +939,7 @@ parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.Nod
 }
 
 @hide:file
-type_starters :: $enummap.init_filled(lexer.TokenKind, bool, false, {
+type_starters :: $enummap.init_default(lexer.TokenKind, bool, false, {
     ident = true, open_bracket = true, struct = true, c_struct = true, opaque = true,
     enum = true, union = true, distinct = true, alias = true, match = true, if = true,
     at = true, star = true, question = true, open_paren = true, proc = true, c_func = true,
@@ -951,7 +951,7 @@ starts_type proc(kind lexer.TokenKind) bool {
 }
 
 @hide:file
-member_names :: $enummap.init_filled(lexer.TokenKind, bool, false, {
+member_names :: $enummap.init_default(lexer.TokenKind, bool, false, {
     ident = true, if = true, else = true, for = true, inline = true, while = true,
     proc = true, return = true, yield = true, break = true, continue = true,
     true = true, false = true, and = true, or = true, xor = true, mut = true,
@@ -1388,7 +1388,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     skip_operand_newlines(state)
     token := current(state)
     expression_start :: state.next_token
-    left := if (prefix_binding_power(token.kind)) |right_bp| {
+    left := if (enummap.get(&prefix_binding_powers, token.kind)) |right_bp| {
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
         operand_span :: ast.builder_span(state.builder, operand)
@@ -1518,7 +1518,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
             continue
         }
         if (token.kind == .pipe and !state.allow_bit_or) break
-        if (infix_binding_power(token.kind)) |power| {
+        if (enummap.get(&infix_binding_powers, token.kind)) |power| {
             if (power.left < min_bp) break
             state.next_token += 1
             right :: try parse_expr_bp(state, power.right)
@@ -1531,7 +1531,7 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
                     end = right_span.end,
                     source = left_span.source,
                 },
-                binary_operator(token.kind),
+                enummap.get(&binary_operators, token.kind)?,
                 left,
                 right,
             )
@@ -1975,7 +1975,7 @@ skip_continuation_newlines proc(state @mut State) void {
         and kind != .close_bracket and kind != .open_bracket
         and kind != .range and kind != .range_inclusive
         and kind != .pipe and kind != .bang and kind != .catch
-        and infix_binding_power(kind) == null
+        and enummap.get(&infix_binding_powers, kind) == null
     ) state.next_token = start
 }
 
@@ -2122,19 +2122,14 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 }
 
 @hide:file
-prefix_binding_powers :: $enummap.init_filled(
+prefix_binding_powers :: $enummap.init_default(
     lexer.TokenKind, BindingPowerScalar, BindingPowerScalar(0), {
     minus = BindingPowerScalar(50), bang = BindingPowerScalar(50), tilde = BindingPowerScalar(50),
     ampersand = BindingPowerScalar(50), try = BindingPowerScalar(50),
 })
 
 @hide:file
-prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
-    return enummap.get(&prefix_binding_powers, kind)
-}
-
-@hide:file
-infix_binding_powers :: $enummap.init_filled(lexer.TokenKind, BindingPower,
+infix_binding_powers :: $enummap.init_default(lexer.TokenKind, BindingPower,
     BindingPower{ left = BindingPowerScalar(0), right = BindingPowerScalar(0) },
     {
         or = BindingPower{ left = BindingPowerScalar(2), right = BindingPowerScalar(3) },
@@ -2159,12 +2154,7 @@ infix_binding_powers :: $enummap.init_filled(lexer.TokenKind, BindingPower,
 )
 
 @hide:file
-infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
-    return enummap.get(&infix_binding_powers, kind)
-}
-
-@hide:file
-binary_operators :: $enummap.init_filled(
+binary_operators :: $enummap.init_default(
     lexer.TokenKind,
     ast.BinaryOperator,
     ast.BinaryOperator.add, {
@@ -2190,17 +2180,12 @@ binary_operators :: $enummap.init_filled(
 )
 
 @hide:file
-binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
-    return enummap.get(&binary_operators, kind)?
-}
-
-@hide:file
 is_assignment_operator proc(kind lexer.TokenKind) bool {
-    return kind == .equal or assignment_operator(kind) != null
+    return kind == .equal or enummap.get(&assignment_operators, kind) != null
 }
 
 @hide:file
-assignment_operators :: $enummap.init_filled(lexer.TokenKind, ast.BinaryOperator, ast.BinaryOperator.add, {
+assignment_operators :: $enummap.init_default(lexer.TokenKind, ast.BinaryOperator, ast.BinaryOperator.add, {
     plus_equal = .add,
     minus_equal = .subtract,
     star_equal = .multiply,
@@ -2213,7 +2198,3 @@ assignment_operators :: $enummap.init_filled(lexer.TokenKind, ast.BinaryOperator
     shift_left_saturating_equal = .shift_left_saturating,
 })
 
-@hide:file
-assignment_operator proc(kind lexer.TokenKind) ?ast.BinaryOperator {
-    return enummap.get(&assignment_operators, kind)
-}

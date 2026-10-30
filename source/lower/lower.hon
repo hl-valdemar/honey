@@ -183,7 +183,7 @@ lower_module proc(
 }
 
 @hide:file
-base_types :: $enummap.init_filled(
+base_types :: $enummap.init_default(
     typecheck.TypeKind, ir.Type, ir.Type.invalid, {
         int = .int,
         usize = .usize,
@@ -957,7 +957,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
                         array_type = try array_shape(state, pointer.element), span = ast.node_span(tree, id),
                     })
                 } else try emit(state, ir.Instruction{
-                    op = binary_op(expression.operator), type = type, left = old, right = right,
+                    op = enummap.get(&binary_ops, expression.operator)?, type = type, left = old, right = right,
                     span = ast.node_span(tree, id),
                 })
                 _ = try emit(state, ir.Instruction{
@@ -1056,7 +1056,7 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
 }
 
 @hide:file
-binary_ops :: $enummap.init_filled(
+binary_ops :: $enummap.init_default(
     ast.BinaryOperator, ir.Op, ir.Op.constant, {
         add = .add,
         subtract = .subtract,
@@ -1078,18 +1078,13 @@ binary_ops :: $enummap.init_filled(
 )
 
 @hide:file
-unary_ops :: $enummap.init_filled(
+unary_ops :: $enummap.init_default(
     ast.UnaryOperator, ir.Op, ir.Op.constant, {
         negate = .negate,
         logical_not = .logical_not,
         bit_not = .bit_not,
     },
 )
-
-@hide:file
-binary_op proc(operator ast.BinaryOperator) ir.Op {
-    return enummap.get(&binary_ops, operator)?
-}
 
 @hide:file
 lower_logical proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
@@ -1892,8 +1887,8 @@ lower_builtin proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
     if (mem.eql(name, "maxval") or mem.eql(name, "minval")) {
         type :: lower_type(state, typecheck.type_of(state.checked, id))
         value := ir.Value{ type = type }
-        if (mem.eql(name, "maxval")) value.data = ir.ValueData{ unsigned = ir.integer_max(type) }
-        else value.data = ir.ValueData{ integer = ir.integer_min(type) }
+        if (mem.eql(name, "maxval")) value.data = ir.ValueData{ unsigned = enummap.get(&ir.integer_maxima, type)? }
+        else value.data = ir.ValueData{ integer = enummap.get(&ir.integer_minima, type)? }
         return try constant(state, value, span)
     }
     if (mem.eql(name, "divtrunc")) {
@@ -2264,9 +2259,9 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             }
             if (expression.operator == .negate and ir.integer_bits(type) != 0 and !ir.unsigned_integer(type) and ast.expr_kind(tree, expression.operand) == .literal_int) {
                 text :: ast.literal_text(tree, expression.operand)
-                magnitude_limit :: ir.integer_max(type) + 1
+                magnitude_limit :: enummap.get(&ir.integer_maxima, type)? + 1
                 if (integer_magnitude(text, magnitude_limit)) |magnitude| {
-                    if (magnitude == magnitude_limit) return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = ir.integer_min(type) } }, span)
+                    if (magnitude == magnitude_limit) return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = enummap.get(&ir.integer_minima, type)? } }, span)
                 }
             }
             operand :: try lower_expression(state, expression.operand)
@@ -2302,7 +2297,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                     array_type = try array_shape(state, pointer.element), span = span,
                 })
             }
-            op :: binary_op(expression.operator)
+            op :: enummap.get(&binary_ops, expression.operator)?
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
         .call: {
@@ -2392,9 +2387,9 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     text :: ast.literal_text(state.tree, id)
     type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
+        if (integer_magnitude(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
     } else if (ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, ir.integer_max(type))) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
+        if (integer_magnitude(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
     } else {
         value :: strconv.parse_float(state.module.allocator, text) catch |err| {
             match err {

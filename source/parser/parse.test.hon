@@ -6,6 +6,7 @@ import "@source/diagnostics"
 import "@source/strpool"
 import "@source/lexer"
 import "@source/ast"
+import "@source/ast/renderer"
 
 parses_expression_precedence_through_tree_views test {
     strings := strpool.init(mem.c_allocator)
@@ -2374,4 +2375,30 @@ keeps_type_composition_and_capture_pipes_with_bitwise_or test {
     try testing.expect(ast.if_stmt(&tree, ast.block_statement(&tree, body, 3)).capture != null)
     try testing.expect(ast.while_stmt(&tree, ast.block_statement(&tree, body, 4)).capture != null)
     try testing.expect(ast.for_stmt(&tree, ast.block_statement(&tree, body, 5)).capture != null)
+}
+
+renders_compound_updates_in_scoped_statement_bodies test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    value := 1
+        `    { value += 2 }
+        `    defer { value -= 3 }
+        `    errdefer |err| { value xor= 4 }
+        `    for (0..2) |item, index| value |= 5
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    output := renderer.init(mem.c_allocator)
+    defer renderer.deinit(&output)
+    try renderer.render(&output, &tree)
+    expected :: "package\n  function run\n    declaration value := 1\n    block\n      assignment value += 2\n    defer\n      assignment value -= 3\n    errdefer |err|\n      assignment value xor= 4\n    for 0..2 |item, index|\n      assignment value |= 5\n"
+    try testing.expect(mem.eql(output.bytes.items, expected))
 }

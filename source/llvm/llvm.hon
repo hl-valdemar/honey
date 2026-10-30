@@ -71,7 +71,7 @@ emit proc(
         .invalid_shift_count,
     ]
     for (memory_codes) |code| {
-        try io.print("@memory_{s} = private constant ", output, {memory_symbol(code)})
+        try io.print("@memory_{s} = private constant ", output, {enummap.get(&memory_symbols, code)?})
         try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?, false)
         try io.write_all(output, "\n")
     }
@@ -212,7 +212,7 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
 }
 
 @hide:file
-abi_extensions :: $enummap.init_filled(ir.Type, []u8, "", {
+abi_extensions :: $enummap.init_default(ir.Type, []u8, "", {
     i8 = "signext",
     i16 = "signext",
     u8 = "zeroext",
@@ -502,7 +502,7 @@ check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void 
 }
 
 @hide:file
-memory_symbols :: $enummap.init_filled(diagnostics.Code, []u8, "", {
+memory_symbols :: $enummap.init_default(diagnostics.Code, []u8, "", {
     null_unwrap = "null_unwrap",
     invalid_slice_bounds = "invalid_slice_bounds",
     sentinel_mismatch = "sentinel_mismatch",
@@ -514,16 +514,11 @@ memory_symbols :: $enummap.init_filled(diagnostics.Code, []u8, "", {
 })
 
 @hide:file
-trap_symbols :: $enummap.init_filled(diagnostics.Code, []u8, "", {
+trap_symbols :: $enummap.init_default(diagnostics.Code, []u8, "", {
     integer_overflow = "overflow",
     index_out_of_bounds = "bounds",
     inactive_union_field = "inactive_union",
 })
-
-@hide:file
-memory_symbol proc(code diagnostics.Code) []u8 {
-    return enummap.get(&memory_symbols, code)?
-}
 
 @hide:file
 trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.WriteError {
@@ -533,7 +528,7 @@ trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.
     length :: message.len
     try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @", state.output, {usize(span.source), position.line, position.column})
     if (symbol) |name| try io.write_all(state.output, name)
-    else try io.print("memory_{s}", state.output, {memory_symbol(code)})
+    else try io.print("memory_{s}", state.output, {enummap.get(&memory_symbols, code)?})
     try io.print(", i64 {})\n  unreachable\n", state.output, {length})
 }
 

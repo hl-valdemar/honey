@@ -931,7 +931,7 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
     match binding.kind {
         .invalid: type = invalid_type(binding.data.diagnostic)
         .builtin: {
-            type.kind = builtin_kind(binding.data.builtin)
+            type.kind = enummap.get(&builtin_kinds, binding.data.builtin)?
             if (binding.data.builtin == .unavailable)
                 type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, id)))
             if (type.kind == .anyopaque and state.pointer_depth == 0) {
@@ -1552,16 +1552,11 @@ builtin_kinds :: $enummap.init(sema.BuiltinType, TypeKind, {
 })
 
 @hide:file
-builtin_kind proc(type sema.BuiltinType) TypeKind {
-    return enummap.get(&builtin_kinds, type)?
-}
-
-@hide:file
 conversion_kind proc(state @State, id ast.NodeId) TypeKind {
     callee :: ast.call_expr(state.tree, id).callee
     binding :: sema.binding(state.resolution, callee)
     if (binding.kind != .builtin) return .none
-    kind :: builtin_kind(binding.data.builtin)
+    kind :: enummap.get(&builtin_kinds, binding.data.builtin)?
     return if (numeric_kind(kind)) kind else .none
 }
 
@@ -1589,7 +1584,7 @@ bitwise proc(operator ast.BinaryOperator) bool {
 }
 
 @hide:file
-integer_widths :: $enummap.init_filled(
+integer_widths :: $enummap.init_default(
     TypeKind, usize, usize(0), {
     i8 = 8, u8 = 8,
     i16 = 16, u16 = 16,
@@ -2512,7 +2507,7 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
                 type_binding :: sema.binding(state.resolution, annotation)
                 if (
                     !integer_kind(state.types[usize(annotation)].kind)
-                    and (type_binding.kind != .builtin or !integer_kind(builtin_kind(type_binding.data.builtin)))
+                    and (type_binding.kind != .builtin or !integer_kind(enummap.get(&builtin_kinds, type_binding.data.builtin)?))
                 ) return null
             }
             return evaluate_integer(state, declaration.initializer, allow_local)

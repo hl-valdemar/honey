@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/arraylist"
+import "@std/enummap"
 import "@source/ir"
 import "@source/diagnostics"
 
@@ -579,7 +580,7 @@ execute proc(
                 if instruction.type == .float {
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = -operand.data.real } }
                 } else {
-                    if (operand.data.integer == ir.integer_min(instruction.type)) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                    if (operand.data.integer == enummap.get(&ir.integer_minima, instruction.type)?) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = -operand.data.integer } }
                 }
             }
@@ -628,7 +629,7 @@ execute proc(
                 } else if ir.unsigned_integer(instruction.type) {
                     result :: checked_unsigned(instruction.op, left.data.unsigned, right.data.unsigned)
                     if result |unsigned| {
-                        if (unsigned > ir.integer_max(instruction.type)) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                        if (unsigned > enummap.get(&ir.integer_maxima, instruction.type)?) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                         value = ir.Value{ type = instruction.type, data = ir.ValueData{ unsigned = unsigned } }
                     } else {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
@@ -636,7 +637,7 @@ execute proc(
                 } else {
                     result :: checked_integer(instruction.op, left.data.integer, right.data.integer)
                     if result |result_integer| {
-                        if (result_integer < ir.integer_min(instruction.type) or result_integer > i64(ir.integer_max(instruction.type))) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
+                        if (result_integer < enummap.get(&ir.integer_minima, instruction.type)? or result_integer > i64(enummap.get(&ir.integer_maxima, instruction.type)?)) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                         value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = result_integer } }
                     } else {
                         return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
@@ -950,7 +951,7 @@ shift_integer proc(op ir.Op, left ir.Value, count u64) ir.Value {
     negative :: signed and left.data.integer < 0
     if (op == .shift_left_saturating) {
         if (bits == 0) return left
-        limit :: if (negative) 1 + (mask >> 1) else ir.integer_max(left.type)
+        limit :: if (negative) 1 + (mask >> 1) else enummap.get(&ir.integer_maxima, left.type)?
         magnitude :: if (negative) 1 + (bits xor mask) else bits
         if (count >= width) return integer_from_bits(left.type, limit)
         if (magnitude > (limit >> count)) return integer_from_bits(left.type, limit)
@@ -1054,28 +1055,28 @@ convert proc(source ir.Value, target ir.Type) ?ir.Value {
         if (ir.unsigned_integer(target)) {
             if (!(real > -1.0 and real < 18446744073709551616.0)) return null
             integer :: u64(real)
-            if (integer > ir.integer_max(target)) return null
+            if (integer > enummap.get(&ir.integer_maxima, target)?) return null
             result.data = ir.ValueData{ unsigned = integer }
         } else {
             if (!(real >= -9223372036854775808.0 and real < 9223372036854775808.0)) return null
             integer :: i64(real)
-            if (integer < ir.integer_min(target) or integer > i64(ir.integer_max(target))) return null
+            if (integer < enummap.get(&ir.integer_minima, target)? or integer > i64(enummap.get(&ir.integer_maxima, target)?)) return null
             result.data = ir.ValueData{ integer = integer }
         }
         return result
     }
     if (ir.unsigned_integer(source.type)) {
         integer :: source.data.unsigned
-        if (integer > ir.integer_max(target)) return null
+        if (integer > enummap.get(&ir.integer_maxima, target)?) return null
         if (ir.unsigned_integer(target)) result.data = ir.ValueData{ unsigned = integer }
         else result.data = ir.ValueData{ integer = i64(integer) }
     } else {
         integer :: source.data.integer
         if (ir.unsigned_integer(target)) {
-            if (integer < 0 or u64(integer) > ir.integer_max(target)) return null
+            if (integer < 0 or u64(integer) > enummap.get(&ir.integer_maxima, target)?) return null
             result.data = ir.ValueData{ unsigned = u64(integer) }
         } else {
-            if (integer < ir.integer_min(target) or integer > i64(ir.integer_max(target))) return null
+            if (integer < enummap.get(&ir.integer_minima, target)? or integer > i64(enummap.get(&ir.integer_maxima, target)?)) return null
             result.data = ir.ValueData{ integer = integer }
         }
     }
