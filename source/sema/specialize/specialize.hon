@@ -2325,6 +2325,7 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
             and !try type_array_initialized(state, id, id)) return Value{}
         if (type != no_node and (contextual_literal(state, id)
             or ast.expr_kind(&state.tree, id) == .block_expr
+            or ast.expr_kind(&state.tree, id) == .slice
             or ast.expr_kind(&state.tree, type) == .fallible_type))
             return try evaluate_ir(state, id, type)
     }
@@ -2332,7 +2333,7 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
 }
 
 # values leaving temporary evaluation must own no interpreter addresses or module IDs.
-# snapshot readonly bytes and rebuild source literals/references before releasing its backing.
+# snapshot readonly bytes and rebuild source literals/references before releasing their backing.
 @hide:file
 serialize_value proc(
     state @mut State,
@@ -2358,10 +2359,7 @@ serialize_value proc(
     result := no_node
     if (type.kind == .slice) {
         slice :: typecheck.array_type(checked, type.array_type)
-        if (
-            slice.mutable or slice.element.kind != .u8 or slice.element.nominal != no_node
-            or (slice.sentinel != null and slice.sentinel? != 0)
-        ) return no_node
+        if (slice.mutable or slice.element.kind != .u8 or slice.element.nominal != no_node) return no_node
         pointer :: ir.aggregate_item(module, value, 0)
         length :: ir.aggregate_item(module, value, 1)
         if (pointer.uninitialized or length.uninitialized) {
@@ -2372,9 +2370,13 @@ serialize_value proc(
             length.data.unsigned != 0
             and interpreter.evaluation_byte(outcome, module, pointer, usize(length.data.unsigned - 1)) == null
         ) return no_node
-        bytes :: try mem.alloc(u8, state.allocator, usize(length.data.unsigned))
+        nonzero_sentinel :: slice.sentinel != null and slice.sentinel? != 0
+        length_bytes :: usize(length.data.unsigned)
+        if (nonzero_sentinel and length_bytes == maxval!(usize)) return no_node
+        extra :: if (nonzero_sentinel) usize(1) else usize(0)
+        bytes :: try mem.alloc(u8, state.allocator, length_bytes + extra)
         defer mem.free(state.allocator, bytes)
-        for (bytes) |_, index| {
+        for (0..length_bytes) |index| {
             byte :: interpreter.evaluation_byte(outcome, module, pointer, index)
             if (byte == null) return no_node
             if (byte?.uninitialized) {
@@ -2384,18 +2386,24 @@ serialize_value proc(
             bytes[index] = u8(byte?.data.unsigned)
         }
         if (slice.sentinel != null) {
-            sentinel :: interpreter.evaluation_byte(outcome, module, pointer, bytes.len)
+            sentinel :: interpreter.evaluation_byte(outcome, module, pointer, length_bytes)
             if (sentinel == null) return no_node
             if (sentinel?.uninitialized) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
                 return no_node
             }
-            if (sentinel?.data.unsigned != 0) {
+            if (sentinel?.data.unsigned != u64(slice.sentinel?)) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .sentinel_mismatch, span)
                 return no_node
             }
+            if (nonzero_sentinel) bytes[length_bytes] = u8(slice.sentinel?)
         }
         result = try ast.add_string(state.builder, span, bytes)
+        if (nonzero_sentinel) {
+            end :: try ast.add_integer(state.builder, span, u64(length_bytes))
+            sentinel :: try ast.add_integer(state.builder, span, u64(slice.sentinel?))
+            result = try ast.add_slice(state.builder, span, result, null, end, sentinel)
+        }
     } else if (type.kind == .array) {
         array :: typecheck.array_type(checked, type.array_type)
         elements := arraylist.init(ast.NodeId, state.allocator)
@@ -2510,6 +2518,16 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
         b :: ast.typed_constant(&state.tree, right)
         return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
     }
+    if (kind == .slice) {
+        a :: ast.slice_expr(&state.tree, left)
+        b :: ast.slice_expr(&state.tree, right)
+        # serialized nonzero-sentinel views have a canonical owned string and explicit end.
+        return (
+            try constant_equal(state, a.base, b.base)
+            and try constant_equal(state, a.end?, b.end?)
+            and try constant_equal(state, a.sentinel?, b.sentinel?)
+        )
+    }
     if (kind == .array_literal) {
         count :: ast.array_element_count(&state.tree, left)
         if (count != ast.array_element_count(&state.tree, right)) return false
@@ -2546,6 +2564,11 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     if (kind == .typed_constant) {
         value :: ast.typed_constant(&state.tree, id)
         return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
+    }
+    if (kind == .slice) {
+        view :: ast.slice_expr(&state.tree, id)
+        return mix(mix(mix(hash, try constant_hash(state, view.base)),
+            try constant_hash(state, view.end?)), try constant_hash(state, view.sentinel?))
     }
     if (kind == .array_literal) {
         result := hash
@@ -2684,6 +2707,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     if (
         (ir.aggregate(value.type) and source_type.kind != .slice)
+        or (source_type.kind == .slice and ast.expr_kind(&state.tree, node) == .slice)
         or source_type.kind == .enumeration or source_type.kind == .void
     )
         return Value{ kind = .aggregate, node = node, annotation = result_type }

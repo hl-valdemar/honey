@@ -965,6 +965,8 @@ computed_byte_slices_recompile_without_borrowing_evaluation_storage test {
             `    if (packet.bytes[2] != 128 or packet.bytes[3] != 42) return -3
             `    if (packet.suffix[0] != 65 or packet.suffix[1] != 0) return -4
             `    if (packet.suffix[2] != 66 or packet.suffix.ptr[3] != 0) return -5
+            `    if (packet.marked.len != 2 or packet.marked.ptr[2] != 255) return -6
+            `    if (packet.marked[0] != 40 or packet.marked[1] != 2) return -7
             `    return 42
             `}
             ,
@@ -972,14 +974,15 @@ computed_byte_slices_recompile_without_borrowing_evaluation_storage test {
         defer arraylist.deinit(&bytes)
         root_source :: try add_source(&session, root, "/byte_slices/app/main.hon", &bytes, &diagnostic_store)
         imported := try owned_text(
-            `Packet :: struct { bytes []u8, suffix [;0]u8 }
+            `Packet :: struct { bytes []u8, suffix [;0]u8, marked [;255]u8 }
             `make proc() Packet {
             `    bytes [4]mut u8 := undefined
             `    bytes[0] = 255
             `    bytes[1] = 0
             `    bytes[2] = 128
             `    bytes[3] = 42
-            `    return Packet { bytes = bytes[..], suffix = "xA\0B"[1..;0] }
+            `    marked [3]mut u8 := [40, 2, 255]
+            `    return Packet { bytes = bytes[..], suffix = "xA\0B"[1..;0], marked = marked[..2;255] }
             `}
             ,
         )

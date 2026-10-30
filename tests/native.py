@@ -5418,11 +5418,127 @@ CASES = {
         main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_aggregate_rejects_nonzero_sentinel_byte_slice_escape": (
+    "comptime_nonzero_sentinel_byte_slices_own_subviews": (
         """
-        make proc() [;1]u8 {
-            values [2]u8 :: [42, 1]
-            return values[..1;1]
+        make proc() [;255]u8 {
+            values [5]mut u8 := [9, 40, 0, 2, 255]
+            return values[1..4;255]
+        }
+        empty proc() [;128]u8 {
+            values [1]u8 :: [128]
+            return values[..0;128]
+        }
+        main proc() usize {
+            value :: $(make())
+            zero :: $(empty())
+            if (value.len != 3 or value[1] != 0 or value.ptr[3] != 255) return 1
+            if (zero.len != 0 or zero.ptr[0] != 128) return 2
+            return usize(value[0]) + usize(value[2])
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_nonzero_sentinel_byte_slices_normalize_cache_and_defaults": (
+        """
+        make proc(padded bool) [;7]u8 {
+            if (padded) {
+                prefixed [4]u8 :: [9, 40, 2, 7]
+                return prefixed[1..3;7]
+            }
+            values [3]u8 :: [40, 2, 7]
+            return values[..2;7]
+        }
+        Box proc($bytes [;7]u8) type { return struct { bytes [;7]u8 = bytes } }
+        main proc() u8 {
+            a Box(make(false)) :: {}
+            b Box(make(true)) :: a
+            direct Box("!(\\x02\\x07"[1..3;7]) :: b
+            if (direct.bytes.len != 2 or direct.bytes.ptr[2] != 7) return 0
+            return direct.bytes[0] + direct.bytes[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_nonzero_sentinel_byte_slices_cross_nested_channels": (
+        """
+        View :: struct { rows [1]??[;9]u8 }
+        Choice :: union(enum) { view View, empty void }
+        Failure :: struct { bytes [;9]u8 }
+        make proc() [;9]u8 {
+            values [3]u8 :: [40, 2, 9]
+            return values[..2;9]
+        }
+        choice proc() Choice { return .view { rows = [some!(some!(make()))] } }
+        success proc() View ! Failure { return { rows = [some!(some!(make()))] } }
+        failure proc() View ! Failure { return Failure { bytes = make() } }
+        main proc() usize {
+            value :: $(choice())
+            good :: $(success()) catch { return 1 }
+            bad :: $(failure()) catch |err| {
+                match value {
+                    .view |view|: {
+                        bytes :: view.rows[0]??
+                        if (bytes.ptr[2] != 9 or good.rows[0]??.ptr[2] != 9) return 2
+                        return usize(bytes[0]) + usize(err.bytes[1])
+                    }
+                    .empty: return 3
+                }
+            }
+            return bad.rows.len
+        }
+        """, b"42\n", None,
+    ),
+    "inline_for_materializes_nonzero_sentinel_byte_slices": (
+        """
+        make proc() [1][;1]u8 {
+            bytes [2]u8 :: [42, 1]
+            return [bytes[..1;1]]
+        }
+        main proc() u8 {
+            inline for make() |bytes| {
+                if (bytes.ptr[1] != 1) return 0
+                return bytes[0]
+            }
+            return 0
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_nonzero_sentinel_byte_slices_recheck_mutated_sentinel": (
+        """
+        make proc() [;255]u8 {
+            values [2]mut u8 := [42, 255]
+            view [;255]u8 :: values[..1;255]
+            values[1] = 0
+            return view
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"sentinel",
+    ),
+    "comptime_nonzero_sentinel_byte_slices_reject_uninitialized_sentinel": (
+        """
+        make proc() [;7]u8 {
+            values [2]mut u8 := [42, 7]
+            view [;7]u8 :: values[..1;7]
+            other [2]mut u8 := undefined
+            other[0] = 42
+            values = other
+            return view
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"before initialization",
+    ),
+    "comptime_nonzero_sentinel_byte_slices_reject_out_of_bounds_sentinel": (
+        """
+        make proc() [;7]u8 {
+            values [1]u8 :: [42]
+            return values.ptr[..1;7]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"bounds",
+    ),
+    "comptime_nonzero_sentinel_byte_slices_reject_mutable_escape": (
+        """
+        make proc() [;7]mut u8 {
+            values [2]mut u8 := [42, 7]
+            return values[..1;7]
         }
         main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
