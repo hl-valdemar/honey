@@ -81,6 +81,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    if (T == i16) return value else return value.missing
             `}
             `Box proc(T type) type { return struct { value T } }
+            `make_box proc($T type) Box(T) { return { value = 40 } }
             `count proc() usize {
             `    result := 0
             `    while (result < 2) result = result + 1
@@ -267,7 +268,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `main proc() i16 {
             `    if $(i16 != i16) { return $(i8(128)) }
             `    values :: $(data())
-            `    box Box(i16) :: { value = identity(i16, values[0]) }
+            `    box Box(i16) :: make_box()
+            `    inferred i16 :: identity(40)
+            `    if (inferred != box.value) return 0
             `    fixed Fixed(count()) :: { values = [box.value, 2] }
             `    same Fixed(2) :: fixed
             `    packet :: $(packet_data())

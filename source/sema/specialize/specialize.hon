@@ -100,6 +100,8 @@ State :: struct {
     type_execution_depth usize = 0
     type_execution_remaining usize = 0
     value_expansion_depth usize = 0
+    return_type ast.NodeId = no_node
+    yield_type ast.NodeId = no_node
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned `builder` arena.
@@ -269,13 +271,66 @@ expand_compile_error proc(state @mut State, id ast.NodeId) void ! Error {
 
 @hide:file
 expand proc(state @mut State, id ast.NodeId) void ! Error {
+    try expand_expected(state, id, no_node)
+}
+
+@hide:file
+expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
     try refresh(state)
     if (state.expanded.items[usize(id)] != 0) return
     state.expanded.items[usize(id)] = 1
     class :: ast.node_class(&state.tree, id)
+    saved_return :: state.return_type
+    saved_yield :: state.yield_type
+    defer {
+        state.return_type = saved_return
+        state.yield_type = saved_yield
+    }
+    if (class == .function) {
+        state.return_type = ast.function_decl(&state.tree, id).return_type
+        state.yield_type = no_node
+    }
+    if (class == .statement) {
+        match ast.stmt_kind(&state.tree, id) {
+            .declaration: {
+                view :: ast.statement_decl(&state.tree, id)
+                annotation := no_node
+                if (view.type) |type| {
+                    try expand(state, type)
+                    annotation = type
+                }
+                try expand_expected(state, view.initializer, annotation)
+                return
+            }
+            .assignment_stmt: {
+                view :: ast.assignment_stmt(&state.tree, id)
+                try expand(state, view.target)
+                try expand_expected(state, view.value, try expression_type(state, view.target, 0))
+                return
+            }
+            .return_stmt, .yield_stmt: {
+                yielding :: ast.stmt_kind(&state.tree, id) == .yield_stmt
+                value :: if (yielding) ast.yield_stmt(&state.tree, id).value else ast.return_stmt(&state.tree, id).value
+                annotation :: if (yielding) state.yield_type else state.return_type
+                if (value) |operand| try expand_expected(state, operand, annotation)
+                return
+            }
+            else: {}
+        }
+    }
+    if (class == .field) {
+        view :: ast.field(&state.tree, id)
+        annotation := no_node
+        if (view.type) |type| {
+            try expand(state, type)
+            annotation = type
+        }
+        if (view.value) |value| try expand_expected(state, value, annotation)
+        return
+    }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .block_expr) {
         body :: ast.block_expr(&state.tree, id)
-        annotation :: try value_block_type(state, body, 0)
+        annotation :: if (expected != no_node) expected else try value_block_type(state, body, 0)
         if (is_type(state, annotation) or type_record_storage(state, annotation, 0)) {
             selected :: try evaluate_type_value_block(state, id, annotation)
             if (selected == no_node) {
@@ -289,6 +344,7 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
         }
         state.value_expansion_depth += 1
         defer state.value_expansion_depth -= 1
+        state.yield_type = annotation
         try expand(state, body)
         return
     }
@@ -374,8 +430,8 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .catch_expr) {
         expression :: ast.catch_expr(&state.tree, id)
+        try expand_expected(state, expression.operand, expected)
         if (expression.capture) |capture| {
-            try expand(state, expression.operand)
             annotation :: try expression_type(state, expression.operand, 0)
             if (annotation != no_node and ast.expr_kind(&state.tree, annotation) == .fallible_type) {
                 hashmap.put(&state.capture_types, capture, ast.binary_expr(&state.tree, annotation).right) catch |err| {
@@ -386,17 +442,21 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
                 }
             }
         }
+        annotation :: if (expected != no_node) expected else try expression_type(state, id, 0)
+        state.yield_type = annotation
+        try expand_expected(state, expression.handler, annotation)
+        return
     }
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .expression) {
         expression :: ast.statement_expr(&state.tree, id)
         if (
             ast.expr_kind(&state.tree, expression) == .match_expr
-            and try specialize_match(state, expression, id)
+            and try specialize_match(state, expression, id, no_node)
         ) return
     }
     if (
         class == .expression and ast.expr_kind(&state.tree, id) == .match_expr
-        and try specialize_match(state, id, no_node)
+        and try specialize_match(state, id, no_node, expected)
     ) return
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .if_stmt) {
         conditional :: ast.if_stmt(&state.tree, id)
@@ -435,6 +495,7 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .comptime_expr) {
         operand :: ast.comptime_operand(&state.tree, id)
+        try expand_expected(state, operand, expected)
         state.evaluation_diagnostic = diagnostics.no_diagnostic
         value :: try evaluate(state, operand)
         if (value.annotation == no_node or !type_record_storage(state, value.annotation, 0))
@@ -456,6 +517,18 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .builtin_call) {
         name :: ast.builtin_call(&state.tree, id).name
+        if (
+            mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "some")
+            and expected != no_node and ast.call_arg_count(&state.tree, id) == 1
+        ) {
+            annotation := try canonical_type(state, expected)
+            if (annotation != no_node and ast.expr_kind(&state.tree, annotation) == .fallible_type)
+                annotation = try canonical_type(state, ast.binary_expr(&state.tree, annotation).left)
+            if (annotation != no_node and ast.expr_kind(&state.tree, annotation) == .optional_type) {
+                try expand_expected(state, ast.call_arg(&state.tree, id, 0), ast.type_operand(&state.tree, annotation))
+                return
+            }
+        }
         if (mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "compile_error")) {
             try expand_compile_error(state, id)
             return
@@ -482,8 +555,111 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
             and ast.node_class(&state.tree, resolved.data.declaration) == .function
             and template(state, resolved.data.declaration)
         ) {
-            try specialize_call(state, id, resolved.data.declaration)
+            try specialize_call(state, id, resolved.data.declaration, expected)
             return
+        }
+        signature := no_node
+        if (resolved.kind == .declaration and ast.node_class(&state.tree, resolved.data.declaration) == .function)
+            signature = resolved.data.declaration
+        else signature = try expression_type(state, callee, 0)
+        if (
+            signature != no_node
+            and (ast.node_class(&state.tree, signature) == .function
+                or ast.expr_kind(&state.tree, signature) == .function_type)
+            and ast.function_param_count(&state.tree, signature) == ast.call_arg_count(&state.tree, id)
+        ) {
+            for (0..ast.call_arg_count(&state.tree, id)) |i| {
+                annotation :: ast.param(&state.tree, ast.function_param(&state.tree, signature, i)).type
+                try expand_expected(state, ast.call_arg(&state.tree, id, i), annotation)
+            }
+            return
+        }
+    }
+    if (class == .expression and expected != no_node) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .unary) {
+            view :: ast.unary_expr(&state.tree, id)
+            if (view.operator == .negate or view.operator == .bit_not or view.operator == .logical_not) {
+                try expand_expected(state, view.operand, expected)
+                return
+            }
+        }
+        if (kind == .binary and !is_type(state, expected)) {
+            view :: ast.binary_expr(&state.tree, id)
+            match view.operator {
+                .add, .subtract, .multiply, .divide, .bit_and, .bit_or, .bit_xor,
+                .logical_and, .logical_or: {
+                    try expand_expected(state, view.left, expected)
+                    try expand_expected(state, view.right, expected)
+                    return
+                }
+                .shift_left, .shift_right, .shift_left_saturating: {
+                    try expand_expected(state, view.left, expected)
+                    try expand(state, view.right)
+                    return
+                }
+                else: {}
+            }
+        }
+        if (kind == .try_expr) {
+            try expand_expected(state, ast.type_operand(&state.tree, id), expected)
+            return
+        }
+        if (kind == .match_expr) {
+            try expand(state, ast.match_expr(&state.tree, id).subject)
+            for (0..ast.match_arm_count(&state.tree, id)) |i| {
+                arm_id :: ast.match_arm(&state.tree, id, i)
+                arm :: ast.match_arm_view(&state.tree, arm_id)
+                for (0..ast.match_pattern_count(&state.tree, arm_id)) |j|
+                    try expand(state, ast.match_pattern(&state.tree, arm_id, j))
+                state.yield_type = expected
+                annotation :: if (arm.expression) expected else no_node
+                try expand_expected(state, arm.body, annotation)
+            }
+            return
+        }
+    }
+    if (class == .expression) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .record_literal or kind == .array_literal) {
+            annotation := expected
+            if (kind == .record_literal) {
+                if (ast.record_literal(&state.tree, id).type) |type| {
+                    try expand(state, type)
+                    annotation = type
+                }
+            }
+            shape := if (annotation != no_node) try canonical_type(state, annotation) else no_node
+            if (shape != no_node and ast.expr_kind(&state.tree, shape) == .fallible_type)
+                shape = try canonical_type(state, ast.binary_expr(&state.tree, shape).left)
+            if (shape != no_node and ast.expr_kind(&state.tree, shape) == .optional_type)
+                shape = try canonical_type(state, ast.type_operand(&state.tree, shape))
+            if (
+                kind == .array_literal and shape != no_node
+                and (ast.expr_kind(&state.tree, shape) == .array_type or ast.expr_kind(&state.tree, shape) == .slice_type)
+            ) {
+                element :: if (ast.expr_kind(&state.tree, shape) == .array_type)
+                    ast.array_type(&state.tree, shape).element else ast.slice_type(&state.tree, shape).element
+                for (0..ast.array_element_count(&state.tree, id)) |i|
+                    try expand_expected(state, ast.array_element(&state.tree, id, i), element)
+                return
+            }
+            if (
+                kind == .record_literal and shape != no_node
+                and (ast.expr_kind(&state.tree, shape) == .record_type or ast.expr_kind(&state.tree, shape) == .union_type)
+            ) {
+                for (0..ast.record_field_count(&state.tree, id)) |i| {
+                    field :: ast.field(&state.tree, ast.record_field(&state.tree, id, i))
+                    slot :: if (field.name != null) type_record_slot(state, shape, field.name?) else i
+                    field_type := no_node
+                    if (slot < ast.record_field_count(&state.tree, shape)) {
+                        if (ast.field(&state.tree, ast.record_field(&state.tree, shape, slot)).type) |type|
+                            field_type = type
+                    }
+                    if (field.value) |value| try expand_expected(state, value, field_type)
+                }
+                return
+            }
         }
     }
     count :: ast.child_count(&state.tree, id)
@@ -1436,7 +1612,7 @@ expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! E
 # runtime bodies share the type-producer selector, but retain ordinary runtime
 # parameters and control transfers in the selected arm.
 @hide:file
-specialize_match proc(state @mut State, id, statement ast.NodeId) bool ! Error {
+specialize_match proc(state @mut State, id, statement, expected ast.NodeId) bool ! Error {
     explicit :: ast.expr_kind(&state.tree, ast.match_expr(&state.tree, id).subject) == .comptime_expr
     try expand_inline_match(state, id, no_node)
     if (ast.expr_kind(&state.tree, id) != .match_expr) return true
@@ -1494,7 +1670,7 @@ specialize_match proc(state @mut State, id, statement ast.NodeId) bool ! Error {
         try reject_evaluation(state, id)
         return true
     }
-    try expand(state, selected)
+    try expand_expected(state, selected, expected)
     if (statement != no_node) {
         replacement :: try ast.add_expression_stmt(state.builder, selected)
         try replace(state, statement, replacement)
@@ -1632,7 +1808,48 @@ compiletime_result proc(state @State, annotation ast.NodeId) bool {
 }
 
 @hide:file
-specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
+inference_contextual proc(state @State, id ast.NodeId) bool {
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .literal_null or kind == .literal_string) return true
+    if (ast.expr_kind(&state.tree, id) == .record_literal) {
+        annotation :: ast.record_literal(&state.tree, id).type
+        return annotation == null or ast.expr_kind(&state.tree, annotation?) == .enum_literal
+    }
+    return flexible(state, id) or contextual_literal(state, id)
+}
+
+@hide:file
+inference_phase proc(state @State, id ast.NodeId) usize {
+    if (inference_contextual(state, id)) return 2
+    if (ast.expr_kind(&state.tree, id) == .call) {
+        callee :: binding(state, ast.call_expr(&state.tree, id).callee)
+        if (
+            callee.kind == .declaration and ast.node_class(&state.tree, callee.data.declaration) == .function
+            and template(state, callee.data.declaration)
+            and ast.call_arg_count(&state.tree, id) != ast.function_param_count(&state.tree, callee.data.declaration)
+        ) return 1
+    }
+    return 0
+}
+
+@hide:file
+annotation_ready proc(
+    state @State, function, id ast.NodeId, arguments []Value, depth usize,
+) bool {
+    if (depth >= 128) return false
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        index :: parameter_index(state, function, resolved.data.declaration)
+        if (index != no_index) return arguments[index].kind != .invalid
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (!annotation_ready(state, function, ast.child(&state.tree, id, i), arguments, depth + 1)) return false
+    }
+    return true
+}
+
+@hide:file
+specialize_call proc(state @mut State, call, function, expected ast.NodeId) void ! Error {
     if (state.depth >= 128 or state.instances.items.len >= 4096) {
         try reject(state, call, .specialization_limit)
         return
@@ -1664,8 +1881,9 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
         if (view.comptime and !explicit) continue
         argument :: ast.call_arg(&state.tree, call, position)
         position += 1
-        try expand(state, argument)
         if (type_result or view.comptime) {
+            context_annotation :: try argument_annotation(state, function, view.type, arguments)
+            try expand_expected(state, argument, context_annotation)
             state.evaluation_diagnostic = diagnostics.no_diagnostic
             annotation := view.type
             contextual := contextual_literal(state, argument)
@@ -1689,7 +1907,16 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
         }
     }
     if (!explicit) {
-        for (0..usize(2)) |phase| {
+        # rigid arguments constrain first; result context then types nested generic
+        # calls before flexible literals choose their default widths.
+        for (0..usize(3)) |phase| {
+            if (phase == 1 and expected != no_node) {
+                result :: ast.function_decl(&state.tree, function).return_type
+                if (!try infer_result(state, function, result, expected, arguments)) {
+                    try reject(state, call, .cannot_infer_generic)
+                    return
+                }
+            }
             position = 0
             for (0..count) |i| {
                 parameter :: ast.function_param(&state.tree, function, i)
@@ -1697,12 +1924,12 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
                 if (view.comptime) continue
                 argument :: runtime_arguments.items[position]
                 position += 1
-                contextual := flexible(state, argument) or contextual_literal(state, argument)
-                if (ast.expr_kind(&state.tree, argument) == .record_literal) {
-                    annotation :: ast.record_literal(&state.tree, argument).type
-                    contextual = annotation == null or ast.expr_kind(&state.tree, annotation?) == .enum_literal
+                contextual :: inference_contextual(state, argument)
+                if (inference_phase(state, argument) != phase) continue
+                if (annotation_ready(state, function, view.type, arguments, 0)) {
+                    annotation :: try argument_annotation(state, function, view.type, arguments)
+                    try expand_expected(state, argument, annotation)
                 }
-                if (contextual != (phase == 1)) continue
                 actual :: try expression_type(state, argument, 0)
                 # contextual literals need not have an independent type; the rewritten
                 # call checks them against the substituted signature after inference.
@@ -1722,6 +1949,16 @@ specialize_call proc(state @mut State, call, function ast.NodeId) void ! Error {
             try reject(state, call, .cannot_infer_generic)
             return
         }
+    }
+    position = 0
+    for (0..count) |i| {
+        view :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
+        if (view.comptime or type_result) continue
+        argument :: runtime_arguments.items[position]
+        position += 1
+        if (state.expanded.items[usize(argument)] != 0) continue
+        annotation :: try argument_annotation(state, function, view.type, arguments)
+        try expand_expected(state, argument, annotation)
     }
     key := usize(function)
     for arguments |argument| {
@@ -2022,9 +2259,24 @@ contextual_literal proc(state @State, id ast.NodeId) bool {
 }
 
 @hide:file
+annotation_generic proc(state @State, function, id ast.NodeId, depth usize) bool {
+    if (depth >= 128) return true
+    resolved :: binding(state, id)
+    if (
+        resolved.kind == .declaration
+        and parameter_index(state, function, resolved.data.declaration) != no_index
+    ) return true
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (annotation_generic(state, function, ast.child(&state.tree, id, i), depth + 1)) return true
+    }
+    return false
+}
+
+@hide:file
 argument_annotation proc(
     state @mut State, function, annotation ast.NodeId, arguments []Value,
 ) ast.NodeId ! Error {
+    if (!annotation_generic(state, function, annotation, 0)) return annotation
     mapping :: try mem.alloc(ast.NodeId, state.allocator, state.original_count)
     defer mem.free(state.allocator, mapping)
     mem.set(mapping, no_node)
@@ -2057,6 +2309,7 @@ argument_annotation proc(
 
 @hide:file
 evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Error {
+    try expand_expected(state, id, annotation)
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
         if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
         state.type_execution_depth += 1
@@ -2667,6 +2920,7 @@ type_snapshot_catch proc(
     view :: ast.catch_expr(&state.tree, id)
     operand :: try type_snapshot(state, execution, view.operand)
     if (operand == no_node) return no_node
+    try expand_expected(state, operand, annotation)
     operand_type :: try expression_type(state, operand, 0)
     if (operand_type == no_node or ast.expr_kind(&state.tree, operand_type) != .fallible_type) return no_node
     channels :: ast.binary_expr(&state.tree, operand_type)
@@ -3707,7 +3961,7 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         return concrete.node
     }
     if (!try expand_type_matches(state, expression)) return no_node
-    try expand(state, expression)
+    try expand_expected(state, expression, annotation)
     resolved :: binding(state, expression)
     if (resolved.kind == .invalid) {
         state.evaluation_diagnostic = resolved.data.diagnostic
@@ -5233,6 +5487,25 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
             element :: if (actual_kind == .optional_type) ast.type_operand(&state.tree, concrete) else concrete
             return try infer(state, function, ast.type_operand(&state.tree, pattern), element, arguments, contextual)
         }
+        .fallible_type: {
+            if (actual_kind != .fallible_type) return false
+            p :: ast.binary_expr(&state.tree, pattern)
+            a :: ast.binary_expr(&state.tree, concrete)
+            return (try infer(state, function, p.left, a.left, arguments, contextual)
+                and try infer(state, function, p.right, a.right, arguments, contextual))
+        }
+        .function_type: {
+            if (actual_kind != .function_type) return false
+            count :: ast.function_param_count(&state.tree, pattern)
+            if (count != ast.function_param_count(&state.tree, concrete)) return false
+            for (0..count) |i| {
+                p :: ast.param(&state.tree, ast.function_param(&state.tree, pattern, i)).type
+                a :: ast.param(&state.tree, ast.function_param(&state.tree, concrete, i)).type
+                if (!try infer(state, function, p, a, arguments, contextual)) return false
+            }
+            return try infer(state, function, ast.callable_result(&state.tree, pattern),
+                ast.callable_result(&state.tree, concrete), arguments, contextual)
+        }
         .call: {
             callee :: binding(state, ast.call_expr(&state.tree, pattern).callee)
             if (callee.kind != .declaration) return false
@@ -5251,6 +5524,44 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
         }
         else: return true
     }
+}
+
+@hide:file
+infer_result proc(
+    state @mut State,
+    function, pattern, actual ast.NodeId,
+    arguments []mut Value,
+) bool ! Error {
+    concrete :: try canonical_type(state, actual)
+    if (concrete == no_node) return true
+    if (
+        ast.expr_kind(&state.tree, concrete) == .optional_type
+        and ast.expr_kind(&state.tree, pattern) != .optional_type
+    ) {
+        resolved :: binding(state, pattern)
+        if (resolved.kind == .declaration) {
+            index :: parameter_index(state, function, resolved.data.declaration)
+            if (index != no_index) {
+                if (arguments[index].kind == .invalid)
+                    return try infer(state, function, pattern, concrete, arguments, false)
+                if (arguments[index].kind == .type and try same_type(state, arguments[index].node, concrete)) return true
+            }
+        }
+        return try infer_result(state, function, pattern, ast.type_operand(&state.tree, concrete), arguments)
+    }
+    if (
+        ast.expr_kind(&state.tree, concrete) == .fallible_type
+        and ast.expr_kind(&state.tree, pattern) != .fallible_type
+    ) return try infer_result(state, function, pattern, ast.binary_expr(&state.tree, concrete).left, arguments)
+    if (ast.expr_kind(&state.tree, pattern) == .fallible_type) {
+        view :: ast.binary_expr(&state.tree, pattern)
+        if (ast.expr_kind(&state.tree, concrete) != .fallible_type)
+            return try infer_result(state, function, view.left, concrete, arguments)
+        channels :: ast.binary_expr(&state.tree, concrete)
+        return (try infer_result(state, function, view.left, channels.left, arguments)
+            and try infer_result(state, function, view.right, channels.right, arguments))
+    }
+    return try infer(state, function, pattern, concrete, arguments, false)
 }
 
 @hide:file

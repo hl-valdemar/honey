@@ -11,7 +11,7 @@ import "@source/parser"
 @hide:file
 expect_specialization proc(
     source []u8, expected diagnostics.Code, expected_count usize,
-) void ! (mem.AllocError | diagnostics.CapacityError | strpool.InternError | testing.Error) {
+) void ! (mem.AllocError | diagnostics.CapacityError | strpool.InternError | lexer.SourceError | testing.Error) {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -57,7 +57,7 @@ infers_nested_nominal_pointer_parameters_and_readonly_slice_views test {
         `}
         `observe proc($T type, values []T) usize { return values.len }
         `reserve proc($T type, storage @mut Storage(T), count usize) void {
-        `    _ = observe(storage.items.ptr[..count])
+        `    observe(storage.items.ptr[..count])
         `}
         `append proc($T type, storage @mut Storage(T), value T) void {
         `    reserve(storage, storage.items.len)
@@ -65,7 +65,7 @@ infers_nested_nominal_pointer_parameters_and_readonly_slice_views test {
         `}
         `release proc($T type, storage @mut Storage(T)) void {
         `    allocation :: storage.items.ptr[..storage.capacity]
-        `    _ = observe(allocation)
+        `    observe(allocation)
         `}
         `forward proc(storage @mut Storage(i16)) void {
         `    append(storage, 7)
@@ -125,5 +125,129 @@ infers_integer_builtin_results_from_their_type_or_rigid_operand test {
         `    return upper + lower + left + right
         `}
         , .cannot_infer_generic, 0,
+    )
+}
+
+infers_direct_results_before_contextual_literal_defaults test {
+    try expect_specialization(
+        `make proc($T type) T { return T(7) }
+        `identity proc($T type, value T) T { return value }
+        `sized proc($N usize, values [N]i16) [N]i16 { return values }
+        `consume proc(value i16) i16 { return value }
+        `main proc() i16 {
+        `    value i16 := identity(1)
+        `    value = make()
+        `    row [2]i16 :: sized([2, 3])
+        `    return consume(make()) + value + row[0]
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+infers_type_and_value_arguments_from_generated_nominal_results test {
+    try expect_specialization(
+        `Fixed proc($T type, $N usize) type {
+        `    return struct { value T = 0, count usize = N }
+        `}
+        `make proc($T type, $N usize) Fixed(T, N) { return {} }
+        `identity proc($T type, $N usize, value T) Fixed(T, N) {
+        `    return { value = value }
+        `}
+        `main proc() i16 {
+        `    first Fixed(i16, 2) :: make()
+        `    second Fixed(i16, 3) :: identity(i16(7))
+        `    cached Fixed(i16, 2) :: make()
+        `    return first.value + second.value + cached.value
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+propagates_expected_results_through_nested_aggregates_and_success_channels test {
+    try expect_specialization(
+        `Error :: enum { failed }
+        `Record :: struct { value i16, rows [2]mut i16 }
+        `make proc($T type) T { return 7 }
+        `optional proc() ?i16 { return make() }
+        `fallible proc() i16 ! Error { return make() }
+        `main proc() Record {
+        `    record Record := { value = make(), rows = [make(), make()] }
+        `    record.value = make()
+        `    record.rows[0] = make()
+        `    maybe ?i16 :: make()
+        `    result i16 ! Error :: make()
+        `    return { value = make(), rows = [make(), make()] }
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+propagates_expected_results_through_match_arms_and_value_block_yields test {
+    try expect_specialization(
+        `make proc($T type) T { return T(7) }
+        `choose proc(flag bool) i16 {
+        `    return match flag {
+        `        true: make(),
+        `        false: { yield make() },
+        `    }
+        `}
+        `main proc() i16 {
+        `    value i16 :: { yield make() }
+        `    return value + choose(true)
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+rejects_expected_results_that_conflict_with_rigid_runtime_arguments test {
+    try expect_specialization(
+        `identity proc($T type, value T) T { return value }
+        `main proc() i16 { return identity(u8(7)) }
+        , .cannot_infer_generic, 1,
+    )
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T } }
+        `make proc($T type, value T) Box(T) { return { value = value } }
+        `main proc() Box(i16) { return make(u8(7)) }
+        , .cannot_infer_generic, 1,
+    )
+}
+
+rejects_unrelated_nominal_results_and_unresolved_compile_time_arguments test {
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T = 0 } }
+        `Other proc($T type) type { return struct { value T = 0 } }
+        `make proc($T type) Box(T) { return {} }
+        `main proc() Other(i16) { return make() }
+        , .cannot_infer_generic, 1,
+    )
+    try expect_specialization(
+        `make proc($T type, $N usize) T { return T(7) }
+        `main proc() i16 { return make() }
+        , .cannot_infer_generic, 1,
+    )
+    try expect_specialization(
+        `make proc($T type) T { return T(7) }
+        `main proc() void { make() }
+        , .cannot_infer_generic, 1,
+    )
+}
+
+preserves_explicit_arguments_and_explicit_type_procedure_inputs test {
+    try expect_specialization(
+        `identity proc($T type, value T) T { return value }
+        `main proc() i16 { return identity(u8, 7) }
+        , .return_type_mismatch, 1,
+    )
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T = 0 } }
+        `make proc($T type) Box(T) { return {} }
+        `main proc() Box(i16) { return make(u8) }
+        , .return_type_mismatch, 1,
+    )
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T } }
+        `main proc() void { value Box() :: { value = 7 } }
+        , .argument_count_mismatch, 1,
     )
 }

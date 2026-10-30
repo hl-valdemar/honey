@@ -998,6 +998,153 @@ CASES = {
         }
         """, b"42\n", None,
     ),
+    "expected_result_inference_direct_return_without_runtime_arguments": (
+        """
+        answer proc($T type) T { return 42 }
+        main proc() i16 { return answer() }
+        """, b"42\n", None,
+    ),
+    "expected_result_inference_assignment_return_and_nested_parameters": (
+        """
+        answer proc($T type) T { return 42 }
+        identity proc($T type, value T) T { return value }
+        read proc() i16 { return identity(42) }
+        consume proc(value i16) i16 { return value }
+        main proc() [4]i16 {
+            value i16 := identity(0)
+            value = answer()
+            return [value, read(), consume(identity(42)), consume(identity(answer()))]
+        }
+        """, b"[42, 42, 42, 42]\n", None,
+    ),
+    "expected_result_inference_nested_aggregate_fields_and_elements": (
+        """
+        identity proc($T type, value T) T { return value }
+        answer proc($T type) T { return 42 }
+        Inner :: struct { value i16 }
+        Outer :: struct { rows [2]Inner }
+        main proc() [2]i16 {
+            result Outer :: { rows = [{ value = identity(42) }, { value = answer() }] }
+            return [result.rows[0].value, result.rows[1].value]
+        }
+        """, b"[42, 42]\n", None,
+    ),
+    "expected_result_inference_precedes_contextual_literal_defaults": (
+        """
+        Key :: enum { first, last }
+        Record :: struct { value i16 }
+        identity proc($T type, value T) T { return value }
+        main proc() i16 {
+            number u8 :: identity(42)
+            key Key :: identity(.last)
+            record Record :: identity({ value = 42 })
+            absent ?i16 :: identity(null)
+            text []u8 :: identity("ab")
+            if (number != 42 or key != .last or absent != null or text.len != 2) return -1
+            return record.value
+        }
+        """, b"42\n", None,
+    ),
+    "expected_result_inference_generated_nominal_type_and_value_arguments": (
+        """
+        Box proc($T type, $count usize) type {
+            return struct { value T, length usize = count }
+        }
+        create proc($T type, $count usize, value T) Box(T, count) {
+            return { value = value }
+        }
+        main proc() i16 {
+            box Box(i16, 2) :: create(40)
+            explicit Box(i16, 2) :: create(i16, 2, 40)
+            if (box.value != explicit.value or box.length != 2) return -1
+            return box.value + i16(box.length)
+        }
+        """, b"42\n", None,
+    ),
+    "expected_result_inference_optional_and_fallible_success_contexts": (
+        """
+        Error :: enum { failed }
+        identity proc($T type, value T) T { return value }
+        optional proc() ?i16 { return identity(42) }
+        fallible proc() i16 ! Error { return identity(42) }
+        main proc() [2]i16 { return [optional()?, fallible() catch 0] }
+        """, b"[42, 42]\n", None,
+    ),
+    "expected_result_inference_match_arms_and_value_block_yields": (
+        """
+        answer proc($T type) T { return 42 }
+        choose proc(flag bool) i16 {
+            return match flag {
+                true: answer(),
+                false: { yield answer() },
+            }
+        }
+        main proc() [2]i16 { return [choose(true), choose(false)] }
+        """, b"[42, 42]\n", None,
+    ),
+    "expected_result_inference_inside_compile_time_type_producers": (
+        """
+        answer proc($T type) T { return 2 }
+        Fixed proc() type {
+            count usize :: answer()
+            return [count]i16
+        }
+        main proc() Fixed() { return [19, 23] }
+        """, b"[19, 23]\n", None,
+    ),
+    "expected_result_inference_cleanup_comptime_and_expression_contexts": (
+        """
+        Error :: enum { failed }
+        answer proc($T type) T { return 21 }
+        fail proc($T type) T ! Error { return .failed }
+        recover proc() i16 { return fail() catch |error| { yield answer() } }
+        propagate proc() i16 ! Error { return try fail() }
+        Default :: struct { value i16 = answer() }
+        main proc() [7]i16 {
+            value ?i16 :: some!(answer())
+            constant i16 :: $(answer())
+            defaults Default :: {}
+            return [answer() + answer(), -answer(), ~answer(), fail() catch answer(),
+                recover(), (value?), constant + defaults.value]
+        }
+        """, b"[42, -21, -22, 21, 21, 21, 42]\n", None,
+    ),
+    "expected_result_inference_structural_returns_and_nested_optional_presence": (
+        """
+        Error :: enum { failed }
+        exact proc(value i16) i16 { return value }
+        callback proc($T type) @proc(value T) T { return exact }
+        optional proc($T type) ?T { return 42 }
+        fallible proc($T, $E type) T ! E { return 42 }
+        identity proc($T type, value T) T { return value }
+        main proc() [4]i16 {
+            call @proc(value i16) i16 :: callback()
+            maybe ?i16 :: optional()
+            result i16 ! Error :: fallible()
+            nested ??i16 :: identity(some!(null))
+            if (nested == null or nested? != null) return [0, 0, 0, 0]
+            return [call(42), (maybe?), result catch 0, 42]
+        }
+        """, b"[42, 42, 42, 42]\n", None,
+    ),
+    "expected_result_inference_rejects_conflicting_rigid_argument": (
+        """
+        identity proc($T type, value T) T { return value }
+        main proc() u16 {
+            value i16 :: 42
+            return identity(value)
+        }
+        """, b"", b"cannot infer consistent compile-time arguments",
+    ),
+    "expected_result_inference_requires_context_for_result_only_arguments": (
+        """
+        answer proc($T type) T { return 42 }
+        main proc() i16 {
+            value :: answer()
+            return 42
+        }
+        """, b"", b"cannot infer consistent compile-time arguments",
+    ),
     "generic_contextual_enum_rejects_unknown_member": (
         """
         Key :: enum { first }
@@ -9554,7 +9701,7 @@ def check_hashmap_packages(temporary, executable):
             return left - divtrunc!(left, 100) * 100 == right - divtrunc!(right, 100) * 100
         }
         exercise proc(allocator mem.Allocator, state @mut State) i16 ! (hashmap.PutError | mem.AllocError) {
-            map := hashmap.init(i16, Value, collision_hash, equivalent, allocator)
+            map hashmap.HashMap(i16, Value, collision_hash, equivalent) := hashmap.init(allocator)
             defer hashmap.deinit(&map)
             if (map.count != 0 or map.entries.len != 0 or state.allocations != 0) return -1
             if (hashmap.get(&map, 0) != null) return -2
@@ -9604,7 +9751,7 @@ def check_hashmap_packages(temporary, executable):
             return 42
         }
         exercise_automatic_and_string_keys proc(allocator mem.Allocator) i16 ! (hashmap.PutError | mem.AllocError) {
-            automatic := hashmap.init(i16, Value, null, null, allocator)
+            automatic hashmap.AutoHashMap(i16, Value) := hashmap.init(allocator)
             defer hashmap.deinit(&automatic)
             for (i16(0)..i16(12)) |key| {
                 try hashmap.put(&automatic, key, Value{ number = key, items = [key, key + 1] })
@@ -9619,7 +9766,7 @@ def check_hashmap_packages(temporary, executable):
             if (hashmap.get(&automatic, minval!(i16))?.number != 42
                 or hashmap.get(&automatic, maxval!(i16))?.items[0] != 19) return -21
             if (hashmap.get(&automatic, -1) != null) return -22
-            strings hashmap.StringHashMap(Value) := { entries = &[], count = 0, allocator = allocator }
+            strings hashmap.StringHashMap(Value) := hashmap.init(allocator)
             defer hashmap.deinit(&strings)
             left [3]mut u8 := [97, 0, 98]
             right [3]mut u8 := [97, 0, 98]
@@ -9673,7 +9820,7 @@ def check_hashmap_packages(temporary, executable):
         Inner :: distinct u64
         Id :: distinct Inner
         integer_keys proc($K type) bool ! (hashmap.PutError | mem.AllocError) {
-            map hashmap.AutoHashMap(K, usize) := hashmap.init(K, usize, null, null, mem.c_allocator)
+            map hashmap.AutoHashMap(K, usize) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&map)
             keys [4]K :: [minval!(K), maxval!(K), K(1), K(2)]
             for keys |key, index| { try hashmap.put(&map, key, index) }
@@ -9698,7 +9845,7 @@ def check_hashmap_packages(temporary, executable):
             if (!try integer_keys(i32) or !try integer_keys(u32)) return -3
             if (!try integer_keys(i64) or !try integer_keys(u64)) return -4
             if (!try integer_keys(isize) or !try integer_keys(usize)) return -5
-            flags hashmap.AutoHashMap(bool, i16) := hashmap.init(bool, i16, null, null, mem.c_allocator)
+            flags hashmap.AutoHashMap(bool, i16) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&flags)
             try hashmap.put(&flags, false, 19)
             try hashmap.put(&flags, true, 23)
@@ -9706,14 +9853,14 @@ def check_hashmap_packages(temporary, executable):
             duplicate := false
             hashmap.put(&flags, false, 99) catch |err| { duplicate = err == .key_exists }
             if (!duplicate or flags.count != 2 or hashmap.get(&flags, false)? != 19) return -7
-            sparse hashmap.AutoHashMap(SparseAlias, i16) := hashmap.init(SparseAlias, i16, null, null, mem.c_allocator)
+            sparse hashmap.AutoHashMap(SparseAlias, i16) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&sparse)
             try hashmap.put(&sparse, .negative, 7)
             try hashmap.put(&sparse, .first, 3)
             try hashmap.put(&sparse, .far, 90)
             if (sparse.count != 3 or hashmap.get(&sparse, Sparse.negative)? != 7) return -8
             if (hashmap.get(&sparse, .first)? != 3 or hashmap.get(&sparse, .far)? != 90) return -9
-            ids hashmap.AutoHashMap(Id, i16) := hashmap.init(Id, i16, null, null, mem.c_allocator)
+            ids hashmap.AutoHashMap(Id, i16) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&ids)
             try hashmap.put(&ids, Id(Inner(0)), 19)
             try hashmap.put(&ids, Id(Inner(maxval!(u64))), 23)
@@ -9734,15 +9881,14 @@ def check_hashmap_packages(temporary, executable):
             return left - divtrunc!(left, 100) * 100 == right - divtrunc!(right, 100) * 100
         }
         main proc() i16 ! (hashmap.PutError | mem.AllocError) {
-            # The alias supplies the library's private string callbacks.
-            strings hashmap.StringHashMap(i16) := { entries = &[], count = 0, allocator = mem.c_allocator }
+            strings hashmap.StringHashMap(i16) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&strings)
             left [3]mut u8 := [97, 0, 98]
             right [3]mut u8 := [97, 0, 98]
             other [3]mut u8 := [97, 0, 99]
             if ((&left).ptr == (&right).ptr) return -7
             try hashmap.put(&strings, left[..], 42)
-            records hashmap.AutoHashMap(Key, i16) := hashmap.init(Key, i16, null, null, mem.c_allocator)
+            records hashmap.AutoHashMap(Key, i16) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&records)
             first Key := { padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [2, 9] }, { values = [4, 8] }] }
             same Key := { padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [2, 9] }, { values = [4, 8] }] }
@@ -9774,7 +9920,7 @@ def check_hashmap_packages(temporary, executable):
             try hashmap.put(&strings, "", 7)
             try hashmap.put(&strings, other[..], 23)
             if (strings.count != 3 or hashmap.get(&strings, "")? != 7 or hashmap.get(&strings, other[..])? != 23) return -11
-            custom := hashmap.init(u16, i16, custom_hash, custom_eql, mem.c_allocator)
+            custom hashmap.HashMap(u16, i16, custom_hash, custom_eql) := hashmap.init(mem.c_allocator)
             defer hashmap.deinit(&custom)
             for (u16(1)..u16(20)) |key| { try hashmap.put(&custom, key, i16(key * 2)) }
             for (u16(1)..u16(20)) |key| {
