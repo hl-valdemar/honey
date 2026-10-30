@@ -44,6 +44,7 @@ while (
 ```
 
 - use early returns for terminal cases so the main path stays shallow.
+- use grouped `match` arms for boolean enum membership; reserve compile-time enum maps for enum-to-value data mappings.
 - register `defer` cleanup immediately after acquiring a resource. use `errdefer` for cleanup needed only until ownership is transferred successfully.
 
 ## allocation and ownership

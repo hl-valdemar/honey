@@ -942,31 +942,23 @@ parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.Nod
 }
 
 @hide:file
-type_starters :: $enummap.init_default(lexer.TokenKind, bool, false, {
-    ident = true, open_bracket = true, struct = true, c_struct = true, opaque = true,
-    enum = true, union = true, distinct = true, alias = true, match = true, if = true,
-    at = true, star = true, question = true, open_paren = true, proc = true, c_func = true,
-})
-
-@hide:file
 starts_type proc(kind lexer.TokenKind) bool {
-    return enummap.get(&type_starters, kind) != null
+    return match kind {
+        .ident, .open_bracket, .struct, .c_struct, .opaque, .enum, .union, .distinct,
+        .alias, .match, .if, .at, .star, .question, .open_paren, .proc, .c_func: true
+        else: false
+    }
 }
 
 @hide:file
-member_names :: $enummap.init_default(lexer.TokenKind, bool, false, {
-    ident = true, if = true, else = true, for = true, inline = true, while = true,
-    proc = true, return = true, yield = true, break = true, continue = true,
-    true = true, false = true, and = true, or = true, xor = true, mut = true,
-    struct = true, c_struct = true, opaque = true, enum = true, union = true,
-    distinct = true, alias = true, match = true, import = true, test = true,
-    c_func = true, null = true, undefined = true, try = true, catch = true,
-    defer = true, errdefer = true, unreachable = true,
-})
-
-@hide:file
 member_name proc(kind lexer.TokenKind) bool {
-    return enummap.get(&member_names, kind) != null
+    return match kind {
+        .ident, .if, .else, .for, .inline, .while, .proc, .return, .yield, .break,
+        .continue, .true, .false, .and, .or, .xor, .mut, .struct, .c_struct, .opaque,
+        .enum, .union, .distinct, .alias, .match, .import, .test, .c_func, .null,
+        .undefined, .try, .catch, .defer, .errdefer, .unreachable: true
+        else: false
+    }
 }
 
 @hide:file
