@@ -1707,7 +1707,7 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
     }
     match ast.expr_kind(&state.tree, id) {
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void,
-        .union_constant: return true
+        .union_constant, .slice_constant: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
         .enum_literal: return true
         .record_literal: {
@@ -2359,8 +2359,96 @@ union_bytes_materializable proc(checked @typecheck.Result, type typecheck.Type, 
     }
 }
 
+# rebuild exact slice backing annotations without retaining temporary checker IDs.
+@hide:file
+serialized_type proc(
+    state @mut State,
+    checked @typecheck.Result,
+    type typecheck.Type,
+    span ast.Span,
+    depth usize,
+) ast.NodeId ! Error {
+    if (depth >= 128) return no_node
+    source := type.nominal
+    if (source == no_node and type.kind == .record) {
+        record :: typecheck.record_type(checked, type.record_type)
+        source = if (record.declaration != no_node) record.declaration else record.source
+    }
+    if (source == no_node and type.kind == .enumeration)
+        source = typecheck.enum_type(checked, type.enum_type).declaration
+    if (source == no_node and type.kind == .function) source = type.function
+    if (source != no_node) {
+        if (ast.node_class(&state.tree, source) == .function) {
+            params := arraylist.init(ast.NodeId, state.allocator)
+            defer arraylist.deinit(&params)
+            for (0..ast.function_param_count(&state.tree, source)) |i|
+                try arraylist.append(&params, ast.function_param(&state.tree, source, i))
+            source = try ast.add_function_type(state.builder, span,
+                ast.callable_result(&state.tree, source), params.items)
+            try refresh(state)
+        }
+        return (try materialize(state, Value{ kind = .type, node = source })).node
+    }
+    result := no_node
+    if (type.kind == .array or type.kind == .slice or type.kind == .optional or type.kind == .fallible) {
+        descriptor :: typecheck.array_type(checked, type.array_type)
+        child :: try serialized_type(state, checked, descriptor.element, span, depth + 1)
+        if (child == no_node) return no_node
+        if (type.kind == .array) {
+            count :: try ast.add_integer(state.builder, span, u64(descriptor.len))
+            result = try ast.add_array_type(state.builder, span, count, child, descriptor.mutable)
+        } else if (type.kind == .slice) {
+            sentinel ?ast.NodeId := null
+            if (descriptor.sentinel) |value| {
+                unsigned :: (descriptor.element.kind == .u8 or descriptor.element.kind == .u16
+                    or descriptor.element.kind == .u32 or descriptor.element.kind == .u64 or descriptor.element.kind == .usize)
+                negative :: value < 0 and !unsigned
+                magnitude :: if (negative) u64(-(value + 1)) + 1 else ptrcast!(@u64, &value)^
+                literal := try ast.add_integer(state.builder, span, magnitude)
+                if (negative) literal = try ast.add_unary(state.builder, span, .negate, literal)
+                sentinel = literal
+            }
+            result = try ast.add_slice_type(state.builder, span, child, descriptor.mutable, sentinel)
+        } else if (type.kind == .optional) result = try ast.add_optional_type(state.builder, span, child)
+        else {
+            error_type :: try serialized_type(state, checked, descriptor.error_type, span, depth + 1)
+            if (error_type == no_node) return no_node
+            result = try ast.add_binary_type(state.builder, span, child, error_type, true)
+        }
+    } else if (type.kind == .pointer) {
+        descriptor :: typecheck.pointer_type(checked, type.pointer_type)
+        child :: try serialized_type(state, checked, descriptor.element, span, depth + 1)
+        if (child == no_node) return no_node
+        result = try ast.add_pointer_type(state.builder, span, child, descriptor.mutable, descriptor.many)
+    } else {
+        kind sema.BuiltinType :: match type.kind {
+            .int: .i64
+            .i8: .i8
+            .i16: .i16
+            .i32: .i32
+            .isize: .isize
+            .u8: .u8
+            .u16: .u16
+            .u32: .u32
+            .u64: .u64
+            .usize: .usize
+            .float: .f64
+            .bool: .bool
+            .string: .string
+            .void: .void
+            .anyopaque: .anyopaque
+            else: return no_node
+        }
+        result = try ast.add_identifier(state.builder, span, strpool.no_str)
+        try refresh(state)
+        state.bindings.items[usize(result)] = sema.Binding{ kind = .builtin, data = sema.BindingData{ builtin = kind } }
+    }
+    try refresh(state)
+    return result
+}
+
 # values leaving temporary evaluation must own no interpreter addresses or module IDs.
-# snapshot readonly bytes and rebuild source literals/references before releasing their backing.
+# snapshot readonly storage and rebuild source literals/references before releasing their backing.
 @hide:file
 serialize_value proc(
     state @mut State,
@@ -2371,7 +2459,15 @@ serialize_value proc(
     type typecheck.Type,
     value ir.Value,
     span ast.Span,
+    remaining @mut usize,
 ) ast.NodeId ! Error {
+    if (remaining^ == 0 or state.depth >= 128) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+        return no_node
+    }
+    remaining^ -= 1
+    state.depth += 1
+    defer state.depth -= 1
     uninitialized := value.uninitialized
     if (ir.aggregate(value.type)) {
         if (module.arrays.items[usize(value.array_type)].is_union)
@@ -2386,12 +2482,63 @@ serialize_value proc(
     result := no_node
     if (type.kind == .slice) {
         slice :: typecheck.array_type(checked, type.array_type)
-        if (slice.mutable or slice.element.kind != .u8 or slice.element.nominal != no_node) return no_node
+        if (slice.mutable) return no_node
         pointer :: ir.aggregate_item(module, value, 0)
         length :: ir.aggregate_item(module, value, 1)
         if (pointer.uninitialized or length.uninitialized) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
             return no_node
+        }
+        if (slice.element.kind != .u8 or slice.element.nominal != no_node) {
+            shape :: module.arrays.items[usize(value.array_type)]
+            count :: usize(length.data.unsigned)
+            extra :: if (slice.sentinel != null) usize(1) else usize(0)
+            if (count > remaining^ or extra > remaining^ - count) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+                return no_node
+            }
+            if (count != 0 and interpreter.evaluation_element(outcome, module, pointer,
+                count - 1, shape.element, shape.element_array) == null) return no_node
+            elements := arraylist.init(ast.NodeId, state.allocator)
+            defer arraylist.deinit(&elements)
+            for (0..(count + extra)) |index| {
+                borrowed :: interpreter.evaluation_element(outcome, module, pointer,
+                    index, shape.element, shape.element_array)
+                if (borrowed == null) return no_node
+                child := borrowed?
+                # recursive slice reads may overwrite the accessor's raw-view scratch.
+                scratch_backed :: ir.aggregate(child.type) and child.raw
+                owned []mut ir.Value := &[]
+                if (scratch_backed) {
+                    owned = try mem.alloc(ir.Value, state.allocator, child.data.elements.len)
+                    memcopy!(owned, child.data.elements)
+                    child.data = ir.ValueData{ elements = owned }
+                }
+                defer if (scratch_backed) mem.free(state.allocator, owned)
+                node :: try serialize_value(state, module, checked, outcome, functions,
+                    slice.element, child, span, remaining)
+                if (node == no_node) return no_node
+                if (index == count and slice.sentinel != null) {
+                    # checker sentinels retain full-width integer bits, including u64 maxima.
+                    if (child.data.integer != slice.sentinel?) {
+                        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .sentinel_mismatch, span)
+                        return no_node
+                    }
+                }
+                try arraylist.append(&elements, node)
+            }
+            annotation :: try serialized_type(state, checked, type, span, 0)
+            if (annotation == no_node) return no_node
+            child_type :: if (type.nominal == no_node) ast.slice_type(&state.tree, annotation).element
+                else try serialized_type(state, checked, slice.element, span, 0)
+            if (child_type == no_node) return no_node
+            length_node :: try ast.add_integer(state.builder, span, u64(count + extra))
+            array_type :: try ast.add_array_type(state.builder, span, length_node, child_type, false)
+            literal :: try ast.add_array_literal(state.builder, span, elements.items)
+            backing :: try ast.add_typed_constant(state.builder, span, array_type, literal)
+            result = try ast.add_slice_constant(state.builder, span, annotation, backing)
+            try refresh(state)
+            return result
         }
         if (
             length.data.unsigned != 0
@@ -2437,7 +2584,17 @@ serialize_value proc(
         defer arraylist.deinit(&elements)
         for (0..array.len) |i| {
             child :: ir.aggregate_item(module, value, i)
-            node :: try serialize_value(state, module, checked, outcome, functions, array.element, child, span)
+            node :: try serialize_value(
+                state,
+                module,
+                checked,
+                outcome,
+                functions,
+                array.element,
+                child,
+                span,
+                remaining,
+            )
             if (node == no_node) return no_node
             try arraylist.append(&elements, node)
         }
@@ -2474,7 +2631,7 @@ serialize_value proc(
                 return result
             }
             child :: ir.aggregate_item(module, value, i)
-            node :: try serialize_value(state, module, checked, outcome, functions, field.type, child, span)
+            node :: try serialize_value(state, module, checked, outcome, functions, field.type, child, span, remaining)
             if (node == no_node) return no_node
             name := field.name
             if (name != null) name = try member_name(state, name?)
@@ -2489,7 +2646,7 @@ serialize_value proc(
         index :: if (failed) usize(1) else usize(0)
         channel :: if (failed) container.error_type else container.element
         child :: ir.aggregate_item(module, value, index)
-        result = try serialize_value(state, module, checked, outcome, functions, channel, child, span)
+        result = try serialize_value(state, module, checked, outcome, functions, channel, child, span, remaining)
         if (result == no_node) return no_node
         # keep named success/error types distinct even when their members overlap.
         annotation := no_node
@@ -2518,12 +2675,12 @@ serialize_value proc(
                 value.data.function == maxval!(ir.FunctionId)
                 else value.data.unsigned == maxval!(u64)
             if (absent) result = try ast.add_literal(state.builder, .null, span)
-            else result = try serialize_value(state, module, checked, outcome, functions, container.element, value, span)
+            else result = try serialize_value(state, module, checked, outcome, functions, container.element, value, span, remaining)
         } else if (!ir.aggregate_item(module, value, 0).data.boolean) {
             result = try ast.add_literal(state.builder, .null, span)
         } else {
             child :: ir.aggregate_item(module, value, 1)
-            payload :: try serialize_value(state, module, checked, outcome, functions, container.element, child, span)
+            payload :: try serialize_value(state, module, checked, outcome, functions, container.element, child, span, remaining)
             if (payload == no_node) return no_node
             name :: try ast.add_generated_identifier(state.builder, span,
                 try strpool.intern(state.strings, "some"), "some")
@@ -2557,9 +2714,11 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
     kind :: ast.expr_kind(&state.tree, left)
     if (kind != ast.expr_kind(&state.tree, right)) return false
     if (kind == .literal_void) return true
-    if (kind == .typed_constant or kind == .union_constant) {
-        a :: if (kind == .union_constant) ast.union_constant(&state.tree, left) else ast.typed_constant(&state.tree, left)
-        b :: if (kind == .union_constant) ast.union_constant(&state.tree, right) else ast.typed_constant(&state.tree, right)
+    if (kind == .typed_constant or kind == .union_constant or kind == .slice_constant) {
+        a :: if (kind == .union_constant) ast.union_constant(&state.tree, left)
+            else if (kind == .slice_constant) ast.slice_constant(&state.tree, left) else ast.typed_constant(&state.tree, left)
+        b :: if (kind == .union_constant) ast.union_constant(&state.tree, right)
+            else if (kind == .slice_constant) ast.slice_constant(&state.tree, right) else ast.typed_constant(&state.tree, right)
         return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
     }
     if (kind == .slice) {
@@ -2605,8 +2764,9 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     kind :: ast.expr_kind(&state.tree, id)
     hash :: enum_index(kind)
     if (kind == .literal_void) return hash
-    if (kind == .typed_constant or kind == .union_constant) {
-        value :: if (kind == .union_constant) ast.union_constant(&state.tree, id) else ast.typed_constant(&state.tree, id)
+    if (kind == .typed_constant or kind == .union_constant or kind == .slice_constant) {
+        value :: if (kind == .union_constant) ast.union_constant(&state.tree, id)
+            else if (kind == .slice_constant) ast.slice_constant(&state.tree, id) else ast.typed_constant(&state.tree, id)
         return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
     }
     if (kind == .slice) {
@@ -2743,7 +2903,8 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     value :: outcome.value
     source_type :: typecheck.type_of(&checked, result_type)
-    node :: try serialize_value(state, &module, &checked, &outcome, functions.items, source_type, value, span)
+    remaining := usize(100000)
+    node :: try serialize_value(state, &module, &checked, &outcome, functions.items, source_type, value, span, &remaining)
     if (node == no_node) {
         if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
@@ -2751,7 +2912,8 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     if (
         (ir.aggregate(value.type) and source_type.kind != .slice)
-        or (source_type.kind == .slice and ast.expr_kind(&state.tree, node) == .slice)
+        or (source_type.kind == .slice and (ast.expr_kind(&state.tree, node) == .slice
+            or ast.expr_kind(&state.tree, node) == .slice_constant))
         or source_type.kind == .enumeration or source_type.kind == .void
     )
         return Value{ kind = .aggregate, node = node, annotation = result_type }
@@ -4847,8 +5009,8 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         return Value{}
     }
     match kind {
-        .union_constant: {
-            value :: ast.union_constant(&state.tree, id)
+        .union_constant, .slice_constant: {
+            value :: if (kind == .union_constant) ast.union_constant(&state.tree, id) else ast.slice_constant(&state.tree, id)
             return Value{ kind = .aggregate, node = id, annotation = value.type }
         }
         .typed_constant: {
@@ -5335,8 +5497,9 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
         .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
             return try builtin(state, id, .type)
-        .typed_constant, .union_constant: {
+        .typed_constant, .union_constant, .slice_constant: {
             annotation :: if (kind == .union_constant) ast.union_constant(&state.tree, id).type
+                else if (kind == .slice_constant) ast.slice_constant(&state.tree, id).type
                 else ast.typed_constant(&state.tree, id).type
             return if (is_type(state, annotation)) annotation else try canonical_type(state, annotation)
         }

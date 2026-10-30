@@ -1007,6 +1007,74 @@ computed_byte_slices_recompile_without_borrowing_evaluation_storage test {
     }
 }
 
+computed_nonbyte_slices_recompile_owned_private_elements_and_callbacks test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `Code :: distinct i16
+            `Entry :: struct { value bool }
+            `increment proc(value Code) i16 { return i16(value) + 100 }
+            `main proc() i16 {
+            `    entries :: $(lib.make())
+            `    if (entries.len != 2 or entries[0].nested.len != 2) return -1
+            `    if (entries[0].nested[0] != -300 or entries[0].nested[1] != 1024) return -2
+            `    if (entries[1].nested.len != 1 or entries[1].nested[0] != 1024) return -3
+            `    if (i16(entries[0].value) != 40 or i16(entries[1].value) != 41) return -4
+            `    if (entries[1].run(entries[1].value) != 43) return -5
+            `    return entries[0].run(entries[0].value)
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/nonbyte_slices/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `@hide:file
+            `Code :: distinct i16
+            `@hide:file
+            `Callback :: alias @proc(value Code) i16
+            `@hide:file
+            `Entry :: struct { value Code, run Callback, nested []i16 }
+            `bias i16 :: 2
+            `@hide:file
+            `increment proc(value Code) i16 { return i16(value) + bias }
+            `make proc() []Entry {
+            `    values [2]i16 :: [-300, 1024]
+            `    entries [2]Entry :: [
+            `        { value = 40, run = increment, nested = values[..] },
+            `        { value = 41, run = increment, nested = values[1..] },
+            `    ]
+            `    return entries[..]
+            `}
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/nonbyte_slices/library/items.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}
+
 computed_untagged_unions_recompile_without_borrowing_storage_bytes test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

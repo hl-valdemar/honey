@@ -48,6 +48,9 @@ State :: struct {
     arguments arraylist.ArrayList(ir.ValueId)
     cleanups arraylist.ArrayList(ast.NodeId)
     records []mut ir.ArrayId
+    slice_elements arraylist.ArrayList(typecheck.Type)
+    slice_backings arraylist.ArrayList(ast.NodeId)
+    evaluation_functions ?@mut arraylist.ArrayList(ast.NodeId) = null
     function usize = 0
     block ir.BlockId = ir.BlockId(0)
     terminated bool = false
@@ -156,11 +159,16 @@ lower_module proc(
         storage = storage,
         arrays = arrays,
         records = records,
+        slice_elements = arraylist.init(typecheck.Type, allocator),
+        slice_backings = arraylist.init(ast.NodeId, allocator),
+        evaluation_functions = functions,
         arguments = arraylist.init(ir.ValueId, allocator),
         cleanups = arraylist.init(ast.NodeId, allocator),
     }
     defer arraylist.deinit(&state.arguments)
     defer arraylist.deinit(&state.cleanups)
+    defer arraylist.deinit(&state.slice_elements)
+    defer arraylist.deinit(&state.slice_backings)
 
     # allocate every package identity before lowering any initializer or body.
     for (0..ast.package_decl_count(tree)) |i| {
@@ -203,6 +211,22 @@ lower_module proc(
             }
             .import, .invalid: {}
         }
+    }
+    backing_index := usize(0)
+    while (backing_index < state.slice_backings.items.len) {
+        try lower_slice_backing(&state, state.slice_backings.items[backing_index])
+        backing_index += 1
+    }
+    # source element shapes are metadata, not record layout dependencies. defer
+    # them until recursive records have cached their completed physical layout.
+    cursor := usize(0)
+    while (cursor < state.slice_elements.items.len) {
+        type :: state.slice_elements.items[cursor]
+        child :: typecheck.array_type(checked, type.array_type).element
+        shape :: state.arrays[usize(type.array_type)]
+        element_shape :: try array_shape(&state, child)
+        module.arrays.items[usize(shape)].element_array = element_shape
+        cursor += 1
     }
     return module
 }
@@ -308,6 +332,10 @@ prepare_container proc(state @mut State, type typecheck.Type) ir.ArrayId ! (mem.
     }
     shape :: try ir.add_record(state.module, fields[..])
     state.arrays[index] = shape
+    if (type.kind == .slice) {
+        state.module.arrays.items[usize(shape)].element = lower_type(state, descriptor.element)
+        try arraylist.append(&state.slice_elements, type)
+    }
     return shape
 }
 
@@ -446,6 +474,19 @@ lower_global proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diag
     value :: try lower_as(state, declaration.initializer, typecheck.type_of(state.checked, id))
     if (state.terminated or trap_type(state, id)) return
     finish(state, value, declaration.span)
+}
+
+@hide:file
+lower_slice_backing proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
+    global :: state.module.globals.items[usize(state.storage[usize(id)].index)]
+    state.function = usize(global.initializer)
+    state.block = ir.BlockId(0)
+    state.terminated = false
+    state.module.functions.items[state.function].result = global.type
+    state.module.functions.items[state.function].result_array_type = global.array_type
+    backing :: ast.slice_constant(state.tree, id).value
+    value :: try lower_expression(state, backing)
+    if (!state.terminated) finish(state, value, ast.node_span(state.tree, id))
 }
 
 @hide:file
@@ -2097,6 +2138,40 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
         .typed_constant: {
             if (trap_type(state, id)) return ir.no_value
             return try lower_as(state, ast.typed_constant(tree, id).value, typecheck.type_of(state.checked, id))
+        }
+        .slice_constant: {
+            if (trap_type(state, id)) return ir.no_value
+            if (state.storage[usize(id)].kind == .none) {
+                backing :: ast.slice_constant(tree, id).value
+                initializer :: try add_function(state.module, span)
+                if (state.evaluation_functions) |declarations|
+                    try arraylist.append(declarations, maxval!(ast.NodeId))
+                global :: u32(state.module.globals.items.len)
+                try arraylist.append(&state.module.globals, ir.Global{
+                    type = lower_type(state, typecheck.type_of(state.checked, backing)),
+                    array_type = try array_shape(state, typecheck.type_of(state.checked, backing)),
+                    initializer = initializer,
+                    span = span,
+                })
+                state.storage[usize(id)] = Storage{ kind = .global, index = global }
+                try arraylist.append(&state.slice_backings, id)
+            }
+            location :: state.storage[usize(id)]
+            global :: state.module.globals.items[usize(location.index)]
+            address :: try emit(state, ir.Instruction{
+                op = .address_global, type = .address, pointee = global.type,
+                array_type = global.array_type, slot = location.index, span = span,
+            })
+            pointer :: try emit(state, ir.Instruction{
+                op = .pointer_from_address, type = .pointer, left = address,
+                pointee = global.type, array_type = global.array_type, span = span,
+            })
+            descriptor :: typecheck.array_type(state.checked, typecheck.type_of(state.checked, id).array_type)
+            backing :: ast.slice_constant(tree, id).value
+            elements :: typecheck.array_type(state.checked, typecheck.type_of(state.checked, backing).array_type)
+            extra :: if (descriptor.sentinel != null) usize(1) else usize(0)
+            len :: elements.len - extra
+            return try record_pair(state, shape, pointer, try usize_constant(state, len, span), span)
         }
         .union_constant: {
             if (trap_type(state, id)) return ir.no_value

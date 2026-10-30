@@ -1301,6 +1301,14 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             try depend(state, value.type, id)
             try depend(state, value.value, id)
         }
+        .slice_constant: {
+            value :: ast.slice_constant(tree, id)
+            state.cells[usize(id)].fixed = true
+            state.cells[usize(id)].type = try check_annotation(state, value.type, false)
+            try collect_expression(state, value.value)
+            try depend(state, value.type, id)
+            try depend(state, value.value, id)
+        }
         .try_expr: {
             operand :: ast.type_operand(tree, id)
             try collect_expression(state, operand)
@@ -2177,6 +2185,27 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     descriptor :: state.records.items[usize(type.record_type)]
                     if (!descriptor.is_union or descriptor.tag_type.kind != .none)
                         try fail(state, id, .invalid_operand, ast.node_span(tree, id))
+                }
+                .slice_constant: {
+                    value :: ast.slice_constant(tree, id)
+                    type :: state.cells[usize(id)].type
+                    backing :: state.types[usize(value.value)]
+                    if (type.kind == .invalid or backing.kind == .invalid) return
+                    if (
+                        type.kind != .slice or backing.kind != .array
+                        or ast.expr_kind(tree, value.value) != .typed_constant
+                    ) {
+                        try fail(state, id, .invalid_operand, ast.node_span(tree, id))
+                        return
+                    }
+                    descriptor :: state.arrays.items[usize(type.array_type)]
+                    elements :: state.arrays.items[usize(backing.array_type)]
+                    if (
+                        descriptor.mutable or elements.mutable
+                        or !same_type(state, descriptor.element, elements.element)
+                        or (descriptor.sentinel != null and elements.len == 0)
+                        or ast.expr_kind(tree, ast.typed_constant(tree, value.value).value) != .array_literal
+                    ) try fail(state, id, .invalid_operand, ast.node_span(tree, id))
                 }
                 .try_expr, .catch_expr: try validate_fallible_expression(state, id)
                 .unary: {

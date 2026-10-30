@@ -5399,24 +5399,343 @@ CASES = {
         main proc() usize { return $(make())[0].len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_aggregate_rejects_nonbyte_slice_escape": (
+    "comptime_nonbyte_slices_materialize_callback_elements": (
+        """
+        Callback :: alias @proc(value i16) i16
+        increment proc(value i16) i16 { return value + 1 }
+        decrement proc(value i16) i16 { return value - 1 }
+        make proc() []Callback {
+            callbacks [2]Callback :: [increment, decrement]
+            return callbacks[..]
+        }
+        main proc() [3]i16 {
+            callbacks :: $(make())
+            return [callbacks[0](41), callbacks[1](43), i16(callbacks.len)]
+        }
+        """, b"[42, 42, 2]\n", None,
+    ),
+    "comptime_nonbyte_slices_preserve_full_width_sentinels": (
+        """
+        make proc() [;18446744073709551615]u64 {
+            values [3]u64 :: [9, 4294967298, 18446744073709551615]
+            return values[1..2;18446744073709551615]
+        }
+        main proc() [3]u64 {
+            values :: $(make())
+            return [u64(values.len), values[0], values.ptr[1]]
+        }
+        """, b"[1, 4294967298, 18446744073709551615]\n", None,
+    ),
+    "comptime_aggregate_materializes_readonly_nonbyte_slices": (
+        """
+        make proc() []i16 {
+            values [2]mut i16 := [-300, 1024]
+            return values[..]
+        }
+        main proc() [3]i16 {
+            values :: $(make())
+            return [values[0], values[1], i16(values.len)]
+        }
+        """, b"[-300, 1024, 2]\n", None,
+    ),
+    "comptime_aggregate_materializes_nominal_byte_slices": (
+        """
+        Byte :: distinct u8
+        exact proc(value Byte) usize { return usize(value) }
+        make proc() []Byte {
+            values [3]Byte :: [0, 128, 255]
+            return values[..]
+        }
+        main proc() [4]usize {
+            values :: $(make())
+            return [exact(values[0]), exact(values[1]), exact(values[2]), values.len]
+        }
+        """, b"[0, 128, 255, 3]\n", None,
+    ),
+    "comptime_nonbyte_slices_preserve_subviews_and_full_element_stride": (
+        """
+        make proc() []i64 {
+            values [4]i64 :: [9, -4294967297, 4294967298, 8]
+            return values[1..3]
+        }
+        main proc() [3]i64 {
+            values :: $(make())
+            return [i64(values.len), values[0], values[1]]
+        }
+        """, b"[2, -4294967297, 4294967298]\n", None,
+    ),
+    "comptime_nonbyte_slices_own_array_elements": (
+        """
+        make proc() [][2]i16 {
+            rows [3][2]i16 :: [[9, 8], [-300, 1024], [40, 2]]
+            return rows[1..]
+        }
+        main proc() [5]i16 {
+            rows :: $(make())
+            return [i16(rows.len), rows[0][0], rows[0][1], rows[1][0], rows[1][1]]
+        }
+        """, b"[2, -300, 1024, 40, 2]\n", None,
+    ),
+    "comptime_nonbyte_slices_own_records_callbacks_and_nested_slices": (
+        """
+        Callback :: alias @proc(value i16) i16
+        Entry :: struct { children [][]i16, run Callback, values [2]i16 }
+        increment proc(value i16) i16 { return value + 1 }
+        decrement proc(value i16) i16 { return value - 1 }
+        make proc() []Entry {
+            first [2]i16 :: [11, 12]
+            second [2]i16 :: [21, 22]
+            rows [2][]i16 :: [first[..], second[..]]
+            entries [2]Entry :: [
+                { children = rows[..], run = increment, values = [40, 2] },
+                { children = rows[1..], run = decrement, values = [44, 3] },
+            ]
+            return entries[..]
+        }
+        main proc() [8]i16 {
+            entries :: $(make())
+            if (
+                entries.len != 2 or entries[0].children.len != 2
+                or entries[1].children.len != 1 or entries[0].children[0].len != 2
+            ) {
+                return [0, 0, 0, 0, 0, 0, 0, 0]
+            }
+            return [entries[0].children[0][0], entries[0].children[0][1],
+                entries[0].children[1][0], entries[1].children[0][1],
+                entries[0].run(41), entries[1].run(43),
+                entries[0].values[0], entries[1].values[1]]
+        }
+        """, b"[11, 12, 21, 22, 42, 42, 40, 3]\n", None,
+    ),
+    "comptime_nonbyte_slices_own_raw_record_views": (
+        """
+        Entry :: struct { children []i16, run @proc(value i16) i16, tail i16 }
+        Backing :: union { entry Entry }
+        increment proc(value i16) i16 { return value + 1 }
+        make proc() []Entry {
+            children [2]i16 :: [40, 2]
+            backing Backing :: { entry = { children = children[..], run = increment, tail = 7 } }
+            pointer *Entry :: &backing.entry
+            return pointer[..1]
+        }
+        main proc() [4]i16 {
+            entries :: $(make())
+            return [entries[0].children[0], entries[0].children[1],
+                entries[0].run(41), entries[0].tail]
+        }
+        """, b"[40, 2, 42, 7]\n", None,
+    ),
+    "comptime_nonbyte_slices_preserve_distinct_slice_identity": (
+        """
+        Slice :: alias []i16
+        View :: distinct Slice
+        make proc() View {
+            values [2]i16 :: [40, 2]
+            return View(values[..])
+        }
+        exact proc(value View) i16 {
+            values :: Slice(value)
+            return values[0] + values[1]
+        }
+        main proc() i16 { return exact($(make())) }
+        """, b"42\n", None,
+    ),
+    "comptime_nonbyte_slices_preserve_empty_and_zero_sized_shapes": (
+        """
+        Empty :: struct {}
+        empty proc() []i16 {
+            values [0]i16 :: []
+            return values[..]
+        }
+        cells proc() []Empty {
+            values [3]Empty :: [{}, {}, {}]
+            return values[..]
+        }
+        rows proc() [][0]i16 {
+            values [2][0]i16 :: [[], []]
+            return values[..]
+        }
+        main proc() [5]usize {
+            none :: $(empty())
+            items :: $(cells())
+            arrays :: $(rows())
+            saved Empty :: items[2]
+            return [none.len, items.len, arrays.len, arrays[0].len, arrays[1].len]
+        }
+        """, b"[0, 3, 2, 0, 0]\n", None,
+    ),
+    "comptime_nonbyte_slices_cross_nested_optional_tagged_and_fallible_channels": (
+        """
+        Failure :: struct { values []i16 }
+        Choice :: union(enum) { data struct { rows [2]?[]i16 }, empty void }
+        Packet :: struct { choice ??Choice, result []i16 ! Failure }
+        make proc(fail bool) Packet {
+            values [2]i16 :: [-300, 1024]
+            result []i16 ! Failure := values[..]
+            if (fail) result = Failure { values = values[1..] }
+            return {
+                choice = some!(some!(Choice { data = { rows = [values[..1], null] } })),
+                result = result,
+            }
+        }
+        main proc() [5]i16 {
+            good :: $(make(false))
+            bad :: $(make(true))
+            choice :: good.choice??
+            if (choice.data.rows[1] != null) return [0, 0, 0, 0, 0]
+            success :: good.result catch { return [1, 1, 1, 1, 1] }
+            failure :: bad.result catch |err| err.values
+            return [choice.data.rows[0]?[0], success[0], success[1],
+                failure[0], i16(failure.len)]
+        }
+        """, b"[-300, -300, 1024, 1024, 1]\n", None,
+    ),
+    "comptime_nonbyte_slices_normalize_cache_identity_and_generated_defaults": (
+        """
+        direct [2]i16 :: [40, 2]
+        make proc(padded bool) []i16 {
+            if (padded) {
+                prefixed [4]i16 :: [9, 40, 2, 8]
+                return prefixed[1..3]
+            }
+            values [2]mut i16 := [40, 2]
+            return values[..]
+        }
+        other proc() []i16 {
+            values [2]i16 :: [40, 3]
+            return values[..]
+        }
+        Box proc($values []i16) type { return struct { values []i16 = values } }
+        Generated proc() type {
+            return struct_type!(.auto, ["values"], [[]i16], [make(false)])
+        }
+        main proc() [4]i16 {
+            first Box(make(false)) :: {}
+            same Box(make(true)) :: first
+            literal Box(direct[..]) :: same
+            generated Generated() :: {}
+            if (Box(make(false)) == Box(other())) return [0, 0, 0, 0]
+            return [literal.values[0], literal.values[1],
+                i16(literal.values.len), generated.values[0] + generated.values[1]]
+        }
+        """, b"[40, 2, 2, 42]\n", None,
+    ),
+    "comptime_nonbyte_slice_backing_outlives_runtime_helper_returns": (
+        """
+        make proc(seed i16) []i16 {
+            values [2]i16 :: [seed, seed + 1]
+            return values[..]
+        }
+        first proc() []i16 { return $(make(40)) }
+        second proc() []i16 { return $(make(100)) }
+        disturb proc(seed i16) i16 {
+            values [8]i16 :: [seed, 2, 3, 4, 5, 6, 7, 8]
+            return values[0] + values[7]
+        }
+        main proc() [5]i16 {
+            left :: first()
+            right :: second()
+            noise :: disturb(200)
+            return [left[0], left[1], right[0], right[1], noise]
+        }
+        """, b"[40, 41, 100, 101, 208]\n", None,
+    ),
+    "comptime_nonbyte_slices_reject_uninitialized_elements": (
+        """
+        make proc() []i16 {
+            values [2]mut i16 := undefined
+            values[0] = 42
+            return values[..]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"local value was read before initialization",
+    ),
+    "comptime_nonbyte_slices_reject_oversized_pointer_lengths": (
         """
         make proc() []i16 {
             values [1]i16 :: [42]
+            return values.ptr[..maxval!(usize)]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "comptime_zero_sized_slices_reject_oversized_pointer_lengths": (
+        """
+        Empty :: struct {}
+        make proc() []Empty {
+            values [1]Empty :: [{}]
+            return values.ptr[..maxval!(usize)]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "comptime_nonbyte_slices_bound_cyclic_retained_storage": (
+        """
+        Node :: struct { children []Node }
+        make proc() []Node {
+            values [1]mut Node := undefined
+            values[0] = { children = values[..] }
+            return values[..]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
+    "comptime_nonbyte_slices_reject_pointer_lengths_beyond_backing": (
+        """
+        make proc() []i16 {
+            values [1]i16 :: [42]
+            return values.ptr[..2]
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_nonbyte_slices_reject_mutable_escape": (
+        """
+        make proc() []mut i16 {
+            values [1]mut i16 := [42]
             return values[..]
         }
         main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_aggregate_rejects_nominal_byte_slice_escape": (
+    "comptime_nonbyte_slices_reject_nonnull_pointer_element_escape": (
         """
-        Byte :: distinct u8
-        make proc() []Byte {
-            values [1]Byte :: [42]
-            return values[..]
+        make proc() []@i16 {
+            value i16 :: 42
+            pointers [1]@i16 :: [&value]
+            return pointers[..]
         }
         main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
+    ),
+    "comptime_nonbyte_sentinel_slices_own_subviews_and_empty_backing": (
+        """
+        make proc() [;-7]i16 {
+            values [4]i16 :: [9, -300, 1024, -7]
+            return values[1..3;-7]
+        }
+        empty proc() [;1024]i16 {
+            values [1]i16 :: [1024]
+            return values[..0;1024]
+        }
+        main proc() [6]i16 {
+            values :: $(make())
+            none :: $(empty())
+            return [i16(values.len), values[0], values[1], values.ptr[2],
+                i16(none.len), none.ptr[0]]
+        }
+        """, b"[2, -300, 1024, -7, 0, 1024]\n", None,
+    ),
+    "comptime_nonbyte_sentinel_slices_recheck_mutated_sentinel": (
+        """
+        make proc() [;1024]i16 {
+            values [2]mut i16 := [42, 1024]
+            view [;1024]i16 :: values[..1;1024]
+            values[1] = 7
+            return view
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"sentinel",
     ),
     "comptime_nonzero_sentinel_byte_slices_own_subviews": (
         """

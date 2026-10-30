@@ -108,18 +108,32 @@ EvaluationMemory :: struct {
     frames arraylist.ArrayList(Frame)
 }
 
-#! borrows one checked byte from retained evaluation storage; null means an invalid pointer/range.
-evaluation_byte proc(outcome @Outcome, module @ir.Module, pointer ir.Value, index usize) ?ir.Value {
-    if (outcome.evaluation_memory == null) return null
+#! borrows one checked typed element from retained evaluation storage; null means an invalid pointer/range.
+#! aggregate storage may borrow scratch valid only until the next evaluation accessor call.
+evaluation_element proc(
+    outcome @Outcome,
+    module @ir.Module,
+    pointer ir.Value,
+    index usize,
+    type ir.Type,
+    shape ir.ArrayId,
+) ?ir.Value {
+    if (outcome.evaluation_memory == null or pointer.type != .pointer) return null
     memory :: &outcome.evaluation_memory?[0]
     handle :: pointer.data.unsigned
     if (handle >= u64(memory.pointers.items.len)) return null
     location := memory.pointers.items[usize(handle)]
-    if (index > maxval!(usize) - location.byte_offset) return null
-    location.byte_offset += index
-    if (pointer_address(module, location, .u8, ir.no_array)) |address|
+    stride :: ir.storage_size(module, type, shape)
+    if (stride != 0 and index > divtrunc!(maxval!(usize) - location.byte_offset, stride)) return null
+    location.byte_offset += index * stride
+    if (pointer_address(module, location, type, shape)) |address|
         return read_address(module, address, memory.scratch)
     return null
+}
+
+#! borrows one checked byte from retained evaluation storage; null means an invalid pointer/range.
+evaluation_byte proc(outcome @Outcome, module @ir.Module, pointer ir.Value, index usize) ?ir.Value {
+    return evaluation_element(outcome, module, pointer, index, .u8, ir.no_array)
 }
 
 #! executes typed IR with invocation/global storage released on every exit.
@@ -789,7 +803,7 @@ pointer_address proc(module @ir.Module, pointer Pointer, type ir.Type, shape ir.
     base := Address{
         type = pointer.root_type, array_type = pointer.root_array, cells = &[],
         root = pointer.root, root_type = pointer.root_type, root_array = pointer.root_array,
-        readonly = pointer.readonly, bytes = pointer.bytes,
+        readonly = pointer.readonly, bytes = pointer.bytes, raw = pointer.root^.raw,
     }
     if (pointer.bytes.len != 0) {
         base.type = type

@@ -84,6 +84,7 @@ ExprKind :: enum {
     catch_expr
     typed_constant
     union_constant
+    slice_constant
     comptime_expr
     literal_void
     literal_undefined
@@ -198,6 +199,7 @@ NodeKind :: enum {
     stmt_block
     expr_typed_constant
     expr_union_constant
+    expr_slice_constant
     expr_comptime
     literal_float_value
     literal_void
@@ -621,6 +623,17 @@ add_union_constant proc(
         kind = .expr_union_constant,
         data0 = NodeData{ node_id = type },
         data1 = NodeData{ node_id = bytes },
+    }, at)
+}
+
+#! owns a readonly slice's typed fixed-array backing, including any sentinel.
+add_slice_constant proc(
+    builder @mut Builder, at Span, type, elements NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_slice_constant,
+        data0 = NodeData{ node_id = type },
+        data1 = NodeData{ node_id = elements },
     }, at)
 }
 
@@ -1613,6 +1626,7 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_catch: .catch_expr
         .expr_typed_constant: .typed_constant
         .expr_union_constant: .union_constant
+        .expr_slice_constant: .slice_constant
         .expr_comptime: .comptime_expr
         .expr_block: .block_expr
         .literal_float_value: .literal_float
@@ -1669,6 +1683,15 @@ typed_constant proc(tree @Tree, id NodeId) TypedConstantView {
 union_constant proc(tree @Tree, id NodeId) TypedConstantView {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .expr_union_constant)
+    return TypedConstantView{
+        type = node.data0.node_id,
+        value = node.data1.node_id,
+    }
+}
+
+slice_constant proc(tree @Tree, id NodeId) TypedConstantView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_slice_constant)
     return TypedConstantView{
         type = node.data0.node_id,
         value = node.data1.node_id,
@@ -2030,7 +2053,7 @@ node_layout proc(node Node) NodeLayout {
         .literal_int, .literal_float, .literal_float_value, .literal_string, .literal_bool, .literal_null,
         .literal_void, .literal_undefined, .expr_identifier, .invalid_expr: {}
         .expr_unary: layout.direct_children = 2
-        .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant, .expr_union_constant,
+        .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant, .expr_union_constant, .expr_slice_constant,
         .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
