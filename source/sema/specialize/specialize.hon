@@ -681,6 +681,28 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
             try refresh(state)
             return
         }
+        if (view.operator == .equal or view.operator == .not_equal) {
+            operand := no_node
+            if (ast.expr_kind(&state.tree, view.left) == .literal_null) operand = view.right
+            else if (ast.expr_kind(&state.tree, view.right) == .literal_null) operand = view.left
+            if (operand != no_node) {
+                annotation :: try expression_type(state, operand, 0)
+                if (type_record_storage(state, annotation, 0)
+                    and ast.expr_kind(&state.tree, annotation) == .optional_type) {
+                    value :: try evaluate_expected(state, operand, annotation)
+                    if (value.kind != .aggregate) {
+                        try reject_evaluation(state, id)
+                        return
+                    }
+                    absent :: ast.expr_kind(&state.tree, value.node) == .literal_null
+                    folded :: try ast.add_boolean(state.builder, view.span,
+                        absent == (view.operator == .equal))
+                    try replace(state, id, folded)
+                    try refresh(state)
+                    return
+                }
+            }
+        }
         if (
             (view.operator == .equal or view.operator == .not_equal)
             and branch_constant(state, view.left, 0) and branch_constant(state, view.right, 0)
@@ -1789,7 +1811,7 @@ type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.
             and type_storage_annotation(tree, bindings, view.initializer, depth + 1))
     }
     kind :: ast.expr_kind(tree, input)
-    if (kind == .alias_expr)
+    if (kind == .alias_expr or kind == .optional_type)
         return type_storage_annotation(tree, bindings, ast.type_operand(tree, input), depth + 1)
     if (kind == .array_type)
         return type_storage_annotation(tree, bindings, ast.array_type(tree, input).element, depth + 1)
@@ -3488,12 +3510,21 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
     dispatch := subject
     if (metadata) {
         value :: try evaluate_expected(state, subject, annotation)
-        if (value.kind != .aggregate or ast.expr_kind(&state.tree, value.node) != .record_literal) return no_index
-        active :: ast.field(&state.tree, ast.record_field(&state.tree, value.node, 0))
+        if (value.kind != .aggregate) return no_index
         span :: ast.node_span(&state.tree, subject)
-        tags :: try metadata_tags(state, annotation)
-        tag :: try ast.add_enum_literal(state.builder, span, active.name?)
-        dispatch = try ast.add_typed_constant(state.builder, span, tags, tag)
+        if (ast.expr_kind(&state.tree, annotation) == .optional_type) {
+            present :: ast.expr_kind(&state.tree, value.node) != .literal_null
+            boolean :: try ast.add_boolean(state.builder, span, true)
+            payload :: if (present) boolean else try ast.add_literal(state.builder, .null, span)
+            optional :: try ast.add_optional_type(state.builder, span, try builtin(state, subject, .bool))
+            dispatch = try ast.add_typed_constant(state.builder, span, optional, payload)
+        } else {
+            if (ast.expr_kind(&state.tree, value.node) != .record_literal) return no_index
+            active :: ast.field(&state.tree, ast.record_field(&state.tree, value.node, 0))
+            tags :: try metadata_tags(state, annotation)
+            tag :: try ast.add_enum_literal(state.builder, span, active.name?)
+            dispatch = try ast.add_typed_constant(state.builder, span, tags, tag)
+        }
         try refresh(state)
     }
     for (0..ast.match_arm_count(&state.tree, id)) |i| {
@@ -3514,7 +3545,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
             try expand(state, pattern)
             try arraylist.append(&patterns, pattern)
         }
-        if (metadata and arm.capture != null) {
+        if (metadata and !optional_capture and arm.capture != null) {
             expected := no_node
             valid := !arm.catch_all and patterns.items.len > 0
             for (patterns.items) |pattern| {
@@ -3570,7 +3601,11 @@ type_match_capture proc(state @mut State, id ast.NodeId) ast.NodeId ! Error {
             ast.node_span(&state.tree, subject), .unwrap, subject)
         try refresh(state)
         child :: try expression_type(state, unwrapped, 0)
-        return try type_execution_value(state, unwrapped, child)
+        payload :: try type_execution_value(state, unwrapped, child)
+        if (payload == no_node or !is_type(state, child)) return payload
+        result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, subject), child, payload)
+        try refresh(state)
+        return result
     }
     annotation :: try expression_type(state, subject, 0)
     value :: if (type_record_storage(state, annotation, 0))
@@ -3669,6 +3704,28 @@ expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
 type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
     if (ast.node_class(&state.tree, id) != .expression) return true
     kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .unary and ast.unary_expr(&state.tree, id).operator == .unwrap) {
+        operand :: ast.unary_expr(&state.tree, id).operand
+        annotation :: try expression_type(state, operand, 0)
+        if (!type_record_storage(state, annotation, 0)) return true
+        type :: try canonical_type(state, annotation)
+        if (type == no_node or ast.expr_kind(&state.tree, type) != .optional_type) return true
+        value :: try type_execution_value(state, operand, type)
+        if (value == no_node or !try type_array_initialized(state, value, id)) return false
+        payload :: ast.typed_constant(&state.tree, value).value
+        if (ast.expr_kind(&state.tree, payload) == .literal_null) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .null_unwrap, ast.node_span(&state.tree, id))
+            return false
+        }
+        selected :: ast.call_arg(&state.tree, payload, 0)
+        resolved :: binding(state, selected)
+        try remember(state, id)
+        ast.replace_node_from_source(state.builder, id, selected)
+        try refresh(state)
+        state.bindings.items[usize(id)] = resolved
+        return true
+    }
     if (kind == .index or kind == .selection) {
         base :: if (kind == .index) ast.index_expr(&state.tree, id).base else ast.selection_expr(&state.tree, id).base
         base_binding :: binding(state, base)
@@ -3845,6 +3902,8 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
     if (is_type(state, annotation)) return true
     type :: try canonical_type(state, annotation)
     if (type == no_node) return false
+    if (ast.expr_kind(&state.tree, type) == .optional_type)
+        return try type_record_check(state, ast.type_operand(&state.tree, type))
     if (ast.expr_kind(&state.tree, type) == .slice_type)
         return try type_record_check(state, ast.slice_type(&state.tree, type).element)
     if (ast.expr_kind(&state.tree, type) == .array_type) {
@@ -4010,6 +4069,8 @@ type_array_initialized proc(state @mut State, value, at ast.NodeId) bool ! Error
     }
     if (kind == .typed_constant)
         return try type_array_initialized(state, ast.typed_constant(&state.tree, value).value, at)
+    if (kind == .builtin_call and contextual_literal(state, value))
+        return try type_array_initialized(state, ast.call_arg(&state.tree, value, 0), at)
     if (kind == .array_literal) {
         for (0..ast.array_element_count(&state.tree, value)) |i| {
             if (!try type_array_initialized(state, ast.array_element(&state.tree, value, i), at)) return false
@@ -4248,6 +4309,42 @@ type_array_update proc(
     return result
 }
 
+# optional metadata uses the same explicit presence encoding as serialized values.
+# an inner null is a payload only when wrapped in some!, never outer absence.
+@hide:file
+type_optional_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId ! Error {
+    if (!try type_record_check(state, type)) return no_node
+    kind :: ast.expr_kind(&state.tree, expression)
+    if (kind == .literal_undefined or kind == .literal_null) {
+        result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), type, expression)
+        try refresh(state)
+        return result
+    }
+    child :: ast.type_operand(&state.tree, type)
+    input := expression
+    if (kind == .typed_constant) {
+        actual :: ast.typed_constant(&state.tree, expression)
+        if (try same_type(state, type, actual.type)) return expression
+    } else if (kind == .builtin_call
+        and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, expression).name), "some")) {
+        if (ast.call_arg_count(&state.tree, expression) != 1) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .argument_count_mismatch, ast.node_span(&state.tree, expression))
+            return no_node
+        }
+        input = ast.call_arg(&state.tree, expression, 0)
+    }
+    payload :: try type_execution_value(state, input, child)
+    if (payload == no_node) return no_node
+    span :: ast.node_span(&state.tree, expression)
+    name :: try metadata_member(state, expression, "some")
+    arguments [1]ast.NodeId :: [payload]
+    present :: try ast.add_builtin_call(state.builder, span, name, arguments[..])
+    result :: try ast.add_typed_constant(state.builder, span, type, present)
+    try refresh(state)
+    return result
+}
+
 @hide:file
 type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.NodeId ! Error {
     if (input == no_node or annotation == no_node) return no_node
@@ -4311,6 +4408,11 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
             .type_mismatch, ast.node_span(&state.tree, expression))
         return no_node
     }
+    if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
+        type :: try canonical_type(state, annotation)
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type)
+            return try type_optional_value(state, expression, type)
+    }
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0))
         return try type_record_value(state, expression, annotation)
     if (is_type(state, annotation)) {
@@ -4369,6 +4471,16 @@ type_capture_guard proc(state @mut State, expression, capture ast.NodeId) Value 
     if (resolved.kind == .invalid) {
         state.evaluation_diagnostic = resolved.data.diagnostic
         return Value{}
+    }
+    annotation :: try expression_type(state, expression, 0)
+    if (type_record_storage(state, annotation, 0)) {
+        type :: try canonical_type(state, annotation)
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type) {
+            value :: try type_execution_value(state, expression, type)
+            if (value == no_node or !try type_array_initialized(state, value, expression)) return Value{}
+            return Value{ kind = .boolean, node = expression,
+                boolean = ast.expr_kind(&state.tree, ast.typed_constant(&state.tree, value).value) != .literal_null }
+        }
     }
     span :: ast.node_span(&state.tree, expression)
     yes :: try ast.add_boolean(state.builder, span, true)

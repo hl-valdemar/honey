@@ -2278,6 +2278,143 @@ CASES = {
         }
         """, b"", b"initialization",
     ),
+    "optional_types_procedure_boundaries_copies_and_static_captures": (
+        """
+        Token :: distinct i16
+        choose proc(present bool) ?type {
+            if (present) return Token
+            return null
+        }
+        pass proc(value ?type) ?type { return value }
+        Box proc(value ?type) type {
+            T :: if value |Child| Child else bool
+            return struct { item T }
+        }
+        Selected proc(value ?type) type { return value? }
+        exact proc($value ?type, input Selected(value)) Selected(value) { return input }
+        Storage proc() type {
+            selected ?type := pass(choose(true))
+            saved :: selected
+            selected = null
+            if (selected != null or null == saved) return bool
+            if (Box(saved) != Box(choose(true))) return bool
+            if (Box(null) == Box(saved)) return bool
+            while saved |T| {
+                return [2]T
+            }
+            return bool
+        }
+        main proc() i16 {
+            values Storage() :: [40, 2]
+            return i16(exact(choose(true), values[0])) + i16(values[1])
+        }
+        """, b"42\n", None,
+    ),
+    "optional_metadata_records_nested_presence_and_owned_updates": (
+        """
+        Config :: struct { child type, count usize }
+        config proc() ?Config { return { child = i16, count = 2 } }
+        nested proc(present bool) ??type {
+            if (present) return some!(null)
+            return null
+        }
+        Storage proc() type {
+            outer :: nested(true)
+            if outer |inner| {
+                if (inner != null or nested(false) != null) return bool
+            } else return bool
+            values [2]mut ?Config := [config(), null]
+            saved :: values
+            values[0] = null
+            values[1] = { child = bool, count = 3 }
+            if (values[0] != null or saved[1] != null) return bool
+            info :: saved[0]?
+            return [info.count]info.child
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "optional_types_fill_undefined_fields_and_yield_before_cleanup": (
+        """
+        Config :: struct { child ?type = bool, count usize }
+        make proc() ?Config {
+            config Config := undefined
+            config.child = i16
+            config.count = 2
+            return some!(config)
+        }
+        Storage proc() type {
+            value ?type := undefined
+            value = null
+            selected ?type :: {
+                defer value = bool
+                yield make()?.child
+            }
+            if (value? != bool) return bool
+            T :: selected?
+            return [make()?.count]T
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "optional_types_reject_null_unwrap": (
+        """
+        empty proc() ?type { return null }
+        Bad proc() type { return empty()? }
+        main proc() Bad() { return 42 }
+        """, b"", b"cannot unwrap a null optional",
+    ),
+    "optional_types_reject_non_type_payload": (
+        """
+        Bad proc() ?type { return some!(42) }
+        Selected proc() type { return Bad()? }
+        main proc() Selected() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "optional_types_reject_incomplete_payload_result": (
+        """
+        Config :: struct { child type, count usize }
+        bad proc() ?Config {
+            value Config := undefined
+            value.child = i16
+            return some!(value)
+        }
+        Selected proc() type { return bad()?.child }
+        main proc() Selected() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "optional_types_reject_uninitialized_presence": (
+        """
+        Bad proc() type {
+            value ?type := undefined
+            if value |_| return i16
+            return bool
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "optional_types_reject_capture_mutation": (
+        """
+        Bad proc() type {
+            value ?type :: i16
+            if value |T| { T = bool }
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"mutable local binding",
+    ),
+    "optional_types_reject_runtime_dependency": (
+        """
+        choose proc(present bool) ?type {
+            if (present) return i16
+            return null
+        }
+        main proc() i16 {
+            present := true
+            return if choose(present) |_| 42 else 0
+        }
+        """, b"", b"compile-time value",
+    ),
     "type_records_undefined_nested_updates_preserve_partial_copies": (
         """
         Config :: struct {
