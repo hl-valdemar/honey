@@ -134,7 +134,8 @@ elaborate proc(
         if (class == .expression and ast.expr_kind(&original, id) == .builtin_call) {
             name :: ast.builtin_call(&original, id).name
             text :: ast.source_text(&original, ast.node_span(&original, name))
-            if (mem.eql(text, "field") or mem.eql(text, "struct_type") or mem.eql(text, "typeinfo")) needed = true
+            if (mem.eql(text, "field") or mem.eql(text, "struct_type") or mem.eql(text, "typeinfo")
+                or mem.eql(text, "compile_error")) needed = true
         }
         if (class == .function and ast.function_generic(&original, id)) needed = true
         if (class == .function) {
@@ -238,6 +239,35 @@ reject proc(state @mut State, id ast.NodeId, code diagnostics.Code) void ! Error
 }
 
 @hide:file
+expand_compile_error proc(state @mut State, id ast.NodeId) void ! Error {
+    if (ast.call_arg_count(&state.tree, id) != 1) {
+        try reject(state, id, .invalid_compile_error)
+        return
+    }
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    value :: try evaluate(state, ast.call_arg(&state.tree, id, 0))
+    if (value.kind != .string) {
+        if (state.evaluation_diagnostic != diagnostics.no_diagnostic) try reject_evaluation(state, id)
+        else try reject(state, id, .invalid_compile_error)
+        return
+    }
+    text :: ast.literal_text(&state.tree, value.node)
+    bytes := arraylist.init(u8, state.allocator)
+    defer arraylist.deinit(&bytes)
+    cursor := usize(1)
+    while (cursor < text.len - 1) {
+        byte :: ast.string_next(text, &cursor) catch {
+            try reject(state, id, .invalid_escape)
+            return
+        }
+        try arraylist.append(&bytes, byte)
+    }
+    state.evaluation_diagnostic = try diagnostics.add_message(state.diagnostics,
+        .compile_error, ast.node_span(&state.tree, id), bytes.items)
+    try reject_evaluation(state, id)
+}
+
+@hide:file
 expand proc(state @mut State, id ast.NodeId) void ! Error {
     try refresh(state)
     if (state.expanded.items[usize(id)] != 0) return
@@ -287,6 +317,15 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     if (class == .statement and ast.stmt_kind(&state.tree, id) == .for_stmt) {
         loop :: ast.for_stmt(&state.tree, id)
         try expand(state, loop.iterable)
+        if (loop.index) |capture| {
+            annotation :: try builtin(state, id, .usize)
+            hashmap.put(&state.capture_types, capture, annotation) catch |err| {
+                match err {
+                    .key_exists: {}
+                    else: return err
+                }
+            }
+        }
         if (!loop.pointer_capture and loop.capture != null) {
             iterable :: try expression_type(state, loop.iterable, 0)
             element := no_node
@@ -417,6 +456,10 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .builtin_call) {
         name :: ast.builtin_call(&state.tree, id).name
+        if (mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "compile_error")) {
+            try expand_compile_error(state, id)
+            return
+        }
         if (mem.eql(ast.source_text(&state.tree, ast.node_span(&state.tree, name)), "field")) {
             try expand_field(state, id)
             return
@@ -496,7 +539,7 @@ value_block_terminal proc(state @State, id ast.NodeId) bool {
     }
     if (class != .statement) return false
     match ast.stmt_kind(&state.tree, id) {
-        .yield_stmt, .return_stmt, .break_stmt, .continue_stmt: return true
+        .yield_stmt, .return_stmt, .break_stmt, .continue_stmt, .unreachable_stmt: return true
         .block_stmt: return value_block_terminal(state, ast.statement_block(&state.tree, id))
         .if_stmt: {
             view :: ast.if_stmt(&state.tree, id)
@@ -2300,7 +2343,11 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     diagnostic_store := diagnostics.init(state.allocator)
     defer diagnostics.deinit(&diagnostic_store)
     # Resolution's existing diagnostic IDs remain valid in this temporary store.
-    for (state.diagnostics.list.items) |diagnostic| try arraylist.append(&diagnostic_store.list, diagnostic)
+    for (state.diagnostics.list.items) |diagnostic| {
+        if (diagnostic.custom_message) |text| {
+            _ = try diagnostics.add_message(&diagnostic_store, diagnostic.code, diagnostic.span, text)
+        } else _ = try diagnostics.add(&diagnostic_store, diagnostic.code, diagnostic.span)
+    }
     original_diagnostics :: diagnostics.count(&diagnostic_store)
     checked := try typecheck.check(state.allocator, &tree, state.resolution, &diagnostic_store)
     defer typecheck.deinit(&checked)
@@ -2744,6 +2791,7 @@ inline_statement proc(state @mut State, id ast.NodeId) TypeFlow ! Error {
     kind :: ast.stmt_kind(&state.tree, id)
     if (kind == .break_stmt) return .break
     if (kind == .continue_stmt) return .continue
+    if (kind == .unreachable_stmt) return .returned
     if (kind == .yield_stmt or kind == .return_stmt) {
         try expand(state, id)
         return if (kind == .yield_stmt) TypeFlow.yielded else TypeFlow.returned
@@ -3911,6 +3959,11 @@ execute_type_statement proc(state @mut State, execution @mut TypeExecution, stat
 @hide:file
 execute_type_statement_body proc(state @mut State, execution @mut TypeExecution, statement ast.NodeId) TypeFlow ! Error {
     match ast.stmt_kind(&state.tree, statement) {
+        .unreachable_stmt: {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .unreachable_executed, ast.node_span(&state.tree, statement))
+            return .invalid
+        }
         .defer_stmt: {}
         .errdefer_stmt: {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
@@ -4465,6 +4518,18 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
             view :: ast.unary_expr(&state.tree, id)
             if (view.operator == .bit_not)
                 return try evaluate_ir(state, id, try expression_type(state, id, 0))
+            if (view.operator == .unwrap) {
+                # source-known callbacks already own declaration identities, not interpreter handles.
+                value := try evaluate(state, view.operand)
+                annotation :: try expression_type(state, view.operand, 0)
+                if (value.kind == .function and annotation != no_node
+                    and ast.expr_kind(&state.tree, annotation) == .optional_type) {
+                    try arraylist.append(&state.rewrites.constraints, id)
+                    value.annotation = ast.type_operand(&state.tree, annotation)
+                    return value
+                }
+                return try evaluate_ir(state, id, try expression_type(state, id, 0))
+            }
             value := try evaluate(state, view.operand)
             if (view.operator == .negate and value.kind == .integer) value.negative = value.magnitude != 0 and !value.negative
             else if (view.operator == .negate and value.kind == .real) value.magnitude = value.magnitude xor (u64(1) << 63)
@@ -4917,6 +4982,8 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 return try builtin(state, id, .usize)
             if ((mem.eql(name, "maxval") or mem.eql(name, "minval")) and count == 1)
                 return try canonical_type(state, ast.call_arg(&state.tree, id, 0))
+            if ((mem.eql(name, "ptrcast") or mem.eql(name, "constcast")) and count == 2)
+                return try canonical_type(state, ast.call_arg(&state.tree, id, 0))
             if (mem.eql(name, "divtrunc") and count == 2) {
                 left :: ast.call_arg(&state.tree, id, 0)
                 right :: ast.call_arg(&state.tree, id, 1)
@@ -4974,6 +5041,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             if (destination.kind == .builtin) return callee
             if (destination.kind == .declaration and ast.node_class(&state.tree, destination.data.declaration) == .function) return try canonical_type(state, ast.function_decl(&state.tree, destination.data.declaration).return_type)
             signature :: try expression_type(state, callee, depth + 1)
+            if (signature != no_node and is_type(state, signature)) return try canonical_type(state, callee)
             if (signature != no_node and ast.expr_kind(&state.tree, signature) == .function_type)
                 return try canonical_type(state, ast.callable_result(&state.tree, signature))
             return no_node
@@ -5121,8 +5189,18 @@ infer_value proc(state @mut State, function, pattern ast.NodeId, actual Value, a
 @hide:file
 infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []mut Value, contextual bool) bool ! Error {
     resolved :: binding(state, pattern)
-    if (resolved.kind == .declaration and parameter_index(state, function, resolved.data.declaration) != no_index)
-        return try infer_value(state, function, pattern, Value{ kind = .type, node = actual }, arguments, contextual)
+    if (resolved.kind == .declaration) {
+        index :: parameter_index(state, function, resolved.data.declaration)
+        if (index != no_index) {
+            if (arguments[index].kind == .type) {
+                expected :: try canonical_type(state, arguments[index].node)
+                # a fixed slice type supplies borrowing/string context; ordinary
+                # argument checking owns element, mutability and sentinel validation.
+                if (expected != no_node and ast.expr_kind(&state.tree, expected) == .slice_type) return true
+            }
+            return try infer_value(state, function, pattern, Value{ kind = .type, node = actual }, arguments, contextual)
+        }
+    }
     # only normalize the actual type: the pattern may still contain unbound
     # parameters or a type-generator call whose arguments must be inferred.
     concrete :: try canonical_type(state, actual)

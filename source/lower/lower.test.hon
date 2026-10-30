@@ -992,7 +992,7 @@ zero_iteration_body_errors_are_checked_but_not_executed test {
     }
 }
 
-loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_overflow test {
+terminal_true_loops_and_assignment_arithmetic_preserve_runtime_behavior test {
     sources [5][]u8 :: [
         "main proc() int {\n while true { return 42 }\n}\n",
         "main proc() int {\n while false { return 42 }\n}\n",
@@ -1005,7 +1005,7 @@ loop_returns_do_not_guarantee_return_and_assignment_arithmetic_still_checks_over
         defer diagnostics.deinit(&diagnostic_store)
         module := try compile_owned(source, &diagnostic_store)
         defer ir.deinit(&module)
-        if (index != 2) {
+        if (index != 0 and index != 2) {
             try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
             diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(0))?
             try testing.expect_equal(diagnostics.Code.missing_return, diagnostic.code)

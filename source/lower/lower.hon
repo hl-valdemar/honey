@@ -23,6 +23,7 @@ LoopTargets :: struct {
     continue_target ir.BlockId
     exit ir.BlockId
     cleanup_depth usize
+    break_reached bool = false
 }
 
 @hide:file
@@ -770,7 +771,14 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
         }
     }
     state.block = exit
-    state.terminated = false
+    state.terminated = (
+        loop.capture == null
+        and ast.expr_kind(state.tree, loop.condition) == .literal_bool
+        and mem.eql(ast.literal_text(state.tree, loop.condition), "true")
+        and !state.loop?.break_reached
+    )
+    if (state.terminated)
+        state.module.functions.items[state.function].blocks.items[usize(exit)].terminator = ir.Terminator{ kind = .unreachable, span = loop.span }
 }
 
 @hide:file
@@ -920,6 +928,12 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
         .if_stmt: try lower_if(state, id)
         .while_stmt: try lower_while(state, id)
         .for_stmt: try lower_for(state, id)
+        .unreachable_stmt: {
+            state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                kind = .unreachable, span = ast.node_span(tree, id),
+            }
+            state.terminated = true
+        }
         .break_stmt, .continue_stmt: {
             if (trap_type(state, id)) return
             if (state.loop) |targets| {
@@ -928,6 +942,11 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
                 if (ast.stmt_kind(tree, id) == .continue_stmt) target = targets.continue_target
                 try lower_cleanups(state, targets.cleanup_depth, ir.no_value)
                 if (state.terminated) return
+                if (ast.stmt_kind(tree, id) == .break_stmt) {
+                    reached := targets
+                    reached.break_reached = true
+                    state.loop = reached
+                }
                 state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
                     kind = .jump, target = target, span = ast.node_span(tree, id),
                 }

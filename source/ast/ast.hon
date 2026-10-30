@@ -14,7 +14,7 @@
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'unreachable' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! assignment_op is '=' or a contiguous compound: '+=', '-=', '*=', '/=', '&=', '|=', 'xor=', '<<=', '>>=', '<<|='.
 #! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if. bitwise-OR headers require parentheses before captures.
 #! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -, !, ~, &, try higher than multiplication/division, addition/subtraction, shifts << / >> / <<|, bitwise &/xor/|, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
@@ -104,6 +104,7 @@ StmtKind :: enum {
     yield_stmt
     break_stmt
     continue_stmt
+    unreachable_stmt
     if_stmt
     while_stmt
     for_stmt
@@ -201,6 +202,7 @@ NodeKind :: enum {
     literal_undefined
     expr_block
     stmt_yield
+    stmt_unreachable
 }
 
 @hide:file
@@ -999,6 +1001,10 @@ add_continue_stmt proc(builder @mut Builder, span Span) NodeId ! mem.AllocError 
     return try add_node(builder, Node{ kind = .stmt_continue }, span)
 }
 
+add_unreachable_stmt proc(builder @mut Builder, span Span) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{ kind = .stmt_unreachable }, span)
+}
+
 add_if_stmt proc(
     builder @mut Builder,
     span Span,
@@ -1352,6 +1358,7 @@ stmt_kind proc(tree @Tree, id NodeId) StmtKind {
         .stmt_yield: .yield_stmt
         .stmt_break: .break_stmt
         .stmt_continue: .continue_stmt
+        .stmt_unreachable: .unreachable_stmt
         .stmt_if: .if_stmt
         .stmt_assignment: .assignment_stmt
         .stmt_while: .while_stmt
@@ -2060,7 +2067,7 @@ node_layout proc(node Node) NodeLayout {
             if (node.kind == .stmt_defer or node.kind == .stmt_errdefer)
                 layout.direct_children = 3
         }
-        .stmt_break, .stmt_continue, .invalid_stmt: layout.class = .statement
+        .stmt_break, .stmt_continue, .stmt_unreachable, .invalid_stmt: layout.class = .statement
         .stmt_assignment: {
             layout.class = .statement
             layout.direct_children = 3

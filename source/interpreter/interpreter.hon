@@ -191,7 +191,7 @@ execute proc(
         if instruction_index == block.instructions.items.len {
             terminator :: block.terminator
             if (terminator.kind == .trap) return Outcome{ trap = terminator.diagnostic }
-            if (terminator.kind == .unreachable) unreachable
+            if (terminator.kind == .unreachable) return try runtime_trap(diagnostic_store, .unreachable_executed, terminator.span)
             if (terminator.kind == .jump or terminator.kind == .branch) {
                 target := terminator.target
                 if (terminator.kind == .branch) {

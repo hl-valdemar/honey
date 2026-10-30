@@ -127,11 +127,15 @@ Code :: enum {
     invalid_metadata_abi
     invalid_undefined
     invalid_shift_count
+    unreachable_executed
+    compile_error
+    invalid_compile_error
 }
 
 Diagnostic :: struct {
     code Code
     span Span
+    custom_message ?[]u8 = null
 }
 
 #! owns diagnostic storage and retains its allocator; release with deinit.
@@ -146,6 +150,9 @@ init proc(allocator mem.Allocator) Store {
 
 #! releases diagnostic storage with the retained allocator.
 deinit proc(store @mut Store) void {
+    for (store.list.items) |diagnostic| {
+        if (diagnostic.custom_message) |text| mem.free(store.list.allocator, text)
+    }
     arraylist.deinit(&store.list)
 }
 
@@ -155,6 +162,22 @@ add proc(store @mut Store, code Code, span Span) DiagnosticId ! (mem.AllocError 
     id :: DiagnosticId(store.list.items.len)
     try arraylist.append(&store.list, Diagnostic{ code = code, span = span })
     return id
+}
+
+#! copies `text`; the store owns the message until deinit.
+add_message proc(store @mut Store, code Code, span Span, text []u8) DiagnosticId ! (mem.AllocError | CapacityError) {
+    owned :: try mem.alloc(u8, store.list.allocator, text.len)
+    errdefer mem.free(store.list.allocator, owned)
+    memcopy!(owned, text)
+    id :: try add(store, code, span)
+    store.list.items[usize(id)].custom_message = owned
+    return id
+}
+
+#! borrows either the store-owned custom message or process-lifetime code text.
+message proc(diagnostic Diagnostic) []u8 {
+    if (diagnostic.custom_message) |text| return text
+    return enummap.get(Code, []u8, &messages, diagnostic.code)?
 }
 
 get proc(store @Store, id DiagnosticId) ?Diagnostic {
@@ -185,6 +208,7 @@ messages :: $enummap.init(Code, []u8, {
     argument_count_mismatch = "argument count does not match the function signature",
     cannot_infer_type = "cannot infer a type without a type anchor",
     missing_return = "nonvoid function can finish without returning a value",
+    unreachable_executed = "reached unreachable statement",
     return_type_mismatch = "return does not match the function result type",
     yield_outside_block = "yield requires an enclosing value block",
     missing_yield = "nonvoid value block can finish without yielding a value",
@@ -275,5 +299,7 @@ messages :: $enummap.init(Code, []u8, {
     missing_metadata_import = "typeinfo! requires importing @std/meta",
     invalid_metadata_abi = "@std/meta declarations do not match the compiler reflection ABI",
     invalid_undefined = "undefined requires a concrete mutable local declaration",
+    compile_error = "explicit compile-time error",
+    invalid_compile_error = "compile_error! requires one compile-time string argument",
 })
 

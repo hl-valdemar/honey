@@ -323,7 +323,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .for, .inline: return try parse_for(state, allow_else)
         .return: return try parse_return(state, allow_else)
         .yield: return try parse_yield(state, allow_else)
-        .break, .continue: return try parse_loop_control(state, allow_else)
+        .break, .continue, .unreachable: return try parse_loop_control(state, allow_else)
         .defer, .errdefer: return try parse_cleanup(state, allow_else)
         .open_curly: return try ast.add_block_stmt(state.builder, try parse_block(state))
         .ident, .int, .float, .string, .true, .false, .minus, .bang, .tilde, .open_paren, .open_bracket, .struct, .c_struct, .opaque, .c_func,
@@ -426,6 +426,8 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
 
     if (keyword.kind == .break)
         return try ast.add_break_stmt(state.builder, keyword.span)
+    if (keyword.kind == .unreachable)
+        return try ast.add_unreachable_stmt(state.builder, keyword.span)
 
     return try ast.add_continue_stmt(state.builder, keyword.span)
 }
@@ -688,6 +690,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
             and !next_is(state, .if) and !next_is(state, .while)
             and !next_is(state, .for) and !next_is(state, .inline)
             and !next_is(state, .break) and !next_is(state, .continue)
+            and !next_is(state, .unreachable)
         ) {
             if (next_is(state, .ident) and is_assignment_operator(state.tokens[state.next_token + 1].kind)) break
             state.next_token += 1
@@ -958,7 +961,7 @@ member_names :: $enummap.init_default(lexer.TokenKind, bool, false, {
     struct = true, c_struct = true, opaque = true, enum = true, union = true,
     distinct = true, alias = true, match = true, import = true, test = true,
     c_func = true, null = true, undefined = true, try = true, catch = true,
-    defer = true, errdefer = true,
+    defer = true, errdefer = true, unreachable = true,
 })
 
 @hide:file
@@ -1192,7 +1195,7 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
     state.match_arm_body = true
     defer state.match_arm_body = previous
     statement_body :: match current(state).kind {
-        .open_curly, .return, .yield, .break, .continue, .if, .while, .for, .inline, .defer, .errdefer: true
+        .open_curly, .return, .yield, .break, .continue, .unreachable, .if, .while, .for, .inline, .defer, .errdefer: true
         else: false
     }
     body ast.NodeId := undefined
@@ -1773,7 +1776,7 @@ brace_starts_block proc(state @State) bool {
         if (kind == .eof) return false
         if (depth > 0
             and (state.tokens[first].kind == .if or state.tokens[first].kind == .open_curly)
-            and (kind == .yield or kind == .return or kind == .defer or kind == .errdefer)
+            and (kind == .yield or kind == .return or kind == .unreachable or kind == .defer or kind == .errdefer)
             and state.tokens[index - 1].kind != .dot
             and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) return true
         if (depth == 1) {
@@ -1782,7 +1785,7 @@ brace_starts_block proc(state @State) bool {
             previous :: if (index > first) state.tokens[index - 1].kind else lexer.TokenKind.open_curly
             if (previous != .dot and !(index + 1 < state.tokens.len and state.tokens[index + 1].kind == .equal)) {
                 match kind {
-                    .yield, .return, .break, .continue, .while, .for, .inline, .defer, .errdefer: return true
+                    .yield, .return, .break, .continue, .unreachable, .while, .for, .inline, .defer, .errdefer: return true
                     else: {}
                 }
             }
@@ -1914,7 +1917,7 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 is_expression_boundary proc(kind lexer.TokenKind) bool {
     return match kind {
-        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .yield, .if, .while, .for, .inline, .defer, .errdefer, .eof: true
+        .close_paren, .newline, .close_curly, .open_curly, .else, .return, .yield, .unreachable, .if, .while, .for, .inline, .defer, .errdefer, .eof: true
         else: false
     }
 }
@@ -2054,7 +2057,7 @@ recovery_closes_delimiters proc(state @State, paren_depth, square_depth usize) b
         kind :: state.tokens[i].kind
         match kind {
             .open_curly, .close_curly, .eof, .if, .else, .while, .for, .inline,
-            .return, .break, .continue, .defer, .errdefer: return false
+            .return, .break, .continue, .unreachable, .defer, .errdefer: return false
             .ident: {
                 if (i + 1 < state.tokens.len) {
                     next :: state.tokens[i + 1].kind

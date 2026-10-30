@@ -110,10 +110,10 @@ put proc(
         for old_entries |entry| {
             if (entry.hash == 0) continue
 
-            idx := entry.hash & (new_entries.len - 1)
-            while (new_entries[idx].hash != 0) idx = (idx + 1) & (new_entries.len - 1)
+            rehash_index := entry.hash & (new_entries.len - 1)
+            while (new_entries[rehash_index].hash != 0) rehash_index = (rehash_index + 1) & (new_entries.len - 1)
 
-            new_entries[idx] = entry
+            new_entries[rehash_index] = entry
         }
 
         map.entries = new_entries
@@ -176,7 +176,7 @@ str_hash proc(key []u8) usize {
     prime u32 :: 16777619
 
     for key |byte| {
-        product u64 :: u64(hash xor u32(byte)) * prime
+        product u64 :: u64(hash xor u32(byte)) * u64(prime)
         hash = u32(product & u64(maxval!(u32)))
     }
 

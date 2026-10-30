@@ -1101,6 +1101,7 @@ collect_block proc(state @mut State, id, return_annotation ast.NodeId, in_loop b
                 try collect_declaration(state, statement)
             }
             .expression: try collect_expression(state, ast.statement_expr(tree, statement))
+            .unreachable_stmt: state.cells[usize(statement)].type = Type{ kind = .void }
             .return_stmt: {
                 state.cells[usize(statement)].role = .return_stmt
                 state.cells[usize(statement)].type = Type{ kind = .void }
@@ -2335,6 +2336,7 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
 BlockFlow :: struct {
     falls bool = true
     yields bool = false
+    breaks bool = false
 }
 
 @hide:file
@@ -2368,6 +2370,16 @@ expression_falls_through proc(state @State, id ast.NodeId) bool {
 }
 
 @hide:file
+expression_breaks proc(state @State, id ast.NodeId) bool {
+    tree :: state.tree
+    if (ast.node_class(tree, id) == .block) return block_flow(state, id).breaks
+    for 0..ast.child_count(tree, id) |i| {
+        if (expression_breaks(state, ast.child(tree, id, i))) return true
+    }
+    return false
+}
+
+@hide:file
 block_flow proc(state @State, id ast.NodeId) BlockFlow {
     tree :: state.tree
     result := BlockFlow{}
@@ -2381,30 +2393,62 @@ block_flow proc(state @State, id ast.NodeId) BlockFlow {
         }
         match kind {
             .yield_stmt: {
+                if (ast.yield_stmt(tree, statement).value) |value|
+                    result.breaks = result.breaks or expression_breaks(state, value)
                 result.yields = true
                 result.falls = false
             }
-            .return_stmt, .break_stmt, .continue_stmt, .invalid: result.falls = false
+            .return_stmt: {
+                if (ast.return_stmt(tree, statement).value) |value|
+                    result.breaks = result.breaks or expression_breaks(state, value)
+                result.falls = false
+            }
+            .break_stmt: {
+                result.breaks = true
+                result.falls = false
+            }
+            .continue_stmt, .unreachable_stmt, .invalid: result.falls = false
             .block_stmt: {
                 nested :: block_flow(state, ast.statement_block(tree, statement))
                 result.yields = result.yields or nested.yields
+                result.breaks = result.breaks or nested.breaks
                 result.falls = nested.falls
             }
             .if_stmt: {
                 conditional :: ast.if_stmt(tree, statement)
                 then_flow :: block_flow(state, conditional.then_block)
                 result.yields = result.yields or then_flow.yields
+                result.breaks = result.breaks or then_flow.breaks or expression_breaks(state, conditional.condition)
                 if (conditional.else_block) |other| {
                     else_flow :: block_flow(state, other)
                     result.yields = result.yields or else_flow.yields
+                    result.breaks = result.breaks or else_flow.breaks
                     result.falls = then_flow.falls or else_flow.falls
                 }
             }
-            .while_stmt: result.yields = result.yields or block_flow(state, ast.while_stmt(tree, statement).body).yields
-            .for_stmt: result.yields = result.yields or block_flow(state, ast.for_stmt(tree, statement).body).yields
-            .expression: result.falls = expression_falls_through(state, source)
-            .declaration: result.falls = expression_falls_through(state, ast.statement_decl(tree, statement).initializer)
-            .assignment_stmt: result.falls = expression_falls_through(state, ast.assignment_stmt(tree, statement).value)
+            .while_stmt: {
+                loop :: ast.while_stmt(tree, statement)
+                body :: block_flow(state, loop.body)
+                result.yields = result.yields or body.yields
+                result.breaks = result.breaks or expression_breaks(state, loop.condition)
+                if (loop.capture == null and ast.expr_kind(tree, loop.condition) == .literal_bool
+                    and mem.eql(ast.literal_text(tree, loop.condition), "true"))
+                    result.falls = body.breaks
+            }
+            .for_stmt: {
+                loop :: ast.for_stmt(tree, statement)
+                result.yields = result.yields or block_flow(state, loop.body).yields
+                result.breaks = result.breaks or expression_breaks(state, loop.iterable)
+            }
+            .expression, .declaration, .assignment_stmt: {
+                value :: if (kind == .expression) source
+                    else if (kind == .declaration) ast.statement_decl(tree, statement).initializer
+                    else ast.assignment_stmt(tree, statement).value
+                result.breaks = result.breaks or expression_breaks(state, value)
+                if (kind == .assignment_stmt)
+                    result.breaks = result.breaks or expression_breaks(state, ast.assignment_stmt(tree, statement).target)
+                result.falls = expression_falls_through(state, value)
+            }
             else: {}
         }
         if (!result.falls) return result

@@ -61,7 +61,7 @@ emit proc(
     }
     for (diagnostic_store.list.items) |diagnostic, index| {
         try io.print("@d{} = private constant ", output, {index})
-        try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?, false)
+        try bytes_constant(output, diagnostics.message(diagnostic), false)
         try io.write_all(output, "\n")
     }
     memory_codes [_]diagnostics.Code :: [
@@ -69,6 +69,7 @@ emit proc(
         .overlapping_memory_copy, .unsupported_foreign_call, .invalid_pointer_access,
         .division_by_zero,
         .invalid_shift_count,
+        .unreachable_executed,
     ]
     for (memory_codes) |code| {
         try io.print("@memory_{s} = private constant ", output, {enummap.get(&memory_symbols, code)?})
@@ -321,7 +322,7 @@ emit_reporting proc(
     try io.write_all(output, "define internal void @report(i64 %trap) {\nentry:\n")
     for (diagnostic_store.list.items) |diagnostic, index| {
         position :: location(line_starts, diagnostic.span)
-        message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, diagnostic.code)?
+        message :: diagnostics.message(diagnostic)
         try io.print("  %t{} = icmp eq i64 %trap, {}\n", output, {index, index})
         try io.print("  call void @diagnose(i64 {}, i64 {}, i64 {}, ptr @d{}, i64 {}, i1 %t{})\n", output, {
             usize(diagnostic.span.source), position.line, position.column, index, message.len, index,
@@ -511,6 +512,7 @@ memory_symbols :: $enummap.init_default(diagnostics.Code, []u8, "", {
     invalid_pointer_access = "invalid_pointer_access",
     division_by_zero = "division_by_zero",
     invalid_shift_count = "invalid_shift_count",
+    unreachable_executed = "unreachable_executed",
 })
 
 @hide:file
@@ -650,7 +652,7 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
                 }
             }
             .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
-            .unreachable: try io.write_all(output, "  unreachable\n")
+            .unreachable: try trap(state, .unreachable_executed, terminator.span)
             .jump: try io.print("  br label %b{}\n", output, {u32(terminator.target)})
             .branch: {
                 condition :: try load(state, terminator.value)

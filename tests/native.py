@@ -11,6 +11,93 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "unreachable_is_a_demanded_source_trap_without_cleanup": (
+        """
+        fail proc() i16 {
+            defer unreachable
+            unreachable
+        }
+        main proc() i16 { return fail() }
+        """, b"", b":3:5: runtime trap: reached unreachable statement",
+    ),
+    "untaken_and_unused_unreachable_do_not_diagnose": (
+        """
+        unused proc() i16 { unreachable }
+        choose proc(flag bool) i16 {
+            if (flag) unreachable
+            return match flag { true: unreachable, false: 42 }
+        }
+        main proc() i16 { return choose(false) }
+        """, b"42\n", None,
+    ),
+    "unreachable_traps_only_selected_constant_execution": (
+        """
+        choose proc(flag bool) i16 {
+            if (flag) unreachable
+            return 42
+        }
+        main proc() i16 { return $(choose(false)) }
+        """, b"42\n", None,
+    ),
+    "unreachable_constant_execution_preserves_source": (
+        """
+        fail proc() i16 {
+            unreachable
+        }
+        main proc() i16 { return $(fail()) }
+        """, b"", b":2:5: runtime trap: reached unreachable statement",
+    ),
+    "terminal_while_true_preserves_nested_breaks_and_cleanups": (
+        """
+        compute proc(trace @mut i16) i16 {
+            while true {
+                defer trace^ += 1
+                while true { break }
+                if (trace^ == 2) return 42
+                continue
+            }
+        }
+        main proc() [2]i16 {
+            trace i16 := 0
+            answer :: compute(&trace)
+            return [answer, trace]
+        }
+        """, b"[42, 3]\n", None,
+    ),
+    "terminal_while_true_return": (
+        "main proc() i16 { while true { return 42 } }",
+        b"42\n", None,
+    ),
+    "terminal_while_true_constant_execution": (
+        "compute proc() i16 { while true { return 42 } }\nmain proc() i16 { return $(compute()) }",
+        b"42\n", None,
+    ),
+    "terminal_while_true_ignores_break_after_return": (
+        "main proc() i16 { while true { return 42\nbreak } }",
+        b"42\n", None,
+    ),
+    "while_true_break_requires_return": (
+        "main proc() i16 { while true { break } }",
+        b"", b"nonvoid function can finish without returning a value",
+    ),
+    "while_true_value_block_break_requires_return": (
+        """
+        main proc() i16 {
+            while true {
+                value i16 :: { break }
+                _ = value
+            }
+        }
+        """, b"", b"nonvoid function can finish without returning a value",
+    ),
+    "while_runtime_guard_still_requires_return": (
+        "main proc() i16 { flag := true\nwhile flag { return 42 } }",
+        b"42\n", b"nonvoid function can finish without returning a value",
+    ),
+    "unreachable_rejects_trailing_operand": (
+        "main proc() i16 { unreachable 42 }",
+        b"", b"unexpected token",
+    ),
     "distinct_bitwise_results_preserve_nominal_type": (
         """
         Flags :: distinct u16
@@ -7334,6 +7421,126 @@ CASES = {
     "invalid_unused_signature": (
         "bad proc(a void) void {}\nmain proc() int { return 42 }", b"42\n", b"void cannot be stored",
     ),
+    "optional_compile_time_callbacks_preserve_source_identity": (
+        """
+        first proc(value i16) i16 { return value }
+        second proc(value i16) i16 { return value + 2 }
+        invoke proc($callback proc(value i16) i16, value i16) i16 { return callback(value) }
+        choose proc($callback ?proc(value i16) i16, value i16) i16 {
+            if $(callback == null) return value + 3
+            else return invoke(callback?, value)
+        }
+        main proc() [3]i16 { return [choose(first, 42), choose(second, 40), choose(null, 39)] }
+        """, b"[42, 42, 42]\n", None,
+    ),
+    "null_compile_time_callback_unwrap_traps": (
+        """
+        invoke proc($callback proc() i16) i16 { return callback() }
+        choose proc($callback ?proc() i16) i16 { return invoke(callback?) }
+        main proc() i16 { return choose(null) }
+        """, b"", b"null optional",
+    ),
+    "compile_error_reports_owned_computed_message": (
+        """
+        explain proc() string { return "invalid \\"key\\"" }
+        fail proc($bad bool) i16 {
+            if (bad) compile_error!(explain())
+            return 42
+        }
+        main proc() i16 { return fail(true) }
+        """, b"", b'invalid "key"',
+    ),
+    "compile_error_skips_unselected_generic_and_type_bodies": (
+        """
+        choose proc($bad bool) i16 {
+            if (bad) compile_error!("wrong branch")
+            return 42
+        }
+        Storage proc(bad bool) type {
+            if (bad) compile_error!("wrong type branch")
+            return i16
+        }
+        main proc() Storage(false) { return choose(false) }
+        """, b"42\n", None,
+    ),
+    "compile_error_type_execution_preserves_message": (
+        """
+        Storage proc(bad bool) type {
+            if (bad) compile_error!("invalid generated storage")
+            return i16
+        }
+        main proc() Storage(true) { return 42 }
+        """, b"", b"invalid generated storage",
+    ),
+    "compile_error_custom_diagnostics_survive_later_evaluation": (
+        """
+        unused proc() void { compile_error!("retained message") }
+        compute proc() i16 { return 42 }
+        main proc() i16 { return $(compute()) }
+        """, b"42\n", b"error: retained message",
+    ),
+    "compile_error_rejects_runtime_messages": (
+        """
+        fail proc(message string) void { compile_error!(message) }
+        main proc() i16 { fail("not constant")\nreturn 42 }
+        """, b"", b"compile_error! requires one compile-time string argument",
+    ),
+    "compile_error_rejects_wrong_arity": (
+        "main proc() i16 { compile_error!()\nreturn 42 }",
+        b"", b"compile_error! requires one compile-time string argument",
+    ),
+    "type_execution_unreachable_is_selected_only": (
+        """
+        Storage proc(bad bool) type {
+            if (bad) unreachable
+            return i16
+        }
+        main proc() Storage(false) { return 42 }
+        """, b"42\n", None,
+    ),
+    "type_execution_unreachable_retains_source": (
+        """
+        Storage proc() type {
+            unreachable
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b":2:5:",
+    ),
+    "rigid_slice_inference_preserves_borrowing_and_string_context": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        length proc($T type, box @Box(T), value T) usize { return box.value.len + value.len }
+        main proc() [3]usize {
+            box Box([]u8) :: { value = "ab" }
+            bytes [3]mut u8 := [1, 2, 3]
+            return [length(&box, bytes[..]), length(&box, "abc"), length(&box, bytes)]
+        }
+        """, b"[5, 5, 5]\n", None,
+    ),
+    "rigid_slice_inference_rejects_readonly_weakening_reversal": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        write proc($T type, box @Box(T), value T) void { value[0] = 0 }
+        main proc() i16 {
+            bytes [1]mut u8 := [42]
+            box Box([]mut u8) :: { value = bytes[..] }
+            readonly []u8 :: bytes[..]
+            write(&box, readonly)
+            return 42
+        }
+        """, b"", b"",
+    ),
+    "rigid_slice_inference_rejects_incompatible_elements": (
+        """
+        Box proc($T type) type { return struct { value T } }
+        length proc($T type, box @Box(T), value T) usize { return value.len }
+        main proc() usize {
+            box Box([]u8) :: { value = "" }
+            words [1]i16 :: [42]
+            return length(&box, words[..])
+        }
+        """, b"", b"",
+    ),
 }
 
 # Keep malformed schemas grouped: each must fail before generated storage is used.
@@ -9300,6 +9507,315 @@ def check_typeinfo_packages(temporary, executable):
     return len(cases) + 4
 
 
+def check_hashmap_packages(temporary, executable):
+    project = temporary / "hashmap"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+    source = project / "main.hon"
+    # Each growth allocation has distinct typed storage: clearing new entries
+    # must not overwrite the old entries before the library rehashes them.
+    source.write_text(textwrap.dedent("""
+        import "@std/hashmap"
+        import "@std/mem"
+        Value :: struct { number i16, items [2]mut i16 }
+        Slot :: alias hashmap.Entry(i16, Value)
+        StringSlot :: alias hashmap.Entry([]u8, Value)
+        State :: struct {
+            small *mut Slot
+            medium *mut Slot
+            large *mut Slot
+            strings *mut StringSlot
+            fail bool = false
+            allocations usize = 0
+            releases usize = 0
+        }
+        allocate proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+            state @mut State :: ptrcast!(context?)
+            state.allocations += 1
+            if (state.fail or alignment != alignof!(Slot)) return null
+            if (size == sizeof!([8]Slot)) return ptrcast!(state.small)
+            if (size == sizeof!([16]Slot)) return ptrcast!(state.medium)
+            if (size == sizeof!([32]Slot)) return ptrcast!(state.large)
+            if (size == sizeof!([8]StringSlot)) return ptrcast!(state.strings)
+            return null
+        }
+        resize proc(
+            _ ?@mut anyopaque, _ ?*mut u8, _ usize, _ usize, _ usize,
+        ) ?*mut u8 { return null }
+        release proc(context ?@mut anyopaque, _ ?*mut u8, _ usize, _ usize) void {
+            state @mut State :: ptrcast!(context?)
+            state.releases += 1
+        }
+        table mem.AllocatorVTable :: { alloc = allocate, realloc = resize, free = release }
+        collision_hash proc(key i16) usize { return if (key == 0) 0 else 1 }
+        equivalent proc(left, right i16) bool {
+            return left - divtrunc!(left, 100) * 100 == right - divtrunc!(right, 100) * 100
+        }
+        exercise proc(allocator mem.Allocator, state @mut State) i16 ! (hashmap.PutError | mem.AllocError) {
+            map := hashmap.init(i16, Value, collision_hash, equivalent, allocator)
+            defer hashmap.deinit(&map)
+            if (map.count != 0 or map.entries.len != 0 or state.allocations != 0) return -1
+            if (hashmap.get(&map, 0) != null) return -2
+            original Value := { number = 0, items = [0, 1] }
+            try hashmap.put(&map, 0, original)
+            original.items[0] = 99
+            if (hashmap.get(&map, 0)?.items[0] != 0) return -3
+            copy := hashmap.get(&map, 0)?
+            copy.items[1] = 99
+            if (hashmap.get(&map, 100)?.items[1] != 1) return -4
+            duplicate := false
+            hashmap.put(&map, 100, Value{ number = 999, items = [9, 9] }) catch |err| {
+                duplicate = err == .key_exists
+            }
+            if (!duplicate or map.count != 1 or hashmap.get(&map, 0)?.number != 0) return -7
+            for (i16(1)..i16(12)) |key| {
+                try hashmap.put(&map, key, Value{ number = key * 2, items = [key, key + 1] })
+            }
+            if (map.count != 12 or map.entries.len != 16) return -5
+            if (state.allocations != 2 or state.releases != 1) return -6
+            state.fail = true
+            previous :: map.entries.ptr
+            calls :: state.allocations
+            released :: state.releases
+            failed := false
+            hashmap.put(&map, 12, original) catch |err| { failed = err == .out_of_memory }
+            if (!failed or map.count != 12 or map.entries.len != 16 or map.entries.ptr != previous) return -8
+            if (state.allocations != calls + 1 or state.releases != released) return -9
+            if (hashmap.get(&map, 12) != null or hashmap.get(&map, 111)?.number != 22) return -10
+            state.fail = false
+            for (i16(12)..i16(24)) |key| {
+                try hashmap.put(&map, key, Value{ number = key * 2, items = [key, key + 1] })
+            }
+            if (map.count != 24 or map.entries.len != 32) return -11
+            for (i16(0)..i16(24)) |key| {
+                value :: hashmap.get(&map, key + 100)?
+                if (value.number != key * 2 or value.items[0] != key or value.items[1] != key + 1) return -12
+            }
+            for map.entries |entry| {
+                if (entry.hash != 0 and entry.hash != 1) return -13
+            }
+            if (hashmap.get(&map, 99) != null) return -14
+            failed = false
+            hashmap.put(&map, 24, original) catch |err| { failed = err == .out_of_memory }
+            if (!failed or map.count != 24 or map.entries.len != 32) return -15
+            if (hashmap.get(&map, 23)?.number != 46 or hashmap.get(&map, 24) != null) return -16
+            return 42
+        }
+        exercise_automatic_and_string_keys proc(allocator mem.Allocator) i16 ! (hashmap.PutError | mem.AllocError) {
+            automatic := hashmap.init(i16, Value, null, null, allocator)
+            defer hashmap.deinit(&automatic)
+            for (i16(0)..i16(12)) |key| {
+                try hashmap.put(&automatic, key, Value{ number = key, items = [key, key + 1] })
+            }
+            edge Value :: { number = 42, items = [19, 23] }
+            try hashmap.put(&automatic, minval!(i16), edge)
+            try hashmap.put(&automatic, maxval!(i16), edge)
+            for (i16(0)..i16(12)) |key| {
+                value :: hashmap.get(&automatic, key)?
+                if (value.number != key or value.items[1] != key + 1) return -20
+            }
+            if (hashmap.get(&automatic, minval!(i16))?.number != 42
+                or hashmap.get(&automatic, maxval!(i16))?.items[0] != 19) return -21
+            if (hashmap.get(&automatic, -1) != null) return -22
+            strings hashmap.StringHashMap(Value) := { entries = &[], count = 0, allocator = allocator }
+            defer hashmap.deinit(&strings)
+            left [3]mut u8 := [97, 0, 98]
+            right [3]mut u8 := [97, 0, 98]
+            try hashmap.put(&strings, left[..], edge)
+            if (hashmap.get(&strings, right[..])?.items[1] != 23) return -23
+            duplicate := false
+            hashmap.put(&strings, right[..], Value{ number = 0, items = [0, 0] }) catch |err| {
+                duplicate = err == .key_exists
+            }
+            if (!duplicate or strings.count != 1 or hashmap.get(&strings, left[..])?.number != 42) return -24
+            try hashmap.put(&strings, "", edge)
+            if (hashmap.get(&strings, right[..2]) != null or hashmap.get(&strings, "")?.number != 42) return -25
+            return 42
+        }
+        main proc() i16 ! (hashmap.PutError | mem.AllocError) {
+            small [8]mut Slot := undefined
+            medium [16]mut Slot := undefined
+            large [32]mut Slot := undefined
+            string_storage [8]mut StringSlot := undefined
+            state State := {
+                small = (&small).ptr, medium = (&medium).ptr, large = (&large).ptr,
+                strings = (&string_storage).ptr,
+            }
+            allocator mem.Allocator :: { context = &state, vtable = &table }
+            result :: try exercise(allocator, &state)
+            if (result != 42) return result
+            if (state.allocations != 5 or state.releases != 3) return -17
+            state.fail = true
+            empty := hashmap.init(i16, Value, collision_hash, equivalent, allocator)
+            defer hashmap.deinit(&empty)
+            failed := false
+            hashmap.put(&empty, 0, Value{ number = 42, items = [4, 2] }) catch |err| {
+                failed = err == .out_of_memory
+            }
+            if (!failed or empty.count != 0 or empty.entries.len != 0) return -18
+            if (hashmap.get(&empty, 0) != null or state.allocations != 6 or state.releases != 3) return -19
+            state.fail = false
+            automatic_result :: try exercise_automatic_and_string_keys(allocator)
+            if (automatic_result != 42) return automatic_result
+            if (state.allocations != 10 or state.releases != 7) return -26
+            return 42
+        }
+    """).strip() + "\n")
+    check(source, executable, (b"42\n", None))
+    native_cases = (
+        """
+        import "@std/hashmap"
+        import "@std/mem"
+        Sparse :: enum(i16) { negative = -7, first = 3, far = 90 }
+        SparseAlias :: alias Sparse
+        Inner :: distinct u64
+        Id :: distinct Inner
+        integer_keys proc($K type) bool ! (hashmap.PutError | mem.AllocError) {
+            map hashmap.AutoHashMap(K, usize) := hashmap.init(K, usize, null, null, mem.c_allocator)
+            defer hashmap.deinit(&map)
+            keys [4]K :: [minval!(K), maxval!(K), K(1), K(2)]
+            for keys |key, index| { try hashmap.put(&map, key, index) }
+            for (3..40) |number| { try hashmap.put(&map, K(number), usize(number)) }
+            if (map.count != 41 or map.entries.len != 64) return false
+            for keys |key, index| { if (hashmap.get(&map, key)? != index) return false }
+            for (3..40) |number| {
+                if (hashmap.get(&map, K(number))? != usize(number)) return false
+            }
+            if (hashmap.get(&map, K(40)) != null) return false
+            if $(minval!(K) < 0) {
+                try hashmap.put(&map, K(-1), 99)
+                if (hashmap.get(&map, K(-1))? != 99) return false
+            }
+            duplicate := false
+            hashmap.put(&map, maxval!(K), 999) catch |err| { duplicate = err == .key_exists }
+            return duplicate and hashmap.get(&map, maxval!(K))? == 1
+        }
+        main proc() i16 ! (hashmap.PutError | mem.AllocError) {
+            if (!try integer_keys(i8) or !try integer_keys(u8)) return -1
+            if (!try integer_keys(i16) or !try integer_keys(u16)) return -2
+            if (!try integer_keys(i32) or !try integer_keys(u32)) return -3
+            if (!try integer_keys(i64) or !try integer_keys(u64)) return -4
+            if (!try integer_keys(isize) or !try integer_keys(usize)) return -5
+            flags hashmap.AutoHashMap(bool, i16) := hashmap.init(bool, i16, null, null, mem.c_allocator)
+            defer hashmap.deinit(&flags)
+            try hashmap.put(&flags, false, 19)
+            try hashmap.put(&flags, true, 23)
+            if (flags.count != 2 or hashmap.get(&flags, false)? != 19 or hashmap.get(&flags, true)? != 23) return -6
+            duplicate := false
+            hashmap.put(&flags, false, 99) catch |err| { duplicate = err == .key_exists }
+            if (!duplicate or flags.count != 2 or hashmap.get(&flags, false)? != 19) return -7
+            sparse hashmap.AutoHashMap(SparseAlias, i16) := hashmap.init(SparseAlias, i16, null, null, mem.c_allocator)
+            defer hashmap.deinit(&sparse)
+            try hashmap.put(&sparse, .negative, 7)
+            try hashmap.put(&sparse, .first, 3)
+            try hashmap.put(&sparse, .far, 90)
+            if (sparse.count != 3 or hashmap.get(&sparse, Sparse.negative)? != 7) return -8
+            if (hashmap.get(&sparse, .first)? != 3 or hashmap.get(&sparse, .far)? != 90) return -9
+            ids hashmap.AutoHashMap(Id, i16) := hashmap.init(Id, i16, null, null, mem.c_allocator)
+            defer hashmap.deinit(&ids)
+            try hashmap.put(&ids, Id(Inner(0)), 19)
+            try hashmap.put(&ids, Id(Inner(maxval!(u64))), 23)
+            if (hashmap.get(&ids, Id(Inner(0)))? != 19) return -10
+            if (hashmap.get(&ids, Id(Inner(maxval!(u64))))? != 23) return -11
+            if (hashmap.get(&ids, Id(Inner(1))) != null) return -12
+            return 42
+        }
+        """,
+        """
+        import "@std/hashmap"
+        import "@std/mem"
+        Padding :: struct_type!(.c, ["tag", "number"], [u8, u64], [null, null])
+        Row :: struct { values [2]u16 }
+        Key :: struct { padded Padding, rows [2]Row }
+        custom_hash proc(_ u16) usize { return 0 }
+        custom_eql proc(left, right u16) bool {
+            return left - divtrunc!(left, 100) * 100 == right - divtrunc!(right, 100) * 100
+        }
+        main proc() i16 ! (hashmap.PutError | mem.AllocError) {
+            # The alias supplies the library's private string callbacks.
+            strings hashmap.StringHashMap(i16) := { entries = &[], count = 0, allocator = mem.c_allocator }
+            defer hashmap.deinit(&strings)
+            left [3]mut u8 := [97, 0, 98]
+            right [3]mut u8 := [97, 0, 98]
+            other [3]mut u8 := [97, 0, 99]
+            if ((&left).ptr == (&right).ptr) return -7
+            try hashmap.put(&strings, left[..], 42)
+            records hashmap.AutoHashMap(Key, i16) := hashmap.init(Key, i16, null, null, mem.c_allocator)
+            defer hashmap.deinit(&records)
+            first Key := { padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [2, 9] }, { values = [4, 8] }] }
+            same Key := { padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [2, 9] }, { values = [4, 8] }] }
+            first_bytes *mut u8 :: ptrcast!(&first.padded)
+            same_bytes *mut u8 :: ptrcast!(&same.padded)
+            if (sizeof!(Padding) != 16 or alignof!(Padding) != 8) return -1
+            for (usize(1)..usize(8)) |index| {
+                first_bytes[index] = 17
+                same_bytes[index] = 238
+            }
+            if (first_bytes[1] == same_bytes[1]) return -2
+            try hashmap.put(&records, first, 19)
+            if (hashmap.get(&records, same)? != 19) return -3
+            duplicate := false
+            hashmap.put(&records, same, 99) catch |err| { duplicate = err == .key_exists }
+            if (!duplicate or records.count != 1 or hashmap.get(&records, first)? != 19) return -4
+            reversed :: Key{ padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [9, 2] }, { values = [4, 8] }] }
+            swapped :: Key{ padded = { tag = 7, number = maxval!(u64) }, rows = [{ values = [4, 8] }, { values = [2, 9] }] }
+            try hashmap.put(&records, reversed, 23)
+            try hashmap.put(&records, swapped, 31)
+            if (hashmap.get(&records, reversed)? != 23 or hashmap.get(&records, swapped)? != 31) return -5
+            same.padded.number = 0
+            if (hashmap.get(&records, same) != null or records.count != 3) return -6
+            if (hashmap.get(&strings, right[..])? != 42) return -8
+            if (hashmap.get(&strings, right[..2]) != null or hashmap.get(&strings, other[..]) != null) return -9
+            duplicate = false
+            hashmap.put(&strings, right[..], 99) catch |err| { duplicate = err == .key_exists }
+            if (!duplicate or strings.count != 1 or hashmap.get(&strings, left[..])? != 42) return -10
+            try hashmap.put(&strings, "", 7)
+            try hashmap.put(&strings, other[..], 23)
+            if (strings.count != 3 or hashmap.get(&strings, "")? != 7 or hashmap.get(&strings, other[..])? != 23) return -11
+            custom := hashmap.init(u16, i16, custom_hash, custom_eql, mem.c_allocator)
+            defer hashmap.deinit(&custom)
+            for (u16(1)..u16(20)) |key| { try hashmap.put(&custom, key, i16(key * 2)) }
+            for (u16(1)..u16(20)) |key| {
+                if (hashmap.get(&custom, key + 100)? != i16(key * 2)) return -12
+            }
+            duplicate = false
+            hashmap.put(&custom, 101, 999) catch |err| { duplicate = err == .key_exists }
+            if (!duplicate or custom.count != 19 or hashmap.get(&custom, 1)? != 2) return -13
+            if (hashmap.get(&custom, 99) != null) return -14
+            return 42
+        }
+        """,
+    )
+    for text in native_cases:
+        source.write_text(textwrap.dedent(text).strip() + "\n")
+        interpreted = run(str(HONEY), "run", str(source))
+        assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+        assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+        assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+        for optimization in ("-O0", "-O2"):
+            built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+            assert outcome(built) == (0, b"", b""), outcome(built)
+            assert outcome(run(str(executable))) == (0, b"42\n", b""), optimization
+            executable.unlink()
+    invalid_keys = (("f64", "f64(1)"), ("[]u8", '"abc"'), ("?i16", "some!(i16(1))"))
+    for key_type, key in invalid_keys:
+        source.write_text(textwrap.dedent(f"""
+            import "@std/hashmap"
+            import "@std/mem"
+            main proc() bool {{
+                map := hashmap.init({key_type}, i16, null, null, mem.c_allocator)
+                return hashmap.get(&map, {key}) == null
+            }}
+        """).strip() + "\n")
+        check(source, executable, (
+            b"true\n",
+            b"AutoHashMap key requires integers, booleans, enums, distinct types, arrays or records",
+        ))
+    return 1 + len(invalid_keys), len(native_cases)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -9316,6 +9832,8 @@ def main():
         allocator_count = check_allocator_libc(temporary, executable)
         arraylist_count, arraylist_native_count = check_arraylist_packages(temporary, executable)
         count += arraylist_count
+        hashmap_count, hashmap_native_count = check_hashmap_packages(temporary, executable)
+        count += hashmap_count
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -9342,7 +9860,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count} native allocator programs, LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count} native allocator programs, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":

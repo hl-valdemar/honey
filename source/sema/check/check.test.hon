@@ -684,7 +684,7 @@ return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_retu
         `void_value proc() void { return 1 }
         `unknown proc() int { return absent }
         `syntax proc() int { return (1 }
-        `unreachable proc() int {
+        `after_return proc() int {
         `    return 7
         `    -"bad"
         `}
@@ -910,7 +910,7 @@ analyzes_return_paths_after_trap_propagation_without_poisoning_signatures test {
         `syntax_trap proc() int {
         `    return 1 stray
         `}
-        `unreachable proc() int {
+        `after_return proc() int {
         `    return 1
         `    -"bad"
         `}
@@ -1198,7 +1198,7 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `missing proc() int { while true { return 1 } }
+        `terminal proc() int { while true { return 1 } }
         `bad_body proc() int { while false { -"bad" } }
         `continues proc() int {
         `    while false { -"bad" }
@@ -1226,12 +1226,11 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
     result := try check(mem.c_allocator, &tree, &resolution, &diagnostic_store)
     defer deinit(&result)
 
-    for usize(0)..usize(2) |index| {
-        function :: ast.package_decl(&tree, index)
-        body :: ast.function_decl(&tree, function).body
-        _ = try expect_fallthrough(&result, &diagnostic_store, function, ast.node_span(&tree, body))
-        try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
-    }
+    terminal :: ast.package_decl(&tree, 0)
+    try testing.expect(fallthrough_diagnostic(&result, terminal) == null)
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    _ = try expect_fallthrough(&result, &diagnostic_store, ast.package_decl(&tree, 1), ast.node_span(&tree, body))
+    try expect_kind(&result, ast.block_statement(&tree, body, 0), .void)
     continues_body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
     loop_statement :: ast.block_statement(&tree, continues_body, 0)
     loop :: ast.while_stmt(&tree, loop_statement)
@@ -1261,7 +1260,7 @@ while_checks_nested_bodies_without_claiming_a_zero_iteration_return test {
         try expect_kind(&result, assignment.target, .int)
         try expect_kind(&result, assignment.value, .int)
     }
-    try testing.expect_equal(2, code_count(&diagnostic_store, .missing_return))
+    try testing.expect_equal(1, code_count(&diagnostic_store, .missing_return))
     try testing.expect_equal(1, code_count(&diagnostic_store, .condition_not_bool))
     try testing.expect_equal(3, code_count(&diagnostic_store, .invalid_operand))
 }
@@ -1518,7 +1517,7 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
         `call proc() int { take(true or 1) }
         `conditional proc() int { if false and missing_condition { return 1 } }
         `loop proc() int { while true or missing_guard { return 1 } }
-        `loop_body proc() int { while true { true or 1 } }
+        `loop_body proc(flag bool) int { while flag { true or 1 } }
         `arms proc(flag bool) int {
         `    if flag { false and missing_arm } else { return 1 }
         `}
