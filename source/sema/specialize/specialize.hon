@@ -431,6 +431,12 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
     if (class == .expression and ast.expr_kind(&state.tree, id) == .catch_expr) {
         expression :: ast.catch_expr(&state.tree, id)
         try expand_expected(state, expression.operand, expected)
+        operand_type :: try expression_type(state, expression.operand, 0)
+        if (type_record_storage(state, operand_type, 0)
+            and ast.expr_kind(&state.tree, operand_type) == .fallible_type) {
+            try specialize_type_catch(state, id, operand_type, expected)
+            return
+        }
         if (expression.capture) |capture| {
             annotation :: try expression_type(state, expression.operand, 0)
             if (annotation != no_node and ast.expr_kind(&state.tree, annotation) == .fallible_type) {
@@ -1393,6 +1399,11 @@ inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist
                 or ast.stmt_kind(&state.tree, declaration) != .declaration) continue
             if (ast.statement_decl(&state.tree, declaration).initializer != type) continue
             name :: try member_name(state, declaration)
+            for (fields.items) |previous| {
+                field :: ast.field(&state.tree, previous)
+                if (ast.name_id(&state.tree, field.name?) != ast.name_id(&state.tree, name)) continue
+                return try same_type(state, field.type?, type)
+            }
             field :: try ast.add_field(state.builder, ast.node_span(&state.tree, type), name, type, null)
             try refresh(state)
             try arraylist.append(fields, field)
@@ -1401,6 +1412,9 @@ inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist
         return false
     }
     if (kind != .enum_type and kind != .union_type) return false
+    if (kind == .enum_type and ast.enum_type(&state.tree, type).backing != null) return false
+    if (kind == .union_type and !ast.union_type(&state.tree, type).auto_tag
+        and ast.union_type(&state.tree, type).tag == null) return false
     count :: if (kind == .enum_type) ast.enum_member_count(&state.tree, type)
         else ast.record_field_count(&state.tree, type)
     for (0..count) |i| {
@@ -1412,8 +1426,10 @@ inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist
         if (kind == .union_type and field.type == null) return false
         duplicate := false
         for (fields.items) |previous| {
-            if (ast.name_id(&state.tree, ast.field(&state.tree, previous).name?)
-                == ast.name_id(&state.tree, field.name?)) duplicate = true
+            name :: ast.field(&state.tree, previous).name?
+            if (ast.name_id(&state.tree, name) != ast.name_id(&state.tree, field.name?)) continue
+            if (name != field.name?) return false
+            duplicate = true
         }
         if (duplicate) continue
         payload :: if (kind == .enum_type) try builtin(state, member, .void) else field.type?
@@ -1537,7 +1553,7 @@ expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! E
             union_view :: ast.union_type(&state.tree, members_type)
             if (kind != .sum_type and union_view.tag != null)
                 tag_type = try canonical_type(state, union_view.tag?)
-            else if (type_record_storage(state, annotation, 0)) tag_type = try metadata_tags(state, annotation)
+            else if (type_record_storage(state, annotation, 0)) tag_type = try metadata_tags(state, members_type)
             else {
                 concrete :: try materialize(state, Value{ kind = .type, node = annotation })
                 tag_type = try ast.add_union_tag_type(state.builder, span, concrete.node)
@@ -1813,6 +1829,11 @@ type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.
     kind :: ast.expr_kind(tree, input)
     if (kind == .alias_expr or kind == .optional_type)
         return type_storage_annotation(tree, bindings, ast.type_operand(tree, input), depth + 1)
+    if (kind == .fallible_type or kind == .sum_type) {
+        channels :: ast.binary_expr(tree, input)
+        return (type_storage_annotation(tree, bindings, channels.left, depth + 1)
+            or type_storage_annotation(tree, bindings, channels.right, depth + 1))
+    }
     if (kind == .array_type)
         return type_storage_annotation(tree, bindings, ast.array_type(tree, input).element, depth + 1)
     if (kind == .slice_type)
@@ -2958,6 +2979,7 @@ TypeExecution :: struct {
     first_owned ast.NodeId
     returned ast.NodeId = no_node
     result_type ast.NodeId
+    failed bool = false
     yielded ast.NodeId = no_node
     yield_type ast.NodeId = no_node
     yield_depth usize = 0
@@ -2990,8 +3012,22 @@ return_type_value proc(state @mut State, block, first_owned, result_type ast.Nod
     defer arraylist.deinit(&execution.locals)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
-    if (try execute_type_block(state, &execution, block) != .returned) return no_node
-    return execution.returned
+    flow :: try execute_type_block(state, &execution, block)
+    if (flow == .returned) return execution.returned
+    if (flow == .next) return try type_void_completion(state, result_type, block)
+    return no_node
+}
+
+@hide:file
+type_void_completion proc(state @mut State, annotation, at ast.NodeId) ast.NodeId ! Error {
+    type :: try canonical_type(state, annotation)
+    if (type == no_node or ast.expr_kind(&state.tree, type) != .fallible_type) return no_node
+    child :: try canonical_type(state, ast.binary_expr(&state.tree, type).left)
+    resolved :: binding(state, child)
+    if (resolved.kind != .builtin or resolved.data.builtin != .void) return no_node
+    value :: try ast.add_literal(state.builder, .void, ast.node_span(&state.tree, at))
+    try refresh(state)
+    return try type_execution_value(state, value, annotation)
 }
 
 @hide:file
@@ -3131,6 +3167,12 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
                 return
             }
         }
+        if (kind == .try_expr) {
+            execution.mapping[usize(id)] = try type_snapshot_try(state, execution, id)
+            if (execution.mapping[usize(id)] == no_node and execution.pending_flow == .next)
+                execution.pending_flow = .invalid
+            return
+        }
         if (kind == .catch_expr) {
             execution.mapping[usize(id)] = try type_snapshot_catch(state, execution, id, no_node)
             if (execution.mapping[usize(id)] == no_node and execution.pending_flow == .next)
@@ -3235,22 +3277,30 @@ type_snapshot_catch proc(
     owned :: try type_execution_value(state, operand, operand_type)
     if (owned == no_node) return no_node
     span :: ast.node_span(&state.tree, id)
-    boolean :: try builtin(state, id, .bool)
-    yes :: try ast.add_boolean(state.builder, span, true)
-    no :: try ast.add_boolean(state.builder, span, false)
-    failed :: try ast.add_return_stmt(state.builder, span, yes)
-    failure_statements [1]ast.NodeId :: [failed]
-    handler :: try ast.add_block(state.builder, span, failure_statements[..])
-    caught :: try ast.add_catch_expr(state.builder, span, owned, null, handler, true)
-    discarded :: try ast.add_expression_stmt(state.builder, caught)
-    success :: try ast.add_return_stmt(state.builder, span, no)
-    statements [2]ast.NodeId :: [discarded, success]
-    body :: try ast.add_block(state.builder, span, statements[..])
-    try refresh(state)
-    guard :: try evaluate_ir_body(state, id, body, boolean)
-    if (guard.kind != .boolean) return no_node
+    failed := false
+    if (type_record_storage(state, operand_type, 0)) {
+        if (!try type_array_initialized(state, owned, id)) return no_node
+        failed = !try same_type(state,
+            ast.typed_constant(&state.tree, ast.typed_constant(&state.tree, owned).value).type, channels.left)
+    } else {
+        boolean :: try builtin(state, id, .bool)
+        yes :: try ast.add_boolean(state.builder, span, true)
+        no :: try ast.add_boolean(state.builder, span, false)
+        returned :: try ast.add_return_stmt(state.builder, span, yes)
+        failure_statements [1]ast.NodeId :: [returned]
+        handler :: try ast.add_block(state.builder, span, failure_statements[..])
+        caught :: try ast.add_catch_expr(state.builder, span, owned, null, handler, true)
+        discarded :: try ast.add_expression_stmt(state.builder, caught)
+        success :: try ast.add_return_stmt(state.builder, span, no)
+        statements [2]ast.NodeId :: [discarded, success]
+        body :: try ast.add_block(state.builder, span, statements[..])
+        try refresh(state)
+        guard :: try evaluate_ir_body(state, id, body, boolean)
+        if (guard.kind != .boolean) return no_node
+        failed = guard.boolean
+    }
     payload :: ast.typed_constant(&state.tree, owned).value
-    if (!guard.boolean) return try type_execution_value(state, payload, channels.left)
+    if (!failed) return try type_execution_value(state, payload, channels.left)
     saved :: execution.locals.items.len
     defer execution.locals.items = execution.locals.items[..saved]
     if (view.capture) |capture| {
@@ -3277,6 +3327,125 @@ type_snapshot_catch proc(
         return try execute_type_value_block(state, execution, view.handler, result_type)
     selected :: try type_snapshot_expected(state, execution, view.handler, result_type)
     return try type_execution_value(state, selected, result_type)
+}
+
+@hide:file
+specialize_type_catch proc(state @mut State, id, annotation, expected ast.NodeId) void ! Error {
+    view :: ast.catch_expr(&state.tree, id)
+    value :: try evaluate_expected(state, view.operand, annotation)
+    if (value.kind != .aggregate) {
+        try reject_evaluation(state, id)
+        return
+    }
+    channels :: ast.binary_expr(&state.tree, annotation)
+    payload :: value.node
+    success :: try same_type(state, ast.typed_constant(&state.tree, payload).type, channels.left)
+    selected := no_node
+    if (success) selected = try type_execution_value(state, payload, channels.left)
+    else {
+        execution := TypeExecution{
+            locals = arraylist.init(state.allocator),
+            mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
+            first_owned = ast.NodeId(0),
+            result_type = no_node,
+        }
+        defer arraylist.deinit(&execution.locals)
+        defer mem.free(state.allocator, execution.mapping)
+        mem.set(execution.mapping, no_node)
+        if (view.capture) |capture| {
+            resolved :: binding(state, capture)
+            if (resolved.kind == .invalid) {
+                state.evaluation_diagnostic = resolved.data.diagnostic
+                try reject_evaluation(state, id)
+                return
+            }
+            error :: try type_execution_value(state, payload, channels.right)
+            if (error == no_node) {
+                try reject_evaluation(state, id)
+                return
+            }
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = capture, value = error, annotation = channels.right,
+            })
+        }
+        selected = try type_snapshot(state, &execution, view.handler)
+        if (view.handler_is_block and selected != no_node) {
+            selected = try ast.add_block_expr(state.builder, ast.node_span(&state.tree, id), selected)
+            try refresh(state)
+        }
+    }
+    if (selected == no_node) {
+        try reject_evaluation(state, id)
+        return
+    }
+    context :: if (expected != no_node) expected else channels.left
+    try expand_expected(state, selected, context)
+    if (is_type(state, channels.left) or type_record_storage(state, channels.left, 0)) {
+        selected = try type_execution_value(state, selected, channels.left)
+        if (selected == no_node) {
+            try reject_evaluation(state, id)
+            return
+        }
+    } else {
+        result_type := channels.left
+        contextual :: try canonical_type(state, context)
+        if (contextual != no_node) {
+            kind :: ast.expr_kind(&state.tree, contextual)
+            if (kind == .optional_type
+                and try same_type(state, ast.type_operand(&state.tree, contextual), channels.left))
+                result_type = context
+            if (kind == .fallible_type
+                and try same_type(state, ast.binary_expr(&state.tree, contextual).left, channels.left))
+                result_type = context
+        }
+        selected = try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, id), result_type, selected)
+        try refresh(state)
+    }
+    if (is_type(state, try expression_type(state, selected, 0))) {
+        selected = try ast.add_type_operand(state.builder, ast.node_span(&state.tree, id), selected, true)
+        try refresh(state)
+    }
+    try replace(state, id, selected)
+    try refresh(state)
+    state.bindings.items[usize(id)] = binding(state, selected)
+}
+
+@hide:file
+type_snapshot_try proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
+    operand :: try type_snapshot(state, execution, ast.type_operand(&state.tree, id))
+    if (operand == no_node) return no_node
+    try expand(state, operand)
+    annotation :: try expression_type(state, operand, 0)
+    if (annotation == no_node or ast.expr_kind(&state.tree, annotation) != .fallible_type) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_fallible_operand, ast.node_span(&state.tree, id))
+        return no_node
+    }
+    result :: try canonical_type(state, execution.result_type)
+    if (execution.cleanup_depth > 0 or result == no_node
+        or ast.expr_kind(&state.tree, result) != .fallible_type) {
+        code diagnostics.Code :: if (execution.cleanup_depth > 0)
+            .cleanup_control_flow else .try_outside_fallible
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, code, ast.node_span(&state.tree, id))
+        return no_node
+    }
+    channels :: ast.binary_expr(&state.tree, annotation)
+    if (!try type_subset(state, channels.right, ast.binary_expr(&state.tree, result).right)) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .incompatible_propagated_error, ast.node_span(&state.tree, id))
+        return no_node
+    }
+    # propagation is a catch whose error branch returns from the enclosing frame.
+    span :: ast.node_span(&state.tree, id)
+    capture :: try ast.add_identifier(state.builder, span, strpool.no_str)
+    try refresh(state)
+    value :: try reference(state, id, capture)
+    returned :: try ast.add_return_stmt(state.builder, span, value)
+    statements [1]ast.NodeId :: [returned]
+    handler :: try ast.add_block(state.builder, span, statements[..])
+    caught :: try ast.add_catch_expr(state.builder, span, operand, capture, handler, true)
+    try refresh(state)
+    return try type_snapshot_catch(state, execution, caught, channels.left)
 }
 
 @hide:file
@@ -3521,7 +3690,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
         } else {
             if (ast.expr_kind(&state.tree, value.node) != .record_literal) return no_index
             active :: ast.field(&state.tree, ast.record_field(&state.tree, value.node, 0))
-            tags :: try metadata_tags(state, annotation)
+            tags :: try metadata_tags(state, try inline_match_shape(state, annotation))
             tag :: try ast.add_enum_literal(state.builder, span, active.name?)
             dispatch = try ast.add_typed_constant(state.builder, span, tags, tag)
         }
@@ -3553,12 +3722,13 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
                     valid = false
                     continue
                 }
-                slot :: type_record_slot(state, annotation, ast.enum_literal(&state.tree, pattern))
+                shape :: try inline_match_shape(state, annotation)
+                slot :: type_record_slot(state, shape, ast.enum_literal(&state.tree, pattern))
                 if (slot == no_index) {
                     valid = false
                     continue
                 }
-                payload :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, slot)).type?
+                payload :: ast.field(&state.tree, ast.record_field(&state.tree, shape, slot)).type?
                 if (binding(state, payload).kind == .builtin and binding(state, payload).data.builtin == .void)
                     valid = false
                 if (expected != no_node and !try same_type(state, expected, payload)) valid = false
@@ -3902,8 +4072,48 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
     if (is_type(state, annotation)) return true
     type :: try canonical_type(state, annotation)
     if (type == no_node) return false
+    if (!type_record_storage(state, type, 0)) {
+        constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, type), type, true)
+        try refresh(state)
+        try arraylist.append(&state.rewrites.constraints, constraint)
+        return true
+    }
     if (ast.expr_kind(&state.tree, type) == .optional_type)
         return try type_record_check(state, ast.type_operand(&state.tree, type))
+    if (ast.expr_kind(&state.tree, type) == .fallible_type) {
+        channels :: ast.binary_expr(&state.tree, type)
+        error_type :: try canonical_type(state, channels.right)
+        if (error_type == no_node) return false
+        kind :: ast.expr_kind(&state.tree, error_type)
+        if (kind != .enum_type and kind != .record_type and kind != .union_type and kind != .sum_type) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .invalid_fallible_type, ast.node_span(&state.tree, type))
+            return false
+        }
+        if (!type_record_storage(state, error_type, 0)) {
+            checked :: try ast.add_binary_type(state.builder, ast.node_span(&state.tree, type),
+                try builtin(state, type, .void), error_type, true)
+            constraint :: try ast.add_type_operand(state.builder, ast.node_span(&state.tree, type), checked, true)
+            try refresh(state)
+            try arraylist.append(&state.rewrites.constraints, constraint)
+        } else if (kind == .union_type and !ast.union_type(&state.tree, error_type).auto_tag
+            and ast.union_type(&state.tree, error_type).tag == null) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .invalid_fallible_type, ast.node_span(&state.tree, type))
+            return false
+        }
+        if (!try type_record_check(state, channels.left)) return false
+        return try type_record_check(state, channels.right)
+    }
+    if (ast.expr_kind(&state.tree, type) == .sum_type) {
+        members :: ast.binary_expr(&state.tree, type)
+        if (!try type_record_check(state, members.left) or !try type_record_check(state, members.right)) return false
+        if (try inline_match_shape(state, type) != no_node) return true
+        if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .invalid_sum_type, ast.node_span(&state.tree, type))
+        return false
+    }
     if (ast.expr_kind(&state.tree, type) == .slice_type)
         return try type_record_check(state, ast.slice_type(&state.tree, type).element)
     if (ast.expr_kind(&state.tree, type) == .array_type) {
@@ -4346,6 +4556,108 @@ type_optional_value proc(state @mut State, expression, type ast.NodeId) ast.Node
 }
 
 @hide:file
+type_variant proc(state @mut State, annotation, name ast.NodeId) bool ! Error {
+    type :: try canonical_type(state, annotation)
+    if (type == no_node) return false
+    kind :: ast.expr_kind(&state.tree, type)
+    if (kind == .sum_type) {
+        members :: ast.binary_expr(&state.tree, type)
+        return try type_variant(state, members.left, name) or try type_variant(state, members.right, name)
+    }
+    if (kind == .union_type) return type_record_slot(state, type, name) != no_index
+    if (kind != .enum_type) return false
+    for (0..ast.enum_member_count(&state.tree, type)) |i| {
+        member :: ast.field(&state.tree, ast.enum_member(&state.tree, type, i)).name?
+        if (ast.name_id(&state.tree, member) == ast.name_id(&state.tree, name)) return true
+    }
+    return false
+}
+
+# the payload's declared channel is retained even when success and error values
+# have overlapping shapes. no type-bearing snapshot enters runtime IR.
+@hide:file
+type_fallible_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId ! Error {
+    if (!try type_record_check(state, type)) return no_node
+    span :: ast.node_span(&state.tree, expression)
+    kind :: ast.expr_kind(&state.tree, expression)
+    if (kind == .literal_undefined) {
+        result :: try ast.add_typed_constant(state.builder, span, type, expression)
+        try refresh(state)
+        return result
+    }
+    channels :: ast.binary_expr(&state.tree, type)
+    actual :: try expression_type(state, expression, 0)
+    if (actual != no_node and ast.expr_kind(&state.tree, actual) == .fallible_type) {
+        if (try same_type(state, actual, type)) return expression
+        source :: ast.binary_expr(&state.tree, actual)
+        if (!try same_type(state, source.left, channels.left)
+            or !try type_subset(state, source.right, channels.right)) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .type_mismatch, span)
+            return no_node
+        }
+        return try type_fallible_value(state, ast.typed_constant(&state.tree, expression).value, type)
+    }
+    channel := channels.left
+    if (actual != no_node and !try same_type(state, actual, channels.left)
+        and try type_subset(state, actual, channels.right)) channel = channels.right
+    name := no_node
+    if (kind == .enum_literal) name = ast.enum_literal(&state.tree, expression)
+    if (kind == .record_literal and ast.record_literal(&state.tree, expression).type != null) {
+        tag :: ast.record_literal(&state.tree, expression).type?
+        if (ast.expr_kind(&state.tree, tag) == .enum_literal) name = ast.enum_literal(&state.tree, tag)
+    }
+    if (name != no_node and try type_variant(state, channels.right, name)
+        and !try type_variant(state, channels.left, name)) channel = channels.right
+    if (kind == .record_literal and ast.record_literal(&state.tree, expression).type == null) {
+        success :: try canonical_type(state, channels.left)
+        failure :: try canonical_type(state, channels.right)
+        if ((success == no_node or ast.expr_kind(&state.tree, success) != .record_type)
+            and ast.expr_kind(&state.tree, failure) == .record_type) channel = channels.right
+    }
+    payload := try type_execution_value(state, expression, channel)
+    if (payload == no_node) return no_node
+    if (ast.expr_kind(&state.tree, payload) != .typed_constant) {
+        payload = try ast.add_typed_constant(state.builder, span, channel, payload)
+        try refresh(state)
+    }
+    result :: try ast.add_typed_constant(state.builder, span, type, payload)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+type_sum_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId ! Error {
+    if (!try type_record_check(state, type)) return no_node
+    actual :: try expression_type(state, expression, 0)
+    if (actual != no_node and try same_type(state, actual, type)) return expression
+    shape :: try inline_match_shape(state, type)
+    if (shape == no_node) return no_node
+    span :: ast.node_span(&state.tree, expression)
+    input := expression
+    if (actual != no_node and try type_subset(state, actual, type)) {
+        source :: try canonical_type(state, actual)
+        if (ast.expr_kind(&state.tree, source) == .record_type) {
+            for (0..ast.record_field_count(&state.tree, shape)) |i| {
+                field :: ast.field(&state.tree, ast.record_field(&state.tree, shape, i))
+                if (!try same_type(state, field.type?, actual)) continue
+                member :: try ast.add_field(state.builder, span, field.name, null, expression)
+                fields [1]ast.NodeId :: [member]
+                input = try ast.add_record_literal(state.builder, span, null, fields[..])
+                try refresh(state)
+                break
+            }
+        } else if (ast.expr_kind(&state.tree, expression) == .typed_constant)
+            input = ast.typed_constant(&state.tree, expression).value
+    }
+    value :: try type_union_value(state, input, shape)
+    if (value == no_node) return no_node
+    result :: try ast.add_typed_constant(state.builder, span, type,
+        ast.typed_constant(&state.tree, value).value)
+    try refresh(state)
+    return result
+}
+
+@hide:file
 type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.NodeId ! Error {
     if (input == no_node or annotation == no_node) return no_node
     if (ast.expr_kind(&state.tree, input) == .block_expr
@@ -4412,6 +4724,10 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         type :: try canonical_type(state, annotation)
         if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type)
             return try type_optional_value(state, expression, type)
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type)
+            return try type_fallible_value(state, expression, type)
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .sum_type)
+            return try type_sum_value(state, expression, type)
     }
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0))
         return try type_record_value(state, expression, annotation)
@@ -4562,13 +4878,24 @@ execute_type_block proc(state @mut State, execution @mut TypeExecution, block as
     while (reached > 0) {
         reached -= 1
         statement :: ast.block_statement(&state.tree, block, reached)
-        if (ast.stmt_kind(&state.tree, statement) != .defer_stmt) continue
+        kind :: ast.stmt_kind(&state.tree, statement)
+        if (kind != .defer_stmt and !(kind == .errdefer_stmt and execution.failed)) continue
         saved_depth :: execution.cleanup_yield_depth
         saved_loop :: execution.cleanup_loop_depth
         execution.cleanup_loop_depth = execution.loop_depth
         execution.cleanup_yield_depth = execution.yield_depth
         execution.cleanup_depth += 1
-        cleanup :: try execute_type_block(state, execution, ast.cleanup_stmt(&state.tree, statement).body)
+        cleanup_view :: ast.cleanup_stmt(&state.tree, statement)
+        if (kind == .errdefer_stmt and cleanup_view.capture != null) {
+            annotation :: ast.binary_expr(&state.tree, try canonical_type(state, execution.result_type)).right
+            value :: ast.typed_constant(&state.tree, execution.returned).value
+            try arraylist.append(&execution.locals, TypeLocal{
+                declaration = cleanup_view.capture?, value = value, annotation = annotation,
+            })
+        }
+        cleanup :: try execute_type_block(state, execution, cleanup_view.body)
+        if (kind == .errdefer_stmt and cleanup_view.capture != null)
+            execution.locals.items = execution.locals.items[..execution.locals.items.len - 1]
         execution.cleanup_depth -= 1
         execution.cleanup_yield_depth = saved_depth
         execution.cleanup_loop_depth = saved_loop
@@ -4641,9 +4968,12 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
         }
         .defer_stmt: {}
         .errdefer_stmt: {
-            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-                .errdefer_outside_fallible, ast.node_span(&state.tree, statement))
-            return .invalid
+            result :: try canonical_type(state, execution.result_type)
+            if (result == no_node or ast.expr_kind(&state.tree, result) != .fallible_type) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .errdefer_outside_fallible, ast.node_span(&state.tree, statement))
+                return .invalid
+            }
         }
         .yield_stmt: {
             if (execution.yield_depth == 0) {
@@ -4673,6 +5003,17 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 execution.returned = try type_execution_value(state, expression, execution.result_type)
                 if (execution.returned != no_node
                     and !try type_array_initialized(state, execution.returned, value)) return .invalid
+                if (execution.returned != no_node and type_record_storage(state, execution.result_type, 0)) {
+                    type :: try canonical_type(state, execution.result_type)
+                    if (type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type) {
+                        payload :: ast.typed_constant(&state.tree, execution.returned).value
+                        execution.failed = !try same_type(state, ast.typed_constant(&state.tree, payload).type,
+                            ast.binary_expr(&state.tree, type).left)
+                    }
+                }
+                if (execution.returned != no_node) return .returned
+            } else {
+                execution.returned = try type_void_completion(state, execution.result_type, statement)
                 if (execution.returned != no_node) return .returned
             }
             return .invalid

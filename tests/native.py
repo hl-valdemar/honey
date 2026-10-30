@@ -2415,6 +2415,355 @@ CASES = {
         }
         """, b"", b"compile-time value",
     ),
+    "fallible_types_record_channels_select_runtime_storage": (
+        """
+        Config :: struct { child ?type, count usize }
+        Failure :: struct { child type, count usize }
+        make proc(failed bool) Config ! Failure {
+            if (failed) return Failure { child = bool, count = 2 }
+            return Config { child = i16, count = 2 }
+        }
+        Selected proc(failed bool) type {
+            config :: make(failed) catch |err| Config { child = err.child, count = err.count }
+            T :: config.child?
+            return [config.count]T
+        }
+        main proc() [2]i16 {
+            values Selected(false) :: [40, 2]
+            flags Selected(true) :: [true, false]
+            if (!flags[0] or flags[1]) return [0, 0]
+            return [values[0] + values[1], i16(flags.len)]
+        }
+        """, b"[42, 2]\n", None,
+    ),
+    "fallible_types_optional_success_try_and_composed_errors": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        choose proc(present bool, failed bool) ?type ! First {
+            if (failed) return .first
+            if (present) return i16
+            return null
+        }
+        forward proc(present bool, failed bool) ?type ! (First | Second) {
+            selected :: try choose(present, failed)
+            return selected
+        }
+        Selected proc(present bool, failed bool) type {
+            selected :: forward(present, failed) catch |err| match err {
+                .first: some!(bool),
+                .second: some!(u16),
+            }
+            return if selected |T| T else u8
+        }
+        main proc() [2]i16 {
+            value Selected(true, false) :: 40
+            missing Selected(false, false) :: 2
+            recovered Selected(true, true) :: true
+            if (!recovered) return [0, 0]
+            return [value + i16(missing), i16(sizeof!(Selected(false, true)))]
+        }
+        """, b"[42, 1]\n", None,
+    ),
+    "fallible_types_copies_procedure_inputs_and_erased_cache_identity": (
+        """
+        Config :: struct { child type, count usize }
+        Failure :: struct { child type, count usize }
+        good proc() Config ! Failure { return Config { child = i16, count = 2 } }
+        bad proc() Config ! Failure { return Failure { child = bool, count = 2 } }
+        pass proc(value Config ! Failure) Config ! Failure { return value }
+        Token proc($value Config ! Failure) type { return struct {} }
+        Selected proc(value Config ! Failure) type {
+            config :: value catch |err| Config { child = err.child, count = err.count }
+            return [config.count]config.child
+        }
+        exact proc($value Config ! Failure, input Selected(value)) Selected(value) { return input }
+        Storage proc() type {
+            value Config ! Failure := pass(good())
+            saved :: value
+            copied := pass(value)
+            value = bad()
+            copied = Config { child = u8, count = 3 }
+            if (Token(saved) != Token(good())) return bool
+            if (Token(value) != Token(bad())) return bool
+            if (Token(saved) == Token(value) or Token(saved) == Token(copied)) return bool
+            if (Token(saved) != Token(Config { child = i16, count = 2 })) return bool
+            if (Token(value) == Token(Failure { child = u8, count = 2 })) return bool
+            if (Token(value) == Token(Failure { child = bool, count = 3 })) return bool
+            if (Token(saved) == Token(Failure { child = i16, count = 2 })) return bool
+            return Selected(saved)
+        }
+        main proc() i16 {
+            values Storage() :: exact(good(), [40, 2])
+            flags :: exact(bad(), [true, false])
+            if (!flags[0] or flags[1]) return 0
+            return values[0] + values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_types_nested_optional_arrays_preserve_owned_replacements": (
+        """
+        Config :: struct { child type, count usize }
+        Failure :: struct { child ?type, count usize }
+        Packet :: struct { rows [2]mut (?Config ! Failure) }
+        make proc() Packet {
+            return { rows = [
+                some!(Config { child = i16, count = 2 }),
+                Failure { child = bool, count = 3 },
+            ] }
+        }
+        pass proc(value Packet) Packet { return value }
+        Storage proc() type {
+            value := make()
+            saved :: pass(value)
+            copied := saved
+            value.rows[0] = null
+            value.rows[1] = some!(Config { child = u8, count = 4 })
+            copied.rows[0] = Failure { child = null, count = 5 }
+            if ((value.rows[0] catch null) != null) return bool
+            changed :: value.rows[1] catch null
+            if (changed?.child != u8 or changed?.count != 4) return bool
+            copied.rows[0] catch |err| {
+                if (err.child != null or err.count != 5) return bool
+                yield null
+            }
+            config :: (saved.rows[0] catch null)?
+            saved.rows[1] catch |err| {
+                if (err.child? != bool or err.count != 3) return bool
+                return [config.count]config.child
+            }
+            return bool
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "fallible_types_return_snapshots_and_cleanup_order": (
+        """
+        Config :: struct { child type, count usize, trace usize }
+        Failure :: struct { child type, count usize, trace usize }
+        make proc(failed bool) Config ! Failure {
+            trace usize := 0
+            value Config ! Failure := undefined
+            defer {
+                if (trace != (if (failed) 321 else 31)) unreachable
+                value catch |err| {
+                    if (err.child != u8 or err.count != 9 or err.trace != 9) unreachable
+                    yield Config { child = u8, count = 9, trace = 9 }
+                }
+            }
+            defer value = Failure { child = u8, count = 9, trace = 9 }
+            defer trace = trace * 10 + 1
+            errdefer |err| {
+                if (err.child != bool or err.count != 2 or err.trace != 3) unreachable
+                trace = trace * 10 + 2
+            }
+            { defer trace = trace * 10 + 3 }
+            value = Config { child = i16, count = 2, trace = trace }
+            if (failed) value = Failure { child = bool, count = 2, trace = trace }
+            return value
+        }
+        Storage proc() type {
+            config :: make(false) catch { return bool }
+            make(true) catch |err| {
+                if (err.child != bool or err.count != 2) return bool
+                if (config.child != i16 or config.count != 2) return bool
+                return struct {
+                    values [config.count]config.child
+                    success usize = config.trace
+                    failure usize = err.trace
+                }
+            }
+            return bool
+        }
+        main proc() [3]i16 {
+            storage Storage() :: { values = [40, 2] }
+            return [storage.values[0] + storage.values[1], i16(storage.success), i16(storage.failure)]
+        }
+        """, b"[42, 3, 3]\n", None,
+    ),
+    "fallible_types_reject_incomplete_success_payload": (
+        """
+        Config :: struct { child type, count usize }
+        Error :: enum { failed }
+        bad proc() Config ! Error {
+            value Config := undefined
+            value.child = i16
+            return value
+        }
+        Selected proc() type { return (bad() catch { return bool }).child }
+        main proc() Selected() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "fallible_types_reject_incomplete_error_payload": (
+        """
+        Failure :: struct { child type, count usize }
+        bad proc() type ! Failure {
+            value Failure := undefined
+            value.child = i16
+            return value
+        }
+        Selected proc() type { return bad() catch |err| err.child }
+        main proc() Selected() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "fallible_types_reject_uninitialized_channel": (
+        """
+        Error :: enum { failed }
+        Selected proc() type {
+            value type ! Error := undefined
+            return value catch bool
+        }
+        main proc() Selected() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "fallible_types_reject_non_type_payload": (
+        """
+        Error :: enum { failed }
+        bad proc() type ! Error { return 42 }
+        Selected proc() type { return bad() catch bool }
+        main proc() Selected() { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "fallible_types_reject_incompatible_error_propagation": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        leaf proc() type ! First { return .first }
+        bad proc() type ! Second { return try leaf() }
+        Selected proc() type { return bad() catch i16 }
+        main proc() Selected() { return 42 }
+        """, b"", b"propagated errors are not a subset",
+    ),
+    "fallible_types_reject_catch_capture_mutation": (
+        """
+        Failure :: struct { child type }
+        bad proc() type ! Failure { return Failure { child = i16 } }
+        Selected proc() type {
+            return bad() catch |err| {
+                err.child = bool
+                yield err.child
+            }
+        }
+        main proc() Selected() { return 42 }
+        """, b"", b"writable array element",
+    ),
+    "fallible_types_reject_errdefer_capture_mutation": (
+        """
+        Failure :: struct { child type }
+        bad proc() type ! Failure {
+            errdefer |err| { err.child = bool }
+            return Failure { child = i16 }
+        }
+        Selected proc() type { return bad() catch |err| err.child }
+        main proc() Selected() { return 42 }
+        """, b"", b"writable array element",
+    ),
+    "fallible_types_reject_runtime_dependency": (
+        """
+        Error :: enum { failed }
+        choose proc(failed bool) type ! Error {
+            if (failed) return .failed
+            return i16
+        }
+        main proc() i16 {
+            failed := false
+            T :: choose(failed) catch bool
+            value T :: 42
+            return value
+        }
+        """, b"", b"compile-time value",
+    ),
+    "fallible_types_direct_catches_select_types_and_runtime_handlers": (
+        """
+        Error :: enum { failed }
+        Failure :: struct { child type }
+        choose proc(failed bool) type ! Error {
+            if (failed) return .failed
+            return i16
+        }
+        compute proc() i16 ! Failure { return Failure { child = i16 } }
+        recover proc(input i16) i16 {
+            return compute() catch |err| {
+                value err.child :: input
+                yield value + 2
+            }
+        }
+        main proc() [2]i16 {
+            Selected :: choose(false) catch bool
+            Recovered :: choose(true) catch i16
+            first Selected :: 40
+            second Recovered :: 2
+            return [first + second, recover(40)]
+        }
+        """, b"[42, 42]\n", None,
+    ),
+    "fallible_types_composed_metadata_errors_preserve_payloads_and_nominals": (
+        """
+        Child :: distinct i16
+        Failure :: struct { child type, count usize }
+        Other :: enum { missing }
+        leaf proc(failed bool) type ! Failure {
+            if (failed) return Failure { child = Child, count = 2 }
+            return bool
+        }
+        forward proc(failed bool) type ! (Failure | Other) { return try leaf(failed) }
+        Storage proc() type {
+            return forward(true) catch |err| match err {
+                .Failure |info|: [info.count]info.child,
+                .missing: bool,
+            }
+        }
+        main proc() i16 {
+            values Storage() :: [40, 2]
+            return i16(values[0]) + i16(values[1])
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_types_reject_invalid_direct_catch_result": (
+        """
+        Error :: enum { failed }
+        choose proc() type ! Error { return .failed }
+        main proc() i16 {
+            Selected :: choose() catch 42
+            return 42
+        }
+        """, b"", b"incompatible value type",
+    ),
+    "fallible_types_void_completion_and_success_precedence": (
+        """
+        Success :: enum { same, good }
+        Failure :: union(enum) { same type, bad type }
+        work proc(mode usize) void ! Failure {
+            errdefer |err| {
+                if (mode != 2) unreachable
+                match err { .same |T|: if (T != i16) unreachable, .bad: unreachable }
+            }
+            if (mode == 0) return
+            if (mode == 2) return Failure { same = i16 }
+        }
+        choose proc() Success ! Failure { return .same }
+        Storage proc() type {
+            work(0) catch { return bool }
+            work(1) catch { return bool }
+            tag :: choose() catch { return bool }
+            if (tag != .same) return bool
+            work(2) catch |err| {
+                return match err { .same |T|: T, .bad: bool }
+            }
+            return bool
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "fallible_types_reject_backed_enum_metadata_composition": (
+        """
+        Failure :: struct { child type }
+        Other :: enum(i16) { failed = 1 }
+        bad proc() type ! (Failure | Other) { return i16 }
+        Selected proc() type { return bad() catch bool }
+        main proc() Selected() { return 42 }
+        """, b"", b"sum composition requires compatible",
+    ),
     "type_records_undefined_nested_updates_preserve_partial_copies": (
         """
         Config :: struct {

@@ -1208,3 +1208,91 @@ optional_type_metadata_recompiles_owned_private_nominal_payloads test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+fallible_type_metadata_recompiles_owned_private_nominal_payloads test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `Child :: struct { value bool }
+            `ErrorChild :: struct { value bool }
+            `main proc() i16 {
+            `    if (lib.Box($(lib.make(true))) != lib.Box(lib.make(true))) return -1
+            `    if (lib.Box($(lib.make(false))) != lib.Box(lib.make(false))) return -2
+            `    Selected :: lib.Selected(true) catch bool
+            `    Recovered :: lib.Recovered()
+            `    if (Selected == Child or Recovered == ErrorChild) return -3
+            `    selected Selected :: { value = 40 }
+            `    recovered Recovered :: { value = 2 }
+            `    snapshot lib.Snapshot($(lib.make(true))) :: {
+            `        original = { values = [{ value = 19 }, { value = 21 }] },
+            `        replacement = { values = [{ value = 2 }] },
+            `    }
+            `    if (snapshot.original.values[0].value + snapshot.original.values[1].value != 40) return -4
+            `    if (snapshot.replacement.values[0].value != 2) return -5
+            `    failed lib.Box($(lib.make(false))) :: { values = [{ value = 2 }] }
+            `    if (failed.values[0].value != recovered.value) return -6
+            `    return selected.value + recovered.value
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/fallible_types/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `@hide:file
+            `Child :: struct { value i16 }
+            `@hide:file
+            `ErrorChild :: struct { value i16 }
+            `@hide:file
+            `Config :: struct { child type, count usize }
+            `@hide:file
+            `Failure :: struct { child type, count usize }
+            `make proc(success bool) Config ! Failure {
+            `    if (success) return Config { child = Child, count = 2 }
+            `    return Failure { child = ErrorChild, count = 1 }
+            `}
+            `Box proc(input Config ! Failure) type {
+            `    info :: input catch |err| { return struct { values [err.count]err.child } }
+            `    return struct { values [info.count]info.child }
+            `}
+            `Selected proc(success bool) type ! Failure {
+            `    info :: try make(success)
+            `    return info.child
+            `}
+            `Recovered proc() type {
+            `    return Selected(false) catch |err| err.child
+            `}
+            `Snapshot proc(input Config ! Failure) type {
+            `    changed := input
+            `    saved :: changed
+            `    changed = make(false)
+            `    return struct { original Box(saved), replacement Box(changed) }
+            `}
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/fallible_types/library/types.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}
