@@ -231,6 +231,17 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `}
             `BoundaryConfig :: struct { child type, counts [2]mut usize, bias i16 = 2 }
             `record_config proc() BoundaryConfig { return { child = i16, counts = [1, 2] } }
+            `partial_record_config proc() BoundaryConfig {
+            `    config BoundaryConfig := undefined
+            `    config.child = i8
+            `    config.counts[0] = 1
+            `    copied := config
+            `    config.child = bool
+            `    copied.child = i16
+            `    copied.counts[1] = 2
+            `    copied.bias = 2
+            `    return copied
+            `}
             `change_record_config proc(input BoundaryConfig) BoundaryConfig {
             `    copied := input
             `    copied.child = u8
@@ -310,6 +321,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `    same_record_boundary RecordBoundary({ child = i16, counts = [1, 2] }) :: record_boundary
             `    if (same_record_boundary.values[0] + same_record_boundary.values[1] + same_record_boundary.bias != 42) return 0
             `    if (read_record_config(record_config(), 40) != 42) return 0
+            `    partial_boundary RecordBoundary(partial_record_config()) :: record_boundary
+            `    if (partial_boundary.values[0] + partial_boundary.values[1] + partial_boundary.bias != 42) return 0
+            `    if (read_record_config(partial_record_config(), 40) != 42) return 0
             `    if (read_record_pair(record_pair(), 40) != 42 or read_record_pair(record_pair(), 40) != 42) return 0
             `    copied_initialized = same_initialized.second
             `    payload :: packet.choices[0].payload

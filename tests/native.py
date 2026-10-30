@@ -2278,6 +2278,159 @@ CASES = {
         }
         """, b"", b"initialization",
     ),
+    "type_records_undefined_nested_updates_preserve_partial_copies": (
+        """
+        Config :: struct {
+            child type = bool
+            detail struct { count usize, bias i16 }
+            rows [2]mut struct { child type, count usize }
+        }
+        config proc() Config {
+            value Config := undefined
+            value.child = i16
+            value.detail.count = 2
+            copied := value
+            value.detail.bias = 99
+            copied.detail.bias = 2
+            for (usize(0)..copied.rows.len) |index| {
+                copied.rows[index].child = copied.child
+                copied.rows[index].count = index + 1
+            }
+            return copied
+        }
+        Storage proc(input Config) type {
+            return struct { values [input.detail.count]input.rows[1].child, bias i16 = input.detail.bias }
+        }
+        main proc() i16 {
+            value Storage(config()) :: { values = [19, 21] }
+            same Storage(config()) :: value
+            return same.values[0] + same.values[1] + same.bias
+        }
+        """, b"42\n", None,
+    ),
+    "type_records_undefined_tuples_replacement_and_empty_fields": (
+        """
+        Pair :: struct { type, struct { child type, values [0]mut type } }
+        pair proc() Pair {
+            value Pair := undefined
+            value.0 = bool
+            value.1.child = i8
+            copied := value
+            value = {i16, { child = i16, values = [] }}
+            copied.0 = value.0
+            copied.1 = value.1
+            return copied
+        }
+        Element proc(input Pair) type { return field!(input, "0") }
+        add proc($schema Pair, value Element(schema)) Element(schema) {
+            if (schema.1.child != i16) return 0
+            return value + 2
+        }
+        main proc() i16 { return add(pair(), 40) }
+        """, b"42\n", None,
+    ),
+    "type_records_undefined_reject_type_leaf_read": (
+        """
+        Bad proc() type {
+            value struct { child type } := undefined
+            return value.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_reject_value_leaf_read": (
+        """
+        Bad proc() type {
+            value struct { child type, count usize } := undefined
+            value.child = i16
+            return [value.count]value.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_defaults_do_not_initialize_fields": (
+        """
+        config proc() struct { child type = i16 } {
+            value struct { child type = i16 } := undefined
+            return value
+        }
+        main proc() config().child { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_copy_retains_uninitialized_leaves": (
+        """
+        Bad proc() type {
+            value struct { child type, count usize } := undefined
+            value.child = i16
+            copied :: value
+            value.count = 2
+            return [copied.count]copied.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_reject_partial_argument": (
+        """
+        Config :: struct { child type, count usize }
+        Selected proc(value Config) type { return value.child }
+        Bad proc() type {
+            value Config := undefined
+            value.child = i16
+            return Selected(value)
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_reject_partial_erased_argument": (
+        """
+        Config :: struct { child type, count usize }
+        selected proc($value Config) i16 { return 42 }
+        Bad proc() type {
+            value Config := undefined
+            value.child = i16
+            return [usize(selected(value))]i16
+        }
+        main proc() Bad() { return [] }
+        """, b"", b"local value was read before initialization",
+    ),
+    "type_records_undefined_reject_readonly_field_update": (
+        """
+        Bad proc() type {
+            value struct { child type } :: undefined
+            value.child = i16
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_records_undefined_reject_readonly_nested_array_update": (
+        """
+        Bad proc() type {
+            value struct { children [1]type } := undefined
+            value.children[0] = i16
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "type_records_undefined_reject_invalid_schema": (
+        """
+        Bad proc() type {
+            value struct { child type, count i8 = 128 } := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"numeric literal is outside its runtime type's range",
+    ),
+    "type_records_undefined_construction_is_bounded": (
+        """
+        Bad proc() type {
+            value struct { child type, rows [1000000000]mut struct { child type } } := undefined
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"compile-time execution exceeds its recursion or step limit",
+    ),
     "type_records_local_schema_defaults_and_owned_copies": (
         """
         Storage proc() type {
