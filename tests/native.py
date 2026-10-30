@@ -2278,6 +2278,369 @@ CASES = {
         }
         """, b"", b"initialization",
     ),
+    "metadata_slices_direct_literal_views_start_bounded_evaluation": (
+        """
+        Selected proc($items []type) type { return items[0] }
+        main proc() [2]usize {
+            value Selected(([i16, bool])[..1]) :: 42
+            return [usize(value), $(([i16, bool])[1..].len)]
+        }
+        """, b"[42, 1]\n", None,
+    ),
+    "metadata_slices_contextual_literals_inputs_results_and_erased_inputs": (
+        """
+        Id :: distinct i16
+        types proc() []type { return [Id, i16] }
+        pass proc(values []type) []type { return values }
+        window proc(values []type, start usize, end usize) []type { return values[start..end] }
+        Selected proc(values []type) type { return values[0] }
+        exact proc($values []type, value Selected(values)) Selected(values) { return value }
+        Storage proc() type {
+            empty []type :: []
+            if (pass(empty).len != 0 or types().len != 2) return bool
+            return Selected(window(pass([bool, Id]), 1, 2))
+        }
+        main proc() i16 {
+            value Storage() :: 40
+            return i16(exact(types(), value)) + 2
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_cache_keys_preserve_nominal_leaves_order_and_length": (
+        """
+        Id :: distinct i16
+        Other :: distinct i16
+        Token proc($values []type) type { return struct {} }
+        types proc() []type {
+            backing [4]type :: [bool, Id, i16, u8]
+            return backing[1..3]
+        }
+        Storage proc() type {
+            if (Token(types()) != Token([Id, i16])) return bool
+            if (Token(types()) == Token([Other, i16])) return bool
+            if (Token(types()) == Token([i16, Id])) return bool
+            if (Token(types()) == Token([Id])) return bool
+            if (Token([]) != Token([])) return bool
+            return types()[0]
+        }
+        main proc() i16 {
+            value Storage() :: 42
+            return i16(value)
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_record_slices_nested_leaves_and_exact_cache_identity": (
+        """
+        Id :: distinct i16
+        Other :: distinct i16
+        Info :: struct { child type, count usize, name string }
+        Row :: struct { types []type, fields []Info }
+        Token proc($values []Info) type { return struct {} }
+        fields proc() []Info { return [{ child = Id, count = 2, name = "value" }] }
+        rows proc() []Row {
+            return [{ types = [Id, i16], fields = fields() }]
+        }
+        Storage proc() type {
+            empty []Info :: []
+            if (empty.len != 0 or rows()[0].types[1] != i16) return bool
+            source :: rows()[0].fields
+            copied := source[0]
+            copied.child = bool
+            copied.count = 3
+            if (source[0].child != Id or source[0].count != 2) return bool
+            if (Token(source) != Token(fields())) return bool
+            if (Token(source) == Token([{ child = Other, count = 2, name = "value" }])) return bool
+            if (Token(source) == Token([{ child = Id, count = 3, name = "value" }])) return bool
+            if (Token(source) == Token([{ child = Id, count = 2, name = "other" }])) return bool
+            return [source[0].count]source[0].child
+        }
+        main proc() i16 {
+            values Storage() :: [40, 2]
+            return i16(values[0]) + i16(values[1])
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_nested_slices_by_value_and_inline_iteration": (
+        """
+        Info :: struct { child type, count usize }
+        rows proc() [][]type { return [[i8, i16], [], [bool]] }
+        fields proc() []Info { return [{ child = i16, count = 2 }] }
+        Storage proc() type {
+            total usize := 0
+            for rows() |row, index| {
+                total += row.len + index
+                for row |T| {
+                    if (T == i16) total += 1
+                }
+            }
+            inline for rows() |row| {
+                inline for row |T| {
+                    if (T == bool) total += 1
+                }
+            }
+            for fields() |field| {
+                copied := field
+                copied.child = bool
+                copied.count = 99
+            }
+            inline for fields() |field| {
+                if (field.child != i16 or field.count != 2) return bool
+            }
+            if (total != 8) return bool
+            return [fields()[0].count]fields()[0].child
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_slices_subviews_empty_boundaries_and_readonly_backing_replacement": (
+        """
+        types proc() []type {
+            backing [3]type := [bool, i16, u8]
+            frozen :: backing
+            saved :: frozen[1..2]
+            backing = [u8, bool, bool]
+            if (saved[0] != i16 or backing[1] != bool) return []
+            return saved
+        }
+        Storage proc() type {
+            source :: types()
+            full :: source[..]
+            nested :: full[0..full.len][..1]
+            if (nested.len != 1 or nested[0] != i16) return bool
+            if (source[0..0].len != 0 or source[1..1].len != 0) return bool
+            empty []type :: []
+            if (empty[..].len != 0 or empty[0..0].len != 0) return bool
+            return nested[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_optional_fallible_parameters_results_and_captures": (
+        """
+        Failure :: struct { types []type }
+        Info :: struct { child type, count usize }
+        choose proc(present bool, failed bool) ?[]Info ! Failure {
+            if (failed) return Failure { types = [i16] }
+            if (present) return some!([{ child = i16, count = 2 }])
+            return null
+        }
+        pass proc(value ?[]Info ! Failure) ?[]Info ! Failure { return value }
+        Token proc($value ?[]Info ! Failure) type { return struct {} }
+        Storage proc() type {
+            original :: pass(choose(true, false))
+            if (Token(original) != Token(choose(true, false))) return bool
+            if (Token(original) == Token(choose(false, false))) return bool
+            if (Token(original) == Token(choose(false, true))) return bool
+            missing :: pass(choose(false, false)) catch null
+            if (missing != null) return bool
+            pass(choose(false, true)) catch |err| {
+                if (err.types[0] != i16) return bool
+                yield null
+            }
+            selected :: original catch null
+            if selected |fields| {
+                return [fields[0].count]fields[0].child
+            }
+            return bool
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_slices_reject_mutable_slice_annotation": (
+        """
+        types proc() []mut type { return [i16] }
+        main proc() types()[0] { return 42 }
+        """, b"", b"compile-time result cannot escape evaluation as a source value",
+    ),
+    "metadata_slices_reject_mutable_array_backing": (
+        """
+        types proc() []type {
+            backing [1]mut type := [i16]
+            return backing[..]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"compile-time result cannot escape evaluation as a source value",
+    ),
+    "metadata_slices_reject_mutable_binding_with_readonly_array_elements": (
+        """
+        types proc() []type {
+            backing [1]type := [i16]
+            return backing[..]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"compile-time result cannot escape evaluation as a source value",
+    ),
+    "metadata_record_slices_reject_mutable_array_backing": (
+        """
+        Info :: struct { child type, count usize }
+        fields proc() []Info {
+            backing [1]mut Info := [{ child = i16, count = 2 }]
+            return backing[..]
+        }
+        main proc() fields()[0].child { return 42 }
+        """, b"", b"compile-time result cannot escape evaluation as a source value",
+    ),
+    "metadata_slices_reject_sentinel_annotation": (
+        """
+        types proc() [;0]type { return [i16] }
+        main proc() types()[0] { return 42 }
+        """, b"", b"operator requires compatible operand types",
+    ),
+    "metadata_slices_reject_sentinel_subview": (
+        """
+        types proc() []type {
+            backing [2]type :: [i16, bool]
+            return backing[..1;0]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"operator requires compatible operand types",
+    ),
+    "metadata_slices_reject_reversed_bounds": (
+        """
+        types proc() []type {
+            backing [2]type :: [i16, bool]
+            return backing[2..1]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"slice bounds are invalid",
+    ),
+    "metadata_slices_reject_excessive_array_bounds": (
+        """
+        types proc() []type {
+            backing [1]type :: [i16]
+            return backing[..2]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"slice bounds are invalid",
+    ),
+    "metadata_slices_reject_excessive_subview_bounds": (
+        """
+        types proc() []type { return [i16, bool] }
+        bad proc() []type { return types()[1..2][..2] }
+        main proc() bad()[0] { return 42 }
+        """, b"", b"slice bounds are invalid",
+    ),
+    "metadata_slices_reject_start_beyond_empty_boundary": (
+        """
+        types proc() []type { return [] }
+        bad proc() []type { return types()[1..1] }
+        main proc() bad()[0] { return 42 }
+        """, b"", b"slice bounds are invalid",
+    ),
+    "metadata_slices_reject_non_usize_start": (
+        """
+        types proc() []type { return [i16] }
+        bad proc() []type { return types()[u8(0)..] }
+        main proc() bad()[0] { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "metadata_slices_reject_non_usize_end": (
+        """
+        types proc() []type { return [i16] }
+        bad proc() []type { return types()[..i16(1)] }
+        main proc() bad()[0] { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "metadata_slices_reject_non_usize_element_index": (
+        """
+        types proc() []type { return [i16] }
+        main proc() types()[u8(0)] { return 42 }
+        """, b"", b"array index must have type usize",
+    ),
+    "metadata_slices_reject_element_index_at_length": (
+        """
+        types proc() []type { return [i16] }
+        main proc() types()[types().len] { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "metadata_slices_reject_empty_element_index": (
+        """
+        types proc() []type { return [] }
+        main proc() types()[0] { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "metadata_slices_reject_non_type_literal_leaf": (
+        """
+        types proc() []type { return [42] }
+        main proc() types()[0] { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "metadata_record_slices_reject_incompatible_literal_field": (
+        """
+        Info :: struct { child type, count usize }
+        fields proc() []Info { return [{ child = i16, count = false }] }
+        main proc() fields()[0].child { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "metadata_slices_reject_readonly_element_assignment": (
+        """
+        types proc() []type {
+            values []type := [i16]
+            values[0] = bool
+            return values
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_record_slices_reject_readonly_field_assignment": (
+        """
+        Info :: struct { child type, count usize }
+        fields proc() []Info {
+            values []Info := [{ child = i16, count = 2 }]
+            values[0].count = 3
+            return values
+        }
+        main proc() fields()[0].child { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_slices_reject_uninitialized_type_leaf": (
+        """
+        types proc() []type {
+            backing [1]type := undefined
+            frozen :: backing
+            return frozen[..]
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "metadata_record_slices_reject_uninitialized_value_leaf": (
+        """
+        Info :: struct { child type, count usize }
+        fields proc() []Info {
+            partial Info := undefined
+            partial.child = i16
+            return [partial]
+        }
+        main proc() fields()[0].child { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "metadata_slices_reject_runtime_producer_dependencies": (
+        """
+        types proc(wide bool) []type {
+            if (wide) return [i16]
+            return [i8]
+        }
+        read proc(wide bool) i16 {
+            value types(wide)[0] :: 42
+            return i16(value)
+        }
+        main proc() i16 { return read(true) }
+        """, b"", b"compile-time value",
+    ),
+    "metadata_slices_inline_captures_specialize_runtime_bodies": (
+        """
+        types proc() []type { return [i16, u8] }
+        add proc(value i16) i16 { return value + 1 }
+        main proc() i16 {
+            total i16 := 0
+            inline for types() |T, index| {
+                value T :: 19
+                total += add(i16(value)) + i16(index + 1)
+            }
+            return total - 1
+        }
+        """, b"42\n", None,
+    ),
     "optional_types_procedure_boundaries_copies_and_static_captures": (
         """
         Token :: distinct i16

@@ -1296,3 +1296,87 @@ fallible_type_metadata_recompiles_owned_private_nominal_payloads test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+readonly_type_slices_recompile_owned_private_nominal_payloads test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `Child :: struct { value bool }
+            `Storage proc() type {
+            `    saved :: $(lib.make())
+            `    if (lib.Box(saved) != lib.Box(lib.make())) return bool
+            `    if (lib.Box(saved) != lib.Box(lib.literal())) return bool
+            `    Selected :: lib.types()[0]
+            `    if (Selected == Child or saved[0].child != Selected) return bool
+            `    return lib.Box(saved)
+            `}
+            `main proc() i16 {
+            `    value lib.types()[0] :: { value = 40 }
+            `    if (lib.read(lib.make(), value) != 42) return -1
+            `    box Storage() :: { values = [{ value = 19 }, { value = 21 }] }
+            `    same lib.Box(lib.literal()) :: box
+            `    return same.values[0].value + same.values[1].value + same.bias
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/readonly_type_slices/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `@hide:file
+            `Child :: struct { value i16 }
+            `@hide:file
+            `Config :: struct { child type, count usize }
+            `types proc() []type { return [Child] }
+            `literal proc() []Config {
+            `    return [{ child = Child, count = 2 }, { child = Child, count = 2 }]
+            `}
+            `make proc() []Config {
+            `    rows [3]Config := [
+            `        { child = Child, count = 99 },
+            `        { child = Child, count = 2 },
+            `        { child = Child, count = 2 },
+            `    ]
+            `    frozen :: rows
+            `    saved :: frozen[1..][..2]
+            `    rows = [
+            `        { child = bool, count = 7 },
+            `        { child = bool, count = 7 },
+            `        { child = bool, count = 7 },
+            `    ]
+            `    return saved
+            `}
+            `Box proc(input []Config) type {
+            `    return struct { values [input[0].count]input[0].child, bias i16 = i16(input[1].count) }
+            `}
+            `read proc($input []Config, value input[0].child) i16 {
+            `    return value.value + i16(input[1].count)
+            `}
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/readonly_type_slices/library/types.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

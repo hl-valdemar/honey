@@ -3122,6 +3122,35 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
     }
     if (execution.evaluate_values and ast.node_class(&state.tree, id) == .expression) {
         kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .slice) {
+            base :: ast.slice_expr(&state.tree, id).base
+            root := base
+            while (true) {
+                root_kind :: ast.expr_kind(&state.tree, root)
+                if (root_kind == .selection) root = ast.selection_expr(&state.tree, root).base
+                else if (root_kind == .index) root = ast.index_expr(&state.tree, root).base
+                else if (root_kind == .unary and ast.unary_expr(&state.tree, root).operator == .unwrap)
+                    root = ast.unary_expr(&state.tree, root).operand
+                else if (root_kind == .builtin_call
+                    and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, root).name), "field")
+                    and ast.call_arg_count(&state.tree, root) == 2)
+                    root = ast.call_arg(&state.tree, root, 0)
+                else break
+            }
+            place :: binding(state, root)
+            if (place.kind == .declaration
+                and ast.node_class(&state.tree, place.data.declaration) == .statement
+                and ast.statement_decl(&state.tree, place.data.declaration).mutability == .variable) {
+                annotation :: try expression_type(state, base, 0)
+                if (type_record_storage(state, annotation, 0)
+                    and ast.expr_kind(&state.tree, annotation) == .array_type) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .comptime_value_escape, ast.node_span(&state.tree, id))
+                    execution.pending_flow = .invalid
+                    return
+                }
+            }
+        }
         if (kind == .block_expr) {
             execution.mapping[usize(id)] = try execute_type_value_block(state, execution,
                 ast.block_expr(&state.tree, id), no_node)
@@ -3874,6 +3903,15 @@ expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
 type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
     if (ast.node_class(&state.tree, id) != .expression) return true
     kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .slice) {
+        annotation :: try expression_type(state, id, 0)
+        if (!try metadata_sequence(state, annotation)) return true
+        value :: try type_slice_value(state, id, annotation)
+        if (value == no_node) return false
+        try replace(state, id, value)
+        try refresh(state)
+        return true
+    }
     if (kind == .unary and ast.unary_expr(&state.tree, id).operator == .unwrap) {
         operand :: ast.unary_expr(&state.tree, id).operand
         annotation :: try expression_type(state, operand, 0)
@@ -3912,6 +3950,12 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             !record and !try execution_array_storage(state, array.type)
             and !try metadata_sequence(state, array.type)
         ) return true
+        if (try metadata_sequence(state, array.type)
+            and ast.expr_kind(&state.tree, array.value) == .literal_undefined) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .read_before_initialization, ast.node_span(&state.tree, id))
+            return false
+        }
         selected := no_node
         selected_type := no_node
         if (record) {
@@ -3936,7 +3980,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
                 selected_type = ast.field(&state.tree, ast.record_field(&state.tree, type, slot)).type?
         } else if (kind == .index) {
             index :: try type_array_index(state, ast.index_expr(&state.tree, id).index,
-                ast.array_element_count(&state.tree, array.value))
+                ast.array_element_count(&state.tree, array.value), false)
             if (index == no_index) return false
             selected = ast.array_element(&state.tree, array.value, index)
             if (!type_record_storage(state, array.type, 0))
@@ -4114,8 +4158,15 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
                 .invalid_sum_type, ast.node_span(&state.tree, type))
         return false
     }
-    if (ast.expr_kind(&state.tree, type) == .slice_type)
-        return try type_record_check(state, ast.slice_type(&state.tree, type).element)
+    if (ast.expr_kind(&state.tree, type) == .slice_type) {
+        descriptor :: ast.slice_type(&state.tree, type)
+        if (descriptor.mutable or descriptor.sentinel != null) {
+            code diagnostics.Code :: if (descriptor.mutable) .comptime_value_escape else .invalid_operand
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, code, ast.node_span(&state.tree, type))
+            return false
+        }
+        return try type_record_check(state, descriptor.element)
+    }
     if (ast.expr_kind(&state.tree, type) == .array_type) {
         if (!try type_step(state, type)) return false
         descriptor :: ast.array_type(&state.tree, type)
@@ -4231,7 +4282,7 @@ type_record_value proc(state @mut State, expression, annotation ast.NodeId) ast.
 }
 
 @hide:file
-type_array_index proc(state @mut State, expression ast.NodeId, count usize) usize ! Error {
+type_array_index proc(state @mut State, expression ast.NodeId, count usize, boundary bool) usize ! Error {
     usize_type :: try builtin(state, expression, .usize)
     actual :: try expression_type(state, expression, 0)
     if (!flexible(state, expression) and (actual == no_node or !try same_type(state, actual, usize_type))) {
@@ -4241,9 +4292,9 @@ type_array_index proc(state @mut State, expression ast.NodeId, count usize) usiz
     }
     value :: try evaluate_ir(state, expression, usize_type)
     if (value.kind != .integer) return no_index
-    if (value.magnitude >= u64(count)) {
-        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-            .index_out_of_bounds, ast.node_span(&state.tree, expression))
+    if (value.magnitude > u64(count) or (!boundary and value.magnitude == u64(count))) {
+        code diagnostics.Code :: if (boundary) .invalid_slice_bounds else .index_out_of_bounds
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, code, ast.node_span(&state.tree, expression))
         return no_index
     }
     return usize(value.magnitude)
@@ -4428,6 +4479,100 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
     return result
 }
 
+# readonly metadata views own their leaves. mutable backing needs borrowing semantics,
+# not a snapshot that silently stops observing later element writes.
+@hide:file
+type_slice_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
+    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+    state.type_execution_depth += 1
+    defer state.type_execution_depth -= 1
+    type :: try canonical_type(state, annotation)
+    if (!try type_record_check(state, type)) return no_node
+    descriptor :: ast.slice_type(&state.tree, type)
+    span :: ast.node_span(&state.tree, expression)
+    kind :: ast.expr_kind(&state.tree, expression)
+    if (kind == .literal_undefined) {
+        result :: try ast.add_typed_constant(state.builder, span, type, expression)
+        try refresh(state)
+        return result
+    }
+    if (kind == .typed_constant) {
+        actual :: ast.typed_constant(&state.tree, expression)
+        if (try same_type(state, type, actual.type)) return expression
+    }
+    source := expression
+    start := usize(0)
+    end := no_index
+    if (kind == .slice) {
+        view :: ast.slice_expr(&state.tree, expression)
+        if (view.sentinel != null) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_operand, span)
+            return no_node
+        }
+        source = view.base
+    }
+    if (ast.expr_kind(&state.tree, source) == .array_literal) {
+        for (0..ast.array_element_count(&state.tree, source)) |_| {
+            if (!try type_step(state, expression)) return no_node
+        }
+        length :: try ast.add_integer(state.builder, span, u64(ast.array_element_count(&state.tree, source)))
+        array :: try ast.add_array_type(state.builder, span, length, descriptor.element, false)
+        try refresh(state)
+        source = try type_array_value(state, source, array)
+    } else {
+        actual :: try expression_type(state, source, 0)
+        if (actual == no_node) return no_node
+        actual_kind :: ast.expr_kind(&state.tree, actual)
+        if ((actual_kind != .array_type and actual_kind != .slice_type)
+            or (actual_kind == .array_type and kind != .slice)) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .type_mismatch, span)
+            return no_node
+        }
+        mutable :: if (actual_kind == .array_type) ast.array_type(&state.tree, actual).mutable
+            else ast.slice_type(&state.tree, actual).mutable
+        element :: if (actual_kind == .array_type) ast.array_type(&state.tree, actual).element
+            else ast.slice_type(&state.tree, actual).element
+        if (mutable) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
+            return no_node
+        }
+        if (!try same_type(state, descriptor.element, element)) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .type_mismatch, span)
+            return no_node
+        }
+        source = try type_execution_value(state, source, actual)
+    }
+    if (source == no_node) return no_node
+    values :: ast.typed_constant(&state.tree, source).value
+    if (ast.expr_kind(&state.tree, values) == .literal_undefined) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+        return no_node
+    }
+    count :: ast.array_element_count(&state.tree, values)
+    end = count
+    if (kind == .slice) {
+        view :: ast.slice_expr(&state.tree, expression)
+        if (view.start) |bound| start = try type_array_index(state, bound, count, true)
+        if (start == no_index) return no_node
+        if (view.end) |bound| end = try type_array_index(state, bound, count, true)
+        if (end == no_index) return no_node
+        if (start > end) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_slice_bounds, span)
+            return no_node
+        }
+    }
+    elements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&elements)
+    for (start..end) |i| {
+        if (!try type_step(state, expression)) return no_node
+        try arraylist.append(&elements, ast.array_element(&state.tree, values, i))
+    }
+    literal :: try ast.add_array_literal(state.builder, span, elements.items)
+    result :: try ast.add_typed_constant(state.builder, span, type, literal)
+    try refresh(state)
+    return result
+}
+
 # rebuild only the field/index path so previous snapshots retain their owned values.
 @hide:file
 type_array_update proc(
@@ -4483,7 +4628,7 @@ type_array_update proc(
         expression :: try type_snapshot(state, execution, ast.index_expr(&state.tree, first).index)
         if (!try expand_type_matches(state, expression)) return no_node
         count = ast.array_element_count(&state.tree, array.value)
-        index = try type_array_index(state, expression, count)
+        index = try type_array_index(state, expression, count, false)
         if (index == no_index) return no_node
         element_type = descriptor.element
         previous = ast.array_element(&state.tree, array.value, index)
@@ -4691,6 +4836,8 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         declaration :: ast.statement_decl(&state.tree, resolved.data.declaration)
         if (declaration.mutability != .constant or !try type_step(state, expression)) return no_node
         if (declaration.type != null and !try same_type(state, annotation, declaration.type?)) {
+            if (try metadata_sequence(state, annotation))
+                return try type_slice_value(state, expression, annotation)
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                 .type_mismatch, ast.node_span(&state.tree, expression))
             return no_node
@@ -4708,18 +4855,8 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         }
         return value
     }
-    if (
-        !is_type(state, annotation) and type_record_storage(state, annotation, 0)
-        and ast.expr_kind(&state.tree, try canonical_type(state, annotation)) == .slice_type
-    ) {
-        if (ast.expr_kind(&state.tree, expression) == .typed_constant) {
-            actual :: ast.typed_constant(&state.tree, expression)
-            if (try same_type(state, annotation, actual.type)) return expression
-        }
-        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-            .type_mismatch, ast.node_span(&state.tree, expression))
-        return no_node
-    }
+    if (try metadata_sequence(state, annotation))
+        return try type_slice_value(state, expression, annotation)
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
         type :: try canonical_type(state, annotation)
         if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type)
