@@ -1,6 +1,7 @@
 import "@std/mem"
 import "@std/strmap"
 import "@std/arraylist"
+import "@std/enummap"
 
 import "@source/diagnostics"
 import "@source/strpool"
@@ -475,11 +476,14 @@ is_digit proc(char u8) bool {
 }
 
 @hide:file
+diagnostic_codes :: $enummap.init(ErrorCode, diagnostics.Code, {
+    float_must_end_with_digit = .float_must_end_with_digit,
+    unterminated_string = .unterminated_string,
+})
+
+@hide:file
 diagnostic_code proc(code ErrorCode) diagnostics.Code {
-    return match code {
-        .float_must_end_with_digit: .float_must_end_with_digit
-        .unterminated_string: .unterminated_string
-    }
+    return enummap.get(&diagnostic_codes, code)?
 }
 
 @hide:file

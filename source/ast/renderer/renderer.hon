@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/arraylist"
+import "@std/enummap"
 import "@source/ast"
 
 #! owns output bytes and retains its allocator; release with deinit.
@@ -162,18 +163,22 @@ append_text proc(renderer @mut Renderer, text []u8) void ! mem.AllocError {
 }
 
 @hide:file
+assignment_operator_texts :: $enummap.init_filled(
+    ast.BinaryOperator, []u8, "", {
+        add = "+",
+        subtract = "-",
+        multiply = "*",
+        divide = "/",
+        bit_and = "&",
+        bit_or = "|",
+        bit_xor = "xor",
+        shift_left = "<<",
+        shift_right = ">>",
+        shift_left_saturating = "<<|",
+    },
+)
+
+@hide:file
 assignment_operator_text proc(operator ast.BinaryOperator) []u8 {
-    return match operator {
-        .add: "+"
-        .subtract: "-"
-        .multiply: "*"
-        .divide: "/"
-        .bit_and: "&"
-        .bit_or: "|"
-        .bit_xor: "xor"
-        .shift_left: "<<"
-        .shift_right: ">>"
-        .shift_left_saturating: "<<|"
-        else: unreachable
-    }
+    return enummap.get(&assignment_operator_texts, operator)?
 }

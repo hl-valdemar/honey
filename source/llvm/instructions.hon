@@ -1,6 +1,63 @@
 import "@std/io"
+import "@std/enummap"
 import "@source/ir"
 import "@source/diagnostics"
+
+@hide:file
+bitwise_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+    bit_and = "and",
+    bit_or = "or",
+    bit_xor = "xor",
+})
+
+@hide:file
+float_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+    add = "fadd",
+    subtract = "fsub",
+    multiply = "fmul",
+    divide = "fdiv",
+})
+
+@hide:file
+integer_opcodes :: $enummap.init_filled(ir.Op, []u8, "", {
+    add = "add",
+    subtract = "sub",
+    multiply = "mul",
+})
+
+@hide:file
+float_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
+    equal = "oeq",
+    not_equal = "une",
+    less = "olt",
+    less_equal = "ole",
+    greater = "ogt",
+    greater_equal = "oge",
+})
+
+@hide:file
+integer_predicates :: $enummap.init_filled(ir.Op, []u8, "", {
+    equal = "eq",
+    not_equal = "ne",
+    less = "lt",
+    less_equal = "le",
+    greater = "gt",
+    greater_equal = "ge",
+})
+
+@hide:file
+conversion_upper_bounds :: $enummap.init_filled(ir.Type, []u8, "", {
+    i8 = "1.280000e+02",
+    i16 = "3.276800e+04",
+    i32 = "2.147483648e+09",
+    int = "9.223372036854775808e+18",
+    isize = "9.223372036854775808e+18",
+    u8 = "2.560000e+02",
+    u16 = "6.553600e+04",
+    u32 = "4.294967296e+09",
+    u64 = "1.8446744073709551616e+19",
+    usize = "1.8446744073709551616e+19",
+})
 
 @hide
 emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruction) void ! io.WriteError {
@@ -311,12 +368,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         .bit_and, .bit_or, .bit_xor: {
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
-            opcode []u8 :: match instruction.op {
-                .bit_and: "and"
-                .bit_or: "or"
-                .bit_xor: "xor"
-                else: unreachable
-            }
+            opcode :: enummap.get(&bitwise_opcodes, instruction.op)?
             try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, ir.integer_bits(instruction.type), left, right})
         }
         .shift_left, .shift_right, .shift_left_saturating: result = try emit_shift(state, instruction)
@@ -324,13 +376,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
             if (instruction.type == .float) {
-                opcode []u8 :: match instruction.op {
-                    .add: "fadd"
-                    .subtract: "fsub"
-                    .multiply: "fmul"
-                    .divide: "fdiv"
-                    else: unreachable
-                }
+                opcode :: enummap.get(&float_opcodes, instruction.op)?
                 try io.print("  %r{} = {s} double %r{}, %r{}\n", output, {result, opcode, left, right})
             } else if (instruction.op == .divide) {
                 bits :: ir.integer_bits(instruction.type)
@@ -349,12 +395,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                 opcode []u8 :: if (ir.unsigned_integer(instruction.type)) "udiv" else "sdiv"
                 try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, bits, left, right})
             } else {
-                opcode []u8 :: match instruction.op {
-                    .add: "add"
-                    .subtract: "sub"
-                    .multiply: "mul"
-                    else: unreachable
-                }
+                opcode :: enummap.get(&integer_opcodes, instruction.op)?
                 bits :: ir.integer_bits(instruction.type)
                 sign []u8 :: if (ir.unsigned_integer(instruction.type)) "u" else "s"
                 pair :: fresh(state)
@@ -370,15 +411,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             right :: try load(state, instruction.right)
             operand_type :: state.values[usize(instruction.left)]
             if (operand_type.kind == .float) {
-                predicate []u8 :: match instruction.op {
-                    .equal: "oeq"
-                    .not_equal: "une"
-                    .less: "olt"
-                    .less_equal: "ole"
-                    .greater: "ogt"
-                    .greater_equal: "oge"
-                    else: unreachable
-                }
+                predicate :: enummap.get(&float_predicates, instruction.op)?
                 try io.print("  %r{} = fcmp {s} double %r{}, %r{}\n", output, {result, predicate, left, right})
             } else {
                 prefix []u8 := ""
@@ -386,15 +419,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                     if (ir.unsigned_integer(operand_type.kind)) prefix = "u"
                     else prefix = "s"
                 }
-                predicate []u8 :: match instruction.op {
-                    .equal: "eq"
-                    .not_equal: "ne"
-                    .less: "lt"
-                    .less_equal: "le"
-                    .greater: "gt"
-                    .greater_equal: "ge"
-                    else: unreachable
-                }
+                predicate :: enummap.get(&integer_predicates, instruction.op)?
                 try io.print("  %r{} = icmp {s}{s} ", output, {result, prefix, predicate})
                 try write_type(output, state.module, operand_type)
                 try io.print(" %r{}, %r{}\n", output, {left, right})
@@ -644,17 +669,7 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
         upper_valid :: fresh(state)
         valid :: fresh(state)
         failed :: fresh(state)
-        upper []u8 :: match destination {
-            .i8: "1.280000e+02"
-            .i16: "3.276800e+04"
-            .i32: "2.147483648e+09"
-            .int, .isize: "9.223372036854775808e+18"
-            .u8: "2.560000e+02"
-            .u16: "6.553600e+04"
-            .u32: "4.294967296e+09"
-            .u64, .usize: "1.8446744073709551616e+19"
-            else: unreachable
-        }
+        upper :: enummap.get(&conversion_upper_bounds, destination)?
         try io.print("  %r{} = call double @llvm.trunc.f64(double %r{})\n", output, {truncated, operand})
         if (destination_unsigned) try io.print("  %r{} = fcmp oge double %r{}, 0.0\n", output, {lower_valid, truncated})
         else try io.print("  %r{} = fcmp oge double %r{}, -{s}\n", output, {lower_valid, truncated, upper})

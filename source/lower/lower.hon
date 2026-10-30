@@ -1,6 +1,7 @@
 import "@std/mem"
 import "@std/arraylist"
 import "@std/strconv"
+import "@std/enummap"
 import "@ffi/c"
 import "@source/ast"
 import "@source/diagnostics"
@@ -182,34 +183,42 @@ lower_module proc(
 }
 
 @hide:file
+base_types :: $enummap.init_filled(
+    typecheck.TypeKind, ir.Type, ir.Type.invalid, {
+        int = .int,
+        usize = .usize,
+        i8 = .i8,
+        i16 = .i16,
+        i32 = .i32,
+        isize = .isize,
+        u8 = .u8,
+        u16 = .u16,
+        u32 = .u32,
+        u64 = .u64,
+        array = .array,
+        record = .record,
+        pointer = .pointer,
+        float = .float,
+        bool = .bool,
+        string = .string,
+        void = .void,
+        function = .function,
+        none = .invalid,
+        invalid = .invalid,
+        range = .invalid,
+        type_value = .invalid,
+        null = .invalid,
+        anyopaque = .invalid,
+    },
+)
+
+@hide:file
 lower_type proc(state @State, type typecheck.Type) ir.Type {
     if (type.kind == .enumeration) return lower_type(state, typecheck.Type{ kind = typecheck.enum_type(state.checked, type.enum_type).backing })
     if (type.kind == .slice) return .record
     if (type.kind == .fallible) return .record
     if (type.kind == .optional) return lower_optional_type(state, typecheck.array_type(state.checked, type.array_type).element)
-    return match type.kind {
-        .int: .int
-        .usize: .usize
-        .i8: .i8
-        .i16: .i16
-        .i32: .i32
-        .isize: .isize
-        .u8: .u8
-        .u16: .u16
-        .u32: .u32
-        .u64: .u64
-        .array: .array
-        .record: .record
-        .pointer: .pointer
-        .float: .float
-        .bool: .bool
-        .string: .string
-        .void: .void
-        .function: .function
-        .enumeration: unreachable
-        .none, .invalid, .range, .type_value, .null, .anyopaque: .invalid
-        .slice, .optional, .fallible: unreachable
-    }
+    return enummap.get(&base_types, type.kind)?
 }
 
 @hide:file
@@ -1047,26 +1056,39 @@ lower_statement proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
 }
 
 @hide:file
+binary_ops :: $enummap.init_filled(
+    ast.BinaryOperator, ir.Op, ir.Op.constant, {
+        add = .add,
+        subtract = .subtract,
+        multiply = .multiply,
+        divide = .divide,
+        bit_and = .bit_and,
+        bit_or = .bit_or,
+        bit_xor = .bit_xor,
+        shift_left = .shift_left,
+        shift_right = .shift_right,
+        shift_left_saturating = .shift_left_saturating,
+        equal = .equal,
+        not_equal = .not_equal,
+        less = .less,
+        less_equal = .less_equal,
+        greater = .greater,
+        greater_equal = .greater_equal,
+    },
+)
+
+@hide:file
+unary_ops :: $enummap.init_filled(
+    ast.UnaryOperator, ir.Op, ir.Op.constant, {
+        negate = .negate,
+        logical_not = .logical_not,
+        bit_not = .bit_not,
+    },
+)
+
+@hide:file
 binary_op proc(operator ast.BinaryOperator) ir.Op {
-    return match operator {
-        .add: .add
-        .subtract: .subtract
-        .multiply: .multiply
-        .divide: .divide
-        .bit_and: .bit_and
-        .bit_or: .bit_or
-        .bit_xor: .bit_xor
-        .shift_left: .shift_left
-        .shift_right: .shift_right
-        .shift_left_saturating: .shift_left_saturating
-        .equal: .equal
-        .not_equal: .not_equal
-        .less: .less
-        .less_equal: .less_equal
-        .greater: .greater
-        .greater_equal: .greater_equal
-        .logical_and, .logical_or: unreachable
-    }
+    return enummap.get(&binary_ops, operator)?
 }
 
 @hide:file
@@ -2249,12 +2271,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             }
             operand :: try lower_expression(state, expression.operand)
             if (state.terminated or trap_type(state, id)) return ir.no_value
-            op ir.Op :: match expression.operator {
-                .negate: .negate
-                .logical_not: .logical_not
-                .bit_not: .bit_not
-                .address_of, .dereference, .unwrap: unreachable
-            }
+            op :: enummap.get(&unary_ops, expression.operator)?
             return try emit(state, ir.Instruction{ op = op, type = type, left = operand, span = span })
         }
         .binary: {

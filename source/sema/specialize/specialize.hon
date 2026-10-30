@@ -1,6 +1,7 @@
 import "@std/mem"
 import "@std/arraylist"
 import "@std/hashmap"
+import "@std/enummap"
 import "@source/ast"
 import "@source/diagnostics"
 import "@source/strpool"
@@ -5296,19 +5297,25 @@ replace proc(state @mut State, target, source ast.NodeId) void ! mem.AllocError 
 }
 
 @hide:file
+builtin_identities :: $enummap.init_filled(
+    sema.BuiltinType,
+    sema.BuiltinType,
+    sema.BuiltinType.type, {
+    i64 = .int, c_long = .int, c_longlong = .int,
+    f64 = .float,
+    uint = .u64, c_ulong = .u64, c_ulonglong = .u64,
+    c_char = .i8,
+    c_uchar = .u8,
+    c_short = .i16,
+    c_ushort = .u16,
+    c_int = .i32,
+    c_uint = .u32,
+})
+
+@hide:file
 builtin_identity proc(kind sema.BuiltinType) sema.BuiltinType {
-    return match kind {
-        .i64, .c_long, .c_longlong: .int
-        .f64: .float
-        .uint, .c_ulong, .c_ulonglong: .u64
-        .c_char: .i8
-        .c_uchar: .u8
-        .c_short: .i16
-        .c_ushort: .u16
-        .c_int: .i32
-        .c_uint: .u32
-        else: kind
-    }
+    if (enummap.get(&builtin_identities, kind)) |identity| return identity
+    return kind
 }
 
 @hide:file

@@ -26,6 +26,22 @@ handles_sparse_enum_get test {
 }
 
 @hide:file
+sparse_optional_values :: $init_filled(TestEnum, ?i16, null, {
+    ident = some!(null),
+    int = some!(some!(i16(42))),
+})
+
+filled_comptime_storage_preserves_absence_and_nested_optional_presence test {
+    absent :: get(&sparse_optional_values, TestEnum.eof)
+    present_null :: get(&sparse_optional_values, TestEnum.ident)
+    present_value :: get(&sparse_optional_values, TestEnum.int)
+    try testing.expect(absent == null)
+    try testing.expect(present_null != null)
+    try testing.expect(present_null? == null)
+    try testing.expect_equal(i16(42), present_value??)
+}
+
+@hide:file
 TestLeftError :: enum {
     shared
     left

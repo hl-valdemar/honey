@@ -3,6 +3,7 @@ import "@std/mem"
 import "@std/arraylist"
 import "@std/hashmap"
 import "@std/strconv"
+import "@std/enummap"
 import "@source/ast"
 import "@source/diagnostics"
 sema :: import "@source/sema"
@@ -1522,34 +1523,37 @@ numeric_kind proc(kind TypeKind) bool {
 }
 
 @hide:file
+builtin_kinds :: $enummap.init(sema.BuiltinType, TypeKind, {
+    int = .int, i64 = .int,
+    float = .float, f64 = .float,
+    i8 = .i8,
+    i16 = .i16,
+    i32 = .i32,
+    isize = .isize,
+    u8 = .u8,
+    u16 = .u16,
+    u32 = .u32,
+    u64 = .u64, uint = .u64,
+    usize = .usize,
+    bool = .bool,
+    string = .string,
+    void = .void,
+    anyopaque = .anyopaque,
+    type = .type_value,
+    c_int = .i32,
+    c_uint = .u32,
+    c_long = .int, c_longlong = .int,
+    c_ulong = .u64, c_ulonglong = .u64,
+    c_char = .i8,
+    c_uchar = .u8,
+    c_short = .i16,
+    c_ushort = .u16,
+    unavailable = .none,
+})
+
+@hide:file
 builtin_kind proc(type sema.BuiltinType) TypeKind {
-    return match type {
-        .int, .i64: .int
-        .float, .f64: .float
-        .i8: .i8
-        .i16: .i16
-        .i32: .i32
-        .isize: .isize
-        .u8: .u8
-        .u16: .u16
-        .u32: .u32
-        .u64, .uint: .u64
-        .usize: .usize
-        .bool: .bool
-        .string: .string
-        .void: .void
-        .anyopaque: .anyopaque
-        .type: .type_value
-        .c_int: .i32
-        .c_uint: .u32
-        .c_long, .c_longlong: .int
-        .c_ulong, .c_ulonglong: .u64
-        .c_char: .i8
-        .c_uchar: .u8
-        .c_short: .i16
-        .c_ushort: .u16
-        .unavailable: .none
-    }
+    return enummap.get(&builtin_kinds, type)?
 }
 
 @hide:file
@@ -1585,14 +1589,18 @@ bitwise proc(operator ast.BinaryOperator) bool {
 }
 
 @hide:file
+integer_widths :: $enummap.init_filled(
+    TypeKind, usize, usize(0), {
+    i8 = 8, u8 = 8,
+    i16 = 16, u16 = 16,
+    i32 = 32, u32 = 32,
+    int = 64, isize = 64, u64 = 64, usize = 64,
+})
+
+@hide:file
 integer_width proc(kind TypeKind) usize {
-    return match kind {
-        .i8, .u8: 8
-        .i16, .u16: 16
-        .i32, .u32: 32
-        .int, .isize, .u64, .usize: 64
-        else: 0
-    }
+    if (enummap.get(&integer_widths, kind)) |width| return width
+    return 0
 }
 
 @hide:file

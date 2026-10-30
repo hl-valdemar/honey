@@ -1,5 +1,6 @@
 import "@std/mem"
 import "@std/arraylist"
+import "@std/enummap"
 
 import "@source/diagnostics"
 import "@source/lexer"
@@ -938,23 +939,31 @@ parse_function_type proc(state @mut State, start ast.Span, invalid bool) ast.Nod
 }
 
 @hide:file
+type_starters :: $enummap.init_filled(lexer.TokenKind, bool, false, {
+    ident = true, open_bracket = true, struct = true, c_struct = true, opaque = true,
+    enum = true, union = true, distinct = true, alias = true, match = true, if = true,
+    at = true, star = true, question = true, open_paren = true, proc = true, c_func = true,
+})
+
+@hide:file
 starts_type proc(kind lexer.TokenKind) bool {
-    return (
-        kind == .ident or kind == .open_bracket or kind == .struct or kind == .c_struct or kind == .opaque
-        or kind == .enum or kind == .union or kind == .distinct or kind == .alias or kind == .match
-        or kind == .if
-        or kind == .at or kind == .star or kind == .question or kind == .open_paren or kind == .proc or kind == .c_func
-    )
+    return enummap.get(&type_starters, kind) != null
 }
 
 @hide:file
+member_names :: $enummap.init_filled(lexer.TokenKind, bool, false, {
+    ident = true, if = true, else = true, for = true, inline = true, while = true,
+    proc = true, return = true, yield = true, break = true, continue = true,
+    true = true, false = true, and = true, or = true, xor = true, mut = true,
+    struct = true, c_struct = true, opaque = true, enum = true, union = true,
+    distinct = true, alias = true, match = true, import = true, test = true,
+    c_func = true, null = true, undefined = true, try = true, catch = true,
+    defer = true, errdefer = true,
+})
+
+@hide:file
 member_name proc(kind lexer.TokenKind) bool {
-    return match kind {
-        .ident, .if, .else, .for, .inline, .while, .proc, .return, .yield, .break, .continue,
-        .true, .false, .and, .or, .xor, .mut, .struct, .c_struct, .opaque, .enum, .union, .distinct,
-        .alias, .match, .import, .test, .c_func, .null, .undefined, .try, .catch, .defer, .errdefer: true
-        else: false
-    }
+    return enummap.get(&member_names, kind) != null
 }
 
 @hide:file
@@ -2113,51 +2122,76 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 }
 
 @hide:file
+prefix_binding_powers :: $enummap.init_filled(
+    lexer.TokenKind, BindingPowerScalar, BindingPowerScalar(0), {
+    minus = BindingPowerScalar(50), bang = BindingPowerScalar(50), tilde = BindingPowerScalar(50),
+    ampersand = BindingPowerScalar(50), try = BindingPowerScalar(50),
+})
+
+@hide:file
 prefix_binding_power proc(kind lexer.TokenKind) ?BindingPowerScalar {
-    return match kind {
-        .minus, .bang, .tilde, .ampersand, .try: BindingPowerScalar(50)
-        else: null
-    }
+    return enummap.get(&prefix_binding_powers, kind)
 }
+
+@hide:file
+infix_binding_powers :: $enummap.init_filled(lexer.TokenKind, BindingPower,
+    BindingPower{ left = BindingPowerScalar(0), right = BindingPowerScalar(0) },
+    {
+        or = BindingPower{ left = BindingPowerScalar(2), right = BindingPowerScalar(3) },
+        and = BindingPower{ left = BindingPowerScalar(4), right = BindingPowerScalar(5) },
+        equal_equal = BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) },
+        not_equal = BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) },
+        less = BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) },
+        less_equal = BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) },
+        greater = BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) },
+        greater_equal = BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) },
+        ampersand = BindingPower{ left = BindingPowerScalar(22), right = BindingPowerScalar(23) },
+        xor = BindingPower{ left = BindingPowerScalar(22), right = BindingPowerScalar(23) },
+        pipe = BindingPower{ left = BindingPowerScalar(22), right = BindingPowerScalar(23) },
+        shift_left = BindingPower{ left = BindingPowerScalar(25), right = BindingPowerScalar(26) },
+        shift_right = BindingPower{ left = BindingPowerScalar(25), right = BindingPowerScalar(26) },
+        shift_left_saturating = BindingPower{ left = BindingPowerScalar(25), right = BindingPowerScalar(26) },
+        plus = BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) },
+        minus = BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) },
+        star = BindingPower{ left = BindingPowerScalar(40), right = BindingPowerScalar(41) },
+        slash = BindingPower{ left = BindingPowerScalar(40), right = BindingPowerScalar(41) },
+    },
+)
 
 @hide:file
 infix_binding_power proc(kind lexer.TokenKind) ?BindingPower {
-    return match kind {
-        .or: BindingPower{ left = BindingPowerScalar(2), right = BindingPowerScalar(3) }
-        .and: BindingPower{ left = BindingPowerScalar(4), right = BindingPowerScalar(5) }
-        .equal_equal, .not_equal: BindingPower{ left = BindingPowerScalar(10), right = BindingPowerScalar(11) }
-        .less, .less_equal, .greater, .greater_equal: BindingPower{ left = BindingPowerScalar(20), right = BindingPowerScalar(21) }
-        .ampersand, .xor, .pipe: BindingPower{ left = BindingPowerScalar(22), right = BindingPowerScalar(23) }
-        .shift_left, .shift_right, .shift_left_saturating: BindingPower{ left = BindingPowerScalar(25), right = BindingPowerScalar(26) }
-        .plus, .minus: BindingPower{ left = BindingPowerScalar(30), right = BindingPowerScalar(31) }
-        .star, .slash: BindingPower{ left = BindingPowerScalar(40), right = BindingPowerScalar(41) }
-        else: null
-    }
+    return enummap.get(&infix_binding_powers, kind)
 }
 
 @hide:file
+binary_operators :: $enummap.init_filled(
+    lexer.TokenKind,
+    ast.BinaryOperator,
+    ast.BinaryOperator.add, {
+        and = .logical_and,
+        or = .logical_or,
+        plus = .add,
+        minus = .subtract,
+        star = .multiply,
+        slash = .divide,
+        ampersand = .bit_and,
+        pipe = .bit_or,
+        xor = .bit_xor,
+        shift_left = .shift_left,
+        shift_right = .shift_right,
+        shift_left_saturating = .shift_left_saturating,
+        equal_equal = .equal,
+        not_equal = .not_equal,
+        less = .less,
+        less_equal = .less_equal,
+        greater = .greater,
+        greater_equal = .greater_equal,
+    },
+)
+
+@hide:file
 binary_operator proc(kind lexer.TokenKind) ast.BinaryOperator {
-    return match kind {
-        .and: .logical_and
-        .or: .logical_or
-        .plus: .add
-        .minus: .subtract
-        .star: .multiply
-        .slash: .divide
-        .ampersand: .bit_and
-        .pipe: .bit_or
-        .xor: .bit_xor
-        .shift_left: .shift_left
-        .shift_right: .shift_right
-        .shift_left_saturating: .shift_left_saturating
-        .equal_equal: .equal
-        .not_equal: .not_equal
-        .less: .less
-        .less_equal: .less_equal
-        .greater: .greater
-        .greater_equal: .greater_equal
-        else: unreachable
-    }
+    return enummap.get(&binary_operators, kind)?
 }
 
 @hide:file
@@ -2166,18 +2200,20 @@ is_assignment_operator proc(kind lexer.TokenKind) bool {
 }
 
 @hide:file
+assignment_operators :: $enummap.init_filled(lexer.TokenKind, ast.BinaryOperator, ast.BinaryOperator.add, {
+    plus_equal = .add,
+    minus_equal = .subtract,
+    star_equal = .multiply,
+    slash_equal = .divide,
+    ampersand_equal = .bit_and,
+    pipe_equal = .bit_or,
+    xor_equal = .bit_xor,
+    shift_left_equal = .shift_left,
+    shift_right_equal = .shift_right,
+    shift_left_saturating_equal = .shift_left_saturating,
+})
+
+@hide:file
 assignment_operator proc(kind lexer.TokenKind) ?ast.BinaryOperator {
-    return match kind {
-        .plus_equal: .add
-        .minus_equal: .subtract
-        .star_equal: .multiply
-        .slash_equal: .divide
-        .ampersand_equal: .bit_and
-        .pipe_equal: .bit_or
-        .xor_equal: .bit_xor
-        .shift_left_equal: .shift_left
-        .shift_right_equal: .shift_right
-        .shift_left_saturating_equal: .shift_left_saturating
-        else: null
-    }
+    return enummap.get(&assignment_operators, kind)
 }

@@ -16,6 +16,25 @@ init proc(
     $E, $V type,
     values meta.EnumFieldStruct(E, ?V, some!(null)),
 ) EnumMap(E, V) {
+    return initialize(E, V, null, values)
+}
+
+#! initializes absent value slots without making their keys present.
+#! use fully initialized storage when a sparse map must be materialized at compile time.
+init_filled proc(
+    $E, $V type,
+    storage_default V,
+    values meta.EnumFieldStruct(E, ?V, some!(null)),
+) EnumMap(E, V) {
+    return initialize(E, V, some!(storage_default), values)
+}
+
+@hide:file
+initialize proc(
+    $E, $V type,
+    storage_default ?V,
+    values meta.EnumFieldStruct(E, ?V, some!(null)),
+) EnumMap(E, V) {
     map EnumMap(E, V) := undefined
 
     match typeinfo!(E) {
@@ -25,7 +44,7 @@ init proc(
             if field!(values, field.name) |value| {
                 map.present[i] = true
                 map.values[i] = value
-            }
+            } else if (storage_default) |value| map.values[i] = value
         }
         else: compile_error!("EnumMap key must be an enum")
     }
@@ -38,7 +57,7 @@ get proc($E, $V type, map @EnumMap(E, V), key E) ?V {
     match typeinfo!(E) {
         .enum |info|: inline for info.fields |field, i| {
             if key == field!(E, field.name) {
-                if (map.present[i]) return map.values[i]
+                if (map.present[i]) return some!(map.values[i])
                 return null
             }
         }

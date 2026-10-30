@@ -212,12 +212,18 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
 }
 
 @hide:file
+abi_extensions :: $enummap.init_filled(ir.Type, []u8, "", {
+    i8 = "signext",
+    i16 = "signext",
+    u8 = "zeroext",
+    u16 = "zeroext",
+    bool = "zeroext",
+})
+
+@hide:file
 abi_extension proc(kind ir.Type) []u8 {
-    return match kind {
-        .i8, .i16: "signext"
-        .u8, .u16, .bool: "zeroext"
-        else: ""
-    }
+    if (enummap.get(&abi_extensions, kind)) |extension| return extension
+    return ""
 }
 
 @hide
@@ -496,33 +502,37 @@ check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void 
 }
 
 @hide:file
+memory_symbols :: $enummap.init_filled(diagnostics.Code, []u8, "", {
+    null_unwrap = "null_unwrap",
+    invalid_slice_bounds = "invalid_slice_bounds",
+    sentinel_mismatch = "sentinel_mismatch",
+    overlapping_memory_copy = "overlapping_memory_copy",
+    unsupported_foreign_call = "unsupported_foreign_call",
+    invalid_pointer_access = "invalid_pointer_access",
+    division_by_zero = "division_by_zero",
+    invalid_shift_count = "invalid_shift_count",
+})
+
+@hide:file
+trap_symbols :: $enummap.init_filled(diagnostics.Code, []u8, "", {
+    integer_overflow = "overflow",
+    index_out_of_bounds = "bounds",
+    inactive_union_field = "inactive_union",
+})
+
+@hide:file
 memory_symbol proc(code diagnostics.Code) []u8 {
-    return match code {
-        .null_unwrap: "null_unwrap"
-        .invalid_slice_bounds: "invalid_slice_bounds"
-        .sentinel_mismatch: "sentinel_mismatch"
-        .overlapping_memory_copy: "overlapping_memory_copy"
-        .unsupported_foreign_call: "unsupported_foreign_call"
-        .invalid_pointer_access: "invalid_pointer_access"
-        .division_by_zero: "division_by_zero"
-        .invalid_shift_count: "invalid_shift_count"
-        else: unreachable
-    }
+    return enummap.get(&memory_symbols, code)?
 }
 
 @hide:file
 trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.WriteError {
     position :: location(state.line_starts, span)
-    symbol []u8 :: match code {
-        .integer_overflow: "overflow"
-        .index_out_of_bounds: "bounds"
-        .inactive_union_field: "inactive_union"
-        else: ""
-    }
+    symbol :: enummap.get(&trap_symbols, code)
     message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
     length :: message.len
     try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @", state.output, {usize(span.source), position.line, position.column})
-    if (symbol.len != 0) try io.write_all(state.output, symbol)
+    if (symbol) |name| try io.write_all(state.output, name)
     else try io.print("memory_{s}", state.output, {memory_symbol(code)})
     try io.print(", i64 {})\n  unreachable\n", state.output, {length})
 }
