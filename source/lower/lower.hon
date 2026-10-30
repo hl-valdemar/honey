@@ -87,11 +87,21 @@ lower_package proc(
     root_package ast.NodeId,
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
-    return try lower_module(allocator, tree, resolution, checked, root_package, null, diagnostic_store)
+    return try lower_module(
+        allocator,
+        tree,
+        resolution,
+        checked,
+        root_package,
+        null,
+        null,
+        diagnostic_store,
+    )
 }
 
 #! lowers an isolated compile-time call wrapper without applying program entry-name rules.
-#! the caller supplies a checked parameterless function and owns the returned IR.
+#! the caller supplies a checked parameterless function, an empty `functions` list and owns the returned IR.
+#! fills `functions` by IR FunctionId; global initializers map to maxval!(ast.NodeId).
 #! retains `allocator` in the returned module; release it with ir.deinit; temporary lowering storage is released before returning.
 lower_evaluation proc(
     allocator mem.Allocator,
@@ -99,9 +109,19 @@ lower_evaluation proc(
     resolution @sema.Resolution,
     checked @typecheck.Result,
     entry ast.NodeId,
+    functions @mut arraylist.ArrayList(ast.NodeId),
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
-    return try lower_module(allocator, tree, resolution, checked, tree.root, entry, diagnostic_store)
+    return try lower_module(
+        allocator,
+        tree,
+        resolution,
+        checked,
+        tree.root,
+        entry,
+        functions,
+        diagnostic_store,
+    )
 }
 
 @hide:file
@@ -112,6 +132,7 @@ lower_module proc(
     checked @typecheck.Result,
     root_package ast.NodeId,
     entry ?ast.NodeId,
+    functions ?@mut arraylist.ArrayList(ast.NodeId),
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! (mem.AllocError | diagnostics.CapacityError) {
     module := ir.init(allocator)
@@ -147,12 +168,14 @@ lower_module proc(
             .function: {
                 if (ast.function_external(tree, id) and typecheck.type_of(checked, id).kind == .none) continue
                 function :: try add_function(&module, ast.node_span(tree, id))
+                if (functions) |declarations| try arraylist.append(declarations, id)
                 storage[usize(id)] = Storage{ kind = .function, index = u32(function) }
             }
             .statement: {
                 if (typecheck.type_of(checked, id).kind == .type_value) continue
                 if (ast.expr_kind(tree, ast.statement_decl(tree, id).initializer) == .alias_expr) continue
                 initializer :: try add_function(&module, ast.node_span(tree, id))
+                if (functions) |declarations| try arraylist.append(declarations, maxval!(ast.NodeId))
                 global :: u32(module.globals.items.len)
                 try arraylist.append(&module.globals, ir.Global{
                     type = lower_type(&state, typecheck.type_of(checked, id)),

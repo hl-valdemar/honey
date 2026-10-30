@@ -4890,6 +4890,86 @@ CASES = {
         main proc() i16 { return apply(null, 40) + apply(increment, 1) }
         """, b"42\n", None,
     ),
+    "comptime_computed_callbacks_preserve_optional_presence_and_calls": (
+        """
+        Callback :: alias @proc(value i16) i16
+        increment proc(value i16) i16 { return value + 1 }
+        decrement proc(value i16) i16 { return value - 1 }
+        choose proc(up bool) Callback {
+            callback Callback := decrement
+            if (up) callback = increment
+            return callback
+        }
+        maybe proc(present bool) ?Callback {
+            if (present) return choose(true)
+            return null
+        }
+        nested proc(present bool) ??Callback {
+            if (present) return some!(maybe(true))
+            return some!(null)
+        }
+        main proc() [6]i16 {
+            up :: $(choose(true))
+            down :: $(choose(false))
+            optional :: $(maybe(true))
+            absent :: $(maybe(false))
+            outer :: $(nested(false))
+            inner :: $(nested(true))
+            return [up(41), down(43), (optional?)(41), ((inner?)?)(41),
+                (if (absent == null) i16(42) else i16(0)),
+                (if (outer != null and outer? == null) i16(42) else i16(0))]
+        }
+        """, b"[42, 42, 42, 42, 42, 42]\n", None,
+    ),
+    "comptime_callback_aggregates_cache_source_identity_and_generate_defaults": (
+        """
+        Callback :: alias @proc(value i16) i16
+        increment proc(value i16) i16 { return value + 1 }
+        decrement proc(value i16) i16 { return value - 1 }
+        Callbacks :: struct { items [2]Callback, optional ?Callback }
+        Choice :: union(enum) { callback Callback, empty void }
+        Failure :: union(enum) { callback Callback }
+        make proc(reverse bool) Callbacks {
+            if (reverse) return { items = [decrement, increment], optional = null }
+            return { items = [increment, decrement], optional = increment }
+        }
+        choice proc() Choice { return .callback{increment} }
+        result proc(fail bool) Callback ! Failure {
+            if (fail) return .callback{decrement}
+            return increment
+        }
+        Box proc($callbacks Callbacks) type {
+            return struct { callbacks Callbacks = callbacks }
+        }
+        main proc() [6]i16 {
+            first Box(make(false)) :: {}
+            same Box(Callbacks { items = [increment, decrement], optional = increment }) :: first
+            other Box(make(true)) :: {}
+            selected :: $(choice())
+            success :: $(result(false)) catch increment
+            failure :: $(result(true)) catch |err| err.callback
+            return [same.callbacks.items[0](41), same.callbacks.optional?(41),
+                other.callbacks.items[0](43), selected.callback(41),
+                success(41), failure(43)]
+        }
+        """, b"[42, 42, 42, 42, 42, 42]\n", None,
+    ),
+    "comptime_computed_callback_signatures_remain_checked": (
+        """
+        Callback :: alias @proc(value i16) i16
+        wrong proc(value u8) u8 { return value }
+        choose proc() Callback { return wrong }
+        main proc() i16 { return $(choose())(42) }
+        """, b"", b"return does not match the function result type",
+    ),
+    "comptime_computed_callback_traps_keep_declaration_provenance": (
+        """
+        Callback :: alias @proc(value i8) i8
+        increment proc(value i8) i8 { return value + 1 }
+        choose proc() Callback { return increment }
+        main proc() i8 { return $(choose())(127) }
+        """, b"", b":2:38: runtime trap: integer arithmetic overflow",
+    ),
     "comptime_branch_rejects_runtime_guard_dependencies": (
         """
         answer proc(take bool) i16 {
@@ -8680,7 +8760,23 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:3:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 22
+    sizing.write_text(textwrap.dedent("""
+        Callback :: alias @proc(value i16) i16
+        bias i16 :: 1
+        @hide:file
+        increment proc(value i16) i16 { return value + bias }
+        choose proc() Callback { return increment }
+    """).strip() + "\n")
+    source.write_text(textwrap.dedent("""
+        lib :: import "../library"
+        increment proc(value i16) i16 { return value + 100 }
+        main proc() i16 {
+            callback :: $(lib.choose())
+            return callback(41)
+        }
+    """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
+    return 23
 
 
 def check_dependency_provenance(temporary, executable):
