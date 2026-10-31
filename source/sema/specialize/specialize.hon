@@ -148,6 +148,9 @@ elaborate proc(
                 if (!parameter.comptime and type_storage_annotation(&original,
                     resolution.storage.bindings, parameter.type, 0)) needed = true
             }
+            if (!ast.function_external(&original, id)
+                and type_local_storage(&original, resolution.storage.bindings,
+                    ast.function_decl(&original, id).body, 0)) needed = true
         }
         if (class == .statement and ast.stmt_kind(&original, id) == .declaration
             and type_storage_annotation(&original, resolution.storage.bindings,
@@ -1857,6 +1860,23 @@ type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.
     return false
 }
 
+# explicit metadata locals have no runtime storage, just like metadata parameters.
+# do not classify ordinary local type aliases as constant-input procedures.
+@hide:file
+type_local_storage proc(tree @ast.Tree, bindings []sema.Binding, id ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    if (ast.node_class(tree, id) == .statement and ast.stmt_kind(tree, id) == .declaration) {
+        declaration :: ast.statement_decl(tree, id)
+        if (declaration.type) |annotation| {
+            if (type_storage_annotation(tree, bindings, annotation, 0)) return true
+        }
+    }
+    for (0..ast.child_count(tree, id)) |i| {
+        if (type_local_storage(tree, bindings, ast.child(tree, id, i), depth + 1)) return true
+    }
+    return false
+}
+
 @hide:file
 compiletime_call proc(state @State, function ast.NodeId) bool {
     if (type_record_storage(state, ast.function_decl(&state.tree, function).return_type, 0)) return true
@@ -1864,7 +1884,9 @@ compiletime_call proc(state @State, function ast.NodeId) bool {
         parameter :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
         if (!parameter.comptime and type_record_storage(state, parameter.type, 0)) return true
     }
-    return false
+    return (!ast.function_external(&state.tree, function)
+        and type_local_storage(&state.tree, state.bindings.items,
+            ast.function_decl(&state.tree, function).body, 0))
 }
 
 @hide:file
@@ -1917,7 +1939,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # ordinary metadata inputs and metadata results require a fully constant call.
+    # metadata inputs, results and explicit locals require a fully constant call.
     type_result :: compiletime_call(state, function)
     runtime := usize(0)
     for (0..count) |i| {

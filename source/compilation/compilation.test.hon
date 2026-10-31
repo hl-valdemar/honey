@@ -1406,6 +1406,7 @@ tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
             `    value Selected :: { value = 40 }
             `    if (lib.read(lib.make(), value) != 42) return -4
             `    if (lib.score(lib.make(), 40) != 42) return -6
+            `    if (lib.score_local(40) != 42) return -7
             `    snapshot Storage() :: {
             `        original = { values = [{ value = 19 }, { value = 21 }] },
             `        nested = { values = [true] },
@@ -1467,6 +1468,13 @@ tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
             `    changed.payload.children[0] = bool
             `    if (saved.payload.children[0]? != Child) return -1
             `    return i16(saved.payload.count) + bias
+            `}
+            `score_local proc(bias i16) i16 {
+            `    config Config := { children = [Child, null], count = 2 }
+            `    saved :: config
+            `    config.children[0] = bool
+            `    if (saved.children[0]? != Child) return -1
+            `    return i16(saved.count) + bias
             `}
             ,
         )

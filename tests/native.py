@@ -11,6 +11,93 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "explicit_metadata_locals_compute_without_metadata_inputs": (
+        """
+        Config :: struct { children [2]mut ?type, count usize }
+        compute proc(count usize) i16 {
+            config Config := undefined
+            config.children = [i8, null]
+            config.count = 0
+            saved :: config
+            while (config.count < count) {
+                config.children[0] = i16
+                config.children[1] = config.children[0]
+                config.count = config.count + 1
+            }
+            if (saved.children[0]? != i8 or saved.count != 0) return -1
+            for config.children |child| {
+                if child |T| { if (T != i16) return -2 }
+            }
+            Element :: config.children[0]?
+            values [config.count]Element :: [19, 23]
+            return values[0] + values[1]
+        }
+        main proc() i16 { return $(compute(2)) }
+        """, b"42\n", None,
+    ),
+    "explicit_type_locals_recurse_and_preserve_cleanup": (
+        """
+        Error :: enum { failed }
+        count proc(depth usize) i16 {
+            T type := i8
+            T = i16
+            defer if (T != i16) unreachable
+            if (depth == 0) return 21
+            return count(depth - 1) + 21
+        }
+        fail proc() i16 ! Error {
+            T ?type := i16
+            errdefer if (T? != i16) unreachable
+            return .failed
+        }
+        main proc() i16 {
+            return fail() catch { yield count(1) }
+        }
+        """, b"42\n", None,
+    ),
+    "explicit_metadata_locals_require_constant_runtime_inputs": (
+        """
+        count proc(value usize) usize {
+            T type :: i16
+            return value
+        }
+        runtime proc(value usize) usize { return count(value) }
+        main proc() usize { return runtime(42) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "explicit_metadata_locals_reject_incomplete_results": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc() usize {
+            config Config := undefined
+            config.child = i16
+            return config.count
+        }
+        main proc() usize { return compute() }
+        """, b"", b"read before initialization",
+    ),
+    "explicit_metadata_locals_run_scoped_error_cleanup": (
+        """
+        Error :: enum { failed }
+        fail proc() i16 ! Error {
+            T type :: i16
+            errdefer unreachable
+            return .failed
+        }
+        main proc() i16 { return fail() catch 0 }
+        """, b"", b"reached unreachable statement",
+    ),
+    "ordinary_local_type_aliases_keep_runtime_parameters": (
+        """
+        add proc(value i16) i16 {
+            Local :: alias i16
+            result Local :: value + 2
+            return result
+        }
+        forward proc(value i16) i16 { return add(value) }
+        main proc() i16 { return forward(40) }
+        """, b"42\n", None,
+    ),
     "ordinary_metadata_inputs_compute_owned_runtime_results": (
         """
         Config :: struct { child type, count usize }
