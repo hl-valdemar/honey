@@ -393,7 +393,7 @@ find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocErro
             .import, .invalid: continue
         }
         if (!mem.eql(ast.source_text(tree, name), "main")) continue
-        if (ast.decl_kind(tree, id) != .function) {
+        if (ast.decl_kind(tree, id) != .function or state.storage[usize(id)].kind != .function) {
             state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
             return
         }

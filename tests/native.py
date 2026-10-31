@@ -11,6 +11,161 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "compiletime_only_main_cannot_select_another_runtime_function": (
+        """
+        fallback proc() i16 { return -99 }
+        main proc() i16 {
+            types := [i16, bool]
+            return 42
+        }
+        """, b"", b"main must be a runtime function with no parameters",
+    ),
+    "inferred_metadata_locals_preserve_owned_copies_and_updates": (
+        """
+        Config :: struct { children [2]mut ?type, count usize }
+        compute proc(count usize) i16 {
+            config := Config { children = [i8, null], count = 0 }
+            saved :: config
+            while (config.count < count) {
+                config.children[0] = i16
+                config.children[1] = config.children[0]
+                config.count += 1
+            }
+            types := [i8, bool]
+            before :: types
+            types = [i16, bool]
+            tuple := { types[0], config.count }
+            tuple.0 = i8
+            if (saved.children[0]? != i8 or saved.count != 0 or before[0] != i8) return -1
+            if (tuple.0 != i8 or tuple.1 != 2) return -2
+            for config.children |child| { if child |T| { if (T != i16) return -3 } }
+            Element :: types[0]
+            values [count]Element :: [19, 23]
+            return values[0] + values[1]
+        }
+        main proc() i16 { return compute(2) }
+        """, b"42\n", None,
+    ),
+    "inferred_type_locals_recurse_and_preserve_cleanup": (
+        """
+        Error :: enum { failed }
+        count proc(depth usize) i16 {
+            T := i8
+            T = i16
+            defer if (T != i16) unreachable
+            if (depth == 0) return 21
+            return count(depth - 1) + 21
+        }
+        fail proc() i16 ! Error {
+            T := ?i16
+            T = ?i8
+            errdefer if (T != ?i8) unreachable
+            return .failed
+        }
+        main proc() i16 { return fail() catch { yield count(1) } }
+        """, b"42\n", None,
+    ),
+    "inferred_metadata_call_results_and_checked_projections": (
+        """
+        Config :: struct { child type, count usize }
+        Schema :: alias Config
+        create proc() Schema { return { child = i8, count = 2 } }
+        children proc() [2]type { return [i8, bool] }
+        optional proc() ?type { return i8 }
+        pair proc() struct { type, usize } { return {i8, 2} }
+        field_type proc(value i16) i16 {
+            T := create().child
+            T = i16
+            result T :: value
+            return result
+        }
+        indexed_type proc(value i16) i16 {
+            T := children()[0]
+            T = i16
+            result T :: value
+            return result
+        }
+        unwrapped_type proc(value i16) i16 {
+            T := optional()?
+            T = i16
+            result T :: value
+            return result
+        }
+        tuple_type proc(value i16) i16 {
+            T := pair().0
+            T = i16
+            result T :: value
+            return result
+        }
+        compute proc() i16 {
+            config := create()
+            saved :: config
+            config.child = i16
+            if (saved.child != i8) return -1
+            return field_type(19) + indexed_type(19) + unwrapped_type(2) + tuple_type(2)
+        }
+        main proc() i16 { return compute() }
+        """, b"42\n", None,
+    ),
+    "inferred_metadata_value_blocks_matches_and_fallible_calls": (
+        """
+        Error :: enum { failed }
+        Config :: struct { child type, count usize }
+        create proc() Config ! Error { return { child = i8, count = 2 } }
+        compute proc(flag bool) i16 ! Error {
+            errdefer unreachable
+            config := try create()
+            saved :: config
+            config.child = i16
+            fields := { yield [i8, bool] }
+            selected := if (flag) { yield { child = i16, count = config.count } }
+                else { yield { child = i8, count = usize(1) } }
+            if (saved.child != i8 or fields[1] != bool or selected.child != i16) return -1
+            Element :: selected.child
+            values [selected.count]Element :: [19, 23]
+            return values[0] + values[1]
+        }
+        main proc() i16 { return compute(true) catch -2 }
+        """, b"42\n", None,
+    ),
+    "inferred_metadata_locals_require_constant_inputs": (
+        """
+        Config :: struct { child type, count usize }
+        count proc(value usize) usize {
+            config := Config { child = i16, count = value }
+            return config.count
+        }
+        runtime proc(value usize) usize { return count(value) }
+        main proc() usize { return runtime(42) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "inferred_metadata_arrays_keep_readonly_elements": (
+        """
+        compute proc() usize {
+            types := [i8, bool]
+            types[0] = i16
+            return types.len
+        }
+        main proc() usize { return compute() }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
+    "immutable_type_aliases_and_scalar_metadata_projections_stay_runtime": (
+        """
+        Config :: struct { child type, count usize }
+        create proc() Config { return { child = i16, count = 2 } }
+        Child proc() type { return i16 }
+        add proc(value i16) i16 {
+            Local :: alias i16
+            Other :: alias Child()
+            amount := create().count
+            argument Local :: value
+            result Other :: argument + i16(amount)
+            return result
+        }
+        forward proc(value i16) i16 { return add(value) }
+        main proc() i16 { return forward(40) }
+        """, b"42\n", None,
+    ),
     "explicit_metadata_locals_compute_without_metadata_inputs": (
         """
         Config :: struct { children [2]mut ?type, count usize }
@@ -3919,15 +4074,6 @@ CASES = {
         main proc() Selected() { return 42 }
         """, b"", b"compile-time execution exceeds its recursion or step limit",
     ),
-    "type_record_procedure_results_do_not_enable_runtime_storage": (
-        """
-        config proc() struct { child type, count i16 } { return { child = i16, count = 42 } }
-        main proc() i16 {
-            input :: config()
-            return input.count
-        }
-        """, b"", b"",
-    ),
     "type_records_reject_unknown_initializer_field": (
         """
         Bad proc() type {
@@ -4019,14 +4165,6 @@ CASES = {
         }
         main proc() Bad() { return 42 }
         """, b"", b"outside its runtime type",
-    ),
-    "type_records_do_not_enable_runtime_storage": (
-        """
-        main proc() i16 {
-            config :: { child = i16, count = 42 }
-            return config.count
-        }
-        """, b"", b"type name cannot be used as a value",
     ),
     "field_reflection_runtime_places_callbacks_and_single_evaluation": (
         """
@@ -11964,13 +12102,28 @@ def check_typeinfo_packages(temporary, executable):
             """,
             b"indexed assignment requires a writable array element",
         ),
-        (
-            "runtime_metadata_escape",
-            "main proc() i16 { info :: typeinfo!(i16)\nreturn 42 }",
-            b"record fields require a concrete value type",
-        ),
     ):
         cases[name] = ('import "@std/meta"\n' + text, b"", error)
+    cases["inferred_reflection_locals_compute_without_metadata_parameters"] = (
+        """
+        import "@std/meta"
+        Record :: struct { child i16, enabled bool }
+        compute proc(bias i16) i16 {
+            info :: typeinfo!(Record)
+            match info {
+                .record |record|: {
+                    saved :: record.fields[0]
+                    field := saved
+                    field.type = i8
+                    if (saved.type != i16 or field.type != i8) return -1
+                    return bias + i16(record.fields.len)
+                }
+                else: return -2,
+            }
+        }
+        main proc() i16 { return compute(40) }
+        """, b"42\n", None,
+    )
     cases["missing_meta_import"] = (
         "main proc() i16 { typeinfo!(i16)\nreturn 42 }",
         b"", b"typeinfo! requires importing @std/meta",

@@ -664,7 +664,7 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
             ) {
                 for (0..ast.record_field_count(&state.tree, id)) |i| {
                     field :: ast.field(&state.tree, ast.record_field(&state.tree, id, i))
-                    slot :: if (field.name != null) type_record_slot(state, shape, field.name?) else i
+                    slot :: if (field.name != null) type_record_slot(&state.tree, shape, field.name?) else i
                     field_type := no_node
                     if (slot < ast.record_field_count(&state.tree, shape)) {
                         if (ast.field(&state.tree, ast.record_field(&state.tree, shape, slot)).type) |type|
@@ -1688,7 +1688,7 @@ specialize_match proc(state @mut State, id, statement, expected ast.NodeId) bool
             if (ast.expr_kind(&state.tree, annotation) != .union_type) break
             pattern :: ast.match_pattern(&state.tree, arm_id, 0)
             if (ast.expr_kind(&state.tree, pattern) != .enum_literal) continue
-            slot :: type_record_slot(state, annotation, ast.enum_literal(&state.tree, pattern))
+            slot :: type_record_slot(&state.tree, annotation, ast.enum_literal(&state.tree, pattern))
             if (slot == no_index) continue
             field :: ast.field(&state.tree, ast.record_field(&state.tree, annotation, slot))
             if (field.type) |type| payload = type
@@ -1860,8 +1860,181 @@ type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.
     return false
 }
 
-# explicit metadata locals have no runtime storage, just like metadata parameters.
-# do not classify ordinary local type aliases as constant-input procedures.
+@hide:file
+storage_schema proc(tree @ast.Tree, bindings []sema.Binding, input ast.NodeId, depth usize) ast.NodeId {
+    if (depth >= 128 or usize(input) >= bindings.len) return no_node
+    resolved :: bindings[usize(input)]
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        if (ast.node_class(tree, target) == .function) return target
+        if (ast.node_class(tree, target) == .statement)
+            return storage_schema(tree, bindings, ast.statement_decl(tree, target).initializer, depth + 1)
+    }
+    if (ast.expr_kind(tree, input) == .alias_expr)
+        return storage_schema(tree, bindings, ast.type_operand(tree, input), depth + 1)
+    return input
+}
+
+# read only existing annotations: discovery must not specialize recursive calls.
+@hide:file
+storage_expression_annotation proc(
+    tree @ast.Tree,
+    bindings []sema.Binding,
+    input ast.NodeId,
+    depth usize,
+) ast.NodeId {
+    if (depth >= 128 or usize(input) >= bindings.len) return no_node
+    resolved :: bindings[usize(input)]
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        class :: ast.node_class(tree, target)
+        if (class == .parameter) return ast.param(tree, target).type
+        if (class == .statement) {
+            declaration :: ast.statement_decl(tree, target)
+            if (declaration.type) |annotation| return annotation
+            return storage_expression_annotation(tree, bindings, declaration.initializer, depth + 1)
+        }
+        return no_node
+    }
+    kind :: ast.expr_kind(tree, input)
+    if (kind == .typed_constant) return ast.typed_constant(tree, input).type
+    if (kind == .union_constant) return ast.union_constant(tree, input).type
+    if (kind == .slice_constant) return ast.slice_constant(tree, input).type
+    if (kind == .record_literal) {
+        if (ast.record_literal(tree, input).type) |type| return type
+        return no_node
+    }
+    if (kind == .call) {
+        callee :: storage_schema(tree, bindings, ast.call_expr(tree, input).callee, depth + 1)
+        if (callee != no_node and ast.node_class(tree, callee) == .function)
+            return ast.function_decl(tree, callee).return_type
+        return no_node
+    }
+    base := no_node
+    if (kind == .selection) base = ast.selection_expr(tree, input).base
+    else if (kind == .index) base = ast.index_expr(tree, input).base
+    else if (kind == .slice) base = ast.slice_expr(tree, input).base
+    else if (kind == .unary) base = ast.unary_expr(tree, input).operand
+    else if (kind == .try_expr) base = ast.type_operand(tree, input)
+    else if (kind == .catch_expr) base = ast.catch_expr(tree, input).operand
+    else if (kind == .comptime_expr) return storage_expression_annotation(tree, bindings,
+        ast.comptime_operand(tree, input), depth + 1)
+    if (base == no_node) return no_node
+    annotation :: storage_schema(tree, bindings,
+        storage_expression_annotation(tree, bindings, base, depth + 1), depth + 1)
+    if (annotation == no_node) return no_node
+    shape :: ast.expr_kind(tree, annotation)
+    if (kind == .slice) return annotation
+    if (kind == .try_expr or kind == .catch_expr)
+        return if (shape == .fallible_type) ast.binary_expr(tree, annotation).left else no_node
+    if (kind == .unary)
+        return if (shape == .optional_type and ast.unary_expr(tree, input).operator == .unwrap)
+            ast.type_operand(tree, annotation) else no_node
+    if (kind == .index) {
+        if (shape == .array_type) return ast.array_type(tree, annotation).element
+        if (shape == .slice_type) return ast.slice_type(tree, annotation).element
+        return no_node
+    }
+    if (shape != .record_type and shape != .union_type) return no_node
+    member :: ast.selection_expr(tree, input).member
+    slot :: type_record_slot(tree, annotation, member)
+    if (slot == no_index) return no_node
+    if (ast.field(tree, ast.record_field(tree, annotation, slot)).type) |type| return type
+    return no_node
+}
+
+@hide:file
+type_storage_yields proc(
+    tree @ast.Tree,
+    bindings []sema.Binding,
+    id ast.NodeId,
+    scalar_type bool,
+    depth usize,
+) bool {
+    if (depth >= 128) return false
+    class :: ast.node_class(tree, id)
+    if (class != .block and class != .statement) return false
+    if (class == .statement and ast.stmt_kind(tree, id) == .yield_stmt) {
+        value :: ast.yield_stmt(tree, id).value
+        return value != null and type_storage_initializer(tree, bindings, value?, scalar_type, depth + 1)
+    }
+    for (0..ast.child_count(tree, id)) |i| {
+        if (type_storage_yields(tree, bindings, ast.child(tree, id, i), scalar_type, depth + 1)) return true
+    }
+    return false
+}
+
+# discover inferred storage without elaborating calls or executing initializers.
+# immutable scalar type bindings remain aliases in ordinary runtime procedures.
+@hide:file
+type_storage_initializer proc(
+    tree @ast.Tree, bindings []sema.Binding, input ast.NodeId, scalar_type bool, depth usize,
+) bool {
+    if (depth >= 128 or usize(input) >= bindings.len) return false
+    annotation :: storage_schema(tree, bindings,
+        storage_expression_annotation(tree, bindings, input, depth + 1), depth + 1)
+    if (annotation != no_node) {
+        if (!scalar_type and bindings[usize(annotation)].kind == .builtin
+            and bindings[usize(annotation)].data.builtin == .type) return false
+        return type_storage_annotation(tree, bindings, annotation, depth + 1)
+    }
+    resolved :: bindings[usize(input)]
+    if (resolved.kind == .builtin) return scalar_type
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        class :: ast.node_class(tree, target)
+        if (class == .statement) {
+            declaration :: ast.statement_decl(tree, target)
+            if (declaration.type != null) return false
+            return type_storage_initializer(tree, bindings, declaration.initializer, scalar_type, depth + 1)
+        }
+        return false
+    }
+    kind :: ast.expr_kind(tree, input)
+    match kind {
+        .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
+        .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
+            return scalar_type
+        .record_literal: {
+            for (0..ast.record_field_count(tree, input)) |i| {
+                field :: ast.field(tree, ast.record_field(tree, input, i))
+                if (field.value != null
+                    and type_storage_initializer(tree, bindings, field.value?, true, depth + 1)) return true
+            }
+            return false
+        }
+        .array_literal: {
+            for (0..ast.array_element_count(tree, input)) |i| {
+                if (type_storage_initializer(tree, bindings, ast.array_element(tree, input, i), true, depth + 1))
+                    return true
+            }
+            return false
+        }
+        .comptime_expr:
+            return type_storage_initializer(tree, bindings, ast.comptime_operand(tree, input), scalar_type, depth + 1)
+        .match_expr: {
+            for (0..ast.match_arm_count(tree, input)) |i| {
+                arm :: ast.match_arm_view(tree, ast.match_arm(tree, input, i))
+                if (arm.expression) {
+                    if (type_storage_initializer(tree, bindings, arm.body, scalar_type, depth + 1)) return true
+                } else if (type_storage_yields(tree, bindings, arm.body, scalar_type, depth + 1)) return true
+            }
+            return false
+        }
+        .block_expr:
+            return type_storage_yields(tree, bindings, ast.block_expr(tree, input), scalar_type, depth + 1)
+        .builtin_call: {
+            name :: ast.literal_text(tree, ast.builtin_call(tree, input).name)
+            if (mem.eql(name, "typeinfo")) return true
+            if (mem.eql(name, "struct_type")) return scalar_type
+            if (mem.eql(name, "some") and ast.call_arg_count(tree, input) == 1)
+                return type_storage_initializer(tree, bindings, ast.call_arg(tree, input, 0), true, depth + 1)
+            return false
+        }
+        else: return false
+    }
+}
+
 @hide:file
 type_local_storage proc(tree @ast.Tree, bindings []sema.Binding, id ast.NodeId, depth usize) bool {
     if (depth >= 128) return false
@@ -1870,6 +2043,8 @@ type_local_storage proc(tree @ast.Tree, bindings []sema.Binding, id ast.NodeId, 
         if (declaration.type) |annotation| {
             if (type_storage_annotation(tree, bindings, annotation, 0)) return true
         }
+        else if (type_storage_initializer(tree, bindings, declaration.initializer,
+            declaration.mutability == .variable, 0)) return true
     }
     for (0..ast.child_count(tree, id)) |i| {
         if (type_local_storage(tree, bindings, ast.child(tree, id, i), depth + 1)) return true
@@ -1939,7 +2114,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # metadata inputs, results and explicit locals require a fully constant call.
+    # metadata inputs, results and locals require a fully constant call.
     type_result :: compiletime_call(state, function)
     runtime := usize(0)
     for (0..count) |i| {
@@ -3332,8 +3507,40 @@ type_snapshot_expected proc(
 }
 
 @hide:file
+type_fallible_failed proc(
+    state @mut State,
+    owned, type, at ast.NodeId,
+) ?bool ! Error {
+    missing ?bool :: null
+    if (type_record_storage(state, type, 0)) {
+        if (!try type_array_initialized(state, owned, at)) return missing
+        return !try same_type(state,
+            ast.typed_constant(&state.tree, ast.typed_constant(&state.tree, owned).value).type,
+            ast.binary_expr(&state.tree, type).left)
+    }
+    span :: ast.node_span(&state.tree, at)
+    boolean :: try builtin(state, at, .bool)
+    yes :: try ast.add_boolean(state.builder, span, true)
+    no :: try ast.add_boolean(state.builder, span, false)
+    returned :: try ast.add_return_stmt(state.builder, span, yes)
+    failure_statements [1]ast.NodeId :: [returned]
+    handler :: try ast.add_block(state.builder, span, failure_statements[..])
+    caught :: try ast.add_catch_expr(state.builder, span, owned, null, handler, true)
+    discarded :: try ast.add_expression_stmt(state.builder, caught)
+    success :: try ast.add_return_stmt(state.builder, span, no)
+    statements [2]ast.NodeId :: [discarded, success]
+    body :: try ast.add_block(state.builder, span, statements[..])
+    try refresh(state)
+    guard :: try evaluate_ir_body(state, at, body, boolean)
+    if (guard.kind != .boolean) return missing
+    return guard.boolean
+}
+
+@hide:file
 type_snapshot_catch proc(
-    state @mut State, execution @mut TypeExecution, id, annotation ast.NodeId,
+    state @mut State,
+    execution @mut TypeExecution,
+    id, annotation ast.NodeId,
 ) ast.NodeId ! Error {
     view :: ast.catch_expr(&state.tree, id)
     operand :: try type_snapshot(state, execution, view.operand)
@@ -3344,29 +3551,9 @@ type_snapshot_catch proc(
     channels :: ast.binary_expr(&state.tree, operand_type)
     owned :: try type_execution_value(state, operand, operand_type)
     if (owned == no_node) return no_node
-    span :: ast.node_span(&state.tree, id)
-    failed := false
-    if (type_record_storage(state, operand_type, 0)) {
-        if (!try type_array_initialized(state, owned, id)) return no_node
-        failed = !try same_type(state,
-            ast.typed_constant(&state.tree, ast.typed_constant(&state.tree, owned).value).type, channels.left)
-    } else {
-        boolean :: try builtin(state, id, .bool)
-        yes :: try ast.add_boolean(state.builder, span, true)
-        no :: try ast.add_boolean(state.builder, span, false)
-        returned :: try ast.add_return_stmt(state.builder, span, yes)
-        failure_statements [1]ast.NodeId :: [returned]
-        handler :: try ast.add_block(state.builder, span, failure_statements[..])
-        caught :: try ast.add_catch_expr(state.builder, span, owned, null, handler, true)
-        discarded :: try ast.add_expression_stmt(state.builder, caught)
-        success :: try ast.add_return_stmt(state.builder, span, no)
-        statements [2]ast.NodeId :: [discarded, success]
-        body :: try ast.add_block(state.builder, span, statements[..])
-        try refresh(state)
-        guard :: try evaluate_ir_body(state, id, body, boolean)
-        if (guard.kind != .boolean) return no_node
-        failed = guard.boolean
-    }
+    failure :: try type_fallible_failed(state, owned, operand_type, id)
+    if (failure == null) return no_node
+    failed :: failure?
     payload :: ast.typed_constant(&state.tree, owned).value
     if (!failed) return try type_execution_value(state, payload, channels.left)
     saved :: execution.locals.items.len
@@ -3791,7 +3978,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
                     continue
                 }
                 shape :: try inline_match_shape(state, annotation)
-                slot :: type_record_slot(state, shape, ast.enum_literal(&state.tree, pattern))
+                slot :: type_record_slot(&state.tree, shape, ast.enum_literal(&state.tree, pattern))
                 if (slot == no_index) {
                     valid = false
                     continue
@@ -4002,7 +4189,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
         if (record) {
             if (kind != .selection) return true
             member :: ast.selection_expr(&state.tree, id).member
-            slot :: type_record_slot(state, type, member)
+            slot :: type_record_slot(&state.tree, type, member)
             if (slot == no_index) {
                 state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                     .unknown_field, ast.node_span(&state.tree, member))
@@ -4087,24 +4274,24 @@ type_record_storage proc(state @State, annotation ast.NodeId, depth usize) bool 
 }
 
 @hide:file
-type_record_slot proc(state @State, record, member ast.NodeId) usize {
-    if (ast.expr_kind(&state.tree, member) != .literal_int) {
-        for (0..ast.record_field_count(&state.tree, record)) |i| {
-            field :: ast.field(&state.tree, ast.record_field(&state.tree, record, i))
-            if (field.name != null and ast.name_id(&state.tree, field.name?) == ast.name_id(&state.tree, member))
+type_record_slot proc(tree @ast.Tree, record, member ast.NodeId) usize {
+    if (ast.expr_kind(tree, member) != .literal_int) {
+        for (0..ast.record_field_count(tree, record)) |i| {
+            field :: ast.field(tree, ast.record_field(tree, record, i))
+            if (field.name != null and ast.name_id(tree, field.name?) == ast.name_id(tree, member))
                 return i
         }
         return no_index
     }
     ordinal := usize(0)
-    for (ast.literal_text(&state.tree, member)) |byte| {
+    for (ast.literal_text(tree, member)) |byte| {
         if (byte < '0' or byte > '9') return no_index
         digit :: usize(byte - '0')
         if (ordinal > divtrunc!(maxval!(usize) - digit, usize(10))) return no_index
         ordinal = ordinal * 10 + digit
     }
-    if (ordinal >= ast.record_field_count(&state.tree, record)) return no_index
-    if (ast.field(&state.tree, ast.record_field(&state.tree, record, ordinal)).name != null) return no_index
+    if (ordinal >= ast.record_field_count(tree, record)) return no_index
+    if (ast.field(tree, ast.record_field(tree, record, ordinal)).name != null) return no_index
     return ordinal
 }
 
@@ -4157,7 +4344,7 @@ type_union_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId 
             if (field.value) |value| input = value
         }
     }
-    slot :: if (name != no_node) type_record_slot(state, type, name) else no_index
+    slot :: if (name != no_node) type_record_slot(&state.tree, type, name) else no_index
     if (slot == no_index) {
         code diagnostics.Code :: if (name != no_node) .unknown_field else .union_initializer_count
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
@@ -4309,7 +4496,7 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
                 }
             }
         }
-        if (field.name != null and type_record_slot(state, type, field.name?) != i) {
+        if (field.name != null and type_record_slot(&state.tree, type, field.name?) != i) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .duplicate_field, field.span)
             return false
         }
@@ -4362,7 +4549,7 @@ type_record_value proc(state @mut State, expression, annotation ast.NodeId) ast.
         for (0..ast.record_field_count(&state.tree, expression)) |i| {
             field :: ast.field(&state.tree, ast.record_field(&state.tree, expression, i))
             slot := i
-            if (field.name) |name| slot = type_record_slot(state, type, name)
+            if (field.name) |name| slot = type_record_slot(&state.tree, type, name)
             if (slot >= count or values[slot] != no_node) {
                 code :: if (slot < count) diagnostics.Code.duplicate_field
                     else if (field.name != null) diagnostics.Code.unknown_field else diagnostics.Code.tuple_arity_mismatch
@@ -4376,7 +4563,7 @@ type_record_value proc(state @mut State, expression, annotation ast.NodeId) ast.
         for (0..count) |i| {
             field :: ast.field(&state.tree, ast.record_field(&state.tree, type, i))
             if (field.name) |name| {
-                if (type_record_slot(state, type, name) != i) {
+                if (type_record_slot(&state.tree, type, name) != i) {
                     state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .duplicate_field, field.span)
                     return no_node
                 }
@@ -4750,7 +4937,7 @@ type_array_update proc(
     previous := no_node
     if (record) {
         if (ast.expr_kind(&state.tree, first) == .selection)
-            index = type_record_slot(state, type, ast.selection_expr(&state.tree, first).member)
+            index = type_record_slot(&state.tree, type, ast.selection_expr(&state.tree, first).member)
         if (index == no_index) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                 .unknown_field, ast.node_span(&state.tree, first))
@@ -4860,7 +5047,7 @@ type_variant proc(state @mut State, annotation, name ast.NodeId) bool ! Error {
         members :: ast.binary_expr(&state.tree, type)
         return try type_variant(state, members.left, name) or try type_variant(state, members.right, name)
     }
-    if (kind == .union_type) return type_record_slot(state, type, name) != no_index
+    if (kind == .union_type) return type_record_slot(&state.tree, type, name) != no_index
     if (kind != .enum_type) return false
     for (0..ast.enum_member_count(&state.tree, type)) |i| {
         member :: ast.field(&state.tree, ast.enum_member(&state.tree, type, i)).name?
@@ -5294,9 +5481,9 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 if (execution.returned != no_node) {
                     type :: try canonical_type(state, execution.result_type)
                     if (type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type) {
-                        payload :: ast.typed_constant(&state.tree, execution.returned).value
-                        execution.failed = !try same_type(state, ast.typed_constant(&state.tree, payload).type,
-                            ast.binary_expr(&state.tree, type).left)
+                        failed :: try type_fallible_failed(state, execution.returned, type, value)
+                        if (failed == null) return .invalid
+                        execution.failed = failed?
                     }
                 }
                 if (execution.returned != no_node) return .returned
@@ -6425,7 +6612,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 }
             }
             if (base_kind != .record_type and base_kind != .union_type) return no_node
-            slot :: type_record_slot(state, base, view.member)
+            slot :: type_record_slot(&state.tree, base, view.member)
             if (slot == no_index) return no_node
             return try canonical_type(state, ast.field(&state.tree, ast.record_field(&state.tree, base, slot)).type?)
         }
