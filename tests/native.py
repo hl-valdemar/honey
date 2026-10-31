@@ -2278,6 +2278,231 @@ CASES = {
         }
         """, b"", b"initialization",
     ),
+    "tagged_metadata_active_payload_updates_own_saved_copies": (
+        """
+        Detail :: struct { child type, rows [2]mut struct { child type, count usize } }
+        Choice :: union(enum) { child type, detail Detail, empty void }
+        Storage proc() type {
+            direct Choice := .child{bool}
+            direct_saved :: direct
+            direct.child = i16
+            if (direct_saved.child != bool or direct.child != i16) return bool
+            value Choice := .detail{
+                child = i8,
+                rows = [{ child = bool, count = 1 }, { child = i16, count = 2 }],
+            }
+            saved :: value
+            value.detail.child = bool
+            value.detail.rows[1].child = u8
+            value.detail.rows[1].count = 3
+            if (saved.detail.child != i8 or saved.detail.rows[1].child != i16) return bool
+            if (value.detail.rows[1].child != u8 or value.detail.rows[1].count != 3) return bool
+            value = .child{i8}
+            if (value.child != i8) return bool
+            value = .empty
+            return match value {
+                .empty: [saved.detail.rows[1].count]saved.detail.rows[1].child,
+                .child, .detail: bool,
+            }
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "tagged_metadata_undefined_storage_whole_replacement": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        Container :: struct { choice Choice }
+        selected proc() type {
+            local Choice := undefined
+            record Container := undefined
+            values [2]mut Choice := undefined
+            local = .child{bool}
+            record.choice = .child{i16}
+            values[0] = local
+            values[1] = record.choice
+            saved :: values
+            local = .empty
+            record.choice = .empty
+            values[1] = .child{u8}
+            if (saved[0].child != bool or values[1].child != u8) return bool
+            return saved[1].child
+        }
+        main proc() selected() { return 42 }
+        """, b"42\n", None,
+    ),
+    "tagged_metadata_procedure_capture_erasure_generated_defaults_and_cache": (
+        """
+        Id :: distinct i16
+        Other :: distinct i16
+        Detail :: struct { child type, count usize, bias i16 }
+        Choice :: union(enum) { detail Detail, child type, empty void }
+        make proc(T type) Choice { return .detail{ child = T, count = 2, bias = 2 } }
+        pass proc(input Choice) Choice {
+            match input {
+                .detail |payload|: {
+                    copied := payload
+                    copied.child = bool
+                    copied.count = 3
+                    return .detail{payload}
+                },
+                .child |T|: return .child{T},
+                .empty: return .empty,
+            }
+        }
+        Storage proc(input Choice) type {
+            return match input {
+                .detail |payload|: struct {
+                    values [payload.count]payload.child
+                    bias i16 = payload.bias
+                },
+                .child |T|: struct { value T },
+                .empty: struct {},
+            }
+        }
+        score proc($input Choice, value Storage(input)) i16 {
+            return i16(value.values[0]) + i16(value.values[1]) + value.bias
+        }
+        main proc() i16 {
+            Selected :: alias Storage(pass(make(Id)))
+            if (Selected != Storage(make(Id))) return -1
+            if (Selected == Storage(make(Other))) return -2
+            if (Selected == Storage(.child{Id})) return -3
+            value Selected :: { values = [Id(19), Id(21)] }
+            same Storage(make(Id)) :: value
+            return score(pass(make(Id)), same)
+        }
+        """, b"42\n", None,
+    ),
+    "tagged_metadata_sparse_explicit_tags_match_variants_not_unused_tags": (
+        """
+        Tag :: enum(i16) { unused = -90, empty = -7, child = 42 }
+        Choice :: union(Tag) { child type, empty void }
+        choose proc(present bool) Choice {
+            if (present) return .child{i16}
+            return .empty
+        }
+        Selected proc(input Choice) type {
+            return match input { .child |T|: T, .empty: bool }
+        }
+        main proc() i16 {
+            empty Selected(choose(false)) :: true
+            value Selected(choose(true)) :: 42
+            if (!empty) return 0
+            return value
+        }
+        """, b"42\n", None,
+    ),
+    "tagged_metadata_reject_inactive_payload_write": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        Bad proc() type {
+            value Choice := .empty
+            value.child = i16
+            return value.child
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"tagged union field is not active",
+    ),
+    "tagged_metadata_reject_inactive_payload_read": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        Bad proc() type { value Choice :: .empty
+            return value.child }
+        main proc() Bad() { return 42 }
+        """, b"", b"tagged union field is not active",
+    ),
+    "tagged_metadata_reject_wrong_nominal_union_literal": (
+        """
+        Choice :: union(enum) { child type }
+        Other :: union(enum) { child type }
+        make proc() Choice { return Other { child = i16 } }
+        main proc() make().child { return 42 }
+        """, b"", b"incompatible value type",
+    ),
+    "tagged_metadata_reject_unknown_member": (
+        """
+        Choice :: union(enum) { child type }
+        make proc() Choice { return Choice { missing = i16 } }
+        main proc() make().child { return 42 }
+        """, b"", b"record has no such field",
+    ),
+    "tagged_metadata_reject_zero_initializers": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        make proc() Choice { return Choice {} }
+        main proc() make().child { return 42 }
+        """, b"", b"union construction requires exactly one member",
+    ),
+    "tagged_metadata_reject_multiple_initializers": (
+        """
+        Choice :: union(enum) { child type, other type }
+        make proc() Choice { return Choice { child = i16, other = bool } }
+        main proc() make().child { return 42 }
+        """, b"", b"union construction requires exactly one member",
+    ),
+    "tagged_metadata_reject_explicit_tag_missing_variant": (
+        """
+        Tag :: enum { other }
+        Choice :: union(Tag) { child type }
+        make proc() Choice { return .child{i16} }
+        main proc() make().child { return 42 }
+        """, b"", b"union tag must be an enum containing every union variant",
+    ),
+    "tagged_metadata_reject_non_enum_tag": (
+        """
+        Choice :: union(i16) { child type }
+        make proc() Choice { return .child{i16} }
+        main proc() make().child { return 42 }
+        """, b"", b"union tag must be an enum containing every union variant",
+    ),
+    "tagged_metadata_reject_untagged_overlapping_layout": (
+        """
+        Choice :: union { detail struct { children [1]type }, count usize }
+        make proc() Choice { return Choice { detail = { children = [i16] } } }
+        main proc() make().detail.children[0] { return 42 }
+        """, b"", b"record fields require a concrete value type",
+    ),
+    "tagged_metadata_reject_undefined_result": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        make proc() Choice { value Choice := undefined
+            return value }
+        main proc() make().child { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "tagged_metadata_reject_undefined_payload_read": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        Bad proc() type { value Choice := undefined
+            return value.child }
+        main proc() Bad() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "tagged_metadata_preserve_narrow_ordinary_payload_overflow": (
+        """
+        Choice :: union(enum) { child type, small i8 }
+        Bad proc() type {
+            value Choice := .small{127}
+            value.small = value.small + 1
+            return i16
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"integer arithmetic overflow",
+    ),
+    "tagged_metadata_reject_mutating_match_capture": (
+        """
+        Choice :: union(enum) { detail struct { child type }, empty void }
+        Bad proc() type {
+            value Choice :: .detail{ child = i16 }
+            match value {
+                .detail |payload|: { payload.child = bool
+                    return payload.child },
+                .empty: return bool,
+            }
+        }
+        main proc() Bad() { return 42 }
+        """, b"", b"indexed assignment requires a writable array element",
+    ),
     "metadata_slices_direct_literal_views_start_bounded_evaluation": (
         """
         Selected proc($items []type) type { return items[0] }

@@ -1380,3 +1380,105 @@ readonly_type_slices_recompile_owned_private_nominal_payloads test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `Child :: struct { value bool }
+            `Storage proc() type {
+            `    saved :: $(lib.make())
+            `    if (lib.Box(saved) != lib.Box(lib.make())) return bool
+            `    if (lib.Box(saved) != lib.Box(lib.literal())) return bool
+            `    Selected :: saved.payload.children[0]?
+            `    if (Selected == Child) return bool
+            `    return lib.Snapshot(saved)
+            `}
+            `main proc() i16 {
+            `    Selected :: lib.Selected(lib.make())
+            `    value Selected :: { value = 40 }
+            `    if (lib.read(lib.make(), value) != 42) return -4
+            `    snapshot Storage() :: {
+            `        original = { values = [{ value = 19 }, { value = 21 }] },
+            `        nested = { values = [true] },
+            `        replacement = { values = [{ value = 2 }] },
+            `    }
+            `    if (!snapshot.nested.values[0]) return -5
+            `    return (snapshot.original.values[0].value
+            `        + snapshot.original.values[1].value + snapshot.replacement.values[0].value)
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/tagged_types/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `@hide:file
+            `Child :: struct { value i16 }
+            `@hide:file
+            `Config :: struct { children [2]mut ?type, count usize }
+            `@hide:file
+            `Metadata :: union(enum) { payload Config, fallback type }
+            `literal proc() Metadata {
+            `    return { payload = { children = [Child, null], count = 2 } }
+            `}
+            `make proc() Metadata {
+            `    value Metadata := undefined
+            `    value = Metadata { payload = { children = [bool, null], count = 1 } }
+            `    value.payload.children[0] = Child
+            `    value.payload.count = 2
+            `    saved :: value
+            `    value.payload.children[0] = bool
+            `    value = Metadata { fallback = bool }
+            `    return saved
+            `}
+            `Box proc(input Metadata) type {
+            `    match input {
+            `        .payload |info|: {
+            `            T :: info.children[0]?
+            `            return struct { values [info.count]T }
+            `        },
+            `        .fallback |ChildType|: return struct { values [1]ChildType },
+            `    }
+            `}
+            `Snapshot proc(input Metadata) type {
+            `    changed := input
+            `    saved :: changed
+            `    changed.payload.children[0] = bool
+            `    changed.payload.count = 1
+            `    nested :: changed
+            `    changed = Metadata { fallback = Child }
+            `    return struct { original Box(saved), nested Box(nested), replacement Box(changed) }
+            `}
+            `Selected proc(input Metadata) type { return input.payload.children[0]? }
+            `read proc($input Metadata, value Selected(input)) i16 {
+            `    return value.value + i16(input.payload.count)
+            `}
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/tagged_types/library/types.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

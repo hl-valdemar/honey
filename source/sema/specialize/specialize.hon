@@ -779,6 +779,12 @@ metadata_package_contains proc(state @State, package ast.NodeId, source diagnost
 metadata_tags proc(state @mut State, type ast.NodeId) ast.NodeId ! Error {
     if (ast.expr_kind(&state.tree, type) == .enum_type) return type
     if (ast.union_type(&state.tree, type).tag) |tag| return try canonical_type(state, tag)
+    return try metadata_variant_tags(state, type)
+}
+
+# dispatch covers union variants, not unused members of an explicit tag enum.
+@hide:file
+metadata_variant_tags proc(state @mut State, type ast.NodeId) ast.NodeId ! Error {
     members := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&members)
     for (0..ast.record_field_count(&state.tree, type)) |i| {
@@ -3719,7 +3725,7 @@ type_match_arm proc(state @mut State, id ast.NodeId) usize ! Error {
         } else {
             if (ast.expr_kind(&state.tree, value.node) != .record_literal) return no_index
             active :: ast.field(&state.tree, ast.record_field(&state.tree, value.node, 0))
-            tags :: try metadata_tags(state, try inline_match_shape(state, annotation))
+            tags :: try metadata_variant_tags(state, try inline_match_shape(state, annotation))
             tag :: try ast.add_enum_literal(state.builder, span, active.name?)
             dispatch = try ast.add_typed_constant(state.builder, span, tags, tag)
         }
@@ -3950,8 +3956,10 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             !record and !try execution_array_storage(state, array.type)
             and !try metadata_sequence(state, array.type)
         ) return true
-        if (try metadata_sequence(state, array.type)
-            and ast.expr_kind(&state.tree, array.value) == .literal_undefined) {
+        if (
+            (try metadata_sequence(state, array.type) or record)
+            and ast.expr_kind(&state.tree, array.value) == .literal_undefined
+        ) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
                 .read_before_initialization, ast.node_span(&state.tree, id))
             return false
@@ -4069,23 +4077,58 @@ type_record_slot proc(state @State, record, member ast.NodeId) usize {
 
 @hide:file
 type_union_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId ! Error {
+    if (!try type_record_check(state, type)) return no_node
+    if (ast.expr_kind(&state.tree, expression) == .literal_undefined) {
+        result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), type, expression)
+        try refresh(state)
+        return result
+    }
     if (ast.expr_kind(&state.tree, expression) == .typed_constant) {
         value :: ast.typed_constant(&state.tree, expression)
         if (try same_type(state, type, value.type)) return expression
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .type_mismatch, ast.node_span(&state.tree, expression))
+        return no_node
     }
     name := no_node
     input := no_node
     kind :: ast.expr_kind(&state.tree, expression)
     if (kind == .enum_literal) name = ast.enum_literal(&state.tree, expression)
-    else if (kind == .record_literal and ast.record_field_count(&state.tree, expression) == 1) {
-        field :: ast.field(&state.tree, ast.record_field(&state.tree, expression, 0))
-        if (field.name) |member| name = member
-        if (field.value) |value| input = value
+    else if (kind == .record_literal) {
+        literal :: ast.record_literal(&state.tree, expression)
+        if (literal.type != null and ast.expr_kind(&state.tree, literal.type?) == .enum_literal) {
+            name = ast.enum_literal(&state.tree, literal.type?)
+            count :: ast.record_field_count(&state.tree, expression)
+            if (count == 1 and ast.field(&state.tree, ast.record_field(&state.tree, expression, 0)).name == null) {
+                input = ast.field(&state.tree, ast.record_field(&state.tree, expression, 0)).value?
+            } else {
+                fields := arraylist.init(ast.NodeId, state.allocator)
+                defer arraylist.deinit(&fields)
+                for (0..count) |i| try arraylist.append(&fields, ast.record_field(&state.tree, expression, i))
+                input = try ast.add_record_literal(state.builder, ast.node_span(&state.tree, expression), null, fields.items)
+                try refresh(state)
+            }
+        } else {
+            if (literal.type != null and !try same_type(state, type, literal.type?)) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .type_mismatch, ast.node_span(&state.tree, expression))
+                return no_node
+            }
+            if (ast.record_field_count(&state.tree, expression) != 1) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .union_initializer_count, ast.node_span(&state.tree, expression))
+                return no_node
+            }
+            field :: ast.field(&state.tree, ast.record_field(&state.tree, expression, 0))
+            if (field.name) |member| name = member
+            if (field.value) |value| input = value
+        }
     }
     slot :: if (name != no_node) type_record_slot(state, type, name) else no_index
     if (slot == no_index) {
+        code diagnostics.Code :: if (name != no_node) .unknown_field else .union_initializer_count
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-            .union_initializer_count, ast.node_span(&state.tree, expression))
+            code, ast.node_span(&state.tree, expression))
         return no_node
     }
     field :: ast.field(&state.tree, ast.record_field(&state.tree, type, slot))
@@ -4093,6 +4136,12 @@ type_union_value proc(state @mut State, expression, type ast.NodeId) ast.NodeId 
     empty :: (binding(state, payload_type).kind == .builtin
         and binding(state, payload_type).data.builtin == .void)
     span :: ast.node_span(&state.tree, expression)
+    if (
+        empty and kind == .record_literal
+        and ast.record_literal(&state.tree, expression).type != null
+        and ast.expr_kind(&state.tree, ast.record_literal(&state.tree, expression).type?) == .enum_literal
+        and ast.record_field_count(&state.tree, expression) == 0
+    ) input = no_node
     if (input == no_node and empty) input = try ast.add_literal(state.builder, .void, span)
     if (input == no_node) {
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .missing_field, span)
@@ -4180,10 +4229,53 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
         }
         return try type_record_check(state, descriptor.element)
     }
+    tagged :: ast.expr_kind(&state.tree, type) == .union_type
+    tag := no_node
+    if (tagged) {
+        descriptor :: ast.union_type(&state.tree, type)
+        if (!descriptor.auto_tag and descriptor.tag == null) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .invalid_record_field_type, ast.node_span(&state.tree, type))
+            return false
+        }
+        if (descriptor.tag) |tag_annotation| {
+            tag = try canonical_type(state, tag_annotation)
+            if (tag == no_node or ast.expr_kind(&state.tree, tag) != .enum_type) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .invalid_union_tag, ast.node_span(&state.tree, tag_annotation))
+                return false
+            }
+            if (!try type_record_check(state, tag)) return false
+        }
+    }
     for (0..ast.record_field_count(&state.tree, type)) |i| {
         field_id :: ast.record_field(&state.tree, type, i)
         field :: ast.field(&state.tree, field_id)
         if (!try type_step(state, field_id)) return false
+        if (tagged) {
+            if (field.type == null or field.value != null) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_record_field_type, field.span)
+                return false
+            }
+            if (field.name == null) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .duplicate_field, field.span)
+                return false
+            }
+            if (tag != no_node) {
+                found := false
+                for (0..ast.enum_member_count(&state.tree, tag)) |j| {
+                    member :: ast.field(&state.tree, ast.enum_member(&state.tree, tag, j))
+                    if (member.name != null and ast.name_id(&state.tree, member.name?) == ast.name_id(&state.tree, field.name?)) {
+                        found = true
+                        break
+                    }
+                }
+                if (!found) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_union_tag, field.span)
+                    return false
+                }
+            }
+        }
         if (field.name != null and type_record_slot(state, type, field.name?) != i) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .duplicate_field, field.span)
             return false
@@ -4352,6 +4444,15 @@ type_array_initialized proc(state @mut State, value, at ast.NodeId) bool ! Error
 type_storage_undefined proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
     if (is_type(state, annotation)) return expression
     type :: try canonical_type(state, annotation)
+    if (
+        type != no_node and ast.expr_kind(&state.tree, type) == .union_type
+        and type_record_storage(state, type, 0)
+    ) {
+        if (!try type_record_check(state, type)) return no_node
+        result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), type, expression)
+        try refresh(state)
+        return result
+    }
     if (type != no_node and ast.expr_kind(&state.tree, type) == .record_type) {
         if (!try type_record_check(state, type)) return no_node
         fields := arraylist.init(ast.NodeId, state.allocator)
@@ -4596,13 +4697,20 @@ type_array_update proc(
     type :: try canonical_type(state, array.type)
     if (
         type == no_node
-        or (ast.expr_kind(&state.tree, type) != .record_type and ast.expr_kind(&state.tree, type) != .array_type)
+        or (ast.expr_kind(&state.tree, type) != .record_type and ast.expr_kind(&state.tree, type) != .array_type
+            and (ast.expr_kind(&state.tree, type) != .union_type or !type_record_storage(state, type, 0)))
     ) {
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
             .invalid_index_assignment, ast.node_span(&state.tree, target))
         return no_node
     }
-    record :: ast.expr_kind(&state.tree, type) == .record_type
+    tagged :: ast.expr_kind(&state.tree, type) == .union_type
+    record :: ast.expr_kind(&state.tree, type) == .record_type or tagged
+    if (tagged and ast.expr_kind(&state.tree, array.value) == .literal_undefined) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .read_before_initialization, ast.node_span(&state.tree, target))
+        return no_node
+    }
     index := no_index
     element_type := no_node
     count := usize(0)
@@ -4617,6 +4725,16 @@ type_array_update proc(
         }
         element_type = ast.field(&state.tree, ast.record_field(&state.tree, type, index)).type?
         count = ast.record_field_count(&state.tree, array.value)
+        if (tagged) {
+            active :: ast.field(&state.tree, ast.record_field(&state.tree, array.value, 0))
+            member :: ast.field(&state.tree, ast.record_field(&state.tree, type, index)).name?
+            if (active.name == null or ast.name_id(&state.tree, active.name?) != ast.name_id(&state.tree, member)) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                    .inactive_union_field, ast.node_span(&state.tree, first))
+                return no_node
+            }
+            index = 0
+        }
         previous = ast.field(&state.tree, ast.record_field(&state.tree, array.value, index)).value?
     } else {
         descriptor :: ast.array_type(&state.tree, type)
