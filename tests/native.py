@@ -11,6 +11,100 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "ordinary_metadata_inputs_compute_owned_runtime_results": (
+        """
+        Config :: struct { child type, count usize }
+        Result :: struct { values [2]i16, name []u8 }
+        amount proc(input Config, extra usize) usize {
+            copy := input
+            saved :: copy
+            copy.count = copy.count + extra
+            if (saved.child != i16 or saved.count != 40) return 0
+            return copy.count
+        }
+        compute proc(input Config) Result {
+            return { values = [i16(amount(input, 2)), 19], name = "owned" }
+        }
+        identity proc(T type, value i16) i16 {
+            if (T != i16) return 0
+            return value
+        }
+        main proc() i16 {
+            result :: compute(Config { child = i16, count = 40 })
+            if (result.name.len != 5 or result.name[4] != 100) return -1
+            return identity(i16, result.values[0])
+        }
+        """, b"42\n", None,
+    ),
+    "ordinary_metadata_inputs_select_recursive_helpers_and_void": (
+        """
+        validate proc(T type, early bool) void {
+            if (T != i16) compile_error!("wrong child")
+            if (early) return
+        }
+        count proc(types []type, index usize) usize {
+            validate(i16, index == 0)
+            if (index == types.len) return 0
+            bias :: if (types[index] == i16) usize(21) else usize(0)
+            return bias + count(types, index + 1)
+        }
+        main proc() usize { return count([i16, bool, i16], 0) }
+        """, b"42\n", None,
+    ),
+    "ordinary_metadata_inputs_preserve_fallible_cleanup": (
+        """
+        Error :: enum { failed }
+        fail proc(T type) i16 ! Error {
+            errdefer if (T != i16) unreachable
+            defer if (T != i16) unreachable
+            return .failed
+        }
+        forward proc(T type) i16 ! Error {
+            errdefer if (T != i16) unreachable
+            return try fail(T)
+        }
+        succeed proc(T type) void ! Error {
+            errdefer unreachable
+            if (T == i16) return
+        }
+        main proc() i16 {
+            succeed(i16) catch { return -1 }
+            succeed(bool) catch { return -2 }
+            return forward(i16) catch |error| {
+                yield if (error == .failed) i16(42) else i16(0)
+            }
+        }
+        """, b"42\n", None,
+    ),
+    "ordinary_metadata_inputs_run_error_cleanup": (
+        """
+        Error :: enum { failed }
+        fail proc(T type) i16 ! Error {
+            errdefer unreachable
+            return .failed
+        }
+        main proc() i16 { return fail(i16) catch 0 }
+        """, b"", b"reached unreachable statement",
+    ),
+    "ordinary_metadata_inputs_reject_runtime_dependencies": (
+        """
+        count proc(T type, value usize) usize { return value }
+        runtime proc(value usize) usize { return count(i16, value) }
+        main proc() usize { return runtime(42) }
+        """, b"", b"generic argument must be a compile-time value",
+    ),
+    "ordinary_metadata_inputs_reject_incomplete_payloads": (
+        """
+        Config :: struct { child type, count usize }
+        count proc(input Config) usize { return input.count }
+        Produce proc() type {
+            input Config := undefined
+            input.count = 42
+            return [count(input)]i16
+        }
+        main proc() usize { value Produce() :: []; return value.len }
+        """, b"", b"read before initialization",
+    ),
     "unreachable_is_a_demanded_source_trap_without_cleanup": (
         """
         fail proc() i16 {
@@ -11290,6 +11384,31 @@ def check_typeinfo_packages(temporary, executable):
         (project / "std" / package).symlink_to(ROOT / "std" / package, target_is_directory=True)
 
     cases = {
+        "ordinary_metadata_helpers_return_values_and_names": (
+            """
+            import "@std/meta"
+            Record :: struct { first i16, second bool }
+            field_name proc(info meta.TypeInfo, index usize) []u8 {
+                return match info {
+                    .record |record|: record.fields[index].name,
+                    else: compile_error!("expected record"),
+                }
+            }
+            count proc(fields []meta.FieldInfo) usize {
+                total usize := 0
+                for fields |field| {
+                    if (field.type == i16) total += 19
+                    else total += 23
+                }
+                return total
+            }
+            main proc() usize {
+                name :: field_name(typeinfo!(Record), 1)
+                if (name.len != 6 or name[0] != 115) return 0
+                return count(typeinfo!(Record).record.fields)
+            }
+            """, b"42\n", None,
+        ),
         "categories_specialize_generic_calls": (
             """
             reflection :: import "@std/meta"

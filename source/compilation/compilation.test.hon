@@ -1405,6 +1405,7 @@ tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
             `    Selected :: lib.Selected(lib.make())
             `    value Selected :: { value = 40 }
             `    if (lib.read(lib.make(), value) != 42) return -4
+            `    if (lib.score(lib.make(), 40) != 42) return -6
             `    snapshot Storage() :: {
             `        original = { values = [{ value = 19 }, { value = 21 }] },
             `        nested = { values = [true] },
@@ -1459,6 +1460,13 @@ tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
             `Selected proc(input Metadata) type { return input.payload.children[0]? }
             `read proc($input Metadata, value Selected(input)) i16 {
             `    return value.value + i16(input.payload.count)
+            `}
+            `score proc(input Metadata, bias i16) i16 {
+            `    saved :: input
+            `    changed := input
+            `    changed.payload.children[0] = bool
+            `    if (saved.payload.children[0]? != Child) return -1
+            `    return i16(saved.payload.count) + bias
             `}
             ,
         )

@@ -143,6 +143,11 @@ elaborate proc(
         if (class == .function) {
             if (type_storage_annotation(&original, resolution.storage.bindings,
                 ast.function_decl(&original, id).return_type, 0)) needed = true
+            for (0..ast.function_param_count(&original, id)) |position| {
+                parameter :: ast.param(&original, ast.function_param(&original, id, position))
+                if (!parameter.comptime and type_storage_annotation(&original,
+                    resolution.storage.bindings, parameter.type, 0)) needed = true
+            }
         }
         if (class == .statement and ast.stmt_kind(&original, id) == .declaration
             and type_storage_annotation(&original, resolution.storage.bindings,
@@ -1853,8 +1858,13 @@ type_storage_annotation proc(tree @ast.Tree, bindings []sema.Binding, input ast.
 }
 
 @hide:file
-compiletime_result proc(state @State, annotation ast.NodeId) bool {
-    return type_record_storage(state, annotation, 0)
+compiletime_call proc(state @State, function ast.NodeId) bool {
+    if (type_record_storage(state, ast.function_decl(&state.tree, function).return_type, 0)) return true
+    for (0..ast.function_param_count(&state.tree, function)) |i| {
+        parameter :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
+        if (!parameter.comptime and type_record_storage(state, parameter.type, 0)) return true
+    }
+    return false
 }
 
 @hide:file
@@ -1907,8 +1917,8 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # type-containing results have no runtime call: every input is specialized.
-    type_result :: compiletime_result(state, ast.function_decl(&state.tree, function).return_type)
+    # ordinary metadata inputs and metadata results require a fully constant call.
+    type_result :: compiletime_call(state, function)
     runtime := usize(0)
     for (0..count) |i| {
         if (!type_result and !ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
@@ -2110,7 +2120,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
 @hide:file
 instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     function :: state.instances.items[index].function
-    type_result :: compiletime_result(state, ast.function_decl(&state.tree, function).return_type)
+    type_result :: compiletime_call(state, function)
     count :: state.original_count
     clone_start :: ast.node_count(&state.tree)
     mapping :: state.mapping
@@ -3027,8 +3037,9 @@ return_type_value proc(state @mut State, block, first_owned, result_type ast.Nod
 @hide:file
 type_void_completion proc(state @mut State, annotation, at ast.NodeId) ast.NodeId ! Error {
     type :: try canonical_type(state, annotation)
-    if (type == no_node or ast.expr_kind(&state.tree, type) != .fallible_type) return no_node
-    child :: try canonical_type(state, ast.binary_expr(&state.tree, type).left)
+    if (type == no_node) return no_node
+    child :: if (ast.expr_kind(&state.tree, type) == .fallible_type)
+        try canonical_type(state, ast.binary_expr(&state.tree, type).left) else type
     resolved :: binding(state, child)
     if (resolved.kind != .builtin or resolved.data.builtin != .void) return no_node
     value :: try ast.add_literal(state.builder, .void, ast.node_span(&state.tree, at))
@@ -5258,7 +5269,7 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 execution.returned = try type_execution_value(state, expression, execution.result_type)
                 if (execution.returned != no_node
                     and !try type_array_initialized(state, execution.returned, value)) return .invalid
-                if (execution.returned != no_node and type_record_storage(state, execution.result_type, 0)) {
+                if (execution.returned != no_node) {
                     type :: try canonical_type(state, execution.result_type)
                     if (type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type) {
                         payload :: ast.typed_constant(&state.tree, execution.returned).value
@@ -6788,5 +6799,5 @@ flexible proc(state @State, id ast.NodeId) bool {
 
 @hide:file
 template proc(state @State, id ast.NodeId) bool {
-    return ast.function_generic(&state.tree, id) or compiletime_result(state, ast.function_decl(&state.tree, id).return_type)
+    return ast.function_generic(&state.tree, id) or compiletime_call(state, id)
 }
