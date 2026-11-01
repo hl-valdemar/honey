@@ -392,7 +392,7 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
     try write_type(output, module, type)
     try io.write_all(output, "\n  store ")
     try write_type(output, module, type)
-    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
+    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @honey.array_open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
     try io.print("  %done = icmp eq i64 %index, {}\n", output, {shape.len})
     try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @out(i32 1, ptr @separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
     try write_type(output, module, type)
@@ -402,7 +402,7 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
     # functions may occur inside arrays without being printable source results.
     if (element.kind != .function) try print_call(output, module, element, 0)
     else try io.write_all(output, "  call void @exit(i32 2)\n")
-    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @out(i32 1, ptr @close, i64 1)\n  ret void\n}\n")
+    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @out(i32 1, ptr @honey.array_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide:file
@@ -613,6 +613,10 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
         if (index != 0) try io.write_all(output, ", ")
         try write_abi_parameter(output, state.module, local_type(function, index))
         try io.print(" %p{}", output, {index})
+    }
+    if (function.variadic) {
+        if (function.parameters.items.len != 0) try io.write_all(output, ", ")
+        try io.write_all(output, "...")
     }
     if (function.external_name.len != 0) {
         try io.write_all(output, ")\n")

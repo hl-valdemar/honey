@@ -11,6 +11,115 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "pointer_array_slice_coercions_borrow_storage_and_preserve_optional_presence": (
+        """
+        borrow proc(value @mut [2]mut i16) []mut i16 { return value }
+        optional proc(value ?@[2]i16) ?[]i16 { return value }
+        c_string proc(value ?string) ?*u8 { return value }
+        main proc() i16 {
+            values [2]mut i16 := [19, 23]
+            view :: borrow(&values)
+            view[0] = 20
+            if (values[0] != 20 or view.len != 2) return -1
+            immutable [2]i16 :: [19, 23]
+            present :: optional(&immutable)
+            if (present?.len != 2 or present?[0] != 19 or optional(null) != null) return -2
+            text :: c_string("ok")?
+            if (text[0] != 111 or text[2] != 0 or c_string(null) != null) return -3
+            return present?[0] + present?[1]
+        }
+        """, b"42\n", None,
+    ),
+    "pointer_array_slice_coercion_rejects_readonly_reversal": (
+        """
+        borrow proc(value @[2]mut i16) []mut i16 { return value }
+        main proc() i16 { values [2]mut i16 := [19, 23]\nreturn borrow(&values)[0] }
+        """, b"", b"return does not match the function result type",
+    ),
+    "pointer_array_slice_coercion_rejects_nominal_element_mismatch": (
+        """
+        Id :: distinct i16
+        borrow proc(value @[2]Id) []i16 { return value }
+        main proc() i16 { values [2]Id :: [Id(19), Id(23)]\nreturn borrow(&values)[0] }
+        """, b"", b"return does not match the function result type",
+    ),
+    "partial_comptime_prefix_infers_remaining_types_and_reuses_nominal_results": (
+        """
+        Box proc($N usize, $T type) type { return struct { values [N]T } }
+        wrap proc($N usize, $T type, value T) Box(N, T) {
+            if (N != 2) compile_error!("expected two elements")
+            return { values = [value, value] }
+        }
+        main proc() i16 {
+            partial :: wrap(usize(2), i16(21))
+            explicit Box(2, i16) :: wrap(usize(2), i16, i16(21))
+            if (partial.values[1] != explicit.values[1]) return -1
+            return partial.values[0] + partial.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "partial_comptime_prefix_checks_explicit_value_types": (
+        """
+        add proc($bias i8, $T type, value T) T { return value + T(bias) }
+        main proc() i16 { return add(i16(2), i16(40)) }
+        """, b"42\n", b"incompatible value type",
+    ),
+    "partial_comptime_prefix_still_requires_unresolved_parameters": (
+        """
+        add proc($bias i8, $T type, value i16) i16 { return value + i16(bias) }
+        main proc() i16 { return add(i8(2), i16(40)) }
+        """, b"", b"cannot infer",
+    ),
+    "pure_type_builtins_select_generic_guards_before_compile_errors": (
+        """
+        checked proc($T type, value T) T {
+            if (minval!(T) == 0 and maxval!(T) == 255 and sizeof!(T) == 1 and alignof!(T) == 1) {
+                return value
+            } else {
+                compile_error!("expected an unsigned byte")
+            }
+        }
+        main proc() u8 { return checked(u8(42)) }
+        """, b"42\n", None,
+    ),
+    "remainder_preserves_exact_signed_unsigned_float_and_nominal_values": (
+        """
+        Id :: distinct i16
+        remainder proc(left, right Id) Id { return rem!(left, right) }
+        signs proc(left, right i64) i64 { return rem!(left, right) }
+        real proc(left, right f64) f64 { return rem!(left, right) }
+        constant proc() i16 { return rem!(i16(-42), 23) }
+        main proc() i16 {
+            if (remainder(Id(-42), Id(23)) != Id(-19)) return -1
+            if (signs(minval!(i64), -1) != 0 or signs(minval!(i64), 10) != -8) return -2
+            if (signs(5, -3) != 2 or signs(-5, 3) != -2) return -3
+            if (rem!(maxval!(u64), 10) != 5) return -4
+            if (real(-5.5, 2.0) != -1.5 or real(5.5, -2.0) != 1.5) return -5
+            if ($(constant()) != -19) return -6
+            return 42
+        }
+        """, b"42\n", None,
+    ),
+    "remainder_traps_on_runtime_zero": (
+        "calculate proc(zero i16) i16 { return rem!(i16(42), zero) }\n"
+        "main proc() i16 { return calculate(0) }", b"", b"division by zero",
+    ),
+    "float_remainder_traps_on_runtime_negative_zero": (
+        "calculate proc(zero f64) f64 { return rem!(f64(42), zero) }\n"
+        "main proc() f64 { return calculate(-0.0) }", b"", b"division by zero",
+    ),
+    "remainder_rejects_mismatched_nominal_types": (
+        "Id :: distinct i16\nmain proc() Id { return rem!(Id(42), i16(23)) }",
+        b"", b"operator requires compatible operand types",
+    ),
+    "character_literals_preserve_codepoints_escapes_and_constant_values": (
+        r"""
+        constant proc() u32 { return '🙂' }
+        main proc() [8]u32 {
+            return ['A', 'é', $(constant()), '\n', '\r', '\t', '\\', '\'']
+        }
+        """, b"[65, 233, 128578, 10, 13, 9, 92, 39]\n", None,
+    ),
     "compiletime_only_main_cannot_select_another_runtime_function": (
         """
         fallback proc() i16 { return -99 }
@@ -10578,13 +10687,15 @@ main proc() int { return missing }
     emitted = run(str(HONEY), "emit-llvm", str(single))
     assert emitted.returncode == 0 and emitted.stderr == b"", outcome(emitted)
     check(single.parent, executable, (b"42\n", b"duplicate name"))
-    put("hidden/a.hon", "@hide:file\nhelper proc() int { return 20 }\nfirst proc() int { return helper() }\n")
-    put("hidden/b.hon", "@hide:file\nhelper proc() int { return 22 }\nsecond proc() int { return helper() }\n")
+    put("hidden/a.hon", "@hide:file\nhelper proc() int { return 20 }\n@hide\npackage_value :: 19\nfirst proc() int { return helper() }\n")
+    put("hidden/b.hon", "@hide:file\nhelper proc() int { return 22 }\nsecond proc() int { return helper() }\nanswer proc() int { return package_value + 23 }\n")
     visibility_cases = (
         ('import "../hidden"\nmain proc() int { return hidden.first() + hidden.second() }\n', b"42\n", None),
         ('import "../hidden"\nmain proc() int { return hidden.helper() }\n', b"", b"unknown name"),
+        ('import "../hidden"\nmain proc() int { return hidden.answer() }\n', b"42\n", None),
+        ('import "../hidden"\nmain proc() int { return hidden.package_value }\n', b"", b"unknown name"),
+        ('import "../hidden"\nspace :: alias hidden\nmain proc() int { return space.package_value }\n', b"", b"unknown name"),
         ('@hide:file\nprivate proc() int { return 42 }\nmain proc() int { return private() }\n', b"42\n", None),
-        ('@hide:package\nprivate proc() int { return 42 }\nmain proc() int { return private() }\n', b"", b"unexpected token"),
     )
     sibling.write_text("sibling proc(n int) int { return n }\n")
     for text, stdout, error in visibility_cases:
@@ -12516,6 +12627,197 @@ def check_hashmap_packages(temporary, executable):
     return 1 + len(invalid_keys), len(native_cases)
 
 
+def check_io_packages(temporary, executable):
+    project = temporary / "io"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+    source = project / "main.hon"
+    writer = """
+        import "@std/io"
+        State :: struct {
+            bytes []mut u8
+            len usize = 0
+            chunk usize = 3
+            fail_at usize = maxval!(usize)
+            mode u8 = 0
+        }
+        write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+            state @mut State :: ptrcast!(context?)
+            if (state.len >= state.fail_at) return .write_failed
+            if (state.mode == 1) return 0
+            if (state.mode == 2) return bytes.len + 1
+            count := bytes.len
+            if (count > state.chunk) count = state.chunk
+            if (count > state.bytes.len - state.len) return .write_failed
+            memcopy!(state.bytes[state.len..state.len + count], bytes[..count])
+            state.len += count
+            return count
+        }
+        output proc(state @mut State) io.Writer {
+            return { context = state, handle = { file_desc = -1 }, write = write }
+        }
+        equal proc(state @State, expected []u8) bool {
+            if (state.len != expected.len) return false
+            for expected |byte, index| { if (state.bytes[index] != byte) return false }
+            return true
+        }
+    """
+    cases = (
+        """
+        Kind :: enum(i16) { negative = -7, first = 3, far = 90 }
+        KindAlias :: alias Kind
+        Inner :: distinct i16
+        Id :: distinct Inner
+        main proc() i16 ! io.WriteError {
+            buffer [512]mut u8 := undefined
+            state State := { bytes = buffer[..] }
+            try io.print("{{{} {d} {b} {o} {x} {X} {c} {s} {}}}",
+                output(&state), {true, i16(-42), u8(5), u16(8), u32(254),
+                    u64(254), u8('!'), "ok", Kind.far})
+            if (!equal(&state, "{true -42 101 10 fe FE ! ok .far}")) return -1
+            state.len = 0
+            try io.print("{} {} {} {}", output(&state),
+                {Id(Inner(-42)), false, KindAlias.first, ""})
+            if (!equal(&state, "-42 false .first ")) return -2
+            state.len = 0
+            try io.print("", output(&state), {})
+            if (!equal(&state, "")) return -3
+            try io.print("{{plain}}", output(&state), {})
+            if (!equal(&state, "{plain}")) return -4
+            return 42
+        }
+        """,
+        """
+        main proc() i16 ! io.WriteError {
+            buffer [512]mut u8 := undefined
+            state State := { bytes = buffer[..], chunk = 1 }
+            try io.print("{} {} {} {} {}", output(&state),
+                {minval!(i64), maxval!(u64), i8(-128), u8(0), isize(-1)})
+            if (!equal(&state, "-9223372036854775808 18446744073709551615 -128 0 -1")) return -1
+            state.len = 0
+            try io.print("{x} {b} {o}", output(&state), {i16(-255), i8(-5), u8(255)})
+            if (!equal(&state, "-ff -101 377")) return -2
+            return 42
+        }
+        """,
+        """
+        main proc() i16 {
+            buffer [64]mut u8 := undefined
+            state State := { bytes = buffer[..], chunk = 2, fail_at = 4 }
+            failed := false
+            io.print("abcdef{}", output(&state), {42}) catch |err| { failed = err == .write_failed }
+            if (!failed or !equal(&state, "abcd")) return -1
+            state.len = 0
+            state.mode = 1
+            failed = false
+            io.print("{}", output(&state), {42}) catch |err| { failed = err == .no_progress }
+            if (!failed or state.len != 0) return -2
+            state.mode = 2
+            failed = false
+            io.print("{}", output(&state), {42}) catch |err| { failed = err == .write_failed }
+            if (!failed or state.len != 0) return -3
+            return 42
+        }
+        """,
+        """
+        format proc() []u8 { return "{} {s} {}" }
+        render proc(writer io.Writer, number i16) void ! io.WriteError {
+            bytes [2]u8 :: ['o', 'k']
+            try io.print(format(), writer, {number, bytes, &bytes})
+        }
+        main proc() i16 ! io.WriteError {
+            buffer [64]mut u8 := undefined
+            state State := { bytes = buffer[..] }
+            for (i16(40)..i16(43)) |value| {
+                state.len = 0
+                try render(output(&state), value)
+                if (value == 42 and !equal(&state, "42 ok ok")) return -1
+            }
+            return 42
+        }
+        """,
+    )
+    for text in cases:
+        source.write_text(textwrap.dedent(writer + text).strip() + "\n")
+        check(source, executable, (b"42\n", None))
+    errors = (
+        ('"{"', '{}', b"unmatched '{'"),
+        ('"}"', '{}', b"unmatched '}'"),
+        ('"{q}"', '{42}', b"unknown specifier"),
+        ('"{dd}"', '{42}', b"one-character specifier"),
+        ('"{}"', '{}', b"argument count does not match the tuple"),
+        ('"plain"', '{42}', b"argument count does not match the tuple"),
+        ('"{}"', '{value = 42}', b"arguments must be a tuple"),
+        ('"{}"', '42', b"arguments must be a tuple"),
+        ('"{d}"', '{true}', b"requires an integer or float argument"),
+        ('"{b}"', '{true}', b"requires an integer argument"),
+        ('"{c}"', '{u16(65)}', b"requires an unsigned integer that fits in u8"),
+        ('"{}"', '{{ value = 42 }}', b"does not support this argument type"),
+    )
+    for format_value, args, diagnostic in errors:
+        source.write_text(textwrap.dedent(writer + f"""
+            main proc() i16 ! io.WriteError {{
+                buffer [64]mut u8 := undefined
+                state State := {{ bytes = buffer[..] }}
+                try io.print({format_value}, output(&state), {args})
+                return 42
+            }}
+        """).strip() + "\n")
+        check(source, executable, (b"", diagnostic))
+    source.write_text(textwrap.dedent(writer + """
+        Distance :: distinct f64
+        main proc() i16 ! io.WriteError {
+            buffer [512]mut u8 := undefined
+            state State := { bytes = buffer[..] }
+            try io.print("{} {d} {e}", output(&state), {f64(1.25), Distance(-2.5), f64(0.5)})
+            if (!equal(&state, "1.25 -2.5 5.0000000000000000e-01")) return -1
+            return 42
+        }
+    """).strip() + "\n")
+    interpreted = run(str(HONEY), "run", str(source))
+    assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+    assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    for optimization in ("-O0", "-O2"):
+        built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+        assert outcome(built) == (0, b"", b""), outcome(built)
+        assert outcome(run(str(executable))) == (0, b"42\n", b""), optimization
+        executable.unlink()
+    return len(cases) + len(errors), 1
+
+
+def check_variadic_libc(temporary, executable):
+    source = temporary / "variadic.hon"
+    source.write_text(textwrap.dedent("""
+        snprintf c_func(buffer ?*mut c_char, size c_ulong, format ?*c_char, ...) c_int
+        main proc() i16 {
+            buffer [256]mut u8 := undefined
+            count :: snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len),
+                "%d %d %d %d %d %d %u %lld %llu %.2f %s",
+                true, i8(-128), u8(255), i16(-32768), u16(65535),
+                i32(-2147483648), maxval!(u32), minval!(i64), maxval!(u64),
+                f64(1.25), "ok".ptr)
+            expected :: "1 -128 255 -32768 65535 -2147483648 4294967295 -9223372036854775808 18446744073709551615 1.25 ok"
+            if (count < 0 or usize(count) != expected.len) return -1
+            for expected |byte, index| { if (buffer[index] != byte) return -2 }
+            if (buffer[expected.len] != 0) return -3
+            return 42
+        }
+    """).strip() + "\n")
+    interpreted = run(str(HONEY), "run", str(source))
+    assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+    assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    for optimization in ("-O0", "-O2"):
+        built = run(str(HONEY), "build", str(source), "-o", str(executable), optimization)
+        assert outcome(built) == (0, b"", b""), outcome(built)
+        assert outcome(run(str(executable))) == (0, b"42\n", b""), optimization
+        executable.unlink()
+    return 1
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="honey native ' ; $") as directory:
         temporary = Path(directory)
@@ -12530,10 +12832,13 @@ def main():
             check(source, executable, (stdout, error))
             count += 1
         allocator_count = check_allocator_libc(temporary, executable)
+        variadic_count = check_variadic_libc(temporary, executable)
         arraylist_count, arraylist_native_count = check_arraylist_packages(temporary, executable)
         count += arraylist_count
         hashmap_count, hashmap_native_count = check_hashmap_packages(temporary, executable)
         count += hashmap_count
+        io_count, io_native_count = check_io_packages(temporary, executable)
+        count += io_count
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -12560,7 +12865,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count} native allocator programs, LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count + io_native_count + variadic_count} native allocator/IO programs, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":

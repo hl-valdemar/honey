@@ -1762,6 +1762,13 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .union_constant, .slice_constant: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
         .enum_literal: return true
+        .builtin_call: {
+            name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
+            if (ast.call_arg_count(&state.tree, id) != 1
+                or (!mem.eql(name, "minval") and !mem.eql(name, "maxval")
+                    and !mem.eql(name, "sizeof") and !mem.eql(name, "alignof"))) return false
+            return branch_constant(state, ast.call_arg(&state.tree, id, 0), depth + 1)
+        }
         .record_literal: {
             # typed literals may omit defaults; materialized constants are complete
             # contextual literals inside a typed_constant wrapper.
@@ -2122,7 +2129,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     }
     supplied :: ast.call_arg_count(&state.tree, call)
     explicit :: supplied == count
-    if (!explicit and (type_result or supplied != runtime)) {
+    if (!explicit and (type_result or supplied < runtime or supplied > count)) {
         try reject(state, call, .argument_count_mismatch)
         return
     }
@@ -2131,11 +2138,17 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     mem.set(arguments, Value{})
     runtime_arguments := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&runtime_arguments)
+    # supplied compile-time arguments form a declaration-order prefix; infer the rest.
+    supplied_comptime :: if (type_result) count else supplied - runtime
+    comptime_position := usize(0)
     position := 0
     for (0..count) |i| {
         parameter :: ast.function_param(&state.tree, function, i)
         view :: ast.param(&state.tree, parameter)
-        if (view.comptime and !explicit) continue
+        if (view.comptime and !type_result) {
+            if (comptime_position >= supplied_comptime) continue
+            comptime_position += 1
+        }
         argument :: ast.call_arg(&state.tree, call, position)
         position += 1
         if (type_result or view.comptime) {
@@ -2288,16 +2301,23 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         try reject(state, call, .specialization_cycle)
         return
     }
-    if (explicit) {
+    if (type_result or supplied_comptime != 0) {
         signature :: state.instances.items[instance].signature
+        position = 0
+        comptime_position = 0
         for (0..count) |i| {
             parameter :: ast.function_param(&state.tree, signature, i)
             view :: ast.param(&state.tree, parameter)
+            if (view.comptime and !type_result) {
+                if (comptime_position >= supplied_comptime) continue
+                comptime_position += 1
+            }
+            original :: ast.call_arg(&state.tree, call, position)
+            position += 1
             if (
                 (!type_result and !view.comptime) or is_type(state, view.type)
                 or type_record_storage(state, view.type, 0)
             ) continue
-            original :: ast.call_arg(&state.tree, call, i)
             constraint :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, original), view.type, original)
             try refresh(state)
             try arraylist.append(&state.rewrites.constraints, constraint)
@@ -6481,7 +6501,7 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 return try canonical_type(state, ast.call_arg(&state.tree, id, 0))
             if ((mem.eql(name, "ptrcast") or mem.eql(name, "constcast")) and count == 2)
                 return try canonical_type(state, ast.call_arg(&state.tree, id, 0))
-            if (mem.eql(name, "divtrunc") and count == 2) {
+            if ((mem.eql(name, "divtrunc") or mem.eql(name, "rem")) and count == 2) {
                 left :: ast.call_arg(&state.tree, id, 0)
                 right :: ast.call_arg(&state.tree, id, 1)
                 operand :: if (flexible(state, left)) right else left

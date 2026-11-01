@@ -521,6 +521,7 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
         owned :: try mem.alloc(u8, state.module.allocator, name.len)
         memcopy!(owned, name)
         state.module.functions.items[state.function].external_name = owned
+        state.module.functions.items[state.function].variadic = ast.callable_variadic(tree, id)
         return
     }
     try predeclare_locals(state, declaration.body)
@@ -1657,9 +1658,11 @@ convert_value proc(state @mut State, value ir.ValueId, actual, expected typechec
     if (actual.kind == .optional and expected.kind == .optional and actual.array_type != expected.array_type) {
         source :: typecheck.array_type(state.checked, actual.array_type).element
         child :: typecheck.array_type(state.checked, expected.array_type).element
-        if (source.kind == .pointer or source.kind == .function) return value
+        nullable :: child.kind == .pointer or child.kind == .function
+        if ((source.kind == .pointer or source.kind == .function) and nullable) return value
+        runtime :: lower_type(state, expected)
         shape :: try array_shape(state, expected)
-        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), .record, shape))
+        slot :: u32(try ir.add_local(state.module, ir.FunctionId(state.function), runtime, shape))
         present :: try optional_present(state, value, actual, span)
         some :: try add_block(state)
         none :: try add_block(state)
@@ -1670,24 +1673,32 @@ convert_value proc(state @mut State, value ir.ValueId, actual, expected typechec
         state.block = some
         payload :: try optional_payload(state, value, actual, span)
         converted :: try convert_value(state, payload, source, child, span)
-        wrapped :: try record_pair(state, shape, present, converted, span)
+        wrapped := converted
+        if (!nullable) wrapped = try record_pair(state, shape, present, converted, span)
         _ = try emit(state, ir.Instruction{ op = .store_local, left = wrapped, slot = slot, span = span })
         state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
             kind = .jump, target = join, span = span,
         }
         state.block = none
-        absent :: try zero_value(state, .record, shape, span)
+        absent :: try zero_value(state, runtime, shape, span)
         _ = try emit(state, ir.Instruction{ op = .store_local, left = absent, slot = slot, span = span })
         state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
             kind = .jump, target = join, span = span,
         }
         state.block = join
-        return try emit(state, ir.Instruction{ op = .load_local, type = .record, array_type = shape, slot = slot, span = span })
+        return try emit(state, ir.Instruction{ op = .load_local, type = runtime, array_type = shape, slot = slot, span = span })
     }
+    if (expected.kind == .pointer and actual.kind == .string)
+        return try emit(state, ir.Instruction{ op = .string_pointer, type = .pointer, left = value, span = span })
     if (expected.kind == .slice and actual.kind == .string) {
         pointer :: try emit(state, ir.Instruction{ op = .string_pointer, type = .pointer, left = value, span = span })
         length :: try emit(state, ir.Instruction{ op = .string_length, type = .usize, left = value, span = span })
         return try record_pair(state, try array_shape(state, expected), pointer, length, span)
+    }
+    if (expected.kind == .slice and actual.kind == .pointer) {
+        pointer :: typecheck.pointer_type(state.checked, actual.pointer_type)
+        length :: try usize_constant(state, typecheck.array_type(state.checked, pointer.element.array_type).len, span)
+        return try record_pair(state, try array_shape(state, expected), value, length, span)
     }
     if (expected.kind == .slice and actual.kind == .array) {
         source_shape :: try array_shape(state, actual)
@@ -1975,13 +1986,15 @@ lower_builtin proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError
         else value.data = ir.ValueData{ integer = enummap.get(&ir.integer_minima, type)? }
         return try constant(state, value, span)
     }
-    if (mem.eql(name, "divtrunc")) {
+    if (mem.eql(name, "divtrunc") or mem.eql(name, "rem")) {
         left :: try lower_expression(state, ast.call_arg(tree, id, 0))
         if (state.terminated) return ir.no_value
         right :: try lower_expression(state, ast.call_arg(tree, id, 1))
         if (state.terminated) return ir.no_value
+        op ir.Op :: if (mem.eql(name, "rem")) .remainder else .divide
         return try emit(state, ir.Instruction{
-            op = .divide, type = lower_type(state, typecheck.type_of(state.checked, id)),
+            op = op,
+            type = lower_type(state, typecheck.type_of(state.checked, id)),
             left = left, right = right, span = span,
         })
     }
@@ -2471,8 +2484,9 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             count :: ast.call_arg_count(tree, id)
             try arraylist.reserve(&state.arguments, scratch_start + count)
             for (0..count) |_| try arraylist.append(&state.arguments, ir.no_value)
+            signature :: typecheck.type_of(state.checked, ast.call_expr(tree, id).callee).function
+            fixed_arguments :: if (signature != ast.NodeId(maxval!(u32))) ast.function_param_count(tree, signature) else 0
             for (0..count) |i| {
-                signature :: typecheck.type_of(state.checked, ast.call_expr(tree, id).callee).function
                 expected := typecheck.Type{}
                 if (signature != ast.NodeId(maxval!(u32)) and i < ast.function_param_count(tree, signature)) expected = typecheck.type_of(state.checked, ast.param(tree, ast.function_param(tree, signature, i)).type)
                 argument :: try lower_as(state, ast.call_arg(tree, id, i), expected)
@@ -2492,6 +2506,8 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 left = callee,
                 arguments_start = start,
                 arguments_count = count,
+                variadic = signature != ast.NodeId(maxval!(u32)) and ast.callable_variadic(tree, signature),
+                fixed_arguments = fixed_arguments,
                 span = span,
             })
         }

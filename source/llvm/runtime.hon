@@ -43,13 +43,13 @@ runtime ::
     `@error = private constant [9 x i8] c": error: "
     `@runtime_trap = private constant [16 x i8] c": runtime trap: "
     `@newline = private constant [1 x i8] c"\0A"
-    `@open = private constant [1 x i8] c"["
-    `@close = private constant [1 x i8] c"]"
+    `@honey.array_open = private constant [1 x i8] c"["
+    `@honey.array_close = private constant [1 x i8] c"]"
     `@record_open = private constant [1 x i8] c"{"
     `@record_close = private constant [1 x i8] c"}"
     `@separator = private constant [2 x i8] c", "
     `@write_error = private constant [44 x i8] c": infrastructure error: cannot write output\0A"
-    `@read = private constant [42 x i8] c"local value was read before initialization"
+    `@honey.uninitialized_read = private constant [42 x i8] c"local value was read before initialization"
     `@assign = private constant [46 x i8] c"local value was assigned before initialization"
     `@cycle = private constant [27 x i8] c"global initialization cycle"
     `@overflow = private constant [27 x i8] c"integer arithmetic overflow"
@@ -154,7 +154,7 @@ runtime ::
     `  %ready = load i1, ptr %flag
     `  br i1 %ready, label %end, label %fail
     `fail:
-    `  %message = select i1 %read, ptr @read, ptr @assign
+    `  %message = select i1 %read, ptr @honey.uninitialized_read, ptr @assign
     `  %length = select i1 %read, i64 42, i64 46
     `  call void @trap(i64 -1, i64 %source, i64 %line, i64 %column, ptr %message, i64 %length)
     `  unreachable

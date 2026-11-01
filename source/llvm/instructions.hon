@@ -16,6 +16,7 @@ float_opcodes :: $enummap.init_default(ir.Op, []u8, "", {
     subtract = "fsub",
     multiply = "fmul",
     divide = "fdiv",
+    remainder = "frem",
 })
 
 @hide:file
@@ -329,15 +330,50 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             for (0..instruction.arguments_count) |index| {
                 _ = try load(state, block.arguments.items[instruction.arguments_start + index])
             }
+            # C default promotions apply only after the fixed prefix.
+            first_promotion :: state.next_register
+            if (instruction.variadic) {
+                for (instruction.fixed_arguments..instruction.arguments_count) |index| {
+                    operand :: block.arguments.items[instruction.arguments_start + index]
+                    kind :: state.values[usize(operand)].kind
+                    if (variadic_type(kind) == kind) continue
+                    promoted :: fresh(state)
+                    opcode []u8 :: if (kind == .bool or ir.unsigned_integer(kind)) "zext" else "sext"
+                    try io.print("  %r{} = {s} ", output, {promoted, opcode})
+                    try write_type(output, state.module, state.values[usize(operand)])
+                    try io.print(" %r{} to i32\n", output, {first_argument + index})
+                }
+            }
             if (instruction.type != .void) try io.print("  %r{} = call ", output, {result})
             else try io.write_all(output, "  call ")
             try write_abi_result(output, state.module, type)
+            if (instruction.variadic) {
+                try io.write_all(output, " (")
+                for (0..instruction.fixed_arguments) |index| {
+                    if (index != 0) try io.write_all(output, ", ")
+                    operand :: block.arguments.items[instruction.arguments_start + index]
+                    try write_type(output, state.module, state.values[usize(operand)])
+                }
+                if (instruction.fixed_arguments != 0) try io.write_all(output, ", ")
+                try io.write_all(output, "...)")
+            }
             try io.print(" %r{}(", output, {callee})
+            promotion := first_promotion
             for (0..instruction.arguments_count) |index| {
                 if (index != 0) try io.write_all(output, ", ")
                 operand :: block.arguments.items[instruction.arguments_start + index]
-                try write_abi_parameter(output, state.module, state.values[usize(operand)])
-                try io.print(" %r{}", output, {first_argument + index})
+                argument_type := state.values[usize(operand)]
+                register := first_argument + index
+                if (instruction.variadic and index >= instruction.fixed_arguments) {
+                    kind :: variadic_type(argument_type.kind)
+                    if (kind != argument_type.kind) {
+                        register = promotion
+                        promotion += 1
+                        argument_type.kind = kind
+                    }
+                }
+                try write_abi_parameter(output, state.module, argument_type)
+                try io.print(" %r{}", output, {register})
             }
             try io.write_all(output, ")\n")
         }
@@ -372,18 +408,24 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, ir.integer_bits(instruction.type), left, right})
         }
         .shift_left, .shift_right, .shift_left_saturating: result = try emit_shift(state, instruction)
-        .add, .subtract, .multiply, .divide: {
+        .add, .subtract, .multiply, .divide, .remainder: {
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
             if (instruction.type == .float) {
+                if (instruction.op == .remainder) {
+                    zero :: fresh(state)
+                    try io.print("  %r{} = fcmp oeq double %r{}, 0.0\n", output, {zero, right})
+                    try check_failure(state, zero, .division_by_zero, instruction.span)
+                }
                 opcode :: enummap.get(&float_opcodes, instruction.op)?
                 try io.print("  %r{} = {s} double %r{}, %r{}\n", output, {result, opcode, left, right})
-            } else if (instruction.op == .divide) {
+            } else if (instruction.op == .divide or instruction.op == .remainder) {
                 bits :: ir.integer_bits(instruction.type)
                 zero :: fresh(state)
                 try io.print("  %r{} = icmp eq i{} %r{}, 0\n", output, {zero, bits, right})
                 try check_failure(state, zero, .division_by_zero, instruction.span)
-                if (!ir.unsigned_integer(instruction.type)) {
+                divisor := right
+                if (!ir.unsigned_integer(instruction.type) and instruction.op == .divide) {
                     minimum :: fresh(state)
                     negative_one :: fresh(state)
                     overflow :: fresh(state)
@@ -392,8 +434,17 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                     try io.print("  %r{} = and i1 %r{}, %r{}\n", output, {overflow, minimum, negative_one})
                     try check_failure(state, overflow, .integer_overflow, instruction.span)
                 }
-                opcode []u8 :: if (ir.unsigned_integer(instruction.type)) "udiv" else "sdiv"
-                try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, bits, left, right})
+                if (!ir.unsigned_integer(instruction.type) and instruction.op == .remainder) {
+                    negative_one :: fresh(state)
+                    divisor = fresh(state)
+                    try io.print("  %r{} = icmp eq i{} %r{}, -1\n", output, {negative_one, bits, right})
+                    # LLVM srem is poison for min/-1; every signed value rem -1 is zero.
+                    try io.print("  %r{} = select i1 %r{}, i{} 1, i{} %r{}\n", output, {divisor, negative_one, bits, bits, right})
+                }
+                opcode []u8 := if (ir.unsigned_integer(instruction.type)) "udiv" else "sdiv"
+                if (instruction.op == .remainder)
+                    opcode = if (ir.unsigned_integer(instruction.type)) "urem" else "srem"
+                try io.print("  %r{} = {s} i{} %r{}, %r{}\n", output, {result, opcode, bits, left, divisor})
             } else {
                 opcode :: enummap.get(&integer_opcodes, instruction.op)?
                 bits :: ir.integer_bits(instruction.type)
@@ -699,4 +750,12 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
     if (source_bits < destination_bits) opcode = if (source_unsigned) "zext" else "sext"
     try io.print("  %r{} = {s} i{} %r{} to i{}\n", output, {result, opcode, source_bits, operand, destination_bits})
     return result
+}
+
+@hide:file
+variadic_type proc(type ir.Type) ir.Type {
+    match type {
+        .bool, .i8, .u8, .i16, .u16: return .i32
+        else: return type
+    }
 }

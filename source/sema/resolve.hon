@@ -487,6 +487,17 @@ canonical_binding proc(state @State, original Binding) Binding {
 }
 
 @hide:file
+namespace_member proc(state @State, root, name ast.NodeId) ?Binding {
+    if (ast.expr_kind(state.tree, name) != .identifier) return null
+    namespace :: hashmap.get(&state.namespaces, root)?
+    if (hashmap.get(&namespace.names, ast.name_id(state.tree, name))) |member| {
+        if (member.kind == .declaration and ast.package_local(state.tree, member.data.declaration)) return null
+        return member
+    }
+    return null
+}
+
+@hide:file
 canonicalize_aliases proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityError) {
     # aliases may forward-reference other aliases or imported namespace members.
     for (0..(state.aliases.len)) |_| {
@@ -501,11 +512,7 @@ canonicalize_aliases proc(state @mut State) void ! (mem.AllocError | diagnostics
             expression :: ast.selection_expr(state.tree, id)
             base :: state.bindings[usize(expression.base)]
             if (base.kind != .namespace or state.bindings[usize(id)].kind != .none) continue
-            namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
-            found :: if (ast.expr_kind(state.tree, expression.member) == .identifier)
-                hashmap.get(&namespace.names, ast.name_id(state.tree, expression.member))
-            else
-                null
+            found :: namespace_member(state, base.data.namespace, expression.member)
             value :: if (found) |member| canonical_binding(state, member) else Binding{
                 kind = .invalid,
                 data = BindingData{ diagnostic = try diagnostics.add(
@@ -614,11 +621,7 @@ resolve_expr proc(
             if (base.kind == .invalid) {
                 value = base
             } else if (base.kind == .namespace) {
-                namespace :: hashmap.get(&state.namespaces, base.data.namespace)?
-                found :: if (ast.expr_kind(tree, expression.member) == .identifier)
-                    hashmap.get(&namespace.names, ast.name_id(tree, expression.member))
-                else
-                    null
+                found :: namespace_member(state, base.data.namespace, expression.member)
                 if (found) |member| {
                     value = member
                 } else {

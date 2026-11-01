@@ -118,19 +118,27 @@ parse_decl proc(state @mut State) ast.NodeId ! ParseError {
     if (next_is(state, .at)) {
         start :: try consume(state, .at)
         name :: try consume(state, .ident)
-        _ = try consume(state, .colon)
-        qualifier :: try consume(state, .ident)
+        file_local := false
+        valid := mem.eql(state.builder.source[usize(name.span.start)..usize(name.span.end)], "hide")
+        if (!valid) return .unexpected_token
+        end := name.span.end
+        if (next_is(state, .colon)) {
+            state.next_token += 1
+            qualifier :: try consume(state, .ident)
+            scope :: state.builder.source[usize(qualifier.span.start)..usize(qualifier.span.end)]
+            file_local = mem.eql(scope, "file")
+            valid = valid and (file_local or mem.eql(scope, "package"))
+            end = qualifier.span.end
+        }
         skip_newlines(state)
         declaration :: try parse_decl(state)
-        if (
-            !mem.eql(state.builder.source[usize(name.span.start)..usize(name.span.end)], "hide")
-            or !mem.eql(state.builder.source[usize(qualifier.span.start)..usize(qualifier.span.end)], "file")
-        ) {
-            span :: ast.Span{ start = start.span.start, end = qualifier.span.end, source = start.span.source }
+        if (!valid) {
+            span :: ast.Span{ start = start.span.start, end = end, source = start.span.source }
             diagnostic :: try diagnostics.add(state.diagnostics, .unexpected_token, span)
             return try ast.add_invalid_decl(state.builder, span, diagnostic)
         }
-        ast.set_file_local(state.builder, declaration)
+        if (file_local) ast.set_file_local(state.builder, declaration)
+        else ast.set_package_local(state.builder, declaration)
         return declaration
     }
     if (
@@ -494,6 +502,7 @@ parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
     condition :: try parse_guard(state)
     capture :: try parse_optional_capture(state)
+    skip_newlines(state)
     then_value :: try parse_expr(state)
     skip_newlines(state)
     if (!next_is(state, .else) or next_n_is(state, 1, .colon)) return .unexpected_token
@@ -1793,6 +1802,39 @@ brace_starts_block proc(state @State) bool {
 }
 
 @hide:file
+decode_character proc(text []u8) ?u64 {
+    if (text.len < 3) return null
+    contents :: text[1..text.len - 1]
+    if (contents.len == 2 and contents[0] == '\\') {
+        return match contents[1] {
+            '0': u64(0)
+            'n': u64('\n')
+            'r': u64('\r')
+            't': u64('\t')
+            '\\': u64('\\')
+            '\'': u64('\'')
+            else: null
+        }
+    }
+    first :: contents[0]
+    if (first < 128) return if (contents.len == 1) u64(first) else null
+    width :: if (first >= 194 and first <= 223) usize(2)
+        else if (first >= 224 and first <= 239) usize(3)
+        else if (first >= 240 and first <= 244) usize(4)
+        else usize(0)
+    if (width == 0 or contents.len != width) return null
+    mask :: if (width == 2) u8(31) else if (width == 3) u8(15) else u8(7)
+    value := u64(first & mask)
+    for (contents[1..]) |byte| {
+        if (byte < 128 or byte > 191) return null
+        value = value * 64 + u64(byte & 63)
+    }
+    if ((width == 3 and value < 2048) or (width == 4 and value < 65536)
+        or (value >= 55296 and value <= 57343) or value > 1114111) return null
+    return value
+}
+
+@hide:file
 parse_primary proc(state @mut State) ast.NodeId ! ParseError {
     token :: current(state)
     match token.kind {
@@ -1871,6 +1913,13 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         .int: {
             state.next_token += 1
             return try ast.add_literal(state.builder, .int, token.span)
+        }
+        .character: {
+            state.next_token += 1
+            text :: state.builder.source[usize(token.span.start)..usize(token.span.end)]
+            if (decode_character(text)) |value| return try ast.add_integer(state.builder, token.span, value)
+            diagnostic :: try diagnostics.add(state.diagnostics, .invalid_character_literal, token.span)
+            return try ast.add_invalid_expr(state.builder, token.span, diagnostic)
         }
         .float: {
             state.next_token += 1

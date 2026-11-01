@@ -2049,13 +2049,10 @@ keeps_generated_foreign_declarations_demand_driven_and_traps_interpreted_calls t
     try expect_trap(foreign_outcome, &diagnostic_store, .unsupported_foreign_call)
 }
 
-diagnoses_demanded_unsupported_foreign_signatures_and_attributes test {
-    sources [5][]u8 :: [
-        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1) }\n",
+diagnoses_demanded_opaque_values_and_incompatible_opaque_pointers test {
+    sources [2][]u8 :: [
         "Handle :: opaque\ntake c_func(_ Handle) void\nmain proc() void { take(undefined) }\n",
         "A :: opaque\nB :: opaque\nmain proc() void { a ?*A :: null\n b ?*B :: a }\n",
-        "@other:file\nhidden :: 1\nmain proc() int { return hidden }\n",
-        "@hide:package\nhidden :: 1\nmain proc() int { return hidden }\n",
     ]
     for sources |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -2085,5 +2082,90 @@ rejects_demanded_unavailable_c_floating_types_without_unknown_names test {
             diagnostic :: diagnostics.get(&diagnostic_store, diagnostics.DiagnosticId(index))?
             try testing.expect(diagnostic.code != .unknown_name)
         }
+    }
+}
+
+preserves_variadic_call_signatures_and_interpreter_foreign_traps test {
+    sources [2][]u8 :: [
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1) }\n",
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1, true, i8(-2), u8(3), i16(-4), u16(5), 6.5) }\n",
+    ]
+    for sources |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        try testing.expect(module.functions.items[0].variadic)
+        try testing.expect_equal(usize(1), module.functions.items[0].parameters.items.len)
+        entry :: &module.functions.items[usize(module.entry?)]
+        found := false
+        for entry.blocks.items |block| {
+            for block.instructions.items |instruction| {
+                if (instruction.op != .call) continue
+                found = true
+                try testing.expect(instruction.variadic)
+                try testing.expect_equal(usize(1), instruction.fixed_arguments)
+            }
+        }
+        try testing.expect(found)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .unsupported_foreign_call)
+    }
+}
+
+rejects_variadic_arity_fixed_types_and_non_c_trailing_values test {
+    sources [4][]u8 :: [
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take() }\n",
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(true) }\n",
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1, \"text\") }\n",
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { values [2]i64 :: [1, 2]\nreturn take(1, values) }\n",
+    ]
+    codes [4]diagnostics.Code :: [
+        .argument_count_mismatch, .type_mismatch, .invalid_operand, .invalid_operand,
+    ]
+    for sources |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, codes[index])
+    }
+}
+
+coerces_strings_to_immutable_byte_pointer_arguments test {
+    sources [3][]u8 :: [
+        "take c_func(_ ?*c_char) void\nmain proc() void { take(\"format\") }\n",
+        "take c_func(_ *u8) void\nmain proc() void { take(\"format\") }\n",
+        "take c_func(_ *i8, ...) void\nmain proc() void { take(\"format\", true) }\n",
+    ]
+    for sources |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .unsupported_foreign_call)
+    }
+}
+
+rejects_string_arguments_for_mutable_or_nonbyte_pointers test {
+    sources [2][]u8 :: [
+        "take c_func(_ ?*mut c_char) void\nmain proc() void { take(\"format\") }\n",
+        "take c_func(_ *u16) void\nmain proc() void { take(\"format\") }\n",
+    ]
+    for sources |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try expect_trap(outcome, &diagnostic_store, .type_mismatch)
     }
 }

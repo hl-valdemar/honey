@@ -162,7 +162,7 @@ Op :: enum {
     bit_not, bit_and, bit_or, bit_xor
     shift_left, shift_right, shift_left_saturating
     add, subtract
-    multiply, divide
+    multiply, divide, remainder
     call
     equal, not_equal
     less, less_equal
@@ -184,6 +184,8 @@ Instruction :: struct {
     constant Value = Value{}
     arguments_start usize = 0
     arguments_count usize = 0
+    variadic bool = false
+    fixed_arguments usize = 0
 }
 
 TerminatorKind :: enum {
@@ -215,6 +217,7 @@ Function :: struct {
     parameters arraylist.ArrayList(Type)
     # owned by the module allocator; empty for interpreted/native-defined functions.
     external_name []u8 = ""
+    variadic bool = false
     locals arraylist.ArrayList(Type)
     result Type = .void
     result_array_type ArrayId = no_array

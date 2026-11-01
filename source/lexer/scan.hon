@@ -16,6 +16,7 @@ ScanError :: struct {
 ErrorCode :: enum {
     float_must_end_with_digit,
     unterminated_string,
+    unterminated_character,
 }
 SourceError :: enum { source_too_large }
 
@@ -153,9 +154,9 @@ scan proc(
             continue
         }
 
-        if char == '"' {
+        if (char == '"' or char == '\'') {
             start :: cursor
-            result :: scan_string(start, program) catch |err| {
+            result :: scan_quoted(start, program, char) catch |err| {
                 id :: try diagnostics.add(
                     diagnostic_store,
                     diagnostic_code(err.code),
@@ -169,9 +170,10 @@ scan proc(
                 cursor = err.end
                 continue
             }
+            kind :: if (char == '\'') TokenKind.character else .string
             try add_token(state, Token{
                 span = make_span(source, start, result.end),
-                kind = .string,
+                kind = kind,
             })
             cursor = result.end
             continue
@@ -440,19 +442,20 @@ scan_number proc(start usize, program []u8, allow_decimal bool) ScanNumResult ! 
 ScanStrResult :: struct { end usize }
 
 @hide:file
-scan_string proc(start usize, program []u8) ScanStrResult ! ScanError {
-    cursor := start + 1 # skip first `"`
-    while cursor < program.len and program[cursor] != '"' and program[cursor] != '\n' : cursor += 1 {
-        # escaped quotes do not terminate the string.
-        if (program[cursor] == '\\' and cursor + 1 < program.len) cursor += 1
+scan_quoted proc(start usize, program []u8, quote u8) ScanStrResult ! ScanError {
+    cursor := start + 1
+    while (cursor < program.len and program[cursor] != quote and program[cursor] != '\n') : cursor += 1 {
+        # an escaped delimiter is content, but a newline still ends an invalid literal.
+        if (program[cursor] == '\\' and cursor + 1 < program.len and program[cursor + 1] != '\n') cursor += 1
     }
-    if (cursor >= program.len or program[cursor] != '"') {
+    if (cursor >= program.len or program[cursor] != quote) {
+        code :: if (quote == '\'') ErrorCode.unterminated_character else .unterminated_string
         return ScanError{
-            code = .unterminated_string,
+            code = code,
             end = cursor,
         }
     }
-    return ScanStrResult{ end = cursor + 1 } # skip last `"`
+    return ScanStrResult{ end = cursor + 1 }
 }
 
 @hide:file
@@ -480,6 +483,7 @@ is_digit proc(char u8) bool {
 diagnostic_codes :: $enummap.init(ErrorCode, diagnostics.Code, {
     float_must_end_with_digit = .float_must_end_with_digit,
     unterminated_string = .unterminated_string,
+    unterminated_character = .unterminated_character,
 })
 
 @hide:file

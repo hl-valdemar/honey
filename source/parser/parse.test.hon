@@ -8,6 +8,102 @@ import "@source/lexer"
 import "@source/ast"
 import "@source/ast/renderer"
 
+parses_characters_as_integer_literals_with_original_spans test {
+    source :: "values :: ['a', '\\0', '\\n', '\\r', '\\t', '\\\\', '\\'', 'é', '😀']"
+    expected [9][]u8 :: ["97", "0", "10", "13", "9", "92", "39", "233", "128512"]
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    builder := ast.init_builder(mem.c_allocator, "")
+    defer ast.deinit_builder(&builder)
+    _ = try ast.set_source(&builder, "other.hon", "")
+    source_id :: try ast.set_source(&builder, "characters.hon", source)
+    scan_state.source_id = source_id
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    root :: try parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+    tree :: ast.view(&builder, root)
+    values :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    try testing.expect_equal(expected.len, ast.array_element_count(&tree, values))
+    for (expected) |text, index| {
+        value :: ast.array_element(&tree, values, index)
+        try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, value))
+        try testing.expect_equal(text, ast.literal_text(&tree, value))
+        span :: ast.node_span(&tree, value)
+        try testing.expect_equal(source_id, span.source)
+        try testing.expect_equal(u8('\''), ast.source_text(&tree, span)[0])
+        try testing.expect_equal(scan_state.tokens.items[3 + index * 2].span.start, span.start)
+        try testing.expect_equal(scan_state.tokens.items[3 + index * 2].span.end, span.end)
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+diagnoses_malformed_character_values_without_losing_sibling_declarations test {
+    sources [7][]u8 :: [
+        "bad :: ''\nnext :: 1",
+        "bad :: 'ab'\nnext :: 1",
+        "bad :: '\\x41'\nnext :: 1",
+        "bad :: '\\q'\nnext :: 1",
+        "bad :: '\xC0\xAF'\nnext :: 1",
+        "bad :: '\xED\xA0\x80'\nnext :: 1",
+        "bad :: '\xF4\x90\x80\x80'\nnext :: 1",
+    ]
+    for (sources) |source| {
+        strings := strpool.init(mem.c_allocator)
+        defer strpool.deinit(&strings)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        scan_state := lexer.init(mem.c_allocator)
+        defer lexer.deinit(&scan_state)
+        try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+        tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+        defer ast.deinit(&tree)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        try testing.expect_equal(2, ast.package_decl_count(&tree))
+        bad :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+        try testing.expect_equal(ast.ExprKind.invalid, ast.expr_kind(&tree, bad))
+        diagnostic :: diagnostics.get(&diagnostic_store, ast.invalid(&tree, bad).diagnostic)?
+        try testing.expect_equal(diagnostics.Code.invalid_character_literal, diagnostic.code)
+        try testing.expect_equal(scan_state.tokens.items[2].span.start, diagnostic.span.start)
+        try testing.expect_equal(scan_state.tokens.items[2].span.end, diagnostic.span.end)
+        try testing.expect_equal("next", ast.source_text(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 1)).name))
+    }
+}
+
+parses_multiline_conditional_values_and_hide_scopes test {
+    source ::
+        `@hide
+        `hidden :: if (true)
+        `    '0'
+        `else if (false)
+        `    'A'
+        `else
+        `    'a'
+        `@hide:package scoped :: 2
+        `@hide:file local :: 3
+        `visible :: 4
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(4, ast.package_decl_count(&tree))
+    for (usize(0)..4) |index| {
+        declaration :: ast.package_decl(&tree, index)
+        try testing.expect_equal(index < 2, ast.package_local(&tree, declaration))
+        try testing.expect_equal(index == 2, ast.file_local(&tree, declaration))
+    }
+    conditional :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    try testing.expect_equal(ast.ExprKind.match_expr, ast.expr_kind(&tree, conditional))
+}
+
 parses_expression_precedence_through_tree_views test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)

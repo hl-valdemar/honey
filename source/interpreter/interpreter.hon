@@ -693,18 +693,21 @@ execute proc(
                     return try runtime_trap(diagnostic_store, .invalid_shift_count, instruction.span)
                 value = shift_integer(instruction.op, left, count)
             }
-            .add, .subtract, .multiply, .divide: {
+            .add, .subtract, .multiply, .divide, .remainder: {
                 left :: frames.items[frame_index].values[usize(instruction.left)]
                 right :: frames.items[frame_index].values[usize(instruction.right)]
-                if (instruction.op == .divide and instruction.type != .float and right.data.unsigned == 0)
+                if ((instruction.op == .divide or instruction.op == .remainder) and instruction.type != .float and right.data.unsigned == 0)
                     return try runtime_trap(diagnostic_store, .division_by_zero, instruction.span)
                 if instruction.type == .float {
+                    if (instruction.op == .remainder and right.data.real == 0)
+                        return try runtime_trap(diagnostic_store, .division_by_zero, instruction.span)
                     result f64 := 0
                     match instruction.op {
                         .add: result = left.data.real + right.data.real
                         .subtract: result = left.data.real - right.data.real
                         .multiply: result = left.data.real * right.data.real
                         .divide: result = left.data.real / right.data.real
+                        .remainder: result = rem!(left.data.real, right.data.real)
                         else: unreachable
                     }
                     value = ir.Value{ type = .float, data = ir.ValueData{ real = result } }
@@ -1076,6 +1079,7 @@ checked_integer proc(op ir.Op, left i64, right i64) ?i64 {
             if (left == minimum and right == -1) return null
             return divtrunc!(left, right)
         }
+        .remainder: return rem!(left, right)
         else: unreachable
     }
 }
@@ -1117,6 +1121,7 @@ checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {
             return left * right
         }
         .divide: return divtrunc!(left, right)
+        .remainder: return rem!(left, right)
         else: unreachable
     }
 }

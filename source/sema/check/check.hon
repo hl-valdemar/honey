@@ -450,7 +450,8 @@ check_elaborated proc(
                     try require_numeric(&state, id, expression.right)
                 }
                 .builtin_call: {
-                    if (mem.eql(builtin_name(&state, id), "divtrunc") and ast.call_arg_count(tree, id) == 2) {
+                    name :: builtin_name(&state, id)
+                    if ((mem.eql(name, "divtrunc") or mem.eql(name, "rem")) and ast.call_arg_count(tree, id) == 2) {
                         try require_numeric(&state, id, ast.call_arg(tree, id, 0))
                         try require_numeric(&state, id, ast.call_arg(tree, id, 1))
                     }
@@ -487,7 +488,8 @@ check_elaborated proc(
                     }
                 }
                 .builtin_call: {
-                    if (mem.eql(builtin_name(&state, id), "divtrunc") and ast.call_arg_count(tree, id) == 2) {
+                    name :: builtin_name(&state, id)
+                    if ((mem.eql(name, "divtrunc") or mem.eql(name, "rem")) and ast.call_arg_count(tree, id) == 2) {
                         try numeric_operand(&state, id, ast.call_arg(tree, id, 0))
                         try numeric_operand(&state, id, ast.call_arg(tree, id, 1))
                     }
@@ -1037,7 +1039,6 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
     if (!ast.function_external(tree, id)) try collect_block(state, function.body, function.return_type, false)
     else {
         if (mem.eql(ast.source_text(tree, function.name), "main")) try fail(state, id, .invalid_entry, function.name)
-        if (ast.callable_variadic(tree, id)) try fail(state, id, .invalid_operand, function.span)
         if (!c_abi_type(state, state.types[usize(function.return_type)])) try fail(state, id, .invalid_operand, function.span)
         for (0..ast.function_param_count(tree, id)) |i| {
             parameter :: ast.function_param(tree, id, i)
@@ -2041,10 +2042,20 @@ assignable_type proc(state @State, actual, expected Type) bool {
         if (actual.kind == .null) return true
         if (actual.kind == .optional) {
             source :: state.arrays.items[usize(actual.array_type)].element
-            if (source.kind != child.kind) return false
+            if (source.kind != child.kind
+                and !(source.kind == .pointer and child.kind == .slice)
+                and !(source.kind == .string and child.kind == .pointer)) return false
             return assignable_type(state, source, child)
         }
         return assignable_type(state, actual, child)
+    }
+    if (actual.kind == .string and expected.kind == .pointer) {
+        pointer :: state.pointers.items[usize(expected.pointer_type)]
+        return (
+            expected.nominal == ast.NodeId(maxval!(u32)) and !pointer.mutable
+            and pointer.element.nominal == ast.NodeId(maxval!(u32))
+            and (pointer.element.kind == .i8 or pointer.element.kind == .u8)
+        )
     }
     if (expected.kind == .slice) {
         b :: state.arrays.items[usize(expected.array_type)]
@@ -2053,6 +2064,17 @@ assignable_type proc(state @State, actual, expected Type) bool {
             a :: state.arrays.items[usize(actual.array_type)]
             return (
                 (!b.mutable or a.mutable) and (b.sentinel == null or same_sentinel(a.sentinel, b.sentinel))
+                and same_type(state, a.element, b.element)
+            )
+        }
+        if (actual.kind == .pointer and actual.nominal == ast.NodeId(maxval!(u32))) {
+            pointer :: state.pointers.items[usize(actual.pointer_type)]
+            if (pointer.many or pointer.element.kind != .array
+                or pointer.element.nominal != ast.NodeId(maxval!(u32))) return false
+            a :: state.arrays.items[usize(pointer.element.array_type)]
+            return (
+                (!b.mutable or (pointer.mutable and a.mutable))
+                and (b.sentinel == null or same_sentinel(a.sentinel, b.sentinel))
                 and same_type(state, a.element, b.element)
             )
         }
@@ -2371,12 +2393,21 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
         return
     }
     parameter_count :: ast.function_param_count(tree, signature.function)
-    if (parameter_count != ast.call_arg_count(tree, id)) {
+    variadic :: ast.callable_variadic(tree, signature.function)
+    if (ast.call_arg_count(tree, id) < parameter_count or (!variadic and parameter_count != ast.call_arg_count(tree, id))) {
         diagnostic :: try diagnostics.add(state.diagnostics, .argument_count_mismatch, expression.span)
         if (callee.kind != .invalid) state.types[usize(id)] = invalid_type(diagnostic)
     }
     for (0..ast.call_arg_count(tree, id)) |i| {
-        if (i >= parameter_count) continue
+        if (i >= parameter_count) {
+            if (variadic) {
+                argument :: ast.call_arg(tree, id, i)
+                actual :: state.types[usize(argument)]
+                if (!c_abi_type(state, actual) or actual.kind == .void)
+                    try fail(state, argument, .invalid_operand, ast.node_span(tree, argument))
+            }
+            continue
+        }
         parameter :: ast.function_param(tree, signature.function, i)
         try compatible(state, ast.call_arg(tree, id, i), state.types[usize(parameter)])
     }
@@ -2697,7 +2728,7 @@ check_function_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
     result :: ast.callable_result(state.tree, id)
     result_type :: try check_annotation(state, result, true)
     if (result_type.kind == .invalid) type = result_type
-    if (ast.callable_variadic(state.tree, id) or (ast.callable_foreign(state.tree, id) and !c_abi_type(state, result_type)))
+    if (ast.callable_foreign(state.tree, id) and !c_abi_type(state, result_type))
         type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, id)))
     try depend(state, result, id)
     for 0..ast.function_param_count(state.tree, id) |i| {
@@ -2764,7 +2795,7 @@ check_container_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocErro
 @hide:file
 c_abi_type proc(state @State, type Type) bool {
     if (type.kind == .optional) return c_abi_pointer(state, state.arrays.items[usize(type.array_type)].element)
-    if (type.kind == .function) return ast.callable_foreign(state.tree, type.function) and !ast.callable_variadic(state.tree, type.function)
+    if (type.kind == .function) return ast.callable_foreign(state.tree, type.function)
     return integer_kind(type.kind) or type.kind == .float or type.kind == .bool or type.kind == .pointer or type.kind == .void or type.kind == .invalid
 }
 
@@ -2794,7 +2825,7 @@ collect_builtin proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | d
     }
     if (layout) state.cells[usize(id)].type = Type{ kind = .usize }
     if (limit and count == 1) state.cells[usize(id)].type = state.types[usize(ast.call_arg(state.tree, id, 0))]
-    if (mem.eql(name, "divtrunc")) {
+    if (mem.eql(name, "divtrunc") or mem.eql(name, "rem")) {
         state.cells[usize(id)].numeric = true
         state.cells[usize(id)].producer = id
     }
@@ -2872,7 +2903,8 @@ infer_builtin proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.A
     span :: ast.node_span(state.tree, id)
     layout :: mem.eql(name, "sizeof") or mem.eql(name, "alignof")
     limit :: mem.eql(name, "maxval") or mem.eql(name, "minval")
-    division :: mem.eql(name, "divtrunc")
+    remainder :: mem.eql(name, "rem")
+    division :: mem.eql(name, "divtrunc") or remainder
     cast :: mem.eql(name, "ptrcast") or mem.eql(name, "constcast")
     memory :: mem.eql(name, "memcopy") or mem.eql(name, "memset")
     some :: mem.eql(name, "some")
@@ -2892,7 +2924,7 @@ infer_builtin proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.A
         left :: try infer_shape(state, ast.call_arg(state.tree, id, 0), defaults)
         right :: try infer_shape(state, ast.call_arg(state.tree, id, 1), defaults)
         if (defaults and left.kind != .invalid and right.kind != .invalid
-            and (!integer_kind(left.kind) or !same_type(state, left, right))) try fail(state, id, .invalid_operand, span)
+            and ((!integer_kind(left.kind) and !(remainder and left.kind == .float)) or !same_type(state, left, right))) try fail(state, id, .invalid_operand, span)
         return group_type(state, id)
     }
     if (some) {

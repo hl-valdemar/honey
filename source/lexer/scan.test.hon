@@ -3,6 +3,32 @@ import "@std/testing"
 import "@source/diagnostics"
 import "@source/strpool"
 
+scans_character_literals_and_preserves_unterminated_line_provenance test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    source :: "'a' '\\n' '\\'' '\\\\' 'é' '\\\nnext :: 1"
+    state.source_id = diagnostics.SourceId(7)
+    try scan(&state, source, &pool, &diagnostic_store)
+    expected [11]TokenKind :: [
+        .character, .character, .character, .character, .character,
+        .invalid, .newline, .ident, .double_colon, .int, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    invalid :: state.tokens.items[5]
+    diagnostic :: diagnostics.get(&diagnostic_store, invalid.data.diagnostic)?
+    try testing.expect_equal(diagnostics.Code.unterminated_character, diagnostic.code)
+    try testing.expect_equal(diagnostics.SourceId(7), diagnostic.span.source)
+    try testing.expect_equal(invalid.span.start, diagnostic.span.start)
+    try testing.expect_equal(invalid.span.end, diagnostic.span.end)
+    try testing.expect_equal(invalid.span.end, state.tokens.items[6].span.start)
+}
+
 reports_invalid_input_and_keeps_scanning test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)

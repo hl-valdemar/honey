@@ -765,12 +765,15 @@ dependency_traps_keep_original_spans_and_remain_demand_driven test {
     }
 }
 
-file_local_declarations_are_isolated_from_siblings_and_import_selection test {
-    callers [4][]u8 :: [
+hidden_declarations_preserve_file_and_package_visibility test {
+    callers [7][]u8 :: [
         "dep :: import \"../dependency\"\nmain proc() int { return dep.answer() }\n",
         "dep :: import \"../dependency\"\nmain proc() int { return dep.sibling() }\n",
         "dep :: import \"../dependency\"\nmain proc() int { return dep.leak() }\n",
         "dep :: import \"../dependency\"\nmain proc() int { return dep.helper() }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.package_helper() }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return dep.package_value }\n",
+        "dep :: import \"../dependency\"\nmain proc() int { return imported_namespace.package_helper() }\nimported_namespace :: alias dep\n",
     ]
     for callers |caller, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -785,6 +788,8 @@ file_local_declarations_are_isolated_from_siblings_and_import_selection test {
             `@hide:file
             `helper proc() int { return 42 }
             `@hide:file secret :: 7
+            `@hide package_value :: 40
+            `@hide:package package_helper proc() int { return package_value + 2 }
             `answer proc() int { return helper() }
             ,
         )
@@ -792,7 +797,7 @@ file_local_declarations_are_isolated_from_siblings_and_import_selection test {
         second_bytes := try owned_text(
             `@hide:file
             `helper proc() int { return 99 }
-            `sibling proc() int { return helper() }
+            `sibling proc() int { return helper() + package_helper() - 42 }
             `leak proc() int { return secret }
             ,
         )

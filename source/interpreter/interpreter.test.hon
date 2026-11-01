@@ -311,6 +311,36 @@ integer_arithmetic_checks_boundaries_before_host_operations test {
     }
 }
 
+integer_remainder_preserves_dividend_sign_and_minimum_without_overflow test {
+    cases [6]IntegerCase :: [
+        IntegerCase{ op = .remainder, left = -5, right = 3, expected = -2 },
+        IntegerCase{ op = .remainder, left = 5, right = -3, expected = 2 },
+        IntegerCase{ op = .remainder, left = minval!(i64), right = -1, expected = 0 },
+        IntegerCase{ op = .remainder, left = minval!(i64), right = 10, expected = -8 },
+        IntegerCase{ op = .remainder, left = 0, right = -1, expected = 0 },
+        IntegerCase{ op = .remainder, left = 1, right = 0, expected = null },
+    ]
+    for (cases) |case| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        span :: diagnostics.Span{ start = 8, end = 16 }
+        main :: try add_function(&module, &[], 0, .int)
+        module.entry = main
+        try emit(&module, main, integer(0, case.left))
+        try emit(&module, main, integer(1, case.right))
+        try emit(&module, main, ir.Instruction{ op = .remainder, type = .int, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1), span = span })
+        return_value(&module, main, ir.ValueId(2))
+        outcome := try run(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        if case.expected |expected| {
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(expected, outcome.value.data.integer)
+        } else try expect_trap(outcome, &store, .division_by_zero, span)
+    }
+}
+
 integer_negation_traps_only_at_minimum test {
     module := ir.init(mem.c_allocator)
     defer ir.deinit(&module)
@@ -1230,7 +1260,7 @@ UnsignedCase :: struct {
 unsigned_arithmetic_and_comparisons_preserve_all_sixty_four_bits test {
     wide_sum u64 :: 9223372036854775815
     almost_maximum u64 :: 18446744073709551614
-    cases [10]UnsignedCase :: [
+    cases [11]UnsignedCase :: [
         UnsignedCase{ op = .add, left = maxval!(u64), right = 0, expected = maxval!(u64) },
         UnsignedCase{ op = .add, left = maxval!(u64), right = 1, expected = null },
         UnsignedCase{ op = .add, left = 9223372036854775808, right = 7, expected = wide_sum },
@@ -1241,6 +1271,7 @@ unsigned_arithmetic_and_comparisons_preserve_all_sixty_four_bits test {
         UnsignedCase{ op = .multiply, left = maxval!(u64), right = 0, expected = u64(0) },
         UnsignedCase{ op = .multiply, left = 0, right = maxval!(u64), expected = u64(0) },
         UnsignedCase{ op = .multiply, left = 3, right = 14, expected = u64(42) },
+        UnsignedCase{ op = .remainder, left = maxval!(u64), right = 10, expected = u64(5) },
     ]
     for (cases) |case| {
         module := ir.init(mem.c_allocator)
