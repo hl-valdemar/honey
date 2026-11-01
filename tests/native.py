@@ -3375,31 +3375,301 @@ CASES = {
         main proc() Storage() { return [40, 2] }
         """, b"[40, 2]\n", None,
     ),
+    "metadata_slices_live_aliases_saved_bounds_rebinding_and_array_copies": (
+        """
+        Storage proc() type {
+            backing [3]mut type := [i8, bool, u8]
+            copied :: backing
+            start := usize(1)
+            finish := usize(2)
+            view []mut type := backing[..]
+            saved :: view[start..finish]
+            shared :: saved
+            start = 0
+            finish = 3
+            saved[0] = i16
+            if (backing[1] != i16 or copied[1] != bool) return bool
+            backing = [bool, i8, bool]
+            if (shared.len != 1 or shared[0] != i8) return bool
+            other [1]mut type := [u8]
+            view = other[..]
+            view[0] = i16
+            shared[0] = i16
+            if (other[0] != i16 or backing[1] != i16) return bool
+            return shared[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_record_slices_borrow_helpers_nested_writes_and_uncached_effects": (
+        """
+        Info :: struct { child type, nested struct { children [2]mut type, count usize } }
+        update proc(items []mut Info) void {
+            items[0].child = i16
+            items[0].nested.children[1] = i16
+            items[0].nested.count += 1
+        }
+        read proc(items []Info) usize { return items[0].nested.count }
+        Storage proc() type {
+            backing [1]mut Info := [{ child = bool, nested = { children = [i8, bool], count = 0 } }]
+            copied :: backing
+            view :: backing[..]
+            update(view)
+            if (read(view) != 1) return bool
+            backing[0] = copied[0]
+            update(view)
+            if (read(view) != 1) return bool
+            update(view)
+            if (read(view) != 2 or copied[0].nested.count != 0) return bool
+            if (view[0].child != i16 or view[0].nested.children[1] != i16) return bool
+            if (copied[0].child != bool or copied[0].nested.children[1] != bool) return bool
+            return [read(view)]view[0].child
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_slices_borrow_cleanup_initialization_and_return_snapshot": (
+        """
+        Error :: enum { failed }
+        initialize proc(items []mut type) void {
+            defer items[1] = i16
+            items[0] = bool
+        }
+        fail proc(items []mut type) void ! Error {
+            errdefer items[0] = i16
+            return .failed
+        }
+        types proc() []type {
+            backing [2]mut type := undefined
+            view :: backing[..]
+            initialize(view)
+            fail(view) catch {}
+            defer view[0] = bool
+            return view
+        }
+        main proc() [2]types()[0] { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_slices_reject_immutable_backing_write": (
+        """
+        Storage proc() type {
+            backing [1]mut type :: [i16]
+            view :: backing[..]
+            view[0] = bool
+            return view[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_slices_reject_readonly_array_to_mutable_view": (
+        """
+        Storage proc() type {
+            backing [1]type := [i16]
+            view []mut type :: backing[..]
+            view[0] = bool
+            return view[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"incompatible",
+    ),
+    "metadata_slices_reject_incomplete_borrow_snapshot": (
+        """
+        types proc() []type {
+            backing [2]mut type := undefined
+            view :: backing[..]
+            view[0] = i16
+            return view
+        }
+        main proc() types()[0] { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "metadata_slices_reject_runtime_branch_borrow_mutation": (
+        """
+        update proc(items []mut type) void { items[0] = i16 }
+        compute proc(take bool) usize {
+            backing [1]mut type := [i8]
+            view :: backing[..]
+            if (take) update(view)
+            return sizeof!(view[0])
+        }
+        main proc() usize { return compute(true) }
+        """, b"", b"compile-time value",
+    ),
+    "metadata_slices_reject_mutable_view_index_type": (
+        """
+        Storage proc() type {
+            backing [1]mut type := [i16]
+            view :: backing[..]
+            view[u8(0)] = bool
+            return i16
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"usize",
+    ),
+    "metadata_slices_reject_mutable_subview_write_at_length": (
+        """
+        Storage proc() type {
+            backing [2]mut type := [i16, bool]
+            view :: backing[1..2]
+            view[1] = i8
+            return i16
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "metadata_slices_nested_places_iteration_optional_aliases_and_empty_shapes": (
+        """
+        Info :: struct { children [2]mut type }
+        Choice :: union(enum) { types []mut type, empty void }
+        Storage proc() type {
+            first [1]mut Info := [{ children = [i8, bool] }]
+            second [1]mut Info := [{ children = [bool, u8] }]
+            rows := first[..]
+            children :: field!(rows[0], "children")[..]
+            rows = second[..]
+            selected ?[]mut type :: some!(children)
+            if selected |chosen| { chosen[0] = i16 }
+            choice Choice :: .types {children}
+            match choice { .types |captured|: captured[1] = i16, .empty: {} }
+            if (children[1] != i16) return bool
+            for children |T, index| {
+                if (index == 0) children[1] = T
+                if (index == 1 and T != i16) return bool
+            }
+            if (second[0].children[0] != bool) return bool
+            empty [0]mut type := []
+            view :: empty[..]
+            for view |T| { return T }
+            if (view[..].len != 0) return bool
+            return first[0].children[1]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_local_fallible_captures_preserve_aliases": (
+        """
+        Failure :: struct { types []mut type }
+        Storage proc() type {
+            backing [1]mut type := [i8]
+            value void ! Failure :: Failure { types = backing[..] }
+            value catch |failure| { failure.types[0] = i16 }
+            return backing[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_reject_readonly_enclosing_array_place": (
+        """
+        Info :: struct { children [1]mut type }
+        Storage proc() type {
+            rows [1]Info := [{ children = [i8] }]
+            children :: rows[0].children[..]
+            children[0] = i16
+            return rows[0].children[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_slices_mixed_execution_and_readonly_generator_cache": (
+        """
+        Token proc(types []type) type { return struct {} }
+        update proc(items []mut type) void { items[0] = i16 }
+        compute proc(value i16) i16 {
+            backing [1]mut type := [i8]
+            update(backing[..])
+            view :: backing[..]
+            if (Token(view) != Token([i16])) return -1
+            local view[0] :: value
+            return local
+        }
+        main proc() i16 { return compute(42) }
+        """, b"42\n", None,
+    ),
+    "metadata_slices_reject_dangling_nested_scope": (
+        """
+        Storage proc() type {
+            backing [1]mut type := [i16]
+            view []type := backing[..]
+            {
+                inner [1]mut type := [bool]
+                view = inner[..]
+            }
+            return view[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"compile-time result cannot escape evaluation as a source value",
+    ),
+    "metadata_slices_reject_runtime_short_circuit_mutation": (
+        """
+        update proc(items []mut type) bool { items[0] = i16
+        return true }
+        compute proc(take bool) usize {
+            backing [1]mut type := [i8]
+            view :: backing[..]
+            if (take and update(view)) return sizeof!(view[0])
+            return sizeof!(view[0])
+        }
+        main proc() usize { return compute(false) }
+        """, b"", b"compile-time value",
+    ),
+    "metadata_slices_reject_runtime_conditional_expression_mutation": (
+        """
+        update proc(items []mut type) bool { items[0] = i16
+        return true }
+        compute proc(take bool) usize {
+            backing [1]mut type := [i8]
+            view :: backing[..]
+            selected :: if (take) update(view) else false
+            if (selected) return sizeof!(view[0])
+            return sizeof!(view[0])
+        }
+        main proc() usize { return compute(false) }
+        """, b"", b"compile-time value",
+    ),
+    "metadata_slices_skip_short_circuited_borrowed_effects": (
+        """
+        update proc(items []mut type) bool { items[0] = i16
+        return true }
+        Storage proc() type {
+            backing [1]mut type := [i8]
+            view :: backing[..]
+            if (false and update(view)) return bool
+            return view[0]
+        }
+        compute proc(value Storage()) i16 {
+            backing [1]mut type := [i8]
+            view :: backing[..]
+            if (true or update(view)) return i16(value)
+            return -1
+        }
+        main proc() i16 { return compute(42) }
+        """, b"42\n", None,
+    ),
     "metadata_slices_reject_mutable_slice_annotation": (
         """
         types proc() []mut type { return [i16] }
         main proc() types()[0] { return 42 }
         """, b"", b"compile-time result cannot escape evaluation as a source value",
     ),
-    "metadata_slices_reject_mutable_array_backing": (
+    "metadata_slices_snapshot_mutable_array_backing": (
         """
         types proc() []type {
             backing [1]mut type := [i16]
             return backing[..]
         }
         main proc() types()[0] { return 42 }
-        """, b"", b"compile-time result cannot escape evaluation as a source value",
+        """, b"42\n", None,
     ),
-    "metadata_slices_reject_mutable_binding_with_readonly_array_elements": (
+    "metadata_slices_snapshot_mutable_binding_with_readonly_array_elements": (
         """
         types proc() []type {
             backing [1]type := [i16]
             return backing[..]
         }
         main proc() types()[0] { return 42 }
-        """, b"", b"compile-time result cannot escape evaluation as a source value",
+        """, b"42\n", None,
     ),
-    "metadata_record_slices_reject_mutable_array_backing": (
+    "metadata_record_slices_snapshot_mutable_array_backing": (
         """
         Info :: struct { child type, count usize }
         fields proc() []Info {
@@ -3407,7 +3677,7 @@ CASES = {
             return backing[..]
         }
         main proc() fields()[0].child { return 42 }
-        """, b"", b"compile-time result cannot escape evaluation as a source value",
+        """, b"42\n", None,
     ),
     "metadata_slices_reject_sentinel_annotation": (
         """
@@ -11412,6 +11682,16 @@ def check_specialization_packages(temporary, executable):
             return struct { values [input.counts[1]]input.child, bias i16 = input.bias }
         }
         add proc($input Config, value input.child) input.child { return value + input.bias }
+        @hide:file
+        Private :: distinct i16
+        @hide:file
+        replace proc(items []mut type) void { items[0] = Private }
+        borrowed_types proc() []type {
+            backing [1]mut type := [bool]
+            replace(backing[..])
+            return backing[..]
+        }
+        FromBorrow proc() type { return struct { value borrowed_types()[0] } }
         NominalConfig :: struct { child type }
         nominal_config proc() NominalConfig {
             return { child = struct { value i16 } }
@@ -11426,10 +11706,14 @@ def check_specialization_packages(temporary, executable):
             same lib.FromRecord({ child = i16, counts = [1, 2] }) :: value
             nominal lib.FromNominal(lib.nominal_config()) :: { value = { value = 40 } }
             same_nominal lib.FromNominal(lib.nominal_config()) :: nominal
+            borrowed lib.FromBorrow() :: { value = 40 }
+            same_borrowed lib.FromBorrow() :: borrowed
+            if (i16(same_borrowed.value) != 40) return 0
             if (same_nominal.value.value != 40) return 0
             return lib.add(lib.record_config(), same.values[0] + same.values[1])
         }
     """).strip() + "\n")
+    check(app, executable, (b"42\n", None))
     check(app, executable, (b"42\n", None))
     sizing.write_text(textwrap.dedent("""
         Config :: struct { child type, rows [1]mut [1]mut type }
@@ -11564,7 +11848,7 @@ def check_specialization_packages(temporary, executable):
     interpreted = run(str(HONEY), "run", str(app))
     assert interpreted.stderr.startswith(f"{sizing.resolve()}:4:".encode()), outcome(interpreted)
     assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
-    return 26
+    return 27
 
 
 def check_dependency_provenance(temporary, executable):

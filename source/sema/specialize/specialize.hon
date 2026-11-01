@@ -108,6 +108,9 @@ State :: struct {
     demanded_functions []mut u8
     execution_functions []mut u8
     execution_visited arraylist.ArrayList(ast.NodeId)
+    metadata_views arraylist.ArrayList(MetadataView)
+    metadata_view_indices hashmap.AutoHashMap(ast.NodeId, usize)
+    metadata_runtime_depth usize = 0
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned `builder` arena.
@@ -185,6 +188,8 @@ elaborate proc(
         demanded_functions = demanded_functions,
         execution_functions = execution_functions,
         execution_visited = arraylist.init(allocator),
+        metadata_views = arraylist.init(allocator),
+        metadata_view_indices = hashmap.init(allocator),
     }
     defer arraylist.deinit(&state.bindings)
     defer arraylist.deinit(&state.declarations)
@@ -192,6 +197,8 @@ elaborate proc(
     defer hashmap.deinit(&state.cache)
     defer hashmap.deinit(&state.capture_types)
     defer arraylist.deinit(&state.execution_visited)
+    defer arraylist.deinit(&state.metadata_views)
+    defer hashmap.deinit(&state.metadata_view_indices)
     defer {
         for (state.instances.items) |instance| mem.free(allocator, instance.arguments)
         arraylist.deinit(&state.instances)
@@ -1759,7 +1766,7 @@ expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! E
         mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
         first_owned = ast.NodeId(0), result_type = no_node,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     span :: ast.node_span(&state.tree, inline_arm)
     static_capture :: if (tagged) arm.tag_capture else arm.capture
@@ -2583,6 +2590,18 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
             if (contextual or type_record_storage(state, annotation, 0))
                 annotation = try argument_annotation(state, function, view.type, arguments)
             arguments[i] = try evaluate_expected(state, argument, annotation)
+            if ((view.comptime or !metadata_result) and arguments[i].kind == .aggregate
+                and metadata_has_view(state, arguments[i].node)) {
+                wrapped :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, argument),
+                    arguments[i].annotation, arguments[i].node)
+                try refresh(state)
+                owned :: try metadata_own(state, wrapped, argument)
+                if (owned == no_node or !try type_array_initialized(state, owned, argument)) {
+                    try reject_evaluation(state, call)
+                    return
+                }
+                arguments[i].node = ast.typed_constant(&state.tree, owned).value
+            }
             if (arguments[i].kind == .invalid) {
                 try reject_evaluation(state, call)
                 return
@@ -2648,13 +2667,41 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         annotation :: try argument_annotation(state, function, view.type, arguments)
         try expand_expected(state, argument, annotation)
     }
+    borrowed := false
+    for arguments |argument| {
+        if (argument.kind != .invalid and metadata_has_view(state, argument.node)) borrowed = true
+    }
+    if (borrowed) {
+        readonly := true
+        for arguments |argument| {
+            if (argument.kind != .invalid and !try metadata_readonly_views(state, argument.node, argument.annotation))
+                readonly = false
+        }
+        if (readonly) {
+            for arguments |@argument| {
+                if (argument.kind == .invalid or !metadata_has_view(state, argument.node)) continue
+                wrapped :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, argument.node),
+                    argument.annotation, argument.node)
+                try refresh(state)
+                owned :: try metadata_own(state, wrapped, call)
+                if (owned == no_node or !try type_array_initialized(state, owned, call)) {
+                    try reject_evaluation(state, call)
+                    return
+                }
+                argument.node = ast.typed_constant(&state.tree, owned).value
+            }
+            borrowed = false
+        }
+    }
     demand_key :: if (demanded) usize(1) else usize(0)
     key := mix(usize(function), demand_key)
     for arguments |argument| {
         if (argument.kind != .invalid) key = mix(key, try value_hash(state, argument))
     }
     head := no_index
-    if (hashmap.get(&state.cache, key)) |found| head = found
+    if (!borrowed) {
+        if (hashmap.get(&state.cache, key)) |found| head = found
+    }
     current := head
     instance := no_index
     while (current != no_index) {
@@ -2688,7 +2735,9 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
             return err
         }
         # cache heads are replaced without reallocating a second entry for the same hash.
-        if (head != no_index) {
+        if (borrowed) {
+            # live places carry effects and must never reuse a cached execution.
+        } else if (head != no_index) {
             for (state.cache.entries) |@entry| {
                 if (entry.hash != 0 and entry.key == key) {
                     entry.value = instance
@@ -3640,6 +3689,7 @@ TypeExecution :: struct {
     mapping []mut ast.NodeId
     first_owned ast.NodeId
     returned ast.NodeId = no_node
+    view_identity ast.NodeId = no_node
     result_type ast.NodeId
     failed bool = false
     yielded ast.NodeId = no_node
@@ -3649,6 +3699,8 @@ TypeExecution :: struct {
     cleanup_depth usize = 0
     cleanup_loop_depth usize = 0
     evaluate_values bool = false
+    # dispatch snapshots must retain match shape until ordinary arm validation.
+    resolve_views bool = true
     pending_flow TypeFlow = .next
     loop_depth usize = 0
     inline_body ast.NodeId = no_node
@@ -3657,6 +3709,442 @@ TypeExecution :: struct {
     residual_boundary usize = 0
     residual_body ast.NodeId = no_node
     residual_flow TypeFlow = .next
+}
+
+# unique empty AST literals identify views in metadata_view_indices. owner teardown
+# invalidates handles before its stack frame disappears; only owned leaves reach IR.
+@hide:file
+MetadataView :: struct {
+    owner @mut TypeExecution
+    owner_identity ast.NodeId = no_node
+    place ast.NodeId
+    start usize
+    count usize
+    active bool = true
+}
+
+@hide:file
+metadata_view_index proc(state @State, id ast.NodeId) usize {
+    if (id == no_node) return no_index
+    if (ast.node_class(&state.tree, id) != .expression) return no_index
+    marker :: if (ast.expr_kind(&state.tree, id) == .typed_constant)
+        ast.typed_constant(&state.tree, id).value else id
+    if (hashmap.get(&state.metadata_view_indices, marker)) |index| return index
+    return no_index
+}
+
+@hide:file
+metadata_has_view proc(state @State, id ast.NodeId) bool {
+    if (id == no_node or state.metadata_views.items.len == 0) return false
+    if (metadata_view_index(state, id) != no_index) return true
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (metadata_has_view(state, ast.child(&state.tree, id, i))) return true
+    }
+    return false
+}
+
+@hide:file
+metadata_uses_views proc(state @State, execution @TypeExecution, id ast.NodeId) bool {
+    if (type_call_metadata_borrows(state, execution, id)) return true
+    for (execution.locals.items) |local| {
+        if (metadata_has_view(state, local.value) and metadata_reads(state, id, local.declaration, 0))
+            return true
+    }
+    return false
+}
+
+@hide:file
+type_execution_deinit proc(state @mut State, execution @mut TypeExecution) void {
+    if (execution.view_identity != no_node) {
+        for (state.metadata_views.items) |@view| {
+            if (view.owner_identity == execution.view_identity) view.active = false
+        }
+    }
+    arraylist.deinit(&execution.locals)
+}
+
+# handles refer to live type-control places, never to temporary interpreter storage.
+@hide:file
+metadata_view_read proc(state @mut State, index usize, at ast.NodeId) ast.NodeId ! Error {
+    view :: state.metadata_views.items[index]
+    if (view.active) {
+        root :: assignment_root(state, view.place)
+        for (view.owner.locals.items) |local| {
+            if (local.declaration != root) continue
+            result :: try type_collection_read(state, view.owner, view.place)
+            if (!try expand_type_matches(state, result)) return no_node
+            return result
+        }
+    }
+    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+        .comptime_value_escape, ast.node_span(&state.tree, at))
+    return no_node
+}
+
+@hide:file
+metadata_view_snapshot proc(state @mut State, value, at ast.NodeId) ast.NodeId ! Error {
+    index :: metadata_view_index(state, value)
+    if (index == no_index) return value
+    view :: state.metadata_views.items[index]
+    annotation :: ast.typed_constant(&state.tree, value).type
+    span :: ast.node_span(&state.tree, at)
+    source :: try metadata_view_read(state, index, at)
+    if (source == no_node) return no_node
+    array :: ast.typed_constant(&state.tree, source).value
+    count :: ast.array_element_count(&state.tree, array)
+    if (view.start > count or view.count > count - view.start) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_slice_bounds, ast.node_span(&state.tree, at))
+        return no_node
+    }
+    elements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&elements)
+    for (view.start..(view.start + view.count)) |i| {
+        if (!try type_step(state, at)) return no_node
+        try arraylist.append(&elements, ast.array_element(&state.tree, array, i))
+    }
+    literal :: try ast.add_array_literal(state.builder, span, elements.items)
+    result :: try ast.add_typed_constant(state.builder, span, annotation, literal)
+    try refresh(state)
+    return result
+}
+
+# readonly boundary values own their leaves before cleanup invalidates local places.
+@hide:file
+metadata_own proc(state @mut State, input, at ast.NodeId) ast.NodeId ! Error {
+    value := input
+    if (!metadata_has_view(state, value)) return value
+    if (metadata_view_index(state, value) != no_index) {
+        if (ast.expr_kind(&state.tree, value) != .typed_constant) return no_node
+        type :: try canonical_type(state, ast.typed_constant(&state.tree, value).type)
+        if (ast.slice_type(&state.tree, type).mutable) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                .comptime_value_escape, ast.node_span(&state.tree, at))
+            return no_node
+        }
+        value = try metadata_view_snapshot(state, value, at)
+        if (value == no_node) return no_node
+        if (!metadata_has_view(state, value)) return value
+    }
+    mapping :: try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree))
+    defer mem.free(state.allocator, mapping)
+    mem.set(mapping, no_node)
+    for (0..ast.child_count(&state.tree, value)) |i| {
+        child :: ast.child(&state.tree, value, i)
+        owned :: if (metadata_has_view(state, child)) try metadata_own(state, child, at) else child
+        if (owned == no_node) return no_node
+        mapping[usize(child)] = owned
+    }
+    result :: try ast.clone_subtree(state.builder, value, mapping)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+metadata_readonly_views proc(state @mut State, id, annotation ast.NodeId) bool ! Error {
+    if (!metadata_has_view(state, id)) return true
+    if (metadata_view_index(state, id) != no_index) {
+        type := annotation
+        if (ast.node_class(&state.tree, id) == .expression
+            and ast.expr_kind(&state.tree, id) == .typed_constant)
+            type = ast.typed_constant(&state.tree, id).type
+        type = try canonical_type(state, type)
+        return (type != no_node and ast.expr_kind(&state.tree, type) == .slice_type
+            and !ast.slice_type(&state.tree, type).mutable)
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (!try metadata_readonly_views(state, ast.child(&state.tree, id, i), no_node)) return false
+    }
+    return true
+}
+
+@hide:file
+MetadataPlace :: struct {
+    owner @mut TypeExecution
+    place ast.NodeId
+    mutable bool
+}
+
+@hide:file
+metadata_place proc(
+    state @mut State, execution @mut TypeExecution, place ast.NodeId,
+) MetadataPlace ! Error {
+    kind :: ast.expr_kind(&state.tree, place)
+    root :: assignment_root(state, place)
+    if (kind != .selection and kind != .index) {
+        return MetadataPlace{ owner = execution, place = place,
+            mutable = (root != no_node and ast.node_class(&state.tree, root) == .statement
+                and ast.statement_decl(&state.tree, root).mutability == .variable) }
+    }
+    parent :: if (kind == .index) ast.index_expr(&state.tree, place).base
+        else ast.selection_expr(&state.tree, place).base
+    base :: try type_collection_read(state, execution, parent)
+    if (!try expand_type_matches(state, base))
+        return MetadataPlace{ owner = execution, place = no_node, mutable = false }
+    borrowed :: metadata_view_index(state, base)
+    if (kind == .index and borrowed != no_index) {
+        view :: state.metadata_views.items[borrowed]
+        if (try metadata_view_read(state, borrowed, place) == no_node)
+            return MetadataPlace{ owner = execution, place = no_node, mutable = false }
+        offset :: try type_array_index(state, ast.index_expr(&state.tree, place).index, view.count, false)
+        if (offset == no_index)
+            return MetadataPlace{ owner = execution, place = no_node, mutable = false }
+        span :: ast.node_span(&state.tree, place)
+        type :: try canonical_type(state, ast.typed_constant(&state.tree, base).type)
+        mutable :: ast.slice_type(&state.tree, type).mutable
+        index :: try ast.add_integer(state.builder, span, u64(view.start + offset))
+        result :: try ast.add_index(state.builder, span, view.place, index)
+        try refresh(state)
+        return MetadataPlace{ owner = view.owner, place = result, mutable = mutable }
+    }
+    result := try metadata_place(state, execution, parent)
+    if (result.place == no_node) return result
+    if (kind == .index) {
+        type :: try canonical_type(state, try expression_type(state, base, 0))
+        if (type == no_node or ast.expr_kind(&state.tree, type) != .array_type) {
+            result.mutable = false
+        } else result.mutable = result.mutable and ast.array_type(&state.tree, type).mutable
+        result.place = try ast.add_index(state.builder, ast.node_span(&state.tree, place),
+            result.place, ast.index_expr(&state.tree, place).index)
+    } else result.place = try ast.add_selection(state.builder, ast.node_span(&state.tree, place),
+        result.place, ast.selection_expr(&state.tree, place).member)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+metadata_view_create proc(
+    state @mut State, execution @mut TypeExecution, id ast.NodeId,
+) ast.NodeId ! Error {
+    view :: ast.slice_expr(&state.tree, id)
+    normalized :: try type_assignment_target(state, execution, view.base)
+    if (normalized == no_node) return no_node
+    place :: try type_collection_place(state, execution, normalized)
+    source := no_node
+    if (place != no_node) source = try type_collection_read(state, execution, place)
+    else source = try type_snapshot(state, execution, normalized)
+    if (source == no_node or !try expand_type_matches(state, source)) return no_node
+    annotation :: try expression_type(state, source, 0)
+    if (!type_record_storage(state, annotation, 0)) return no_node
+    if (view.sentinel != null) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_operand, ast.node_span(&state.tree, id))
+        return no_node
+    }
+    type :: try canonical_type(state, annotation)
+    kind :: ast.expr_kind(&state.tree, type)
+    if (kind != .array_type and kind != .slice_type) return no_node
+    previous :: metadata_view_index(state, source)
+    if (place == no_node and previous == no_index) return no_node
+    base := MetadataView{ owner = execution, place = place, start = 0, count = 0 }
+    mutable := false
+    element := no_node
+    if (previous != no_index) {
+        base = state.metadata_views.items[previous]
+        mutable = ast.slice_type(&state.tree, type).mutable
+        element = ast.slice_type(&state.tree, type).element
+    } else if (kind == .array_type) {
+        descriptor :: ast.array_type(&state.tree, type)
+        storage :: try metadata_place(state, execution, place)
+        if (storage.place == no_node) return no_node
+        base.owner = storage.owner
+        base.place = storage.place
+        mutable = descriptor.mutable and storage.mutable
+        element = descriptor.element
+        base.count = ast.array_element_count(&state.tree, ast.typed_constant(&state.tree, source).value)
+    } else return no_node
+    start := usize(0)
+    end := base.count
+    if (view.start) |bound| {
+        snapshot :: try type_snapshot(state, execution, bound)
+        if (snapshot == no_node) return no_node
+        start = try type_array_index(state, snapshot, base.count, true)
+    }
+    if (start == no_index) return no_node
+    if (view.end) |bound| {
+        snapshot :: try type_snapshot(state, execution, bound)
+        if (snapshot == no_node) return no_node
+        end = try type_array_index(state, snapshot, base.count, true)
+    }
+    if (end == no_index) return no_node
+    if (start > end) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .invalid_slice_bounds, ast.node_span(&state.tree, id))
+        return no_node
+    }
+    span :: ast.node_span(&state.tree, id)
+    slice :: try ast.add_slice_type(state.builder, span, element, mutable, null)
+    empty [0]ast.NodeId :: []
+    marker :: try ast.add_array_literal(state.builder, span, empty[..])
+    result :: try ast.add_typed_constant(state.builder, span, slice, marker)
+    try refresh(state)
+    if (base.owner.view_identity == no_node) base.owner.view_identity = marker
+    if (previous == no_index) base.owner_identity = base.owner.view_identity
+    base.start += start
+    base.count = end - start
+    index :: state.metadata_views.items.len
+    try arraylist.append(&state.metadata_views, base)
+    hashmap.put(&state.metadata_view_indices, marker, index) catch |err| {
+        match err {
+            .key_exists: unreachable
+            else: return err
+        }
+    }
+    return result
+}
+
+@hide:file
+metadata_resolve_views proc(state @mut State, id ast.NodeId) bool ! Error {
+    if (!metadata_has_view(state, id)) return true
+    if (ast.node_class(&state.tree, id) == .expression
+        and ast.expr_kind(&state.tree, id) == .typed_constant) return true
+    if (ast.node_class(&state.tree, id) == .expression
+        and ast.expr_kind(&state.tree, id) == .binary) {
+        binary :: ast.binary_expr(&state.tree, id)
+        if (binary.operator == .logical_and or binary.operator == .logical_or) {
+            if (!try metadata_resolve_views(state, binary.left)) return false
+            if (branch_constant(state, binary.left, 0)) {
+                value :: try evaluate_ir(state, binary.left, try builtin(state, id, .bool))
+                if (value.kind != .boolean) return false
+                if (value.boolean == (binary.operator == .logical_or)) {
+                    # inspect the skipped call's signature without executing its body.
+                    right :: storage_expression_annotation(&state.tree, state.bindings.items, binary.right, 0)
+                    if (!try same_type(state, right, try builtin(state, id, .bool))) {
+                        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                            .invalid_operand, ast.node_span(&state.tree, binary.right))
+                        return false
+                    }
+                    result :: try ast.add_boolean(state.builder, ast.node_span(&state.tree, id), value.boolean)
+                    try replace(state, id, result)
+                    try refresh(state)
+                    return true
+                }
+                return try metadata_resolve_views(state, binary.right)
+            }
+            state.metadata_runtime_depth += 1
+            defer state.metadata_runtime_depth -= 1
+            return try metadata_resolve_views(state, binary.right)
+        }
+    }
+    if (ast.node_class(&state.tree, id) == .expression
+        and ast.expr_kind(&state.tree, id) == .match_expr) {
+        subject :: ast.match_expr(&state.tree, id).subject
+        if (!try metadata_resolve_views(state, subject)) return false
+        if (try specialize_match(state, id, no_node, no_node)) {
+            if (binding(state, id).kind == .invalid) return false
+            return try metadata_resolve_views(state, id)
+        }
+        state.metadata_runtime_depth += 1
+        defer state.metadata_runtime_depth -= 1
+        for (0..ast.match_arm_count(&state.tree, id)) |i| {
+            if (!try metadata_resolve_views(state, ast.match_arm(&state.tree, id, i))) return false
+        }
+        return true
+    }
+    for (0..ast.child_count(&state.tree, id)) |i| {
+        if (!try metadata_resolve_views(state, ast.child(&state.tree, id, i))) return false
+    }
+    if (ast.node_class(&state.tree, id) != .expression) return true
+    if (ast.expr_kind(&state.tree, id) == .call) {
+        try expand(state, id)
+        if (binding(state, id).kind == .invalid) {
+            state.evaluation_diagnostic = binding(state, id).data.diagnostic
+            return false
+        }
+    }
+    return try type_array_projection(state, id)
+}
+
+@hide:file
+metadata_rebase_place proc(
+    state @mut State, execution @mut TypeExecution, target, first, replacement ast.NodeId,
+) ast.NodeId ! Error {
+    if (target == first) return replacement
+    kind :: ast.expr_kind(&state.tree, target)
+    base :: if (kind == .index) ast.index_expr(&state.tree, target).base
+        else ast.selection_expr(&state.tree, target).base
+    rebased :: try metadata_rebase_place(state, execution, base, first, replacement)
+    result := no_node
+    span :: ast.node_span(&state.tree, target)
+    if (kind == .selection)
+        result = try ast.add_selection(state.builder, span, rebased, ast.selection_expr(&state.tree, target).member)
+    else {
+        index :: try type_snapshot(state, execution, ast.index_expr(&state.tree, target).index)
+        if (index == no_node) return no_node
+        frozen :: try type_execution_value(state, index, try builtin(state, index, .usize))
+        if (frozen == no_node) return no_node
+        result = try ast.add_index(state.builder, span, rebased, frozen)
+    }
+    try refresh(state)
+    return result
+}
+
+@hide:file
+type_place_root proc(state @State, id ast.NodeId) ast.NodeId {
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .selection) return type_place_root(state, ast.selection_expr(&state.tree, id).base)
+    if (kind == .index) return type_place_root(state, ast.index_expr(&state.tree, id).base)
+    return id
+}
+
+@hide:file
+metadata_assignment proc(
+    state @mut State, execution @mut TypeExecution, target, input ast.NodeId,
+) bool ! Error {
+    first := target
+    while (true) {
+        kind :: ast.expr_kind(&state.tree, first)
+        if (kind != .selection and kind != .index) return false
+        base :: if (kind == .index) ast.index_expr(&state.tree, first).base
+            else ast.selection_expr(&state.tree, first).base
+        if (kind == .index) {
+            value :: try type_snapshot(state, execution, base)
+            if (value == no_node or !try expand_type_matches(state, value)) return true
+            index :: metadata_view_index(state, value)
+            if (index != no_index) {
+                view :: state.metadata_views.items[index]
+                type :: try canonical_type(state, ast.typed_constant(&state.tree, value).type)
+                if (!ast.slice_type(&state.tree, type).mutable) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .invalid_index_assignment, ast.node_span(&state.tree, target))
+                    return true
+                }
+                if (try metadata_view_read(state, index, target) == no_node) return true
+                if (state.metadata_runtime_depth > 0) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .comptime_argument_required, ast.node_span(&state.tree, target))
+                    return true
+                }
+                snapshot :: try type_snapshot(state, execution, ast.index_expr(&state.tree, first).index)
+                if (snapshot == no_node) return true
+                offset :: try type_array_index(state, snapshot, view.count, false)
+                if (offset == no_index) return true
+                span :: ast.node_span(&state.tree, first)
+                frozen :: try ast.add_integer(state.builder, span, u64(view.start + offset))
+                place :: try ast.add_index(state.builder, span, view.place, frozen)
+                try refresh(state)
+                rebased :: try metadata_rebase_place(state, execution, target, first, place)
+                if (rebased == no_node) return true
+                expression :: try type_snapshot(state, execution, input)
+                if (expression == no_node or !try expand_type_matches(state, expression)) return true
+                root :: assignment_root(state, view.place)
+                for (view.owner.locals.items) |local, i| {
+                    if (local.declaration != root) continue
+                    if (view.owner.residual != null and i < view.owner.residual_boundary) {
+                        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                            .comptime_argument_required, ast.node_span(&state.tree, target))
+                        return true
+                    }
+                    updated :: try type_array_update(state, view.owner, rebased,
+                        type_place_root(state, view.place), local.value, expression)
+                    if (updated != no_node) view.owner.locals.items[i].value = updated
+                    return true
+                }
+                return true
+            }
+        }
+        first = base
+    }
 }
 
 @hide:file
@@ -3900,7 +4388,7 @@ expand_runtime_metadata proc(state @mut State, function ast.NodeId) void ! Error
         mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
         first_owned = ast.NodeId(0), result_type = view.return_type, residual_body = view.body,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
     body := try residual_block(state, &execution, view.body, 0)
@@ -3933,7 +4421,7 @@ return_type_value proc(state @mut State, block, first_owned, result_type ast.Nod
         result_type = result_type,
         evaluate_values = true,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
     flow :: try execute_type_block(state, &execution, block)
@@ -3967,7 +4455,7 @@ evaluate_type_value_block proc(state @mut State, expression, annotation ast.Node
         result_type = no_node,
         evaluate_values = true,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
     return try execute_type_value_block(state, &execution, ast.block_expr(&state.tree, expression), annotation)
@@ -4079,41 +4567,75 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
             return
         }
     }
+    if (execution.residual != null and !execution.evaluate_values
+        and ast.node_class(&state.tree, id) == .expression and metadata_uses_views(state, execution, id)) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .binary) {
+            binary :: ast.binary_expr(&state.tree, id)
+            if (binary.operator == .logical_and or binary.operator == .logical_or) {
+                left :: try type_snapshot(state, execution, binary.left)
+                if (left == no_node) return
+                known :: branch_constant(state, left, 0)
+                if (known) {
+                    value :: try evaluate_ir(state, left, try builtin(state, id, .bool))
+                    if (value.kind != .boolean) {
+                        execution.pending_flow = .invalid
+                        return
+                    }
+                    if (value.boolean == (binary.operator == .logical_or)) {
+                        right :: storage_expression_annotation(&state.tree, state.bindings.items, binary.right, 0)
+                        if (!try same_type(state, right, try builtin(state, id, .bool))) {
+                            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                                .invalid_operand, ast.node_span(&state.tree, binary.right))
+                            execution.pending_flow = .invalid
+                            return
+                        }
+                        execution.mapping[usize(id)] = try ast.add_boolean(state.builder,
+                            ast.node_span(&state.tree, id), value.boolean)
+                        try refresh(state)
+                        return
+                    }
+                }
+                if (!known) state.metadata_runtime_depth += 1
+                defer if (!known) state.metadata_runtime_depth -= 1
+                right :: try type_snapshot(state, execution, binary.right)
+                execution.mapping[usize(binary.left)] = left
+                execution.mapping[usize(binary.right)] = right
+                if (right == no_node) execution.pending_flow = .invalid
+                return
+            }
+        }
+        if (kind == .match_expr) {
+            subject :: try type_snapshot(state, execution, ast.match_expr(&state.tree, id).subject)
+            if (subject == no_node) return
+            if (!branch_constant(state, subject, 0)) {
+                state.metadata_runtime_depth += 1
+                defer state.metadata_runtime_depth -= 1
+                for (0..ast.child_count(&state.tree, id)) |i|
+                    try prepare_type_snapshot(state, execution, ast.child(&state.tree, id, i))
+                return
+            }
+        }
+    }
+    if ((execution.evaluate_values or execution.residual != null)
+        and ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .slice) {
+        result :: try metadata_view_create(state, execution, id)
+        if (result != no_node) {
+            execution.mapping[usize(id)] = result
+            return
+        }
+        if (state.evaluation_diagnostic != diagnostics.no_diagnostic) {
+            execution.pending_flow = .invalid
+            return
+        }
+    }
     if (execution.evaluate_values and ast.node_class(&state.tree, id) == .expression) {
         kind :: ast.expr_kind(&state.tree, id)
-        if (kind == .call and type_call_borrows(state, execution, id)) {
+        if (kind == .call and type_call_borrows(state, execution, id)
+            and !type_call_metadata_borrows(state, execution, id)) {
             execution.mapping[usize(id)] = try type_borrow_call(state, execution, id)
             if (execution.mapping[usize(id)] == no_node) execution.pending_flow = .invalid
             return
-        }
-        if (kind == .slice) {
-            base :: ast.slice_expr(&state.tree, id).base
-            root := base
-            while (true) {
-                root_kind :: ast.expr_kind(&state.tree, root)
-                if (root_kind == .selection) root = ast.selection_expr(&state.tree, root).base
-                else if (root_kind == .index) root = ast.index_expr(&state.tree, root).base
-                else if (root_kind == .unary and ast.unary_expr(&state.tree, root).operator == .unwrap)
-                    root = ast.unary_expr(&state.tree, root).operand
-                else if (root_kind == .builtin_call
-                    and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, root).name), "field")
-                    and ast.call_arg_count(&state.tree, root) == 2)
-                    root = ast.call_arg(&state.tree, root, 0)
-                else break
-            }
-            place :: binding(state, root)
-            if (place.kind == .declaration
-                and ast.node_class(&state.tree, place.data.declaration) == .statement
-                and ast.statement_decl(&state.tree, place.data.declaration).mutability == .variable) {
-                annotation :: try expression_type(state, base, 0)
-                if (type_record_storage(state, annotation, 0)
-                    and ast.expr_kind(&state.tree, annotation) == .array_type) {
-                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
-                        .comptime_value_escape, ast.node_span(&state.tree, id))
-                    execution.pending_flow = .invalid
-                    return
-                }
-            }
         }
         if (kind == .block_expr) {
             execution.mapping[usize(id)] = try execute_type_value_block(state, execution,
@@ -4141,6 +4663,19 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
                 }
                 right := no_node
                 if (value.boolean == (view.operator == .logical_or)) {
+                    if (metadata_uses_views(state, execution, view.right)) {
+                        annotation :: storage_expression_annotation(&state.tree, state.bindings.items, view.right, 0)
+                        if (!try same_type(state, annotation, boolean)) {
+                            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                                .invalid_operand, ast.node_span(&state.tree, view.right))
+                            execution.pending_flow = .invalid
+                            return
+                        }
+                        execution.mapping[usize(id)] = try ast.add_boolean(state.builder,
+                            ast.node_span(&state.tree, id), value.boolean)
+                        try refresh(state)
+                        return
+                    }
                     saved :: execution.evaluate_values
                     execution.evaluate_values = false
                     right = try type_snapshot(state, execution, view.right)
@@ -4239,6 +4774,7 @@ type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId
     result :: try ast.clone_subtree(state.builder, id, execution.mapping)
     try refresh(state)
     try bind_type_snapshot(state, execution, id, start)
+    if (execution.resolve_views and !try metadata_resolve_views(state, result)) return no_node
     return result
 }
 
@@ -4354,7 +4890,7 @@ specialize_type_catch proc(state @mut State, id, annotation, expected ast.NodeId
             first_owned = ast.NodeId(0),
             result_type = no_node,
         }
-        defer arraylist.deinit(&execution.locals)
+        defer type_execution_deinit(state, &execution)
         defer mem.free(state.allocator, execution.mapping)
         mem.set(execution.mapping, no_node)
         if (view.capture) |capture| {
@@ -4461,6 +4997,9 @@ type_dispatch_snapshot proc(state @mut State, execution @mut TypeExecution, id a
     try expand_inline_match(state, id, subject_type)
     if (ast.expr_kind(&state.tree, id) != .match_expr) return no_node
     saved :: execution.evaluate_values
+    saved_views :: execution.resolve_views
+    execution.resolve_views = false
+    defer execution.resolve_views = saved_views
     execution.evaluate_values = false
     defer execution.evaluate_values = saved
     snapshot :: try type_snapshot(state, execution, id)
@@ -4634,7 +5173,7 @@ expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
         first_owned = ast.NodeId(0), result_type = no_node,
         inline_body = loop.body, inline_blocks = &blocks,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
     for (0..usize(2)) |i| {
@@ -4825,7 +5364,7 @@ type_match_body proc(state @mut State, id ast.NodeId, arm ast.MatchArmView) ast.
         first_owned = ast.NodeId(0),
         result_type = no_node,
     }
-    defer arraylist.deinit(&execution.locals)
+    defer type_execution_deinit(state, &execution)
     defer mem.free(state.allocator, execution.mapping)
     mem.set(execution.mapping, no_node)
     captured :: if (is_type(state, snapshot.type)) snapshot.value else value
@@ -4923,7 +5462,12 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             return false
         }
         if (ast.expr_kind(&state.tree, base) != .typed_constant) return true
-        array :: ast.typed_constant(&state.tree, base)
+        array := ast.typed_constant(&state.tree, base)
+        if (metadata_view_index(state, base) != no_index) {
+            snapshot :: try metadata_view_snapshot(state, base, id)
+            if (snapshot == no_node) return false
+            array = ast.typed_constant(&state.tree, snapshot)
+        }
         type :: try canonical_type(state, array.type)
         record :: (type != no_node and (ast.expr_kind(&state.tree, type) == .record_type
             or (type_record_storage(state, type, 0) and ast.expr_kind(&state.tree, type) == .union_type)))
@@ -5184,8 +5728,8 @@ type_record_check proc(state @mut State, annotation ast.NodeId) bool ! Error {
     }
     if (ast.expr_kind(&state.tree, type) == .slice_type) {
         descriptor :: ast.slice_type(&state.tree, type)
-        if (descriptor.mutable or descriptor.sentinel != null) {
-            code diagnostics.Code :: if (descriptor.mutable) .comptime_value_escape else .invalid_operand
+        if (descriptor.sentinel != null) {
+            code diagnostics.Code :: .invalid_operand
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, code, ast.node_span(&state.tree, type))
             return false
         }
@@ -5555,8 +6099,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
     return result
 }
 
-# readonly metadata views own their leaves. mutable backing needs borrowing semantics,
-# not a snapshot that silently stops observing later element writes.
+# local handles retain borrowing; owned readonly literals cross execution boundaries.
 @hide:file
 type_slice_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
     if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
@@ -5575,8 +6118,27 @@ type_slice_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
     if (kind == .typed_constant) {
         actual :: ast.typed_constant(&state.tree, expression)
         if (try same_type(state, type, actual.type)) return expression
+        index :: metadata_view_index(state, expression)
+        if (index != no_index) {
+            actual_type :: try canonical_type(state, actual.type)
+            if (ast.expr_kind(&state.tree, actual_type) == .slice_type) {
+                source :: ast.slice_type(&state.tree, actual_type)
+                if ((!descriptor.mutable or source.mutable)
+                    and try same_type(state, descriptor.element, source.element)) {
+                    result :: try ast.add_typed_constant(state.builder, span, type, actual.value)
+                    try refresh(state)
+                    return result
+                }
+            }
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .type_mismatch, span)
+            return no_node
+        }
     }
     source := expression
+    if (descriptor.mutable) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
+        return no_node
+    }
     start := usize(0)
     end := no_index
     if (kind == .slice) {
@@ -6115,6 +6677,15 @@ type_call_borrows proc(state @State, execution @TypeExecution, call ast.NodeId) 
 }
 
 @hide:file
+type_call_metadata_borrows proc(state @State, execution @TypeExecution, call ast.NodeId) bool {
+    for (execution.locals.items) |local| {
+        if (type_record_storage(state, local.annotation, 0)
+            and type_borrowed_place(state, call, local.declaration, false)) return true
+    }
+    return false
+}
+
+@hide:file
 TypeBorrow :: struct { index usize, previous ast.NodeId, temporary ast.NodeId }
 
 @hide:file
@@ -6431,6 +7002,8 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 expression :: try type_snapshot_expected(state, execution, value, execution.result_type)
                 if (expression == no_node) return .invalid
                 execution.returned = try type_execution_value(state, expression, execution.result_type)
+                if (execution.returned != no_node)
+                    execution.returned = try metadata_own(state, execution.returned, value)
                 if (execution.returned != no_node
                     and !try type_array_initialized(state, execution.returned, value)) return .invalid
                 if (execution.returned != no_node) {
@@ -6490,6 +7063,11 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 execution.mapping = try mem.realloc(state.allocator, execution.mapping, ast.node_count(&state.tree))
                 mem.set(execution.mapping[previous..], no_node)
                 return try execute_type_statement(state, execution, normalized)
+            }
+            if (try metadata_assignment(state, execution, target, assignment.value)) {
+                if (state.evaluation_diagnostic != diagnostics.no_diagnostic or execution.pending_flow != .next)
+                    return .invalid
+                return .next
             }
             root := assignment.target
             indexed := true
@@ -6768,7 +7346,10 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
     collection :: try type_execution_value(state, snapshot, annotation)
     if (collection == no_node) return .invalid
     count := Value{}
-    if tuple {
+    borrowed :: metadata_view_index(state, collection)
+    if (borrowed != no_index) {
+        count = Value{ kind = .integer, magnitude = u64(state.metadata_views.items[borrowed].count) }
+    } else if tuple {
         count = Value{ kind = .integer, magnitude = u64(ast.record_field_count(&state.tree, annotation)) }
     } else if (try execution_array_storage(state, annotation) or try metadata_sequence(state, annotation)) {
         count = Value{ kind = .integer,

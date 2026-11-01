@@ -1318,6 +1318,7 @@ readonly_type_slices_recompile_owned_private_nominal_payloads test {
             `    saved :: $(lib.make())
             `    if (lib.Box(saved) != lib.Box(lib.make())) return bool
             `    if (lib.Box(saved) != lib.Box(lib.literal())) return bool
+            `    if (lib.Box(saved) != lib.Box(lib.borrowed())) return bool
             `    Selected :: lib.types()[0]
             `    if (Selected == Child or saved[0].child != Selected) return bool
             `    return lib.Box(saved)
@@ -1356,6 +1357,16 @@ readonly_type_slices_recompile_owned_private_nominal_payloads test {
             `        { child = bool, count = 7 },
             `    ]
             `    return saved
+            `}
+            `fill proc(values []mut Config) void {
+            `    for values |_, index| { values[index] = { child = Child, count = 2 } }
+            `}
+            `borrowed proc() []Config {
+            `    rows [2]mut Config := undefined
+            `    view :: rows[..]
+            `    fill(view)
+            `    defer view[0].child = bool
+            `    return view
             `}
             `Box proc(input []Config) type {
             `    return struct { values [input[0].count]input[0].child, bias i16 = i16(input[1].count) }
