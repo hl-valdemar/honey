@@ -485,6 +485,13 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
     if (class == .function) {
         state.return_type = ast.function_decl(&state.tree, id).return_type
         state.yield_type = no_node
+        if (!ast.function_external(&state.tree, id)
+            and type_local_storage(&state.tree, state.bindings.items,
+                ast.function_decl(&state.tree, id).body, 0)
+            and !compiletime_call(state, id)) {
+            try expand_runtime_metadata(state, id)
+            return
+        }
     }
     if (class == .statement) {
         match ast.stmt_kind(&state.tree, id) {
@@ -2318,16 +2325,167 @@ type_local_storage proc(tree @ast.Tree, bindings []sema.Binding, id ast.NodeId, 
     return false
 }
 
+# local metadata does not make unrelated parameters constant. retain constant-input
+# execution only when a parameter participates in constructing or updating metadata.
+@hide:file
+metadata_local proc(state @State, id ast.NodeId) bool {
+    if (ast.node_class(&state.tree, id) != .statement
+        or ast.stmt_kind(&state.tree, id) != .declaration) return false
+    declaration :: ast.statement_decl(&state.tree, id)
+    if (declaration.type) |annotation| return type_record_storage(state, annotation, 0)
+    return type_storage_initializer(&state.tree, state.bindings.items, declaration.initializer,
+        declaration.mutability == .variable, 0)
+}
+
+@hide:file
+assignment_root proc(state @State, id ast.NodeId) ast.NodeId {
+    kind :: ast.expr_kind(&state.tree, id)
+    if (kind == .selection) return assignment_root(state, ast.selection_expr(&state.tree, id).base)
+    if (kind == .index) return assignment_root(state, ast.index_expr(&state.tree, id).base)
+    if (kind == .builtin_call
+        and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "field")
+        and ast.call_arg_count(&state.tree, id) == 2)
+        return assignment_root(state, ast.call_arg(&state.tree, id, 0))
+    resolved :: binding(state, id)
+    return if (resolved.kind == .declaration) resolved.data.declaration else no_node
+}
+
+@hide:file
+DependencyPath :: struct { declaration ast.NodeId, parent ?@DependencyPath }
+
+@hide:file
+parameter_dependency proc(state @State, id, body ast.NodeId, path ?@DependencyPath, depth usize) bool {
+    if (depth >= 128) return true
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        declaration :: resolved.data.declaration
+        class :: ast.node_class(&state.tree, declaration)
+        if (class == .parameter and ast.param(&state.tree, declaration).type != no_node)
+            return !ast.param(&state.tree, declaration).comptime
+        if (class == .statement or class == .expression or class == .parameter) {
+            current := path
+            while (current) |entry| {
+                if (entry.declaration == declaration) return false
+                current = entry.parent
+            }
+            entry :: DependencyPath{ declaration = declaration, parent = path }
+            if (class == .statement
+                and parameter_dependency(state, ast.statement_decl(&state.tree, declaration).initializer,
+                    body, &entry, depth + 1)) return true
+            if (class == .statement and ast.statement_decl(&state.tree, declaration).mutability == .constant)
+                return false
+            return declaration_parameter_dependency(state, body, declaration, body, &entry, false, depth + 1)
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (parameter_dependency(state, ast.child(&state.tree, id, i), body, path, depth + 1)) return true
+    return false
+}
+
+@hide:file
+subtree_has proc(state @State, root, node ast.NodeId) bool {
+    if (root == node) return true
+    for (0..ast.child_count(&state.tree, root)) |i|
+        if (subtree_has(state, ast.child(&state.tree, root, i), node)) return true
+    return false
+}
+
+# follow writes as well as initializers; the declaration path breaks assignment cycles.
+@hide:file
+declaration_parameter_dependency proc(
+    state @State, id, declaration, body ast.NodeId, path @DependencyPath, dynamic bool, depth usize,
+) bool {
+    if (depth >= 128) return true
+    selected := dynamic
+    class :: ast.node_class(&state.tree, id)
+    if (class == .statement) {
+        kind :: ast.stmt_kind(&state.tree, id)
+        if (kind == .assignment_stmt) {
+            assignment :: ast.assignment_stmt(&state.tree, id)
+            if (assignment_root(state, assignment.target) == declaration)
+                return (dynamic or parameter_dependency(state, assignment.target, body, path, depth + 1)
+                    or parameter_dependency(state, assignment.value, body, path, depth + 1))
+        }
+        if (kind == .if_stmt or kind == .while_stmt or kind == .for_stmt) {
+            condition := no_node
+            captured := false
+            if (kind == .if_stmt) {
+                view :: ast.if_stmt(&state.tree, id)
+                condition = view.condition
+                captured = view.capture != null and view.capture? == declaration
+            } else if (kind == .while_stmt) {
+                view :: ast.while_stmt(&state.tree, id)
+                condition = view.condition
+                captured = view.capture != null and view.capture? == declaration
+            } else {
+                view :: ast.for_stmt(&state.tree, id)
+                condition = view.iterable
+                captured = ((view.capture != null and view.capture? == declaration)
+                    or (view.index != null and view.index? == declaration))
+            }
+            if (captured) return parameter_dependency(state, condition, body, path, depth + 1)
+            if (!subtree_has(state, id, declaration))
+                selected = dynamic or parameter_dependency(state, condition, body, path, depth + 1)
+        }
+    }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .match_expr) {
+        subject :: ast.match_expr(&state.tree, id).subject
+        for (0..ast.match_arm_count(&state.tree, id)) |i| {
+            arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, id, i))
+            if (arm.capture != null and arm.capture? == declaration)
+                return parameter_dependency(state, subject, body, path, depth + 1)
+        }
+        if (!subtree_has(state, id, declaration))
+            selected = dynamic or parameter_dependency(state, subject, body, path, depth + 1)
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (declaration_parameter_dependency(state, ast.child(&state.tree, id, i),
+            declaration, body, path, selected, depth + 1)) return true
+    return false
+}
+
+@hide:file
+metadata_parameter_dependency proc(state @State, id, body, dynamic ast.NodeId) bool {
+    class :: ast.node_class(&state.tree, id)
+    if (metadata_local(state, id) and parameter_dependency(state, id, body, null, 0)) return true
+    if (class == .statement) {
+        kind :: ast.stmt_kind(&state.tree, id)
+        if (kind == .assignment_stmt) {
+            assignment :: ast.assignment_stmt(&state.tree, id)
+            root :: assignment_root(state, assignment.target)
+            if (root != no_node and metadata_local(state, root))
+                return ((dynamic != no_node and !subtree_has(state, dynamic, root))
+                    or parameter_dependency(state, assignment.target, body, null, 0)
+                    or parameter_dependency(state, assignment.value, body, null, 0))
+        }
+        if (kind == .if_stmt or kind == .while_stmt or kind == .for_stmt) {
+            condition :: if (kind == .if_stmt) ast.if_stmt(&state.tree, id).condition
+                else if (kind == .while_stmt) ast.while_stmt(&state.tree, id).condition
+                else ast.for_stmt(&state.tree, id).iterable
+            selected :: if (parameter_dependency(state, condition, body, null, 0)) id else dynamic
+            for (0..ast.child_count(&state.tree, id)) |i|
+                if (metadata_parameter_dependency(state, ast.child(&state.tree, id, i), body, selected)) return true
+            return false
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (metadata_parameter_dependency(state, ast.child(&state.tree, id, i), body, dynamic)) return true
+    return false
+}
+
 @hide:file
 compiletime_call proc(state @State, function ast.NodeId) bool {
     if (type_record_storage(state, ast.function_decl(&state.tree, function).return_type, 0)) return true
+    runtime_input := false
     for (0..ast.function_param_count(&state.tree, function)) |i| {
         parameter :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
         if (!parameter.comptime and type_record_storage(state, parameter.type, 0)) return true
+        if (!parameter.comptime) runtime_input = true
     }
-    return (!ast.function_external(&state.tree, function)
-        and type_local_storage(&state.tree, state.bindings.items,
-            ast.function_decl(&state.tree, function).body, 0))
+    if (!runtime_input or ast.function_external(&state.tree, function)) return false
+    body :: ast.function_decl(&state.tree, function).body
+    if (!type_local_storage(&state.tree, state.bindings.items, body, 0)) return false
+    return metadata_parameter_dependency(state, body, body, no_node)
 }
 
 @hide:file
@@ -3495,10 +3653,272 @@ TypeExecution :: struct {
     loop_depth usize = 0
     inline_body ast.NodeId = no_node
     inline_blocks ?@mut arraylist.ArrayList(ast.NodeId) = null
+    residual ?@mut arraylist.ArrayList(ast.NodeId) = null
+    residual_boundary usize = 0
+    residual_body ast.NodeId = no_node
+    residual_flow TypeFlow = .next
 }
 
 @hide:file
 TypeFlow :: enum { next, returned, yielded, break, continue, invalid }
+
+@hide:file
+ResidualCleanup :: struct { position usize, statement ast.NodeId }
+
+@hide:file
+metadata_reads proc(state @State, id, declaration ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        if (resolved.data.declaration == declaration) return true
+        if (ast.node_class(&state.tree, resolved.data.declaration) == .statement)
+            return metadata_reads(state, ast.statement_decl(&state.tree, resolved.data.declaration).initializer,
+                declaration, depth + 1)
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (metadata_reads(state, ast.child(&state.tree, id, i), declaration, depth + 1)) return true
+    return false
+}
+
+@hide:file
+metadata_updates_outer proc(state @State, id, scope ast.NodeId) bool {
+    if (ast.node_class(&state.tree, id) == .statement and ast.stmt_kind(&state.tree, id) == .assignment_stmt) {
+        root :: assignment_root(state, ast.assignment_stmt(&state.tree, id).target)
+        if (root != no_node and metadata_local(state, root) and !subtree_has(state, scope, root)) return true
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (metadata_updates_outer(state, ast.child(&state.tree, id, i), scope)) return true
+    return false
+}
+
+@hide:file
+metadata_updates proc(state @State, id ast.NodeId) bool {
+    return metadata_updates_outer(state, id, id)
+}
+
+@hide:file
+metadata_needs proc(state @State, id, declaration ast.NodeId) bool {
+    if (metadata_local(state, id) and metadata_reads(state, id, declaration, 0)) return true
+    if (ast.node_class(&state.tree, id) == .statement) {
+        kind :: ast.stmt_kind(&state.tree, id)
+        if (kind == .assignment_stmt) {
+            root :: assignment_root(state, ast.assignment_stmt(&state.tree, id).target)
+            if (root != no_node and metadata_local(state, root)
+                and metadata_reads(state, id, declaration, 0)) return true
+        }
+        if ((kind == .while_stmt or kind == .for_stmt or kind == .if_stmt) and metadata_updates(state, id)) {
+            condition :: if (kind == .while_stmt) ast.while_stmt(&state.tree, id).condition
+                else if (kind == .for_stmt) ast.for_stmt(&state.tree, id).iterable
+                else ast.if_stmt(&state.tree, id).condition
+            if (metadata_reads(state, condition, declaration, 0)) return true
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (metadata_needs(state, ast.child(&state.tree, id, i), declaration)) return true
+    return false
+}
+
+# erase metadata storage before ordinary checking. runtime scopes may create their
+# own metadata, but cannot change a snapshot belonging to an enclosing runtime path.
+@hide:file
+residual_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId, boundary usize) ast.NodeId ! Error {
+    saved :: execution.locals.items.len
+    saved_output :: execution.residual
+    saved_boundary :: execution.residual_boundary
+    statements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&statements)
+    cleanups := arraylist.init(ResidualCleanup, state.allocator)
+    defer arraylist.deinit(&cleanups)
+    execution.residual = &statements
+    execution.residual_boundary = boundary
+    execution.residual_flow = .next
+    defer {
+        execution.locals.items = execution.locals.items[..saved]
+        execution.residual = saved_output
+        execution.residual_boundary = saved_boundary
+    }
+    for (0..ast.block_statement_count(&state.tree, block)) |i| {
+        statement :: ast.block_statement(&state.tree, block, i)
+        if (!try type_step(state, statement)) return no_node
+        kind :: ast.stmt_kind(&state.tree, statement)
+        if ((kind == .break_stmt or kind == .continue_stmt) and execution.loop_depth > 0) {
+            execution.residual_flow = if (kind == .break_stmt) TypeFlow.break else TypeFlow.continue
+            break
+        }
+        if (kind == .defer_stmt) {
+            try arraylist.append(&cleanups, ResidualCleanup{ position = statements.items.len, statement = statement })
+            try arraylist.append(&statements, statement)
+            continue
+        }
+        constant := metadata_local(state, statement)
+        if (kind == .declaration and !constant) {
+            declaration :: ast.statement_decl(&state.tree, statement)
+            constant = (type_storage_initializer(&state.tree, state.bindings.items,
+                declaration.initializer, true, 0)
+                or metadata_needs(state, execution.residual_body, statement))
+        }
+        if (kind == .assignment_stmt) {
+            root :: assignment_root(state, ast.assignment_stmt(&state.tree, statement).target)
+            for (execution.locals.items) |local, index| {
+                if (root != local.declaration) continue
+                if (index < boundary) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+                        .comptime_argument_required, ast.node_span(&state.tree, statement))
+                    return no_node
+                }
+                constant = true
+            }
+        }
+        if (constant) {
+            saved_values :: execution.evaluate_values
+            execution.evaluate_values = true
+            flow :: execute_type_statement(state, execution, statement) catch |err| {
+                execution.evaluate_values = saved_values
+                return err
+            }
+            execution.evaluate_values = saved_values
+            if (flow != .next) return no_node
+            continue
+        }
+        if (kind == .block_stmt) {
+            child :: try residual_block(state, execution, ast.statement_block(&state.tree, statement), boundary)
+            if (child == no_node) return no_node
+            try arraylist.append(&statements, try ast.add_block_stmt(state.builder, child))
+            try refresh(state)
+            if (execution.residual_flow != .next) break
+            continue
+        }
+        if (kind == .expression
+            and ast.expr_kind(&state.tree, ast.statement_expr(&state.tree, statement)) == .match_expr) {
+            expression :: ast.statement_expr(&state.tree, statement)
+            subject :: try type_snapshot(state, execution, ast.match_expr(&state.tree, expression).subject)
+            if (subject == no_node) return no_node
+            try expand(state, subject)
+            if (type_record_storage(state, try expression_type(state, subject, 0), 0)
+                or branch_constant(state, subject, 0)) {
+                arms := arraylist.init(ast.NodeId, state.allocator)
+                defer arraylist.deinit(&arms)
+                for (0..ast.match_arm_count(&state.tree, expression)) |position|
+                    try arraylist.append(&arms, ast.match_arm(&state.tree, expression, position))
+                dispatch :: try ast.add_match(state.builder, ast.node_span(&state.tree, expression), subject, arms.items)
+                try refresh(state)
+                try expand_inline_match(state, dispatch, try expression_type(state, subject, 0))
+                index :: try type_match_arm(state, dispatch)
+                if (index == no_index) return no_node
+                arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, dispatch, index))
+                selected :: try type_match_body(state, dispatch, arm)
+                if (selected == no_node) return no_node
+                if (arm.expression) {
+                    snapshot :: try type_snapshot(state, execution, selected)
+                    if (snapshot == no_node) return no_node
+                    try arraylist.append(&statements, try ast.add_expression_stmt(state.builder, snapshot))
+                } else {
+                    body :: try residual_block(state, execution, selected, boundary)
+                    if (body == no_node) return no_node
+                    value :: try ast.add_block_expr(state.builder, ast.node_span(&state.tree, expression), body)
+                    try arraylist.append(&statements, try ast.add_expression_stmt(state.builder, value))
+                    if (execution.residual_flow == .yielded) execution.residual_flow = .next
+                }
+                try refresh(state)
+                if (execution.residual_flow != .next) break
+                continue
+            }
+        }
+        if (kind == .if_stmt and ast.if_stmt(&state.tree, statement).capture != null) {
+            condition :: try type_snapshot(state, execution, ast.if_stmt(&state.tree, statement).condition)
+            if (condition == no_node) return no_node
+            try expand(state, condition)
+            if (type_record_storage(state, try expression_type(state, condition, 0), 0)) {
+                flow :: try execute_type_statement(state, execution, statement)
+                if (flow == .invalid) return no_node
+                execution.residual_flow = flow
+                if (flow != .next) break
+                continue
+            }
+        }
+        if (kind == .if_stmt and ast.if_stmt(&state.tree, statement).capture == null) {
+            condition :: try type_snapshot(state, execution, ast.if_stmt(&state.tree, statement).condition)
+            if (condition == no_node) return no_node
+            try expand(state, condition)
+            if (branch_constant(state, condition, 0)) {
+                value :: try evaluate_ir(state, condition, try builtin(state, condition, .bool))
+                if (value.kind != .boolean) return no_node
+                view :: ast.if_stmt(&state.tree, statement)
+                selected := if (value.boolean) view.then_block else no_node
+                if (!value.boolean and view.else_block != null) selected = view.else_block?
+                if (selected != no_node) {
+                    child :: try residual_block(state, execution, selected, boundary)
+                    if (child == no_node) return no_node
+                    try arraylist.append(&statements, try ast.add_block_stmt(state.builder, child))
+                    try refresh(state)
+                    if (execution.residual_flow != .next) break
+                }
+                continue
+            }
+        }
+        if ((kind == .for_stmt or kind == .while_stmt) and metadata_updates(state, statement)) {
+            flow :: try execute_type_statement(state, execution, statement)
+            if (flow == .invalid) return no_node
+            execution.residual_flow = flow
+            if (flow != .next) break
+            continue
+        }
+        snapshot :: try type_snapshot(state, execution, statement)
+        if (snapshot == no_node) return no_node
+        try arraylist.append(&statements, snapshot)
+        if (kind == .return_stmt or kind == .yield_stmt) {
+            execution.residual_flow = if (kind == .return_stmt) TypeFlow.returned else TypeFlow.yielded
+            break
+        }
+    }
+    remaining := cleanups.items.len
+    while (remaining > 0) {
+        remaining -= 1
+        cleanup :: cleanups.items[remaining]
+        saved_flow :: execution.residual_flow
+        body :: try residual_block(state, execution, ast.cleanup_stmt(&state.tree, cleanup.statement).body, boundary)
+        if (body == no_node) return no_node
+        statements.items[cleanup.position] = try ast.add_cleanup_stmt(state.builder,
+            ast.node_span(&state.tree, cleanup.statement), body, null, false)
+        try refresh(state)
+        execution.residual_flow = saved_flow
+    }
+    result :: try ast.add_block(state.builder, ast.node_span(&state.tree, block), statements.items)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+expand_runtime_metadata proc(state @mut State, function ast.NodeId) void ! Error {
+    view :: ast.function_decl(&state.tree, function)
+    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
+    state.type_execution_depth += 1
+    defer state.type_execution_depth -= 1
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    execution := TypeExecution{
+        locals = arraylist.init(state.allocator),
+        mapping = try mem.alloc(ast.NodeId, state.allocator, ast.node_count(&state.tree)),
+        first_owned = ast.NodeId(0), result_type = view.return_type, residual_body = view.body,
+    }
+    defer arraylist.deinit(&execution.locals)
+    defer mem.free(state.allocator, execution.mapping)
+    mem.set(execution.mapping, no_node)
+    body := try residual_block(state, &execution, view.body, 0)
+    if (body == no_node) {
+        diagnostic := state.evaluation_diagnostic
+        if (diagnostic == diagnostics.no_diagnostic)
+            diagnostic = try diagnostics.add(state.diagnostics, .comptime_argument_required, view.span)
+        invalid :: try ast.add_invalid_stmt(state.builder, view.span, diagnostic)
+        statements [1]ast.NodeId :: [invalid]
+        body = try ast.add_block(state.builder, view.span, statements[..])
+    }
+    try replace(state, view.body, body)
+    try refresh(state)
+    try expand(state, view.return_type)
+    for (0..ast.function_param_count(&state.tree, function)) |i|
+        try expand(state, ast.function_param(&state.tree, function, i))
+    try expand(state, view.body)
+}
 
 # type values cannot enter runtime IR. execute their control flow here, substituting
 # owned constants into snapshots; ordinary value operations still use checked IR.
@@ -3599,6 +4019,37 @@ type_step proc(state @mut State, at ast.NodeId) bool ! Error {
 @hide:file
 prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) void ! Error {
     if (id == no_node or usize(id) >= execution.mapping.len or execution.pending_flow != .next) return
+    resolved_capture :: binding(state, id)
+    if (execution.residual != null and !execution.evaluate_values
+        and (ast.node_class(&state.tree, id) == .expression or ast.node_class(&state.tree, id) == .parameter)
+        and resolved_capture.kind == .declaration and resolved_capture.data.declaration == id) return
+    if (execution.residual != null and !execution.evaluate_values) {
+        # captures precede their bodies semantically, regardless of AST child order.
+        for (0..ast.child_count(&state.tree, id)) |i| {
+            child :: ast.child(&state.tree, id, i)
+            resolved :: binding(state, child)
+            if ((ast.node_class(&state.tree, child) != .expression and ast.node_class(&state.tree, child) != .parameter)
+                or resolved.kind != .declaration or resolved.data.declaration != child) continue
+            capture :: try ast.copy_node(state.builder, child)
+            try refresh(state)
+            execution.mapping[usize(child)] = capture
+            state.bindings.items[usize(capture)] = sema.Binding{
+                kind = .declaration, data = sema.BindingData{ declaration = capture },
+            }
+        }
+    }
+    if (execution.residual != null and !execution.evaluate_values and ast.node_class(&state.tree, id) == .block) {
+        saved_flow :: execution.residual_flow
+        saved_loop :: execution.loop_depth
+        execution.loop_depth = 0
+        defer {
+            execution.residual_flow = saved_flow
+            execution.loop_depth = saved_loop
+        }
+        execution.mapping[usize(id)] = try residual_block(state, execution, id, execution.locals.items.len)
+        if (execution.mapping[usize(id)] == no_node) execution.pending_flow = .invalid
+        return
+    }
     # substituted arguments belong to the caller, including nominal type identity.
     if (id < execution.first_owned) {
         execution.mapping[usize(id)] = id
@@ -5822,6 +6273,14 @@ type_borrow_call proc(state @mut State, execution @mut TypeExecution, call ast.N
 
 @hide:file
 execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
+    if (execution.residual != null and !execution.evaluate_values) {
+        block_value :: try residual_block(state, execution, block, execution.residual_boundary)
+        if (block_value == no_node) return .invalid
+        statement :: try ast.add_block_stmt(state.builder, block_value)
+        try refresh(state)
+        try arraylist.append(execution.residual?, statement)
+        return execution.residual_flow
+    }
     if (block == execution.inline_body) {
         saved_demand :: state.demand_depth
         state.demand_depth = 0

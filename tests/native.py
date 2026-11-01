@@ -170,14 +170,223 @@ CASES = {
         }
         """, b"[65, 233, 128578, 10, 13, 9, 92, 39]\n", None,
     ),
-    "compiletime_only_main_cannot_select_another_runtime_function": (
+    "mixed_metadata_locals_preserve_snapshots_and_runtime_effects": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc($T type, effects @mut i16, value T) T {
+            Explicit type := i8
+            Explicit = T
+            Inferred := bool
+            Inferred = Explicit
+            types [2]mut type := [i8, bool]
+            saved_types :: types
+            if (T == i16) { types[0] = Inferred } else { types[0] = i16 }
+            inferred_types := [i8, bool]
+            saved_inferred_types :: inferred_types
+            inferred_types = [types[0], bool]
+            config Config := { child = i8, count = 1 }
+            saved_config :: config
+            config.child = inferred_types[0]
+            config.count += 1
+            inferred_config := Config { child = bool, count = 1 }
+            saved_inferred_config :: inferred_config
+            inferred_config.child = config.child
+            inferred_config.count = config.count
+            if (saved_types[0] != i8 or saved_inferred_types[0] != i8) return T(-1)
+            if (saved_config.child != i8 or saved_config.count != 1) return T(-2)
+            if (saved_inferred_config.child != bool or saved_inferred_config.count != 1) return T(-3)
+            Element :: inferred_config.child
+            values [inferred_config.count]Element :: [value, T(2)]
+            effects^ += 1
+            return values[0] + values[1]
+        }
+        forward proc(effects @mut i16, value i16) i16 { return compute(i16, effects, value) }
+        main proc() [2]i16 {
+            effects := i16(0)
+            first :: forward(&effects, 18)
+            second :: forward(&effects, 20)
+            return [first + second, effects]
+        }
+        """, b"[42, 2]\n", None,
+    ),
+    "mixed_runtime_branches_and_loops_keep_metadata_locals_independent": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc(value i16, repeats usize, take bool) i16 {
+            total := value
+            if (take) {
+                Element := i8
+                Element = i16
+                amount Element :: 2
+                total += amount
+            } else {
+                config Config := { child = i8, count = 1 }
+                config.child = i16
+                amount config.child :: 4
+                total += amount
+            }
+            index := usize(0)
+            while (index < repeats) {
+                config := Config { child = i8, count = 1 }
+                saved :: config
+                config.child = i16
+                config.count += 1
+                if (saved.child != i8 or saved.count != 1) return -1
+                values [config.count]config.child :: [total, 1]
+                total = values[0] + values[1]
+                index += 1
+            }
+            return total
+        }
+        forward proc(value i16, repeats usize, take bool) i16 { return compute(value, repeats, take) }
+        main proc() [2]i16 { return [forward(38, 2, true), forward(36, 2, false)] }
+        """, b"[42, 42]\n", None,
+    ),
+    "mixed_metadata_construction_static_exits_and_cleanup": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc(value i16, effects @mut i16) i16 {
+            config Config := { child = i8, count = 0 }
+            types [2]mut type := undefined
+            for (0..usize(3)) |index| {
+                if (index == 2) break
+                types[index] = i16
+                config.count += 1
+                effects^ += 1
+            }
+            {
+                defer config.child = types[0]
+                config.child = bool
+            }
+            selected ?type :: types[1]
+            if selected |Child| {
+                if (Child != i16) return -1
+                amount Child :: 2
+                values [config.count]config.child :: [value, amount]
+                return values[0] + values[1]
+            }
+            return -2
+        }
+        main proc() [2]i16 {
+            value := i16(40)
+            effects := i16(0)
+            result :: compute(value, &effects)
+            return [result, effects]
+        }
+        """, b"[42, 2]\n", None,
+    ),
+    "mixed_runtime_captures_and_tagged_metadata_selection": (
+        """
+        Choice :: union(enum) { child type, empty void }
+        compute proc(value ?i16, values []i16) i16 {
+            T := i16
+            choice Choice :: { child = T }
+            match choice {
+                .child |Child|: { if (Child != i16) return -1 },
+                .empty: return -2,
+            }
+            total := i16(0)
+            if value |captured| {
+                U := T
+                local U :: captured
+                total += local
+            }
+            for values |captured, index| {
+                U := T
+                local U :: captured
+                total += local + i16(index)
+            }
+            return total
+        }
+        main proc() i16 {
+            values [2]i16 :: [10, 10]
+            return compute(21, values[..])
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_input_dependencies_follow_mutable_scalar_updates": (
+        """
+        compute proc(count usize) usize {
+            size := usize(0)
+            size = count
+            config struct { child type, count usize } := { child = i16, count = size }
+            return config.count
+        }
+        main proc() usize { return compute(42) }
+        """, b"42\n", None,
+    ),
+    "metadata_scalar_update_dependencies_still_require_constant_inputs": (
+        """
+        compute proc(count usize) usize {
+            size := usize(0)
+            size = count
+            config struct { child type, count usize } := { child = i16, count = size }
+            return config.count
+        }
+        forward proc(count usize) usize { return compute(count) }
+        main proc() usize { return forward(42) }
+        """, b"", b"compile-time value",
+    ),
+    "mixed_metadata_locals_reject_runtime_type_initializers": (
+        """
+        compute proc(wide bool) i16 {
+            Element := if (wide) i16 else i8
+            value Element :: 42
+            return i16(value)
+        }
+        forward proc(wide bool) i16 { return compute(wide) }
+        main proc() i16 { return forward(true) }
+        """, b"", b"compile-time value",
+    ),
+    "mixed_metadata_locals_reject_runtime_record_updates": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc(wide bool) i16 {
+            config Config := { child = i8, count = 1 }
+            config.child = if (wide) i16 else i8
+            value config.child :: 42
+            return i16(value)
+        }
+        forward proc(wide bool) i16 { return compute(wide) }
+        main proc() i16 { return forward(true) }
+        """, b"", b"compile-time value",
+    ),
+    "mixed_runtime_branches_reject_outer_type_mutation": (
+        """
+        compute proc(wide bool) i16 {
+            Element := i8
+            if (wide) { Element = i16 }
+            value Element :: 42
+            return i16(value)
+        }
+        forward proc(wide bool) i16 { return compute(wide) }
+        main proc() i16 { return forward(true) }
+        """, b"", b"compile-time value",
+    ),
+    "mixed_runtime_loops_reject_outer_metadata_mutation": (
+        """
+        Config :: struct { child type, count usize }
+        compute proc(repeats usize) usize {
+            config := Config { child = i16, count = 0 }
+            index := usize(0)
+            while (index < repeats) {
+                config.count += 1
+                index += 1
+            }
+            return config.count
+        }
+        forward proc(repeats usize) usize { return compute(repeats) }
+        main proc() usize { return forward(42) }
+        """, b"", b"compile-time value",
+    ),
+    "metadata_only_main_keeps_runtime_entrypoint": (
         """
         fallback proc() i16 { return -99 }
         main proc() i16 {
             types := [i16, bool]
             return 42
         }
-        """, b"", b"main must be a runtime function with no parameters",
+        """, b"42\n", None,
     ),
     "inferred_metadata_locals_preserve_owned_copies_and_updates": (
         """
@@ -296,7 +505,7 @@ CASES = {
         }
         runtime proc(value usize) usize { return count(value) }
         main proc() usize { return runtime(42) }
-        """, b"", b"generic argument must be a compile-time value",
+        """, b"", b"compile-time value",
     ),
     "inferred_metadata_arrays_keep_readonly_elements": (
         """
@@ -369,7 +578,7 @@ CASES = {
         }
         """, b"42\n", None,
     ),
-    "explicit_metadata_locals_require_constant_runtime_inputs": (
+    "explicit_metadata_locals_allow_independent_runtime_inputs": (
         """
         count proc(value usize) usize {
             T type :: i16
@@ -377,7 +586,7 @@ CASES = {
         }
         runtime proc(value usize) usize { return count(value) }
         main proc() usize { return runtime(42) }
-        """, b"", b"generic argument must be a compile-time value",
+        """, b"42\n", None,
     ),
     "explicit_metadata_locals_reject_incomplete_results": (
         """
