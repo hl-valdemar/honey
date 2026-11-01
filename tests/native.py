@@ -11,6 +11,56 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "runtime_helper_guards_preserve_borrowed_effects": (
+        """
+        predicate proc(calls @mut i16, value i16) bool {
+            calls^ += 1
+            return value == 42
+        }
+        choose proc($T type, calls @mut i16, value T) i16 {
+            if predicate(calls, 42) { return i16(value) }
+            return -1
+        }
+        main proc() i16 {
+            calls := i16(0)
+            first :: choose(&calls, i16(19))
+            second :: choose(&calls, i16(23))
+            if (calls != 2) return -2
+            return first + second
+        }
+        """, b"42\n", None,
+    ),
+    "demanded_constant_calls_execute_mutable_borrows_and_only_reached_errors": (
+        """
+        fill proc(values []mut usize, seed usize) void {
+            for values |_, index| { values[index] = seed + index }
+        }
+        produce proc($N usize, $seed usize) [N]mut usize {
+            values [N]mut usize := undefined
+            fill(values[..], seed)
+            if (values[0] != seed) compile_error!("unexpected initialization")
+            return values
+        }
+        main proc() usize {
+            total := usize(0)
+            inline for produce(3, 13) |value| { total += value }
+            return total
+        }
+        """, b"42\n", None,
+    ),
+    "type_helper_guards_infer_constant_execution_without_explicit_syntax": (
+        """
+        scalar proc($T type) bool {
+            return T == i16 or T == Id
+        }
+        Id :: distinct i16
+        identity proc($T type, value T) T {
+            if scalar(T) { return value }
+            else { compile_error!("expected scalar") }
+        }
+        main proc() Id { return identity(Id(42)) }
+        """, b"42\n", None,
+    ),
     "pointer_array_slice_coercions_borrow_storage_and_preserve_optional_presence": (
         """
         borrow proc(value @mut [2]mut i16) []mut i16 { return value }

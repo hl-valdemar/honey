@@ -12,6 +12,13 @@ import "@source/parser"
 expect_specialization proc(
     source []u8, expected diagnostics.Code, expected_count usize,
 ) void ! (mem.AllocError | diagnostics.CapacityError | strpool.InternError | lexer.SourceError | testing.Error) {
+    try expect_specialization_guards(source, expected, expected_count, maxval!(usize))
+}
+
+@hide:file
+expect_specialization_guards proc(
+    source []u8, expected diagnostics.Code, expected_count, expected_guards usize,
+) void ! (mem.AllocError | diagnostics.CapacityError | strpool.InternError | lexer.SourceError | testing.Error) {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)
     diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -40,13 +47,259 @@ expect_specialization proc(
             for (0..ast.function_param_count(&tree, declaration)) |j|
                 try testing.expect(!ast.param(&tree, ast.function_param(&tree, declaration, j)).comptime)
         }
+        if (expected_guards != maxval!(usize))
+            try testing.expect_equal(expected_guards, runtime_guard_count(&tree, root))
     } else {
         count := usize(0)
         for (diagnostic_store.list.items) |diagnostic| {
             if (diagnostic.code == expected) count += 1
         }
-        try testing.expect_equal(expected_count, count)
+        if (expected_count == maxval!(usize)) try testing.expect(count > 0)
+        else try testing.expect_equal(expected_count, count)
     }
+}
+
+@hide:file
+runtime_guard_count proc(tree @ast.Tree, id ast.NodeId) usize {
+    count := usize(0)
+    if (ast.node_class(tree, id) == .statement and ast.stmt_kind(tree, id) == .if_stmt) count += 1
+    for (0..ast.child_count(tree, id)) |i| count += runtime_guard_count(tree, ast.child(tree, id, i))
+    return count
+}
+
+selects_known_type_helper_guards_without_explicit_comptime test {
+    try expect_specialization_guards(
+        `Id :: distinct i16
+        `primitive proc($T type) bool { return T == i16 or T == Id }
+        `scalar proc($T type) bool { return primitive(T) }
+        `accept proc($T type, value T) T {
+        `    if scalar(T) { return value }
+        `    else { compile_error!("expected scalar") }
+        `}
+        `main proc() i16 { return accept(i16(42)) }
+        , .compile_error, 0, 0,
+    )
+    try expect_specialization(
+        `scalar proc($T type) bool { return T == i16 }
+        `accept proc($T type, value T) T {
+        `    if scalar(T) { return value }
+        `    else { compile_error!("expected scalar") }
+        `}
+        `main proc() bool { return accept(true) }
+        , .compile_error, 1,
+    )
+}
+
+selects_matched_type_helper_guards_before_expanding_invalid_arms test {
+    try expect_specialization_guards(
+        `scalar proc($T type) bool {
+        `    match T == i16 {
+        `        true: return true
+        `        else: return false
+        `    }
+        `}
+        `accept proc($T type, value T) T {
+        `    if scalar(T) { return value }
+        `    else { compile_error!("expected scalar") }
+        `}
+        `main proc() i16 { return accept(i16(42)) }
+        , .compile_error, 0, 0,
+    )
+}
+
+preserves_runtime_guards_with_constant_arguments_or_type_dependent_effects test {
+    sources [6][]u8 :: [
+        `advance proc(value @mut i16) void { value^ += 1 }
+        `predicate proc(value i16) bool {
+        `    local i16 := value
+        `    advance(&local)
+        `    return local == 42
+        `}
+        `choose proc($T type, value T) T {
+        `    if predicate(42) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+        `advance proc(value @mut i16) void { value^ += 1 }
+        `predicate proc($T type) bool {
+        `    local i16 := 41
+        `    advance(&local)
+        `    return T == i16 and local == 42
+        `}
+        `choose proc($T type, value T) T {
+        `    if predicate(T) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+        `enabled := true
+        `predicate proc($T type) bool { return enabled }
+        `choose proc($T type, value T) T {
+        `    if predicate(T) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+        `observe c_func() bool
+        `predicate proc($T type) bool { return observe() }
+        `choose proc($T type, value T) T {
+        `    if predicate(T) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+        `predicate proc($T type) bool { unreachable }
+        `choose proc($T type, value T) T {
+        `    if predicate(T) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+        `predicate proc($T type, flag bool) bool { return flag }
+        `choose proc($T type, value T) T {
+        `    if predicate(T, true) { return value } else { return value }
+        `}
+        `main proc() i16 { return choose(i16(42)) }
+        ,
+    ]
+    for (sources) |source|
+        try expect_specialization_guards(source, .compile_error, 0, 1)
+}
+
+demands_inline_iterable_calls_before_expanding_their_bodies test {
+    try expect_specialization(
+        `fill proc(values []mut i16, value i16) void {
+        `    for (0..values.len) |i| values[i] = value
+        `}
+        `produce proc($N usize, $seed i16) [N]mut i16 {
+        `    values [N]mut i16 := undefined
+        `    fill(values[..], seed)
+        `    if values[0] != seed { compile_error!("unexpected initialization") }
+        `    return values
+        `}
+        `main proc() i16 {
+        `    total i16 := 0
+        `    inline for (produce(3, 14)) |value| total += value
+        `    return total
+        `}
+        , .compile_error, 0,
+    )
+    try expect_specialization(
+        `produce proc($N usize) [N]i16 {
+        `    if N == 2 { compile_error!("reached failure") }
+        `    return [1, 2]
+        `}
+        `main proc() void { inline for (produce(2)) |value| {} }
+        , .compile_error, 1,
+    )
+}
+
+explicit_demand_executes_ordinary_calls_and_preserves_borrow_aliases test {
+    try expect_specialization(
+        `update proc(left, right []mut i16) void {
+        `    left[0] = 19
+        `    right[1] = left[0] + 4
+        `}
+        `produce proc() [2]mut i16 {
+        `    values [2]mut i16 := undefined
+        `    update(values[..], values[..])
+        `    if values[1] != 23 { compile_error!("lost mutable alias") }
+        `    return values
+        `}
+        `main proc() i16 { values :: $(produce())
+        `    return values[0] + values[1]
+        `}
+        , .compile_error, 0,
+    )
+}
+
+demanded_calls_still_infer_omitted_compiletime_type_arguments test {
+    try expect_specialization(
+        `identity proc($T type, value T) T { return value }
+        `main proc() i16 { return $(identity(i16(42))) }
+        , .cannot_infer_generic, 0,
+    )
+}
+
+demanded_expression_inline_matches_bind_payloads_and_static_tags test {
+    try expect_specialization(
+        `Detail :: union(enum) { count usize, empty void }
+        `score proc(input Detail) i16 {
+        `    return match input {
+        `        inline |payload, tag|: match tag { .count: i16(payload), else: 0 },
+        `    }
+        `}
+        `main proc() i16 { return $(score(.count{42})) }
+        , .invalid_match_capture, 0,
+    )
+}
+
+keeps_borrowed_snapshots_owned_and_explicit_numeric_annotations_rigid test {
+    try expect_specialization(
+        `borrow proc(values []mut i16) []mut i16 { return values }
+        `produce proc() []mut i16 {
+        `    values [2]mut i16 := [19, 23]
+        `    return borrow(values[..])
+        `}
+        `main proc() void { values :: $(produce()) }
+        , .comptime_value_escape, 1,
+    )
+    try expect_specialization(
+        `produce proc() usize {
+        `    value i16 := 1
+        `    if value == 0 { compile_error!("unselected typed guard") }
+        `    return value
+        `}
+        `main proc() void { value :: $(produce()) }
+        , .type_mismatch, 1,
+    )
+}
+
+keeps_inferred_compiletime_literals_contextual_until_a_rigid_source test {
+    try expect_specialization(
+        `produce proc() usize {
+        `    width := 2
+        `    width = 3
+        `    cursor := 0
+        `    cursor += width
+        `    values [4]i16 :: [1, 2, 3, 42]
+        `    if values[cursor] != 42 { compile_error!("wrong contextual index") }
+        `    count := 0
+        `    count = values.len
+        `    return count
+        `}
+        `main proc() usize { return $(produce()) }
+        , .compile_error, 0,
+    )
+    try expect_specialization(
+        `produce proc() usize {
+        `    width i16 := 2
+        `    cursor usize := 0
+        `    if cursor == 99 { compile_error!("unselected typed guard") }
+        `    cursor += width
+        `    return cursor
+        `}
+        `main proc() usize { return $(produce()) }
+        , .invalid_operand, maxval!(usize),
+    )
+}
+
+demanded_local_execution_retains_overflow_and_initialization_diagnostics test {
+    try expect_specialization(
+        `produce proc() u8 {
+        `    value u8 := 255
+        `    value += 1
+        `    return value
+        `}
+        `main proc() u8 { return $(produce()) }
+        , .integer_overflow, 1,
+    )
+    try expect_specialization(
+        `initialize proc(values []mut i16) void { values[0] = 42 }
+        `produce proc() i16 {
+        `    values [2]mut i16 := undefined
+        `    initialize(values[..])
+        `    return values[1]
+        `}
+        `main proc() i16 { return $(produce()) }
+        , .read_before_initialization, 1,
+    )
 }
 
 infers_nested_nominal_pointer_parameters_and_readonly_slice_views test {

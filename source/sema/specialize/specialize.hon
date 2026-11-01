@@ -51,6 +51,7 @@ Instance :: struct {
     diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
     signature ast.NodeId = no_node
     value ast.NodeId = no_node
+    demanded bool = false
 }
 
 @hide:file
@@ -102,6 +103,11 @@ State :: struct {
     value_expansion_depth usize = 0
     return_type ast.NodeId = no_node
     yield_type ast.NodeId = no_node
+    demand_depth usize = 0
+    snapshot_uninitialized bool = false
+    demanded_functions []mut u8
+    execution_functions []mut u8
+    execution_visited arraylist.ArrayList(ast.NodeId)
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned `builder` arena.
@@ -160,6 +166,12 @@ elaborate proc(
     if (!needed) return result
     mapping :: try mem.alloc(ast.NodeId, allocator, ast.node_count(&original))
     defer mem.free(allocator, mapping)
+    demanded_functions :: try mem.alloc(u8, allocator, ast.node_count(&original))
+    defer mem.free(allocator, demanded_functions)
+    mem.set(demanded_functions, 0)
+    execution_functions :: try mem.alloc(u8, allocator, ast.node_count(&original))
+    defer mem.free(allocator, execution_functions)
+    mem.set(execution_functions, 0)
     state := State{
         allocator = allocator, builder = builder, tree = ast.view(builder, root), strings = strings,
         bindings = arraylist.init(allocator), declarations = arraylist.init(allocator),
@@ -170,21 +182,27 @@ elaborate proc(
         rewrites = &result,
         mapping = mapping,
         resolution = resolution,
+        demanded_functions = demanded_functions,
+        execution_functions = execution_functions,
+        execution_visited = arraylist.init(allocator),
     }
     defer arraylist.deinit(&state.bindings)
     defer arraylist.deinit(&state.declarations)
     defer arraylist.deinit(&state.expanded)
     defer hashmap.deinit(&state.cache)
     defer hashmap.deinit(&state.capture_types)
+    defer arraylist.deinit(&state.execution_visited)
     defer {
         for (state.instances.items) |instance| mem.free(allocator, instance.arguments)
         arraylist.deinit(&state.instances)
     }
     count :: ast.node_count(&state.tree)
     for (0..count) |i| try arraylist.append(&state.bindings, sema.binding(resolution, ast.NodeId(i)))
+    try collect_demanded_functions(&state, root, false)
     for (0..ast.package_decl_count(&state.tree)) |i| {
         id :: ast.package_decl(&state.tree, i)
-        if (ast.decl_kind(&state.tree, id) == .function and template(&state, id)) continue
+        if (ast.decl_kind(&state.tree, id) == .function
+            and (template(&state, id) or state.demanded_functions[usize(id)] == 1)) continue
         try arraylist.append(&state.declarations, id)
     }
     index := 0
@@ -277,6 +295,166 @@ expand_compile_error proc(state @mut State, id ast.NodeId) void ! Error {
     try reject_evaluation(state, id)
 }
 
+# ordinary constant calls retain one interpreter frame and its aliases. only
+# bodies whose type-control operations need value-dependent execution use snapshots.
+@hide:file
+metadata_capture proc(state @State, id, capture ast.NodeId) bool {
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .match_expr) {
+        subject :: ast.match_expr(&state.tree, id).subject
+        if (ast.expr_kind(&state.tree, subject) == .builtin_call
+            and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, subject).name), "typeinfo")) {
+            for (0..ast.match_arm_count(&state.tree, id)) |i| {
+                arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, id, i))
+                if (arm.capture != null and arm.capture? == capture) return true
+            }
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (metadata_capture(state, ast.child(&state.tree, id, i), capture)) return true
+    return false
+}
+
+@hide:file
+runtime_dependency proc(state @State, id, body ast.NodeId, depth usize) bool {
+    if (depth >= 128) return true
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        declaration :: resolved.data.declaration
+        class :: ast.node_class(&state.tree, declaration)
+        if (class == .parameter) return !ast.param(&state.tree, declaration).comptime
+        if (class == .statement) {
+            view :: ast.statement_decl(&state.tree, declaration)
+            return view.mutability == .variable or runtime_dependency(state, view.initializer, body, depth + 1)
+        }
+        if (class == .expression) return !metadata_capture(state, body, declaration)
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (runtime_dependency(state, ast.child(&state.tree, id, i), body, depth + 1)) return true
+    return false
+}
+
+@hide:file
+scan_demand_execution proc(state @mut State, id, body ast.NodeId, static_control bool) bool ! mem.AllocError {
+    class :: ast.node_class(&state.tree, id)
+    if (static_control and class == .statement and ast.stmt_kind(&state.tree, id) == .if_stmt) {
+        conditional :: ast.if_stmt(&state.tree, id)
+        if (try scan_demand_execution(state, conditional.condition, body, true)) return true
+        selected_statically :: !runtime_dependency(state, conditional.condition, body, 0)
+        if (try scan_demand_execution(state, conditional.then_block, body, selected_statically)) return true
+        if (conditional.else_block) |other|
+            if (try scan_demand_execution(state, other, body, selected_statically)) return true
+        return false
+    }
+    if (class == .expression) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (!static_control and kind == .builtin_call
+            and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "compile_error")) return true
+        if (kind == .match_expr) {
+            subject :: ast.match_expr(&state.tree, id).subject
+            if (ast.expr_kind(&state.tree, subject) == .builtin_call
+                and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, subject).name), "typeinfo")) {
+                for (0..ast.match_arm_count(&state.tree, id)) |i| {
+                    arm :: ast.match_arm_view(&state.tree, ast.match_arm(&state.tree, id, i))
+                    if (try scan_demand_execution(state, arm.body, body, true)) return true
+                }
+                return false
+            }
+        }
+        if (kind == .index) {
+            view :: ast.index_expr(&state.tree, id)
+            root := view.base
+            while (ast.expr_kind(&state.tree, root) == .selection)
+                root = ast.selection_expr(&state.tree, root).base
+            resolved :: binding(state, root)
+            if (resolved.kind == .declaration and runtime_dependency(state, view.index, body, 0)
+                and metadata_capture(state, body, resolved.data.declaration)) return true
+        }
+        if (kind == .call) {
+            callee :: binding(state, ast.call_expr(&state.tree, id).callee)
+            if (callee.kind == .declaration and usize(callee.data.declaration) < state.original_count
+                and ast.node_class(&state.tree, callee.data.declaration) == .function
+                and !ast.function_external(&state.tree, callee.data.declaration)
+                and !compiletime_call(state, callee.data.declaration)) {
+                function :: callee.data.declaration
+                flag :: state.execution_functions[usize(function)]
+                if (flag == 2) return true
+                if (flag == 0) {
+                    try arraylist.append(&state.execution_visited, function)
+                    state.execution_functions[usize(function)] = 3
+                    called_body :: ast.function_decl(&state.tree, function).body
+                    if (try scan_demand_execution(state, called_body, called_body, false)) return true
+                }
+            }
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (try scan_demand_execution(state, ast.child(&state.tree, id, i), body, static_control)) return true
+    return false
+}
+
+@hide:file
+needs_demand_execution proc(state @mut State, function ast.NodeId) bool ! mem.AllocError {
+    if (usize(function) >= state.original_count) return false
+    flag :: state.execution_functions[usize(function)]
+    if (flag == 1) return false
+    if (flag == 2) return true
+    defer {
+        for (state.execution_visited.items) |visited| {
+            if (state.execution_functions[usize(visited)] == 3) state.execution_functions[usize(visited)] = 0
+        }
+        state.execution_visited.items = state.execution_visited.items[..0]
+    }
+    try arraylist.append(&state.execution_visited, function)
+    state.execution_functions[usize(function)] = 3
+    body :: ast.function_decl(&state.tree, function).body
+    required :: try scan_demand_execution(state, body, body, false)
+    if (!required) {
+        for (state.execution_visited.items) |visited| state.execution_functions[usize(visited)] = 1
+    } else state.execution_functions[usize(function)] = 2
+    return required
+}
+
+# find demanded callees before walking runtime declarations, independent of source
+# order. a later runtime reference retains the original declaration as usual.
+@hide:file
+collect_demanded_functions proc(state @mut State, id ast.NodeId, demanded bool) void ! mem.AllocError {
+    class :: ast.node_class(&state.tree, id)
+    demand := demanded
+    if (class == .statement and ast.stmt_kind(&state.tree, id) == .for_stmt
+        and ast.for_stmt(&state.tree, id).is_inline) {
+        loop :: ast.for_stmt(&state.tree, id)
+        try collect_demanded_functions(state, loop.iterable, true)
+        try collect_demanded_functions(state, loop.body, demanded)
+        return
+    }
+    if (class == .expression) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .comptime_expr) demand = true
+        if (kind == .call) {
+            callee :: binding(state, ast.call_expr(&state.tree, id).callee)
+            if (callee.kind == .declaration
+                and ast.node_class(&state.tree, callee.data.declaration) == .function) {
+                function :: callee.data.declaration
+                if (demand and !ast.function_external(&state.tree, function)
+                    and state.demanded_functions[usize(function)] == 0
+                    and try needs_demand_execution(state, function)) {
+                    state.demanded_functions[usize(function)] = 1
+                    try collect_demanded_functions(state, ast.function_decl(&state.tree, function).body, true)
+                }
+                if (ast.call_arg_count(&state.tree, id) == ast.function_param_count(&state.tree, function)) {
+                    for (0..ast.call_arg_count(&state.tree, id)) |i| {
+                        parameter :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
+                        try collect_demanded_functions(state, ast.call_arg(&state.tree, id, i), demand or parameter.comptime)
+                    }
+                    return
+                }
+            }
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        try collect_demanded_functions(state, ast.child(&state.tree, id, i), demand)
+}
+
 @hide:file
 expand proc(state @mut State, id ast.NodeId) void ! Error {
     try expand_expected(state, id, no_node)
@@ -285,6 +463,16 @@ expand proc(state @mut State, id ast.NodeId) void ! Error {
 @hide:file
 expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
     try refresh(state)
+    if (state.demand_depth == 0) {
+        resolved :: binding(state, id)
+        if (resolved.kind == .declaration and usize(resolved.data.declaration) < state.original_count) {
+            declaration :: resolved.data.declaration
+            if (state.demanded_functions[usize(declaration)] == 1 and !template(state, declaration)) {
+                state.demanded_functions[usize(declaration)] = 2
+                try arraylist.append(&state.declarations, declaration)
+            }
+        }
+    }
     if (state.expanded.items[usize(id)] != 0) return
     state.expanded.items[usize(id)] = 1
     class :: ast.node_class(&state.tree, id)
@@ -508,6 +696,8 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
         }
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .comptime_expr) {
+        state.demand_depth += 1
+        defer state.demand_depth -= 1
         operand :: ast.comptime_operand(&state.tree, id)
         try expand_expected(state, operand, expected)
         state.evaluation_diagnostic = diagnostics.no_diagnostic
@@ -567,7 +757,10 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
         if (
             resolved.kind == .declaration
             and ast.node_class(&state.tree, resolved.data.declaration) == .function
-            and template(state, resolved.data.declaration)
+            and (template(state, resolved.data.declaration)
+                or (state.demand_depth > 0 and usize(resolved.data.declaration) < state.original_count
+                    and !ast.function_external(&state.tree, resolved.data.declaration)
+                    and try needs_demand_execution(state, resolved.data.declaration)))
         ) {
             try specialize_call(state, id, resolved.data.declaration, expected)
             return
@@ -1512,9 +1705,11 @@ expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! E
         return
     }
     subject :: ast.match_expr(&state.tree, id).subject
-    try expand(state, subject)
     annotation := subject_type
-    if (annotation == no_node) annotation = try expression_type(state, subject, 0)
+    if (annotation == no_node) {
+        try expand(state, subject)
+        annotation = try expression_type(state, subject, 0)
+    }
     if (annotation == no_node) {
         try reject(state, id, .invalid_inline_match_subject)
         return
@@ -1737,8 +1932,8 @@ specialize_match proc(state @mut State, id, statement, expected ast.NodeId) bool
     return true
 }
 
-# only probe side-effect-free expressions. ordinary calls stay runtime unless the
-# source requests evaluation with $(); probing must not execute FFI or emit traps.
+# implicit probing is limited to constants and effect-free, fully bound type
+# helpers. ordinary runtime calls still require an explicit evaluation request.
 @hide:file
 branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
     if (depth >= 128) return false
@@ -1762,6 +1957,8 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .union_constant, .slice_constant: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
         .enum_literal: return true
+        .call: return branch_type_call(state, id, depth + 1)
+        .block_expr: return branch_body_constant(state, ast.block_expr(&state.tree, id), depth + 1)
         .builtin_call: {
             name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
             if (ast.call_arg_count(&state.tree, id) != 1
@@ -1807,6 +2004,68 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .optional_type, .alias_expr: return branch_constant(state, ast.type_operand(&state.tree, id), depth + 1)
         .record_type, .union_type, .enum_type, .distinct_type, .array_type, .slice_type, .function_type,
         .fallible_type, .sum_type, .union_tag_type: return true
+        else: return false
+    }
+}
+
+@hide:file
+branch_type_call proc(state @State, id ast.NodeId, depth usize) bool {
+    if (depth >= 128 or ast.call_arg_count(&state.tree, id) != 0) return false
+    callee :: binding(state, ast.call_expr(&state.tree, id).callee)
+    if (callee.kind != .declaration) return false
+    function :: callee.data.declaration
+    if (ast.node_class(&state.tree, function) != .function
+        or ast.function_external(&state.tree, function)
+        or ast.function_param_count(&state.tree, function) != 0) return false
+    for (state.instances.items) |instance| {
+        if (instance.declaration != function) continue
+        for (0..ast.function_param_count(&state.tree, instance.function)) |i| {
+            parameter :: ast.param(&state.tree, ast.function_param(&state.tree, instance.function, i))
+            if (parameter.comptime and is_type(state, parameter.type))
+                return branch_body_constant(state, ast.function_decl(&state.tree, function).body, depth + 1)
+        }
+        return false
+    }
+    return false
+}
+
+@hide:file
+branch_body_constant proc(state @State, id ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    if (ast.node_class(&state.tree, id) == .block) {
+        for (0..ast.block_statement_count(&state.tree, id)) |i| {
+            if (!branch_body_constant(state, ast.block_statement(&state.tree, id, i), depth + 1)) return false
+        }
+        return true
+    }
+    if (ast.node_class(&state.tree, id) != .statement) return false
+    match ast.stmt_kind(&state.tree, id) {
+        .return_stmt, .yield_stmt: {
+            value :: if (ast.stmt_kind(&state.tree, id) == .yield_stmt)
+                ast.yield_stmt(&state.tree, id).value else ast.return_stmt(&state.tree, id).value
+            return value == null or branch_constant(state, value?, depth + 1)
+        }
+        .block_stmt: return branch_body_constant(state, ast.statement_block(&state.tree, id), depth + 1)
+        .expression: return branch_constant(state, ast.statement_expr(&state.tree, id), depth + 1)
+        .declaration: {
+            declaration :: ast.statement_decl(&state.tree, id)
+            initializer :: ast.expr_kind(&state.tree, declaration.initializer)
+            if (declaration.type != null and (initializer == .record_literal or initializer == .array_literal)) return false
+            return (
+                declaration.mutability == .constant
+                and branch_constant(state, declaration.initializer, depth + 1)
+            )
+        }
+        .if_stmt: {
+            conditional :: ast.if_stmt(&state.tree, id)
+            return (
+                conditional.capture == null
+                and branch_constant(state, conditional.condition, depth + 1)
+                and branch_body_constant(state, conditional.then_block, depth + 1)
+                and (conditional.else_block == null
+                    or branch_body_constant(state, conditional.else_block?, depth + 1))
+            )
+        }
         else: return false
     }
 }
@@ -2121,15 +2380,17 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # metadata inputs, results and locals require a fully constant call.
-    type_result :: compiletime_call(state, function)
+    # demand is scoped to explicit evaluation, never inferred from constant arguments.
+    metadata_result :: compiletime_call(state, function)
+    demanded :: !metadata_result and state.demand_depth > 0 and try needs_demand_execution(state, function)
+    type_result :: metadata_result or demanded
     runtime := usize(0)
     for (0..count) |i| {
-        if (!type_result and !ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
+        if (!metadata_result and !ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
     }
     supplied :: ast.call_arg_count(&state.tree, call)
     explicit :: supplied == count
-    if (!explicit and (type_result or supplied < runtime or supplied > count)) {
+    if (!explicit and (metadata_result or supplied < runtime or supplied > count)) {
         try reject(state, call, .argument_count_mismatch)
         return
     }
@@ -2139,13 +2400,13 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     runtime_arguments := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&runtime_arguments)
     # supplied compile-time arguments form a declaration-order prefix; infer the rest.
-    supplied_comptime :: if (type_result) count else supplied - runtime
+    supplied_comptime :: if (metadata_result) count else supplied - runtime
     comptime_position := usize(0)
     position := 0
     for (0..count) |i| {
         parameter :: ast.function_param(&state.tree, function, i)
         view :: ast.param(&state.tree, parameter)
-        if (view.comptime and !type_result) {
+        if (view.comptime and !metadata_result) {
             if (comptime_position >= supplied_comptime) continue
             comptime_position += 1
         }
@@ -2172,9 +2433,8 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
                 try reject(state, call, .type_mismatch)
                 return
             }
-        } else {
-            try arraylist.append(&runtime_arguments, argument)
         }
+        if (!view.comptime and !metadata_result) try arraylist.append(&runtime_arguments, argument)
     }
     if (!explicit) {
         # rigid arguments constrain first; result context then types nested generic
@@ -2230,7 +2490,8 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         annotation :: try argument_annotation(state, function, view.type, arguments)
         try expand_expected(state, argument, annotation)
     }
-    key := usize(function)
+    demand_key :: if (demanded) usize(1) else usize(0)
+    key := mix(usize(function), demand_key)
     for arguments |argument| {
         if (argument.kind != .invalid) key = mix(key, try value_hash(state, argument))
     }
@@ -2240,7 +2501,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     instance := no_index
     while (current != no_index) {
         entry :: state.instances.items[current]
-        equal := entry.function == function and entry.arguments.len == count
+        equal := entry.function == function and entry.arguments.len == count and entry.demanded == demanded
         if (equal) {
             for (0..count) |i| {
                 if (!try value_equal(state, entry.arguments[i], arguments[i])) {
@@ -2262,7 +2523,9 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         values :: try mem.alloc(Value, state.allocator, count)
         memcopy!(values, arguments)
         instance = state.instances.items.len
-        arraylist.append(&state.instances, Instance{ function = function, arguments = values, next = head }) catch |err| {
+        arraylist.append(&state.instances, Instance{
+            function = function, arguments = values, next = head, demanded = demanded,
+        }) catch |err| {
             mem.free(state.allocator, values)
             return err
         }
@@ -2308,7 +2571,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         for (0..count) |i| {
             parameter :: ast.function_param(&state.tree, signature, i)
             view :: ast.param(&state.tree, parameter)
-            if (view.comptime and !type_result) {
+            if (view.comptime and !metadata_result) {
                 if (comptime_position >= supplied_comptime) continue
                 comptime_position += 1
             }
@@ -2337,7 +2600,7 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
 @hide:file
 instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     function :: state.instances.items[index].function
-    type_result :: compiletime_call(state, function)
+    type_result :: compiletime_call(state, function) or state.instances.items[index].demanded
     count :: state.original_count
     clone_start :: ast.node_count(&state.tree)
     mapping :: state.mapping
@@ -2394,6 +2657,8 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
     }
     if (type_result) {
+        state.demand_depth += 1
+        defer state.demand_depth -= 1
         if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
         state.type_execution_depth += 1
         defer state.type_execution_depth -= 1
@@ -2586,6 +2851,8 @@ argument_annotation proc(
 
 @hide:file
 evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Error {
+    state.demand_depth += 1
+    defer state.demand_depth -= 1
     try expand_expected(state, id, annotation)
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
         if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
@@ -2752,6 +3019,7 @@ serialize_value proc(
             uninitialized = ir.aggregate_item(module, value, 0).uninitialized
     }
     if (uninitialized) {
+        if (state.snapshot_uninitialized) return try ast.add_literal(state.builder, .undefined, span)
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
         return no_node
     }
@@ -3203,6 +3471,9 @@ TypeLocal :: struct {
     declaration ast.NodeId
     value ast.NodeId
     annotation ast.NodeId
+    # unannotated numeric literal origins stay contextual while executing constants;
+    # annotations, casts and rigid assignment sources retain ordinary exact types.
+    contextual bool = false
 }
 
 @hide:file
@@ -3338,7 +3609,10 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
     if (resolved.kind == .declaration) {
         for (execution.locals.items) |local| {
             if (local.declaration == resolved.data.declaration) {
-                execution.mapping[usize(id)] = local.value
+                value := local.value
+                if (local.contextual and ast.expr_kind(&state.tree, value) == .typed_constant)
+                    value = ast.typed_constant(&state.tree, value).value
+                execution.mapping[usize(id)] = value
                 return
             }
         }
@@ -3356,6 +3630,11 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
     }
     if (execution.evaluate_values and ast.node_class(&state.tree, id) == .expression) {
         kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .call and type_call_borrows(state, execution, id)) {
+            execution.mapping[usize(id)] = try type_borrow_call(state, execution, id)
+            if (execution.mapping[usize(id)] == no_node) execution.pending_flow = .invalid
+            return
+        }
         if (kind == .slice) {
             base :: ast.slice_expr(&state.tree, id).base
             root := base
@@ -3727,6 +4006,9 @@ type_snapshot_try proc(state @mut State, execution @mut TypeExecution, id ast.No
 type_dispatch_snapshot proc(state @mut State, execution @mut TypeExecution, id ast.NodeId) ast.NodeId ! Error {
     subject :: try type_snapshot(state, execution, ast.match_expr(&state.tree, id).subject)
     if (subject == no_node) return no_node
+    subject_type :: try expression_type(state, subject, 0)
+    try expand_inline_match(state, id, subject_type)
+    if (ast.expr_kind(&state.tree, id) != .match_expr) return no_node
     saved :: execution.evaluate_values
     execution.evaluate_values = false
     defer execution.evaluate_values = saved
@@ -3886,6 +4168,8 @@ inline_block proc(state @mut State, block ast.NodeId) TypeFlow ! Error {
 
 @hide:file
 expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
+    state.demand_depth += 1
+    defer state.demand_depth -= 1
     loop :: ast.for_stmt(&state.tree, id)
     if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
     state.type_execution_depth += 1
@@ -5250,6 +5534,13 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
         return concrete.node
     }
     kind :: ast.expr_kind(&state.tree, expression)
+    result_type :: binding(state, try canonical_type(state, annotation))
+    if (result_type.kind == .builtin and result_type.data.builtin == .void) {
+        if (kind == .literal_void) return expression
+        value :: try evaluate_ir(state, expression, annotation)
+        if (value.kind == .invalid) return no_node
+        return (try materialize(state, value)).node
+    }
     if (kind == .literal_string or kind == .typed_constant) {
         value :: try evaluate(state, expression)
         if (
@@ -5347,9 +5638,194 @@ type_assignment_value proc(
     return owned
 }
 
+# borrowed places live only in one checked interpreter invocation. its result owns
+# snapshots of the changed roots; neither slice pointers nor interpreter cells escape.
+@hide:file
+type_borrowed_place proc(state @State, id, declaration ast.NodeId, borrowed bool) bool {
+    resolved :: binding(state, id)
+    if (borrowed and resolved.kind == .declaration and resolved.data.declaration == declaration) return true
+    borrowing := borrowed
+    if (ast.node_class(&state.tree, id) == .expression) {
+        kind :: ast.expr_kind(&state.tree, id)
+        borrowing = borrowing or kind == .slice
+        if (kind == .unary) borrowing = borrowing or ast.unary_expr(&state.tree, id).operator == .address_of
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (type_borrowed_place(state, ast.child(&state.tree, id, i), declaration, borrowing)) return true
+    return false
+}
+
+@hide:file
+type_call_borrows proc(state @State, execution @TypeExecution, call ast.NodeId) bool {
+    for (execution.locals.items) |local| {
+        if (type_borrowed_place(state, call, local.declaration, false)) return true
+    }
+    return false
+}
+
+@hide:file
+TypeBorrow :: struct { index usize, previous ast.NodeId, temporary ast.NodeId }
+
+@hide:file
+type_snapshot_uninitialized proc(state @State, id ast.NodeId) bool {
+    if (ast.expr_kind(&state.tree, id) == .literal_undefined) return true
+    if (ast.expr_kind(&state.tree, id) == .typed_constant)
+        return type_snapshot_uninitialized(state, ast.typed_constant(&state.tree, id).value)
+    if (ast.expr_kind(&state.tree, id) == .array_literal) {
+        for (0..ast.array_element_count(&state.tree, id)) |i|
+            if (type_snapshot_uninitialized(state, ast.array_element(&state.tree, id, i))) return true
+    }
+    if (ast.expr_kind(&state.tree, id) == .record_literal) {
+        for (0..ast.record_field_count(&state.tree, id)) |i| {
+            field :: ast.field(&state.tree, ast.record_field(&state.tree, id, i))
+            if (field.value != null and type_snapshot_uninitialized(state, field.value?)) return true
+        }
+    }
+    return false
+}
+
+# initialization state is not a value: recreate it as storage and write only
+# initialized subobjects before entering the interpreter's borrowed call.
+@hide:file
+type_restore_snapshot proc(
+    state @mut State, target, input ast.NodeId, statements @mut arraylist.ArrayList(ast.NodeId),
+) void ! Error {
+    value := input
+    if (ast.expr_kind(&state.tree, value) == .typed_constant) value = ast.typed_constant(&state.tree, value).value
+    kind :: ast.expr_kind(&state.tree, value)
+    if (kind == .literal_undefined) return
+    if (!type_snapshot_uninitialized(state, value)) {
+        assignment :: try ast.add_assignment_stmt(state.builder, ast.node_span(&state.tree, value), target, input)
+        try arraylist.append(statements, assignment)
+        try refresh(state)
+        return
+    }
+    count :: if (kind == .array_literal) ast.array_element_count(&state.tree, value)
+        else ast.record_field_count(&state.tree, value)
+    for (0..count) |i| {
+        child := no_node
+        place := no_node
+        span :: ast.node_span(&state.tree, value)
+        if (kind == .array_literal) {
+            child = ast.array_element(&state.tree, value, i)
+            index :: try ast.add_integer(state.builder, span, u64(i))
+            place = try ast.add_index(state.builder, span, target, index)
+        } else {
+            field :: ast.field(&state.tree, ast.record_field(&state.tree, value, i))
+            child = field.value?
+            member := no_node
+            if (field.name) |name| member = name
+            else member = try ast.add_integer(state.builder, span, u64(i))
+            place = try ast.add_selection(state.builder, span, target, member)
+        }
+        try refresh(state)
+        try type_restore_snapshot(state, place, child, statements)
+    }
+}
+
+@hide:file
+type_borrow_call proc(state @mut State, execution @mut TypeExecution, call ast.NodeId) ast.NodeId ! Error {
+    saved_demand :: state.demand_depth
+    state.demand_depth = 0
+    defer state.demand_depth = saved_demand
+    span :: ast.node_span(&state.tree, call)
+    borrowed := arraylist.init(TypeBorrow, state.allocator)
+    defer arraylist.deinit(&borrowed)
+    statements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&statements)
+    fields := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&fields)
+    values := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&values)
+    for (execution.locals.items) |local, i| {
+        if (!type_borrowed_place(state, call, local.declaration, false)) continue
+        if (type_record_storage(state, local.annotation, 0)) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_value_escape, span)
+            return no_node
+        }
+        mutability :: if (ast.node_class(&state.tree, local.declaration) == .statement)
+            ast.statement_decl(&state.tree, local.declaration).mutability else ast.Mutability.constant
+        partial :: type_snapshot_uninitialized(state, local.value)
+        initializer := local.value
+        if (partial) initializer = try ast.add_literal(state.builder, .undefined, span)
+        temporary :: try ast.add_statement_decl(state.builder, span, span, strpool.no_str,
+            local.annotation, mutability, initializer)
+        try refresh(state)
+        try arraylist.append(&statements, temporary)
+        if (partial) try type_restore_snapshot(state, try reference(state, call, temporary), local.value, &statements)
+        try arraylist.append(&borrowed, TypeBorrow{ index = i, previous = local.value, temporary = temporary })
+    }
+    snapshot := no_node
+    {
+        saved_values :: execution.evaluate_values
+        execution.evaluate_values = false
+        defer execution.evaluate_values = saved_values
+        defer for (borrowed.items) |entry| execution.locals.items[entry.index].value = entry.previous
+        for (borrowed.items) |entry|
+            execution.locals.items[entry.index].value = try reference(state, call, entry.temporary)
+        snapshot = try type_snapshot(state, execution, call)
+    }
+    if (snapshot == no_node) return no_node
+    try expand(state, snapshot)
+    result_type :: try expression_type(state, snapshot, 0)
+    if (result_type == no_node) return no_node
+    resolved_result :: binding(state, try canonical_type(state, result_type))
+    void_result :: resolved_result.kind == .builtin and resolved_result.data.builtin == .void
+    result_offset :: if (void_result) usize(0) else usize(1)
+    if (void_result) {
+        discarded :: try ast.add_expression_stmt(state.builder, snapshot)
+        try arraylist.append(&statements, discarded)
+    } else {
+        result_local :: try ast.add_statement_decl(state.builder, span, span, strpool.no_str,
+            result_type, .constant, snapshot)
+        try refresh(state)
+        try arraylist.append(&statements, result_local)
+        result_field :: try ast.add_field(state.builder, span, null, result_type, null)
+        result_value :: try ast.add_field(state.builder, span, null, null, try reference(state, call, result_local))
+        try arraylist.append(&fields, result_field)
+        try arraylist.append(&values, result_value)
+    }
+    for (borrowed.items) |entry| {
+        field :: try ast.add_field(state.builder, span, null, execution.locals.items[entry.index].annotation, null)
+        value :: try ast.add_field(state.builder, span, null, null, try reference(state, call, entry.temporary))
+        try arraylist.append(&fields, field)
+        try arraylist.append(&values, value)
+    }
+    tuple :: try ast.add_record_type(state.builder, span, fields.items)
+    literal :: try ast.add_record_literal(state.builder, span, null, values.items)
+    returned :: try ast.add_return_stmt(state.builder, span, literal)
+    try arraylist.append(&statements, returned)
+    body :: try ast.add_block(state.builder, span, statements.items)
+    try refresh(state)
+    saved_uninitialized :: state.snapshot_uninitialized
+    state.snapshot_uninitialized = true
+    defer state.snapshot_uninitialized = saved_uninitialized
+    result :: try evaluate_ir_body(state, call, body, tuple)
+    if (result.kind != .aggregate) return no_node
+    for (borrowed.items) |entry, i| {
+        value :: ast.field(&state.tree, ast.record_field(&state.tree, result.node, i + result_offset)).value?
+        owned :: try ast.add_typed_constant(state.builder, span,
+            execution.locals.items[entry.index].annotation, value)
+        try refresh(state)
+        execution.locals.items[entry.index].value = owned
+    }
+    if (void_result) {
+        value :: try ast.add_literal(state.builder, .void, span)
+        try refresh(state)
+        return value
+    }
+    value :: ast.field(&state.tree, ast.record_field(&state.tree, result.node, 0)).value?
+    owned :: try ast.add_typed_constant(state.builder, span, result_type, value)
+    try refresh(state)
+    return owned
+}
+
 @hide:file
 execute_type_block proc(state @mut State, execution @mut TypeExecution, block ast.NodeId) TypeFlow ! Error {
     if (block == execution.inline_body) {
+        saved_demand :: state.demand_depth
+        state.demand_depth = 0
+        defer state.demand_depth = saved_demand
         snapshot :: try type_snapshot(state, execution, block)
         if (snapshot == no_node) return .invalid
         flow :: try inline_block(state, snapshot)
@@ -5538,6 +6014,7 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 annotation = ast.typed_constant(&state.tree, value).type
             try arraylist.append(&execution.locals, TypeLocal{
                 declaration = statement, value = value, annotation = annotation,
+                contextual = declaration.type == null and flexible(state, expression),
             })
         }
         .assignment_stmt: {
@@ -5609,9 +6086,21 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
             }
             expression :: try type_snapshot_expected(state, execution,
                 assignment.value, execution.locals.items[index].annotation)
+            if (expression == no_node) return .invalid
+            if (execution.locals.items[index].contextual and !flexible(state, expression)) {
+                if (!try expand_type_matches(state, expression)) return .invalid
+                actual :: try expression_type(state, expression, 0)
+                resolved_type :: binding(state, actual)
+                numeric :: (try integer_type(state, actual)
+                    or (resolved_type.kind == .builtin
+                        and builtin_identity(resolved_type.data.builtin) == .float))
+                if (numeric) execution.locals.items[index].annotation = actual
+            }
             value :: try type_execution_value(state, expression, execution.locals.items[index].annotation)
             if (value == no_node) return .invalid
             execution.locals.items[index].value = value
+            contextual :: execution.locals.items[index].contextual and flexible(state, expression)
+            execution.locals.items[index].contextual = contextual
         }
         .if_stmt, .while_stmt: {
             looping :: ast.stmt_kind(&state.tree, statement) == .while_stmt
@@ -5962,6 +6451,10 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
     try expand(state, id)
     kind :: ast.expr_kind(&state.tree, id)
     resolved :: binding(state, id)
+    if (resolved.kind == .invalid) {
+        state.evaluation_diagnostic = resolved.data.diagnostic
+        return Value{}
+    }
     if (resolved.kind == .builtin and resolved.data.builtin != .type) return Value{ kind = .type, node = id }
     if (resolved.kind == .declaration) {
         target :: resolved.data.declaration
