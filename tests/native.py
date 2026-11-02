@@ -3375,6 +3375,285 @@ CASES = {
         main proc() Storage() { return [40, 2] }
         """, b"[40, 2]\n", None,
     ),
+    "metadata_pointers_scalar_aliases_helpers_and_uncached_effects": (
+        """
+        replace proc(value @mut type) void { value^ = i16 }
+        read proc(value @type) bool { return value^ == i16 }
+        Info :: struct { child type, count usize }
+        update proc(left, right @mut Info) void {
+            left.child = i16
+            left.count += 1
+            right.count += 1
+        }
+        Storage proc() type {
+            T type := bool
+            pointer :: &T
+            replace(pointer)
+            if (!read(pointer)) return bool
+            info Info := { child = bool, count = 0 }
+            saved :: info
+            reference :: &info
+            update(reference, reference)
+            if (info.child != i16 or info.count != 2) return bool
+            info = saved
+            update(reference, reference)
+            update(reference, reference)
+            if (info.count != 4 or saved.child != bool or saved.count != 0) return bool
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_pointers_sequences_arithmetic_slices_and_identity": (
+        """
+        fill proc(pointer *mut type) void { pointer[0] = i16
+        pointer[1] = i16 }
+        Storage proc() type {
+            values [3]mut type := [bool, i8, u8]
+            pointer :: values.ptr + usize(1)
+            fill(pointer)
+            if (values[1] != i16 or values[2] != i16) return bool
+            if (pointer != &values[1] or pointer == &values[0]) return bool
+            tail :: pointer[0..2]
+            tail[1] = bool
+            if (values[2] != bool) return bool
+            saved :: tail.ptr
+            values = [u8, i16, i8]
+            if (saved[1] != i8) return bool
+            end :: values.ptr + values.len
+            if (end != values[3..3].ptr or end[0..0].len != 0) return bool
+            return pointer[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_pointer_captures_initialize_live_storage_and_cleanup": (
+        """
+        Error :: enum { failed }
+        initialize proc(items []mut type) void {
+            for items |@T, index| {
+                defer T^ = i16
+                if (index == 0) continue
+                T^ = bool
+                break
+            }
+        }
+        fail proc(value @mut type) void ! Error {
+            errdefer value^ = i16
+            return .failed
+        }
+        types proc() []type {
+            backing [2]mut type := undefined
+            initialize(backing[..])
+            fail(&backing[0]) catch {}
+            defer backing[0] = bool
+            return backing[..]
+        }
+        main proc() [2]types()[0] { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_pointers_nested_places_frozen_indices_and_array_pointees": (
+        """
+        Info :: struct { children [2]mut type }
+        Storage proc() type {
+            rows [2]mut Info := [{ children = [bool, u8] }, { children = [i8, bool] }]
+            index := usize(0)
+            pointer :: &rows[index].children[1]
+            index = 1
+            pointer^ = i16
+            array :: &rows[0].children
+            view :: array[..]
+            view[0] = i16
+            if (rows[1].children[0] != i8 or rows[1].children[1] != bool) return bool
+            for view |@T| { if (T^ != i16) return bool }
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_pointers_mixed_runtime_inputs_and_effects": (
+        """
+        replace proc(value @mut type) void { value^ = i16 }
+        compute proc(value i16, calls @mut i16) i16 {
+            T type := bool
+            pointer :: &T
+            replace(pointer)
+            Selected :: pointer^
+            local Selected :: value
+            calls^ += 1
+            return local
+        }
+        main proc() i16 {
+            calls := i16(0)
+            result :: compute(41, &calls)
+            return result + calls
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_pointers_contextual_many_addresses_and_pointer_array_indexing": (
+        """
+        fill proc(items *mut type) void { items[0] = i16
+        items[1] = i16 }
+        Storage proc() type {
+            items [3]mut type := [bool, u8, i8]
+            pointer *mut type :: &items[1]
+            fill(&items[1])
+            if (pointer[0] != i16 or pointer[1] != i16) return bool
+            array :: &items
+            array[0] = i16
+            if (array[0] != i16 or array.len != 3) return bool
+            return array[1]
+        }
+        main proc() Storage() { return 42 }
+        """, b"42\n", None,
+    ),
+    "metadata_pointer_captures_record_fields_and_mixed_runtime_effects": (
+        """
+        Info :: struct { child type, count usize }
+        replace proc(value @mut type) void { value^ = i16 }
+        compute proc(value i16, calls @mut i16) i16 {
+            items [2]mut Info := [{ child = bool, count = 0 }, { child = u8, count = 1 }]
+            for items |@item| {
+                replace(&item.child)
+                item.count += 1
+                calls^ += 1
+            }
+            Selected :: items[1].child
+            result Selected :: value
+            return result
+        }
+        main proc() i16 {
+            calls := i16(0)
+            result :: compute(40, &calls)
+            return result + calls
+        }
+        """, b"42\n", None,
+    ),
+    "metadata_pointers_optional_aggregate_aliases_and_partial_record_initialization": (
+        """
+        Info :: struct { child type, count usize }
+        Holder :: struct { value ?@mut Info }
+        Storage proc() type {
+            info Info := undefined
+            pointer :: &info
+            pointer.child = i16
+            copied :: info
+            holder Holder :: { value = some!(pointer) }
+            if holder.value |shared| { shared.count = 2 }
+            if (pointer.child != i16 or copied.child != i16) return bool
+            return [pointer.count]pointer.child
+        }
+        main proc() Storage() { return [40, 2] }
+        """, b"[40, 2]\n", None,
+    ),
+    "metadata_pointers_reject_single_value_as_many_pointer": (
+        """
+        fill proc(items *mut type) void { items[0] = i16 }
+        Storage proc() type {
+            items [1]mut type := [bool]
+            pointer :: &items[0]
+            fill(pointer)
+            return items[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"incompatible",
+    ),
+    "metadata_pointers_reject_readonly_scalar_write": (
+        """
+        Storage proc() type {
+            T type :: i16
+            pointer :: &T
+            pointer^ = bool
+            return T
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_pointers_reject_readonly_reversal": (
+        """
+        replace proc(value @mut type) void { value^ = bool }
+        Storage proc() type {
+            T type :: i16
+            replace(&T)
+            return T
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"incompatible",
+    ),
+    "metadata_pointer_captures_reject_readonly_elements": (
+        """
+        Storage proc() type {
+            backing [1]type := [i16]
+            for backing |@T| { T^ = bool }
+            return backing[0]
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"writable",
+    ),
+    "metadata_pointers_reject_uninitialized_pointee_read": (
+        """
+        Storage proc() type {
+            values [1]mut type := undefined
+            pointer :: values.ptr
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"read before initialization",
+    ),
+    "metadata_pointers_reject_one_past_dereference": (
+        """
+        Storage proc() type {
+            values [1]mut type := [i16]
+            pointer :: values.ptr + values.len
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"index out of bounds",
+    ),
+    "metadata_pointers_reject_wrong_offset_type": (
+        """
+        Storage proc() type {
+            values [1]mut type := [i16]
+            pointer :: values.ptr + u8(0)
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"usize",
+    ),
+    "metadata_pointers_reject_expired_scope": (
+        """
+        Storage proc() type {
+            T type := i16
+            pointer @type := &T
+            {
+                inner type := bool
+                pointer = &inner
+            }
+            return pointer^
+        }
+        main proc() Storage() { return 42 }
+        """, b"", b"cannot escape evaluation",
+    ),
+    "metadata_pointers_reject_local_pointer_result": (
+        """
+        make proc() @type { T type := i16
+        return &T }
+        Storage proc() type { return make()^ }
+        main proc() Storage() { return 42 }
+        """, b"", b"cannot escape evaluation",
+    ),
+    "metadata_pointers_reject_runtime_controlled_mutation": (
+        """
+        replace proc(value @mut type) void { value^ = i16 }
+        compute proc(take bool) usize {
+            T type := i8
+            pointer :: &T
+            if (take) replace(pointer)
+            return sizeof!(T)
+        }
+        main proc() usize { return compute(true) }
+        """, b"", b"compile-time value",
+    ),
     "metadata_slices_live_aliases_saved_bounds_rebinding_and_array_copies": (
         """
         Storage proc() type {
