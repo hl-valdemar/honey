@@ -59,3 +59,47 @@ shape_and_segment_limits_preserve_zero_leaf_arrays_and_allow_retry test {
         op = .load_local, type = .array, array_type = zero_rows, slot = 1,
     }))
 }
+
+address_write_provenance_survives_byte_copies_but_not_integer_forgery test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    bytes [8]mut Value := undefined
+    copied [8]mut Value := undefined
+    pointer :: Value{ type = .pointer, data = ValueData{ unsigned = 19 } }
+    write_storage(&module, bytes[..], pointer)
+    restored :: read_storage(&module, .pointer, no_array, bytes[..], true)
+    try testing.expect(!restored.forged)
+    try testing.expect_equal(u64(19), restored.data.unsigned)
+    for (0..bytes.len) |i|
+        write_storage(&module, copied[i..], read_storage(&module, .u8, no_array, bytes[i..], true))
+    try testing.expect(!read_storage(&module, .pointer, no_array, copied[..], true).forged)
+    write_storage(&module, copied[3..], Value{ type = .u8, data = ValueData{ unsigned = 0 } })
+    try testing.expect(read_storage(&module, .pointer, no_array, copied[..], true).forged)
+    write_storage(&module, copied[..], Value{ type = .u64, data = ValueData{ unsigned = 19 } })
+    try testing.expect(read_storage(&module, .pointer, no_array, copied[..], true).forged)
+    for (copied) |byte| try testing.expect_equal(Type.invalid, byte.relocation)
+}
+
+byte_views_preserve_relocations_split_across_native_scalar_leaves test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    bytes [16]mut Value := undefined
+    copied [16]mut Value := undefined
+    mem.set(bytes[..], Value{ type = .u8 })
+    pointer :: Value{ type = .pointer, data = ValueData{ unsigned = 19 } }
+    write_storage(&module, bytes[3..], pointer)
+    for (0..usize(8)) |i| {
+        fragment :: read_storage(&module, .i16, no_array, bytes[i * 2..], true)
+        write_storage(&module, copied[i * 2..], fragment)
+    }
+    restored :: read_storage(&module, .pointer, no_array, copied[3..], true)
+    try testing.expect(!restored.forged)
+    try testing.expect_equal(u64(19), restored.data.unsigned)
+    for (0..usize(2)) |i| {
+        mixed :: read_storage(&module, .u64, no_array, copied[i * 8..], true)
+        write_storage(&module, bytes[i * 8..], mixed)
+    }
+    try testing.expect(!read_storage(&module, .pointer, no_array, bytes[3..], true).forged)
+    write_storage(&module, bytes[6..], Value{ type = .u8 })
+    try testing.expect(read_storage(&module, .pointer, no_array, bytes[3..], true).forged)
+}

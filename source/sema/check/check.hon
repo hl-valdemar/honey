@@ -1294,19 +1294,39 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             try depend(state, value.type, id)
             try depend(state, value.value, id)
         }
-        .union_constant: {
-            value :: ast.union_constant(tree, id)
+        .slice_constant: {
+            value :: ast.slice_constant(tree, id)
             state.cells[usize(id)].fixed = true
             state.cells[usize(id)].type = try check_annotation(state, value.type, false)
             try collect_expression(state, value.value)
             try depend(state, value.type, id)
             try depend(state, value.value, id)
         }
-        .slice_constant: {
-            value :: ast.slice_constant(tree, id)
+        .memory_constant: {
+            value :: ast.memory_constant(tree, id)
+            state.cells[usize(id)].fixed = true
+            state.cells[usize(id)].type = try check_annotation(state, value.type, false)
+            try depend(state, value.type, id)
+            # owned backing may retain undefined bytes outside the observed pointee.
+            bytes :: ast.typed_constant(tree, ast.array_element(tree, value.value, 0)).value
+            for (0..ast.array_element_count(tree, bytes)) |i| {
+                byte :: ast.array_element(tree, bytes, i)
+                if (ast.expr_kind(tree, byte) != .literal_undefined) continue
+                state.cells[usize(byte)].role = .expression
+                seed(state, byte, Type{ kind = .u8 })
+            }
+            for (0..ast.array_element_count(tree, value.value)) |i| {
+                child :: ast.array_element(tree, value.value, i)
+                try collect_expression(state, child)
+                try depend(state, child, id)
+            }
+        }
+        .address_constant: {
+            value :: ast.address_constant(tree, id)
             state.cells[usize(id)].fixed = true
             state.cells[usize(id)].type = try check_annotation(state, value.type, false)
             try collect_expression(state, value.value)
+            try collect_expression(state, ast.address_constant_offset(tree, id))
             try depend(state, value.type, id)
             try depend(state, value.value, id)
         }
@@ -2196,18 +2216,6 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     value :: ast.typed_constant(tree, id)
                     try compatible(state, value.value, state.cells[usize(id)].type)
                 }
-                .union_constant: {
-                    value :: ast.union_constant(tree, id)
-                    type :: state.cells[usize(id)].type
-                    if (type.kind == .invalid) return
-                    if (type.kind != .record or ast.expr_kind(tree, value.value) != .literal_string) {
-                        try fail(state, id, .invalid_operand, ast.node_span(tree, id))
-                        return
-                    }
-                    descriptor :: state.records.items[usize(type.record_type)]
-                    if (!descriptor.is_union or descriptor.tag_type.kind != .none)
-                        try fail(state, id, .invalid_operand, ast.node_span(tree, id))
-                }
                 .slice_constant: {
                     value :: ast.slice_constant(tree, id)
                     type :: state.cells[usize(id)].type
@@ -2228,6 +2236,11 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                         or (descriptor.sentinel != null and elements.len == 0)
                         or ast.expr_kind(tree, ast.typed_constant(tree, value.value).value) != .array_literal
                     ) try fail(state, id, .invalid_operand, ast.node_span(tree, id))
+                }
+                .memory_constant: {}
+                .address_constant: {
+                    if (state.cells[usize(id)].type.kind != .pointer)
+                        try fail(state, id, .invalid_operand, ast.node_span(tree, id))
                 }
                 .try_expr, .catch_expr: try validate_fallible_expression(state, id)
                 .unary: {

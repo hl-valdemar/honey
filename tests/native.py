@@ -11,6 +11,201 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "comptime_nonnull_pointer_results_own_mutable_scalar_storage": (
+        """
+        make proc() @mut i16 { value i16 := 40
+            return &value }
+        main proc() i16 { pointer :: $(make())
+            pointer^ += 2
+            return pointer^ }
+        """, b"42\n", None,
+    ),
+    "comptime_address_graph_preserves_shared_roots_offsets_and_copies": (
+        """
+        Views :: struct { readonly []i16, all []mut i16, tail []mut i16, middle @mut i16 }
+        make proc() Views {
+            values [3]mut i16 := [19, 20, 3]
+            return { readonly = values[..], all = values[..], tail = values[1..], middle = &values[1] }
+        }
+        main proc() i16 {
+            views :: $(make())
+            saved :: views
+            other :: $(make())
+            if (ptrcast!(*mut i16, views.middle) != views.tail.ptr) return -1
+            if (views.all.ptr + 1 != ptrcast!(*mut i16, views.middle)) return -2
+            views.middle^ += 3
+            if (views.tail[0] != 23 or saved.all[1] != 23 or views.readonly[1] != 23) return -3
+            if (other.all[1] != 20 or other.all.ptr == views.all.ptr) return -4
+            return views.all[0] + views.tail[0]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_address_graph_preserves_record_and_array_interior_places": (
+        """
+        Pair :: struct { first u8, second i16 }
+        Views :: struct { record @mut Pair, field @mut i16, rows @mut [2]mut Pair }
+        make proc() Views {
+            rows [2]mut Pair := [{ first = 1, second = 19 }, { first = 2, second = 20 }]
+            return { record = &rows[1], field = &rows[1].second, rows = &rows }
+        }
+        main proc() i16 {
+            views :: $(make())
+            views.field^ += 3
+            if (views.record.second != 23 or views.rows[1].second != 23) return -1
+            if (&views.rows[1].second != views.field) return -2
+            return views.rows[0].second + views.record.second
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_mutable_slice_specializations_keep_backing_identity": (
+        """
+        make proc() []mut i16 { values [1]mut i16 := [19]
+            return values[..] }
+        Holder proc($values []mut i16) type { return struct { view []mut i16 = values } }
+        main proc() i16 {
+            first :: $(make())
+            second :: $(make())
+            if (Holder(first) == Holder(second)) return -1
+            left Holder(first) :: {}
+            right Holder(second) :: {}
+            left.view[0] += 4
+            if (first[0] != 23 or second[0] != 19 or right.view[0] != 19) return -2
+            return left.view[0] + right.view[0]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_address_unions_relocate_callbacks_strings_and_slices": (
+        """
+        Callback :: alias @proc(value i16) i16
+        Call :: union { bits u64, callback Callback }
+        Text :: union { bits [2]u64, text string }
+        View :: union { bits [2]u64, values []mut i16 }
+        Packet :: struct { call Call, text Text, view View, pointer @mut i16 }
+        increment proc(value i16) i16 { return value + 2 }
+        make proc() Packet {
+            values [2]mut i16 := [19, 19]
+            return {
+                call = { callback = increment }, text = { text = "owned" },
+                view = { values = values[..] }, pointer = &values[1],
+            }
+        }
+        main proc() i16 {
+            packet :: $(make())
+            copy :: packet
+            packet.pointer^ += 2
+            if (copy.view.values[1] != 21 or packet.text.text.len != 5) return -1
+            if (packet.text.text[0] != u8(111)) return -2
+            return packet.call.callback(packet.view.values[0]) + copy.view.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_nonnull_pointer_rejects_uninitialized_pointee": (
+        """
+        make proc() @i16 { value i16 := undefined
+            return &value }
+        main proc() i16 { return $(make())^ }
+        """, b"", b"read before initialization",
+    ),
+    "comptime_mutable_slice_rechecks_sentinel_after_mutation": (
+        """
+        make proc() [;7]mut i16 {
+            values [2]mut i16 := [42, 7]
+            view [;7]mut i16 :: values[..1;7]
+            values[1] = 9
+            return view
+        }
+        main proc() usize { return $(make()).len }
+        """, b"", b"sentinel",
+    ),
+    "comptime_mutable_slice_rejects_range_beyond_backing": (
+        """
+        make proc() []mut i16 { values [1]mut i16 := [42]
+            return values.ptr[..2] }
+        main proc() usize { return $(make()).len }
+        """, b"", b"pointer does not refer to live accessible storage",
+    ),
+    "comptime_nonnull_pointer_rejects_integer_forged_evaluation_handle": (
+        """
+        Storage :: union { bits u64, pointer @i16 }
+        make proc() @i16 {
+            anchor i16 :: 42
+            live :: &anchor
+            storage Storage :: { bits = 0 }
+            return storage.pointer
+        }
+        main proc() i16 { return $(make())^ }
+        """, b"", b"pointer does not refer to live accessible storage",
+    ),
+    "comptime_address_union_rejects_partial_pointer_overwrite": (
+        """
+        Storage :: union { bytes [8]mut u8, pointer @i16 }
+        make proc() Storage {
+            anchor i16 :: 42
+            storage Storage := { pointer = &anchor }
+            storage.bytes[0] = 0
+            return storage
+        }
+        main proc() i16 { return $(make()).pointer^ }
+        """, b"", b"pointer does not refer to live accessible storage",
+    ),
+    "comptime_address_graph_preserves_transitive_readonly_aliases": (
+        """
+        Node :: struct { values []mut i16 }
+        Views :: struct { readonly []i16, node @mut Node }
+        make proc() Views {
+            values [2]mut i16 := [19, 20]
+            node Node := { values = values[..] }
+            return { readonly = values[..], node = &node }
+        }
+        main proc() i16 {
+            views :: $(make())
+            views.node.values[1] += 3
+            if (views.readonly[1] != 23) return -1
+            return views.readonly[0] + views.node.values[1]
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_interior_pointer_preserves_uninitialized_sibling_storage": (
+        """
+        Pair :: struct { first i16, second i16 }
+        make proc() @mut i16 {
+            value Pair := undefined
+            value.first = 40
+            return &value.first
+        }
+        main proc() i16 {
+            pointer :: $(make())
+            pointer^ += 2
+            return pointer^
+        }
+        """, b"42\n", None,
+    ),
+    "raw_slice_pointer_provenance_survives_typed_scalar_backing": (
+        """
+        Storage :: struct { alignment u64, values [8]mut i16 }
+        main proc() i16 {
+            storage Storage := { alignment = 0, values = [0, 0, 0, 0, 0, 0, 0, 0] }
+            bytes [3]mut u8 := [18, 0, 23]
+            slot :: ptrcast!(@mut []mut u8, &storage.values)
+            slot^ = bytes[..]
+            restored :: slot^
+            if (restored.ptr != bytes.ptr or restored.len != 3) return -1
+            restored[0] += 1
+            return i16(bytes[0]) + i16(restored[2])
+        }
+        """, b"42\n", None,
+    ),
+    "comptime_address_bits_cannot_fold_handle_comparisons": (
+        """
+        Raw :: union { pointer @i16, bits usize }
+        bad proc() bool {
+            value i16 :: 42
+            raw Raw :: { pointer = &value }
+            return raw.bits == 0
+        }
+        main proc() bool { return $(bad()) }
+        """, b"", b"compile-time result cannot escape evaluation",
+    ),
     "runtime_helper_guards_preserve_borrowed_effects": (
         """
         predicate proc(calls @mut i16, value i16) bool {
@@ -2473,7 +2668,7 @@ CASES = {
         }
         """, b"", b"integer arithmetic overflow",
     ),
-    "inline_for_tuple_rejects_storage_escape_before_break": (
+    "inline_for_tuple_materializes_storage_before_break": (
         """
         values proc() struct { i16, @i16 } {
             local i16 :: 2
@@ -2483,7 +2678,7 @@ CASES = {
             inline for values() |_| { break }
             return 42
         }
-        """, b"", b"escape",
+        """, b"42\n", None,
     ),
     "ordinary_for_still_rejects_heterogeneous_tuple": (
         """
@@ -2806,17 +3001,18 @@ CASES = {
         }
         """, b"8\n", None,
     ),
-    "inline_for_rejects_mutable_byte_slice_element_escape": (
+    "inline_for_materializes_mutable_byte_slice_elements": (
         """
         data proc() [1][]mut u8 {
             values [1]mut u8 := [42]
             return [values[..]]
         }
-        main proc() usize {
-            inline for data() |value| { return value.len }
+        main proc() u8 {
+            inline for data() |value| { value[0] += 1
+                return value[0] }
             return 0
         }
-        """, b"", b"escape",
+        """, b"43\n", None,
     ),
     "inline_for_expansion_is_bounded": (
         """
@@ -7678,7 +7874,7 @@ CASES = {
         main proc() i8 { return $(make()).value }
         """, b"", b"integer arithmetic overflow",
     ),
-    "comptime_aggregate_rejects_pointer_escape": (
+    "comptime_aggregate_materializes_nonnull_pointer": (
         """
         Borrow :: struct { pointer @i16 }
         make proc() Borrow {
@@ -7686,7 +7882,7 @@ CASES = {
             return Borrow { pointer = &value }
         }
         main proc() i16 { return $(make()).pointer^ }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"42\n", None,
     ),
     "comptime_aggregate_materializes_readonly_byte_slices": (
         """
@@ -7833,15 +8029,6 @@ CASES = {
         main proc() usize { return $(make()).len }
         """, b"", b"slice",
     ),
-    "comptime_byte_slices_reject_oversized_pointer_views_before_allocation": (
-        """
-        make proc() []u8 {
-            values [1]u8 :: [42]
-            return values.ptr[..maxval!(usize)]
-        }
-        main proc() usize { return $(make()).len }
-        """, b"", b"compile-time result cannot escape evaluation",
-    ),
     "comptime_byte_slices_recheck_zero_sentinel_after_mutation": (
         """
         make proc() [;0]u8 {
@@ -7853,14 +8040,16 @@ CASES = {
         main proc() usize { return $(make()).len }
         """, b"", b"sentinel",
     ),
-    "comptime_aggregate_rejects_mutable_byte_slice_escape": (
+    "comptime_aggregate_materializes_mutable_byte_slice": (
         """
         make proc() [1][]mut u8 {
             values [1]mut u8 := [42]
             return [values[..]]
         }
-        main proc() usize { return $(make())[0].len }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() u8 { view :: $(make())[0]
+            view[0] += 1
+            return view[0] }
+        """, b"43\n", None,
     ),
     "comptime_nonbyte_slices_materialize_callback_elements": (
         """
@@ -8152,24 +8341,26 @@ CASES = {
         main proc() usize { return $(make()).len }
         """, b"", b"compile-time result cannot escape evaluation",
     ),
-    "comptime_nonbyte_slices_reject_mutable_escape": (
+    "comptime_nonbyte_slices_materialize_mutable_backing": (
         """
         make proc() []mut i16 {
             values [1]mut i16 := [42]
             return values[..]
         }
-        main proc() usize { return $(make()).len }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() i16 { view :: $(make())
+            view[0] += 1
+            return view[0] }
+        """, b"43\n", None,
     ),
-    "comptime_nonbyte_slices_reject_nonnull_pointer_element_escape": (
+    "comptime_nonbyte_slices_materialize_nonnull_pointer_elements": (
         """
         make proc() []@i16 {
             value i16 :: 42
             pointers [1]@i16 :: [&value]
             return pointers[..]
         }
-        main proc() usize { return $(make()).len }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() i16 { return $(make())[0]^ }
+        """, b"42\n", None,
     ),
     "comptime_nonbyte_sentinel_slices_own_subviews_and_empty_backing": (
         """
@@ -8316,14 +8507,16 @@ CASES = {
         main proc() usize { return $(make()).len }
         """, b"", b"bounds",
     ),
-    "comptime_nonzero_sentinel_byte_slices_reject_mutable_escape": (
+    "comptime_nonzero_sentinel_byte_slices_materialize_mutable_backing": (
         """
         make proc() [;7]mut u8 {
             values [2]mut u8 := [42, 7]
             return values[..1;7]
         }
-        main proc() usize { return $(make()).len }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() [3]u8 { view :: $(make())
+            view[0] += 1
+            return [view[0], view.ptr[view.len], u8(view.len)] }
+        """, b"[43, 7, 1]\n", None,
     ),
     "comptime_tagged_union_preserves_tags_and_nested_raw_payloads": (
         """
@@ -8488,7 +8681,7 @@ CASES = {
         }
         """, b"42\n", None,
     ),
-    "comptime_tagged_union_rejects_nonnull_pointer_payload_escape": (
+    "comptime_tagged_union_materializes_nonnull_pointer_payload": (
         """
         Choice :: union(enum) { pointer @i16, empty void }
         make proc() Choice {
@@ -8496,19 +8689,19 @@ CASES = {
             return .pointer{&value}
         }
         main proc() i16 { return $(make()).pointer^ }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"42\n", None,
     ),
-    "comptime_fallible_rejects_nonnull_success_pointer_escape": (
+    "comptime_fallible_materializes_nonnull_success_pointer": (
         """
         Error :: enum { failed }
         make proc() @i16 ! Error {
             value i16 :: 42
             return &value
         }
-        main proc() i16 { return ($(make()) catch null)^ }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() i16 { return ($(make()) catch { return -1 })^ }
+        """, b"42\n", None,
     ),
-    "comptime_fallible_rejects_nonnull_error_pointer_escape": (
+    "comptime_fallible_materializes_nonnull_error_pointer": (
         """
         Failure :: struct { pointer @i16 }
         make proc() i16 ! Failure {
@@ -8516,7 +8709,7 @@ CASES = {
             return Failure { pointer = &value }
         }
         main proc() i16 { return $(make()) catch |err| err.pointer^ }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"42\n", None,
     ),
     "comptime_untagged_union_preserves_scalar_and_ieee_bits": (
         """
@@ -8627,43 +8820,43 @@ CASES = {
         }
         """, b"[42, 42, 42, 42]\n", None,
     ),
-    "comptime_untagged_union_rejects_source_pointer": (
+    "comptime_untagged_union_materializes_source_pointer": (
         """
         Storage :: union { bits u64, pointer @i16 }
         make proc() Storage {
             value i16 :: 42
             return Storage { pointer = &value }
         }
-        main proc() u64 { return $(make()).bits }
-        """, b"", b"compile-time result cannot escape evaluation",
+        main proc() i16 { return $(make()).pointer^ }
+        """, b"42\n", None,
     ),
-    "comptime_untagged_union_rejects_inactive_pointer_layout": (
+    "comptime_untagged_union_preserves_integer_bits_with_inactive_pointer_layout": (
         """
         Storage :: union { bits u64, pointer ?@i16 }
         make proc() Storage { return Storage { bits = 0 } }
         main proc() u64 { return $(make()).bits }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"0\n", None,
     ),
-    "comptime_untagged_union_rejects_inactive_callback_layout": (
+    "comptime_untagged_union_preserves_integer_bits_with_inactive_callback_layout": (
         """
         Storage :: union { bits u64, callback @proc(value i16) i16 }
         make proc() Storage { return Storage { bits = 42 } }
         main proc() u64 { return $(make()).bits }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"42\n", None,
     ),
-    "comptime_untagged_union_rejects_inactive_string_layout": (
+    "comptime_untagged_union_preserves_integer_bits_with_inactive_string_layout": (
         """
         Storage :: union { bits [2]u64, text string }
         make proc() Storage { return Storage { bits = [0, 0] } }
         main proc() u64 { return $(make()).bits[0] }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"0\n", None,
     ),
-    "comptime_untagged_union_rejects_nested_inactive_slice_layout": (
+    "comptime_untagged_union_preserves_integer_bits_with_inactive_slice_layout": (
         """
         Storage :: union { bits [2]u64, rows [1]struct { bytes []u8 } }
         make proc() Storage { return Storage { bits = [0, 0] } }
         main proc() u64 { return $(make()).bits[0] }
-        """, b"", b"compile-time result cannot escape evaluation",
+        """, b"0\n", None,
     ),
     "comptime_untagged_union_rejects_uninitialized_tail_bytes": (
         """
@@ -12542,6 +12735,84 @@ def check_typeinfo_packages(temporary, executable):
         (project / "std" / package).symlink_to(ROOT / "std" / package, target_is_directory=True)
 
     cases = {
+        "enum_field_struct_preserves_owned_and_address_backed_defaults": (
+            """
+            import "@std/meta"
+            Keys :: enum(i16) { last = -7, first = 3, middle = 90 }
+            Item :: struct { values [2]mut i16 }
+            Callback :: alias @proc(value i16) i16
+            Addresses :: struct { pointer @mut i16, view []mut i16, values [2]mut i16 }
+            increment proc(value i16) i16 { return value + 1 }
+            address_default proc() Addresses {
+                backing [3]mut i16 := [9, 19, 23]
+                return { pointer = &backing[1], view = backing[1..], values = [19, 23] }
+            }
+            pointer_default proc() @mut i16 {
+                value i16 := 19
+                return &value
+            }
+            slice_default proc() []mut i16 {
+                values [2]mut i16 := [19, 23]
+                return values[..]
+            }
+            main proc() i16 {
+                Absent :: meta.EnumFieldStruct(Keys, ??i16, some!(null))
+                Null :: meta.EnumFieldStruct(Keys, ??i16, some!(some!(null)))
+                Present :: meta.EnumFieldStruct(Keys, ??i16, some!(some!(some!(i16(42)))))
+                absent Absent :: {}
+                nulls Null :: { first = null, middle = some!(some!(i16(19))) }
+                present Present :: {}
+                if (absent.last != null or nulls.last == null) return -1
+                if (nulls.last? != null or nulls.first != null or nulls.middle?? != 19) return -2
+                if (present.last?? != 42) return -3
+
+                Arrays :: meta.EnumFieldStruct(Keys, [2]mut i16, [19, 23])
+                Items :: meta.EnumFieldStruct(Keys, Item, Item { values = [19, 23] })
+                arrays Arrays := {}
+                array_copy := arrays
+                arrays.last[0] = 0
+                array_copy.first[1] = 0
+                if (array_copy.last[0] != 19 or arrays.first[1] != 23) return -4
+                if (arrays.middle[0] + arrays.middle[1] != 42) return -5
+                items Items := {}
+                item_copy := items
+                items.last.values[0] = 0
+                item_copy.first.values[1] = 0
+                if (item_copy.last.values[0] != 19 or items.first.values[1] != 23) return -6
+                if (typeinfo!(Arrays).record.fields[0].type != [2]mut i16) return -7
+                if (typeinfo!(Items).record.fields[2].type != Item) return -8
+
+                Callbacks :: meta.EnumFieldStruct(Keys, Callback, increment)
+                callbacks Callbacks :: {}
+                if (callbacks.last(41) != 42 or field!(callbacks, "middle")(41) != 42) return -9
+                Pointers :: meta.EnumFieldStruct(Keys, @mut i16, pointer_default())
+                pointers Pointers :: {}
+                pointers.last^ = 42
+                if (pointers.middle^ != 42 or pointers.first != pointers.last) return -10
+                Slices :: meta.EnumFieldStruct(Keys, []mut i16, slice_default())
+                slices Slices :: {}
+                slices.last[0] = 20
+                slices.first[1] = 22
+                if (slices.middle[0] + slices.middle[1] != 42) return -11
+
+                AddressValues :: meta.EnumFieldStruct(Keys, Addresses, address_default())
+                addresses AddressValues := {}
+                saved := addresses
+                addresses.last.pointer^ = 20
+                addresses.first.view[1] = 22
+                addresses.last.values[0] = 0
+                saved.first.values[1] = 0
+                if (saved.middle.pointer^ != 20) return -12
+                if (addresses.middle.view[0] + saved.last.view[1] != 42) return -13
+                if (saved.last.values[0] != 19 or addresses.first.values[1] != 23) return -14
+                first :: $(address_default())
+                second :: $(address_default())
+                first.pointer^ = 99
+                if (first.view[0] != 99 or second.view[0] != 19) return -15
+                return 42
+            }
+            """, b"42\n", None,
+        ),
         "ordinary_metadata_helpers_return_values_and_names": (
             """
             import "@std/meta"
@@ -12976,6 +13247,16 @@ def check_typeinfo_packages(temporary, executable):
         ),
     }
     for name, text, error in (
+        (
+            "enum_field_struct_rejects_non_enum_key",
+            "main proc() i16 { values meta.EnumFieldStruct(i16, i16, 0) :: {}\nreturn 42 }",
+            b"EnumFieldStruct key must be an enum",
+        ),
+        (
+            "enum_field_struct_absent_default_does_not_initialize_optional_fields",
+            "Key :: enum { first, second }\nmain proc() i16 { values meta.EnumFieldStruct(Key, ?i16, null) :: { first = null }\nreturn 42 }",
+            b"record initializer is missing a required field",
+        ),
         ("missing_argument", "main proc() i16 { typeinfo!()\nreturn 42 }", b"argument count"),
         ("extra_argument", "main proc() i16 { typeinfo!(i16, bool)\nreturn 42 }", b"argument count"),
         ("non_type_argument", "main proc() i16 { typeinfo!(42)\nreturn 42 }", b"must name a type"),

@@ -1,4 +1,3 @@
-import "@std/debug"
 import "@std/mem"
 import "@std/arraylist"
 import "@std/strconv"
@@ -484,9 +483,82 @@ lower_slice_backing proc(state @mut State, id ast.NodeId) void ! (mem.AllocError
     state.terminated = false
     state.module.functions.items[state.function].result = global.type
     state.module.functions.items[state.function].result_array_type = global.array_type
-    backing :: ast.slice_constant(state.tree, id).value
+    backing :: if (ast.expr_kind(state.tree, id) == .memory_constant) id
+        else ast.slice_constant(state.tree, id).value
     value :: try lower_expression(state, backing)
     if (!state.terminated) finish(state, value, ast.node_span(state.tree, id))
+}
+
+@hide:file
+memory_pointer proc(state @mut State, root ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, root)
+    if (state.storage[usize(root)].kind == .none) {
+        initializer :: try add_function(state.module, span)
+        if (state.evaluation_functions) |declarations|
+            try arraylist.append(declarations, maxval!(ast.NodeId))
+        shape :: try array_shape(state, typecheck.type_of(state.checked, root))
+        global :: u32(state.module.globals.items.len)
+        try arraylist.append(&state.module.globals, ir.Global{
+            # all supported native scalar layouts require at most eight-byte alignment.
+            type = .array, array_type = shape, initializer = initializer, span = span, alignment = 8,
+        })
+        state.storage[usize(root)] = Storage{ kind = .global, index = global }
+        try arraylist.append(&state.slice_backings, root)
+    }
+    location :: state.storage[usize(root)]
+    global :: state.module.globals.items[usize(location.index)]
+    address :: try emit(state, ir.Instruction{
+        op = .address_global, type = .address, pointee = global.type,
+        array_type = global.array_type, slot = location.index, span = span,
+    })
+    return try emit(state, ir.Instruction{
+        op = .pointer_from_address, type = .pointer, left = address, span = span,
+    })
+}
+
+@hide:file
+lower_memory_constant proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    span :: ast.node_span(state.tree, id)
+    value :: ast.memory_constant(state.tree, id)
+    bytes :: ast.array_element(state.tree, value.value, 0)
+    bytes_shape :: try array_shape(state, typecheck.type_of(state.checked, bytes))
+    slot :: try ir.add_local(state.module, ir.FunctionId(state.function), .array, bytes_shape)
+    initial :: try lower_expression(state, bytes)
+    _ = try emit(state, ir.Instruction{ op = .store_local, slot = u32(slot), left = initial, span = span })
+    address :: try emit(state, ir.Instruction{
+        op = .address_local, type = .address, pointee = .array,
+        array_type = bytes_shape, slot = u32(slot), span = span,
+    })
+    pointer :: try emit(state, ir.Instruction{
+        op = .pointer_from_address, type = .pointer, left = address, span = span,
+    })
+    index := usize(1)
+    while (index < ast.array_element_count(state.tree, value.value)) {
+        offset :: try lower_as(state, ast.array_element(state.tree, value.value, index), typecheck.Type{ kind = .usize })
+        child :: ast.array_element(state.tree, value.value, index + 1)
+        relocated :: try lower_expression(state, child)
+        interior :: try emit(state, ir.Instruction{
+            op = .pointer_offset, type = .pointer, pointee = .u8,
+            left = pointer, right = offset, span = span,
+        })
+        place :: try emit(state, ir.Instruction{
+            op = .pointer_address, type = .address,
+            pointee = lower_type(state, typecheck.type_of(state.checked, child)),
+            array_type = try array_shape(state, typecheck.type_of(state.checked, child)),
+            left = interior, span = span,
+        })
+        _ = try emit(state, ir.Instruction{ op = .store_address, left = place, right = relocated, span = span })
+        index += 2
+    }
+    type :: lower_type(state, typecheck.type_of(state.checked, id))
+    shape :: try array_shape(state, typecheck.type_of(state.checked, id))
+    place :: try emit(state, ir.Instruction{
+        op = .pointer_address, type = .address, pointee = type,
+        array_type = shape, left = pointer, span = span,
+    })
+    return try emit(state, ir.Instruction{
+        op = .load_address, type = type, array_type = shape, left = place, span = span,
+    })
 }
 
 @hide:file
@@ -2152,6 +2224,19 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (trap_type(state, id)) return ir.no_value
             return try lower_as(state, ast.typed_constant(tree, id).value, typecheck.type_of(state.checked, id))
         }
+        .memory_constant: {
+            if (trap_type(state, id)) return ir.no_value
+            return try lower_memory_constant(state, id)
+        }
+        .address_constant: {
+            if (trap_type(state, id)) return ir.no_value
+            pointer :: try memory_pointer(state, ast.address_constant(tree, id).value)
+            offset :: try lower_as(state, ast.address_constant_offset(tree, id), typecheck.Type{ kind = .usize })
+            return try emit(state, ir.Instruction{
+                op = .pointer_offset, type = .pointer, pointee = .u8,
+                left = pointer, right = offset, span = span,
+            })
+        }
         .slice_constant: {
             if (trap_type(state, id)) return ir.no_value
             if (state.storage[usize(id)].kind == .none) {
@@ -2185,35 +2270,6 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             extra :: if (descriptor.sentinel != null) usize(1) else usize(0)
             len :: elements.len - extra
             return try record_pair(state, shape, pointer, try usize_constant(state, len, span), span)
-        }
-        .union_constant: {
-            if (trap_type(state, id)) return ir.no_value
-            bytes :: ast.union_constant(tree, id).value
-            text :: ast.literal_text(tree, bytes)
-            count :: ir.storage_size(state.module, .record, shape)
-            byte_shape :: try ir.add_array(state.module, .u8, ir.no_array, count, false)
-            scratch :: state.arguments.items.len
-            defer state.arguments.items = state.arguments.items.ptr[..scratch]
-            cursor := usize(1)
-            while (cursor < text.len - 1) {
-                byte :: ast.string_next(text, &cursor) catch |_| {
-                    trap(state, try diagnostics.add(state.diagnostics, .invalid_escape, span), span)
-                    return ir.no_value
-                }
-                element :: try constant(state, ir.Value{ type = .u8, data = ir.ValueData{ unsigned = u64(byte) } }, span)
-                try arraylist.append(&state.arguments, element)
-            }
-            debug.assert(state.arguments.items.len - scratch == count)
-            block :: &state.module.functions.items[state.function].blocks.items[usize(state.block)]
-            start :: block.arguments.items.len
-            for (state.arguments.items[scratch..]) |element| try arraylist.append(&block.arguments, element)
-            payload :: try emit(state, ir.Instruction{
-                op = .array_literal, type = .array, array_type = byte_shape,
-                arguments_start = start, arguments_count = count, span = span,
-            })
-            return try emit(state, ir.Instruction{
-                op = .union_literal, type = .record, array_type = shape, left = payload, span = span,
-            })
         }
         .invalid: {
             invalid :: ast.invalid(tree, id)

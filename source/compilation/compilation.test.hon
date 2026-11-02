@@ -1580,3 +1580,76 @@ metadata_pointer_borrows_recompile_private_types_without_retained_places test {
         try testing.expect_equal(i64(42), outcome.value.data.integer)
     }
 }
+
+address_constants_recompile_owned_roots_relocations_and_private_callbacks test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    modules [2]mut ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        root :: try add_package(&session)
+        dependency :: try add_package(&session)
+        bytes := try owned_text(
+            `lib :: import "../library"
+            `main proc() i16 {
+            `    packet :: $(lib.make())
+            `    saved :: packet
+            `    other :: $(lib.make())
+            `    packet.pointer^ = packet.view[0]
+            `    if (i16(saved.tail[0]) != 19 or i16(packet.storage.pointer^) != 19) return -1
+            `    if (i16(other.tail[0]) != 20 or other.pointer == packet.pointer) return -2
+            `    generated lib.Generated() :: {}
+            `    if (i16(generated.value.tail[0]) != 20) return -3
+            `    packet.pointer^ = other.tail[0]
+            `    return packet.run(packet.storage.pointer^) + 22
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        root_source :: try add_source(&session, root, "/address_constants/app/main.hon", &bytes, &diagnostic_store)
+        imported := try owned_text(
+            `@hide:file
+            `Code :: distinct i16
+            `@hide:file
+            `Callback :: alias @proc(value Code) i16
+            `Storage :: union { pointer @mut Code, bits u64 }
+            `Packet :: struct {
+            `    view []mut Code
+            `    tail []mut Code
+            `    pointer @mut Code
+            `    storage Storage
+            `    run Callback
+            `}
+            `@hide:file
+            `read proc(value Code) i16 { return i16(value) }
+            `make proc() Packet {
+            `    values [2]mut Code := [Code(19), Code(20)]
+            `    return {
+            `        view = values[..], tail = values[1..], pointer = &values[1],
+            `        storage = { pointer = &values[1] }, run = read,
+            `    }
+            `}
+            `Generated proc() type { return struct { value Packet = $(make()) } }
+            ,
+        )
+        defer arraylist.deinit(&imported)
+        _ = try add_source(&session, dependency, "/address_constants/library/values.hon", &imported, &diagnostic_store)
+        try arraylist.append(&session.imports, Import{
+            node = declaration(&session, root_source, 0).node,
+            target = dependency,
+        })
+        modules[0] = try compile(&session, root, &diagnostic_store)
+        errdefer ir.deinit(&modules[0])
+        modules[1] = try compile(&session, root, &diagnostic_store)
+    }
+    defer ir.deinit(&modules[0])
+    defer ir.deinit(&modules[1])
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    for modules |module| {
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
+}

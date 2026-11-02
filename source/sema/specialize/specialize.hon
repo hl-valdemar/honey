@@ -111,6 +111,8 @@ State :: struct {
     metadata_views arraylist.ArrayList(MetadataView)
     metadata_view_indices hashmap.AutoHashMap(ast.NodeId, usize)
     metadata_runtime_depth usize = 0
+    snapshot_roots ?@mut arraylist.ArrayList(SnapshotRoot) = null
+    snapshot_scan_remaining usize = 0
 }
 
 #! elaborates templates into cached concrete declarations in the caller-owned `builder` arena.
@@ -1968,7 +1970,7 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
     }
     match ast.expr_kind(&state.tree, id) {
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void,
-        .union_constant, .slice_constant: return true
+        .slice_constant, .memory_constant, .address_constant: return true
         .typed_constant: return branch_constant(state, ast.typed_constant(&state.tree, id).value, depth + 1)
         .enum_literal: return true
         .call: return branch_type_call(state, id, depth + 1)
@@ -1976,8 +1978,12 @@ branch_constant proc(state @State, id ast.NodeId, depth usize) bool {
         .builtin_call: {
             name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
             if (ast.call_arg_count(&state.tree, id) != 1
-                or (!mem.eql(name, "minval") and !mem.eql(name, "maxval")
+                or (!mem.eql(name, "minval") and !mem.eql(name, "maxval") and !mem.eql(name, "some")
                     and !mem.eql(name, "sizeof") and !mem.eql(name, "alignof"))) return false
+            # folding presence can replay its payload; replaying owned backing changes
+            # observable address identity. explicit some! evaluation still reuses the captured payload.
+            if (mem.eql(name, "some") and constant_addresses(state, ast.call_arg(&state.tree, id, 0), depth + 1))
+                return false
             return branch_constant(state, ast.call_arg(&state.tree, id, 0), depth + 1)
         }
         .record_literal: {
@@ -2180,8 +2186,9 @@ storage_expression_annotation proc(
     }
     kind :: ast.expr_kind(tree, input)
     if (kind == .typed_constant) return ast.typed_constant(tree, input).type
-    if (kind == .union_constant) return ast.union_constant(tree, input).type
     if (kind == .slice_constant) return ast.slice_constant(tree, input).type
+    if (kind == .memory_constant) return ast.memory_constant(tree, input).type
+    if (kind == .address_constant) return ast.address_constant(tree, input).type
     if (kind == .record_literal) {
         if (ast.record_literal(tree, input).type) |type| return type
         return no_node
@@ -2602,7 +2609,8 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
             contextual := contextual_literal(state, argument)
             if (!contextual and !is_type(state, annotation)) {
                 type :: try canonical_type(state, annotation)
-                contextual = type != no_node and ast.expr_kind(&state.tree, type) == .fallible_type
+                contextual = type != no_node and (ast.expr_kind(&state.tree, type) == .fallible_type
+                    or ast.expr_kind(&state.tree, type) == .optional_type)
             }
             if (contextual or type_record_storage(state, annotation, 0))
                 annotation = try argument_annotation(state, function, view.type, arguments)
@@ -2711,6 +2719,11 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         }
     }
     demand_key :: if (demanded) usize(1) else usize(0)
+    if (demanded) {
+        for (arguments) |argument| {
+            if (argument.kind != .invalid and constant_addresses(state, argument.node, 0)) borrowed = true
+        }
+    }
     key := mix(usize(function), demand_key)
     for arguments |argument| {
         if (argument.kind != .invalid) key = mix(key, try value_hash(state, argument))
@@ -3091,6 +3104,21 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
         type :: try canonical_type(state, annotation)
         if (type != no_node and ast.expr_kind(&state.tree, type) == .array_type
             and !try type_array_initialized(state, id, id)) return Value{}
+        if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type) {
+            kind :: ast.expr_kind(&state.tree, id)
+            explicit_presence :: (
+                kind == .builtin_call
+                and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "some")
+            )
+            if (kind != .typed_constant and !explicit_presence) {
+                actual :: try expression_type(state, id, 0)
+                if (actual != no_node and try same_type(state, type, actual)) return try evaluate(state, id)
+            }
+            constant :: try type_optional_value(state, id, type)
+            if (constant == no_node or !try type_array_initialized(state, constant, id)) return Value{}
+            value :: ast.typed_constant(&state.tree, constant)
+            return Value{ kind = .aggregate, node = value.value, annotation = value.type }
+        }
         if (type != no_node and (contextual_literal(state, id)
             or ast.expr_kind(&state.tree, id) == .block_expr
             or ast.expr_kind(&state.tree, id) == .slice
@@ -3100,30 +3128,355 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     return try evaluate(state, id)
 }
 
-# raw union snapshots cannot distinguish addresses from overlapping integer bits.
-# require every view to be address-free before retaining the complete representation.
 @hide:file
-union_bytes_materializable proc(checked @typecheck.Result, type typecheck.Type, depth usize) bool {
-    if (depth >= 128) return false
+SnapshotRoot :: struct {
+    identity usize
+    node ast.NodeId = no_node
+    serializing bool = false
+}
+
+# ponytail: linear root lookup; use an identity-keyed map if address graphs grow.
+@hide:file
+snapshot_root_index proc(state @State, identity usize) usize {
+    for (state.snapshot_roots?.items) |root, index|
+        if (root.identity == identity) return index
+    return no_index
+}
+
+# reserve pointer/mutable-slice roots before serializing readonly views, so their
+# aliases do not depend on record field order. ordinary readonly snapshots remain content-based.
+@hide:file
+snapshot_reserve proc(
+    state @mut State, module @ir.Module, checked @typecheck.Result,
+    outcome @interpreter.Outcome, type typecheck.Type, value ir.Value, depth usize,
+) void ! Error {
+    if (value.uninitialized or state.snapshot_scan_remaining == 0) return
+    if (depth >= 128) {
+        state.snapshot_scan_remaining = 0
+        return
+    }
+    state.snapshot_scan_remaining -= 1
+    if (type.kind == .pointer or type.kind == .slice) {
+        pointer :: if (type.kind == .pointer) value else ir.aggregate_item(module, value, 0)
+        mutable :: type.kind == .pointer or typecheck.array_type(checked, type.array_type).mutable
+        if (mutable) {
+            if (interpreter.evaluation_pointer(outcome, module, pointer)) |location| {
+                if (snapshot_root_index(state, location.identity) == no_index) {
+                    try arraylist.append(state.snapshot_roots?, SnapshotRoot{ identity = location.identity })
+                    borrowed :: interpreter.evaluation_storage(outcome, module, pointer)?
+                    if (borrowed.len > state.snapshot_scan_remaining) {
+                        state.snapshot_scan_remaining = 0
+                        return
+                    }
+                    state.snapshot_scan_remaining -= borrowed.len
+                    # collect edges before recursion invalidates raw-view scratch.
+                    children := arraylist.init(ir.Value, state.allocator)
+                    defer arraylist.deinit(&children)
+                    for (borrowed) |byte, index| {
+                        if (byte.relocation != .pointer or byte.relocation_byte != 0) continue
+                        if (borrowed.len - index < 8) continue
+                        try arraylist.append(&children,
+                            ir.read_storage(module, .pointer, ir.no_array, borrowed[index..], true))
+                    }
+                    for (children.items) |child| {
+                        if (state.snapshot_scan_remaining == 0) return
+                        try snapshot_reserve(state, module, checked, outcome,
+                            typecheck.Type{ kind = .pointer }, child, depth + 1)
+                    }
+                }
+            }
+        }
+        if (type.kind == .slice) {
+            descriptor :: typecheck.array_type(checked, type.array_type)
+            count :: ir.aggregate_item(module, value, 1)
+            if (count.uninitialized or count.data.unsigned > u64(state.snapshot_scan_remaining)) {
+                state.snapshot_scan_remaining = 0
+                return
+            }
+            shape :: module.arrays.items[usize(value.array_type)]
+            for (0..usize(count.data.unsigned)) |i| {
+                if (state.snapshot_scan_remaining == 0) return
+                borrowed :: interpreter.evaluation_element(outcome, module, pointer, i, shape.element, shape.element_array)
+                if (borrowed == null) return
+                child := borrowed?
+                owned []mut ir.Value := &[]
+                scratch_backed :: ir.aggregate(child.type) and child.raw
+                if (scratch_backed) {
+                    owned = try mem.alloc(ir.Value, state.allocator, child.data.elements.len)
+                    memcopy!(owned, child.data.elements)
+                    child.data = ir.ValueData{ elements = owned }
+                }
+                defer if (scratch_backed) mem.free(state.allocator, owned)
+                try snapshot_reserve(state, module, checked, outcome, descriptor.element, child, depth + 1)
+            }
+        }
+        return
+    }
+    if (type.kind == .optional) {
+        child :: typecheck.array_type(checked, type.array_type).element
+        if (child.kind == .pointer or child.kind == .function) {
+            if (value.data.unsigned != maxval!(u64))
+                try snapshot_reserve(state, module, checked, outcome, child, value, depth + 1)
+        } else if (ir.aggregate_item(module, value, 0).data.boolean)
+            try snapshot_reserve(state, module, checked, outcome, child, ir.aggregate_item(module, value, 1), depth + 1)
+    } else if (type.kind == .array) {
+        array :: typecheck.array_type(checked, type.array_type)
+        for (0..array.len) |i| {
+            if (state.snapshot_scan_remaining == 0) return
+            try snapshot_reserve(state, module, checked, outcome, array.element, ir.aggregate_item(module, value, i), depth + 1)
+        }
+    } else if (type.kind == .fallible) {
+        channels :: typecheck.array_type(checked, type.array_type)
+        failed :: ir.union_tag(module, value).data.integer == 1
+        channel :: if (failed) channels.error_type else channels.element
+        index :: if (failed) usize(1) else usize(0)
+        try snapshot_reserve(state, module, checked, outcome,
+            channel, ir.aggregate_item(module, value, index), depth + 1)
+    } else if (type.kind == .record) {
+        record :: typecheck.record_type(checked, type.record_type)
+        if (record.is_union and record.tag_type.kind != .enumeration) {
+            for (value.data.elements) |byte, i| {
+                if (state.snapshot_scan_remaining == 0) return
+                state.snapshot_scan_remaining -= 1
+                if (byte.relocation != .pointer or byte.relocation_byte != 0
+                    or value.data.elements.len - i < 8) continue
+                pointer :: ir.read_storage(module, .pointer, ir.no_array, value.data.elements[i..], true)
+                try snapshot_reserve(state, module, checked, outcome, typecheck.Type{ kind = .pointer }, pointer, depth + 1)
+            }
+        } else {
+            for (record.fields) |field, i| {
+                if (state.snapshot_scan_remaining == 0) return
+                if (!record.is_union or ir.union_active(module, value, i))
+                    try snapshot_reserve(state, module, checked, outcome, field.type, ir.aggregate_item(module, value, i), depth + 1)
+            }
+        }
+    }
+}
+
+# native layout mirrors the existing IR layout; only bounds are needed here.
+@hide:file
+snapshot_layout proc(checked @typecheck.Result, type typecheck.Type, depth usize) [2]usize {
+    if (depth >= 128) return [no_index, 1]
     match type.kind {
-        .int, .i8, .i16, .i32, .isize, .u8, .u16, .u32, .u64, .usize,
-        .float, .bool, .void, .enumeration: return true
-        .array, .optional: {
-            return union_bytes_materializable(checked, typecheck.array_type(checked, type.array_type).element, depth + 1)
+        .void, .anyopaque: return [0, 1]
+        .bool, .i8, .u8: return [1, 1]
+        .i16, .u16: return [2, 2]
+        .i32, .u32: return [4, 4]
+        .int, .isize, .usize, .u64, .float, .pointer, .function: return [8, 8]
+        .string, .slice: return [16, 8]
+        .enumeration: return snapshot_layout(checked,
+            typecheck.Type{ kind = typecheck.enum_type(checked, type.enum_type).backing }, depth + 1)
+        .array: {
+            descriptor :: typecheck.array_type(checked, type.array_type)
+            child :: snapshot_layout(checked, descriptor.element, depth + 1)
+            if (child[0] == no_index or (child[0] != 0
+                and descriptor.len > divtrunc!(maxval!(usize), child[0]))) return [no_index, 1]
+            return [child[0] * descriptor.len, child[1]]
+        }
+        .optional: {
+            child_type :: typecheck.array_type(checked, type.array_type).element
+            if (child_type.kind == .pointer or child_type.kind == .function) return [8, 8]
+            child :: snapshot_layout(checked, child_type, depth + 1)
+            if (child[0] > maxval!(usize) - child[1] * 2) return [no_index, 1]
+            return [divtrunc!(child[1] + child[0] + child[1] - 1, child[1]) * child[1], child[1]]
         }
         .fallible: {
-            channels :: typecheck.array_type(checked, type.array_type)
-            return (union_bytes_materializable(checked, channels.element, depth + 1)
-                and union_bytes_materializable(checked, channels.error_type, depth + 1))
+            descriptor :: typecheck.array_type(checked, type.array_type)
+            left :: snapshot_layout(checked, descriptor.element, depth + 1)
+            right :: snapshot_layout(checked, descriptor.error_type, depth + 1)
+            size :: if (left[0] > right[0]) left[0] else right[0]
+            if (size > maxval!(usize) - 15) return [no_index, 1]
+            return [divtrunc!(size + 7, usize(8)) * 8 + 8, 8]
         }
         .record: {
-            for (typecheck.record_type(checked, type.record_type).fields) |field| {
-                if (!union_bytes_materializable(checked, field.type, depth + 1)) return false
+            record :: typecheck.record_type(checked, type.record_type)
+            size := usize(0)
+            alignment := usize(1)
+            for (record.fields) |field| {
+                child :: snapshot_layout(checked, field.type, depth + 1)
+                if (child[0] == no_index or size > maxval!(usize) - child[1]) return [no_index, 1]
+                if (record.is_union) {
+                    if (child[0] > size) size = child[0]
+                } else {
+                    size = divtrunc!(size + child[1] - 1, child[1]) * child[1]
+                    if (child[0] > maxval!(usize) - size) return [no_index, 1]
+                    size += child[0]
+                }
+                if (child[1] > alignment) alignment = child[1]
             }
-            return true
+            if (record.is_union) {
+                alignment = 8
+                if (record.tag_type.kind == .enumeration) {
+                    if (size > maxval!(usize) - 8) return [no_index, 1]
+                    size += 8
+                }
+            }
+            if (size > maxval!(usize) - alignment) return [no_index, 1]
+            return [divtrunc!(size + alignment - 1, alignment) * alignment, alignment]
         }
-        else: return false
+        else: return [no_index, 1]
     }
+}
+
+@hide:file
+snapshot_address proc(
+    state @mut State, module @ir.Module, checked @typecheck.Result, outcome @interpreter.Outcome,
+    functions []ast.NodeId, pointer ir.Value, annotation ast.NodeId, size usize,
+    mutable bool, span ast.Span, remaining @mut usize,
+) ast.NodeId ! Error {
+    location :: interpreter.evaluation_pointer(outcome, module, pointer)
+    if (location == null or size == no_index) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+        return no_node
+    }
+    if (size > location?.byte_size - location?.byte_offset or (mutable and location?.readonly)) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+        return no_node
+    }
+    borrowed :: interpreter.evaluation_storage(outcome, module, pointer)?
+    for (borrowed[location?.byte_offset..location?.byte_offset + size]) |byte| {
+        if (byte.uninitialized) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+            return no_node
+        }
+    }
+    index := snapshot_root_index(state, location?.identity)
+    if (index == no_index) {
+        index = state.snapshot_roots?.items.len
+        try arraylist.append(state.snapshot_roots?, SnapshotRoot{ identity = location?.identity })
+    }
+    if (state.snapshot_roots?.items[index].serializing) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+        return no_node
+    }
+    if (state.snapshot_roots?.items[index].node == no_node) {
+        if (borrowed.len > remaining^) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+            return no_node
+        }
+        bytes :: try mem.alloc(ir.Value, state.allocator, borrowed.len)
+        defer mem.free(state.allocator, bytes)
+        memcopy!(bytes, borrowed)
+        count :: try ast.add_integer(state.builder, span, u64(bytes.len))
+        byte_type :: try builtin(state, annotation, .u8)
+        array_type :: try ast.add_array_type(state.builder, span, count, byte_type, true)
+        try refresh(state)
+        state.snapshot_roots?.items[index].serializing = true
+        root :: try snapshot_memory(state, module, checked, outcome, functions,
+            array_type, bytes, true, span, remaining)
+        state.snapshot_roots?.items[index].serializing = false
+        if (root == no_node) return no_node
+        state.snapshot_roots?.items[index].node = root
+    }
+    offset :: try ast.add_integer(state.builder, span, u64(location?.byte_offset))
+    result :: try ast.add_address_constant(state.builder, span, annotation, state.snapshot_roots?.items[index].node, offset)
+    try refresh(state)
+    return result
+}
+
+@hide:file
+snapshot_memory proc(
+    state @mut State, module @ir.Module, checked @typecheck.Result, outcome @interpreter.Outcome,
+    functions []ast.NodeId, annotation ast.NodeId, bytes []mut ir.Value, allow_uninitialized bool,
+    span ast.Span, remaining @mut usize,
+) ast.NodeId ! Error {
+    if (bytes.len > remaining^ or state.depth >= 128) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+        return no_node
+    }
+    remaining^ -= bytes.len
+    state.depth += 1
+    defer state.depth -= 1
+    parts := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&parts)
+    try arraylist.append(&parts, no_node)
+    index := usize(0)
+    while (index < bytes.len) {
+        byte :: bytes[index]
+        if (byte.relocation == .invalid) {
+            index += 1
+            continue
+        }
+        width :: ir.storage_size(module, byte.relocation, ir.no_array)
+        valid := byte.relocation_byte == 0 and width <= bytes.len - index
+        if (valid) {
+            for (0..width) |i| {
+                if (bytes[index + i].relocation != byte.relocation or usize(bytes[index + i].relocation_byte) != i)
+                    valid = false
+            }
+        }
+        if (!valid) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
+        value :: ir.read_storage(module, byte.relocation, ir.no_array, bytes[index..], true)
+        if (value.uninitialized) {
+            if (!allow_uninitialized and !state.snapshot_uninitialized) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                return no_node
+            }
+            for (0..width) |i| {
+                if (!bytes[index + i].uninitialized) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                    return no_node
+                }
+            }
+            for (0..width) |i| bytes[index + i].relocation = .invalid
+            index += width
+            continue
+        }
+        node := no_node
+        if ((byte.relocation == .pointer and value.data.unsigned == maxval!(u64))
+            or (byte.relocation == .function and value.data.function == maxval!(ir.FunctionId))) {
+            child_type :: try builtin(state, annotation, .u8)
+            pointer_type :: try ast.add_pointer_type(state.builder, span, child_type, true, true)
+            optional_type :: try ast.add_optional_type(state.builder, span, pointer_type)
+            literal :: try ast.add_literal(state.builder, .null, span)
+            node = try ast.add_typed_constant(state.builder, span, optional_type, literal)
+            try refresh(state)
+        } else if (byte.relocation == .pointer) {
+            child_type :: try builtin(state, annotation, .u8)
+            pointer_type :: try ast.add_pointer_type(state.builder, span, child_type, true, true)
+            try refresh(state)
+            node = try snapshot_address(state, module, checked, outcome, functions,
+                value, pointer_type, 0, false, span, remaining)
+        } else if (byte.relocation == .function) {
+            function :: usize(value.data.function)
+            if (function < functions.len and functions[function] != no_node)
+                node = try reference(state, functions[function], functions[function])
+        } else if (byte.relocation == .string and usize(value.data.string) < module.strings.items.len) {
+            node = try ast.add_string(state.builder, span, ir.string_bytes(module, value.data.string))
+        }
+        if (node == no_node) {
+            if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
+        try arraylist.append(&parts, try ast.add_integer(state.builder, span, u64(index)))
+        try arraylist.append(&parts, node)
+        for (0..width) |i| bytes[index + i] = ir.Value{ type = .u8 }
+        index += width
+    }
+    elements := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&elements)
+    for (bytes) |byte| {
+        if (byte.uninitialized and !allow_uninitialized and !state.snapshot_uninitialized) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+            return no_node
+        }
+        node :: if (byte.uninitialized) try ast.add_literal(state.builder, .undefined, span)
+            else try ast.add_integer(state.builder, span, byte.data.unsigned)
+        try arraylist.append(&elements, node)
+    }
+    count :: try ast.add_integer(state.builder, span, u64(bytes.len))
+    byte_type :: try builtin(state, annotation, .u8)
+    array_type :: try ast.add_array_type(state.builder, span, count, byte_type, true)
+    literal :: try ast.add_array_literal(state.builder, span, elements.items)
+    parts.items[0] = try ast.add_typed_constant(state.builder, span, array_type, literal)
+    payload :: try ast.add_array_literal(state.builder, span, parts.items)
+    result :: try ast.add_memory_constant(state.builder, span, annotation, payload)
+    try refresh(state)
+    return result
 }
 
 # rebuild exact slice backing annotations without retaining temporary checker IDs.
@@ -3215,7 +3568,7 @@ serialized_type proc(
 }
 
 # values leaving temporary evaluation must own no interpreter addresses or module IDs.
-# snapshot readonly storage and rebuild source literals/references before releasing their backing.
+# snapshot owned storage and rebuild source literals/references before releasing their backing.
 @hide:file
 serialize_value proc(
     state @mut State,
@@ -3247,24 +3600,75 @@ serialize_value proc(
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
         return no_node
     }
+    if (!ir.aggregate(value.type) and value.type != .pointer and value.type != .function and value.type != .string
+        and (value.relocation != .invalid or value.provenance_kinds != 0 or value.forged)) {
+        if (value.forged) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
+        annotation :: try serialized_type(state, checked, type, span, 0)
+        if (annotation == no_node) return no_node
+        bytes [16]mut ir.Value := undefined
+        size :: ir.storage_size(module, value.type, value.array_type)
+        ir.write_storage(module, bytes[..size], value)
+        return try snapshot_memory(state, module, checked, outcome, functions, annotation, bytes[..size], false, span, remaining)
+    }
     result := no_node
     if (type.kind == .slice) {
         slice :: typecheck.array_type(checked, type.array_type)
-        if (slice.mutable) return no_node
         pointer :: ir.aggregate_item(module, value, 0)
         length :: ir.aggregate_item(module, value, 1)
         if (pointer.uninitialized or length.uninitialized) {
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
             return no_node
         }
-        if (slice.element.kind != .u8 or slice.element.nominal != no_node) {
-            shape :: module.arrays.items[usize(value.array_type)]
-            count :: usize(length.data.unsigned)
-            extra :: if (slice.sentinel != null) usize(1) else usize(0)
-            if (count > remaining^ or extra > remaining^ - count) {
-                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+        location :: interpreter.evaluation_pointer(outcome, module, pointer)
+        if (location == null) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
+        count :: usize(length.data.unsigned)
+        extra :: if (slice.sentinel != null) usize(1) else usize(0)
+        if (count > remaining^ or extra > remaining^ - count) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+            return no_node
+        }
+        if (slice.mutable or snapshot_root_index(state, location?.identity) != no_index) {
+            layout :: snapshot_layout(checked, slice.element, 0)
+            if (layout[0] == no_index or (layout[0] != 0 and count + extra > divtrunc!(maxval!(usize), layout[0]))) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
                 return no_node
             }
+            size :: (count + extra) * layout[0]
+            if (size > location?.byte_size - location?.byte_offset or (slice.mutable and location?.readonly)) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+                return no_node
+            }
+            storage :: interpreter.evaluation_storage(outcome, module, pointer)?
+            for (storage[location?.byte_offset..location?.byte_offset + size]) |byte| {
+                if (byte.uninitialized) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                    return no_node
+                }
+            }
+            if (slice.sentinel != null) {
+                shape :: module.arrays.items[usize(value.array_type)]
+                sentinel :: interpreter.evaluation_element(outcome, module, pointer, count, shape.element, shape.element_array)
+                if (sentinel == null or sentinel?.data.integer != slice.sentinel?) {
+                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .sentinel_mismatch, span)
+                    return no_node
+                }
+            }
+            annotation :: try serialized_type(state, checked, type, span, 0)
+            if (annotation == no_node) return no_node
+            bytes [16]mut ir.Value := undefined
+            mem.set(bytes[..], ir.Value{ type = .u8 })
+            ir.write_storage(module, bytes[..], pointer)
+            ir.write_storage(module, bytes[8..], length)
+            return try snapshot_memory(state, module, checked, outcome, functions, annotation, bytes[..], false, span, remaining)
+        }
+        if (slice.element.kind != .u8 or slice.element.nominal != no_node) {
+            shape :: module.arrays.items[usize(value.array_type)]
             if (count != 0 and interpreter.evaluation_element(outcome, module, pointer,
                 count - 1, shape.element, shape.element_array) == null) return no_node
             elements := arraylist.init(ast.NodeId, state.allocator)
@@ -3315,8 +3719,9 @@ serialize_value proc(
         nonzero_sentinel :: slice.sentinel != null and slice.sentinel? != 0
         length_bytes :: usize(length.data.unsigned)
         if (nonzero_sentinel and length_bytes == maxval!(usize)) return no_node
-        extra :: if (nonzero_sentinel) usize(1) else usize(0)
-        bytes :: try mem.alloc(u8, state.allocator, length_bytes + extra)
+        byte_extra :: if (nonzero_sentinel) usize(1) else usize(0)
+        remaining^ -= length_bytes + byte_extra
+        bytes :: try mem.alloc(u8, state.allocator, length_bytes + byte_extra)
         defer mem.free(state.allocator, bytes)
         for (0..length_bytes) |index| {
             byte :: interpreter.evaluation_byte(outcome, module, pointer, index)
@@ -3370,23 +3775,14 @@ serialize_value proc(
     } else if (type.kind == .record) {
         record :: typecheck.record_type(checked, type.record_type)
         if (record.is_union and record.tag_type.kind != .enumeration) {
-            if (!union_bytes_materializable(checked, type, 0)) return no_node
-            bytes :: try mem.alloc(u8, state.allocator, value.data.elements.len)
+            bytes :: try mem.alloc(ir.Value, state.allocator, value.data.elements.len)
             defer mem.free(state.allocator, bytes)
-            for (value.data.elements) |byte, index| {
-                if (byte.uninitialized) {
-                    state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
-                    return no_node
-                }
-                bytes[index] = u8(byte.data.unsigned)
-            }
+            memcopy!(bytes, value.data.elements)
             annotation :: if (type.nominal != no_node) type.nominal
                 else if (record.declaration != no_node) record.declaration else record.source
             concrete :: try materialize(state, Value{ kind = .type, node = annotation })
-            literal :: try ast.add_string(state.builder, span, bytes)
-            result = try ast.add_union_constant(state.builder, span, concrete.node, literal)
-            try refresh(state)
-            return result
+            return try snapshot_memory(state, module, checked, outcome, functions,
+                concrete.node, bytes, false, span, remaining)
         }
         fields := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&fields)
@@ -3439,6 +3835,10 @@ serialize_value proc(
     } else if (type.kind == .optional) {
         container :: typecheck.array_type(checked, type.array_type)
         if (container.element.kind == .pointer or container.element.kind == .function) {
+            if (value.forged) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+                return no_node
+            }
             absent :: if (container.element.kind == .function)
                 value.data.function == maxval!(ir.FunctionId)
                 else value.data.unsigned == maxval!(u64)
@@ -3456,9 +3856,20 @@ serialize_value proc(
             result = try ast.add_builtin_call(state.builder, span, name, arguments[..])
         }
     } else if (type.kind == .function) {
+        if (value.forged) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
         index :: usize(value.data.function)
         if (index >= functions.len or functions[index] == no_node) return no_node
         result = try reference(state, functions[index], functions[index])
+    } else if (type.kind == .pointer) {
+        descriptor :: typecheck.pointer_type(checked, type.pointer_type)
+        annotation :: try serialized_type(state, checked, type, span, 0)
+        if (annotation == no_node) return no_node
+        layout :: snapshot_layout(checked, descriptor.element, 0)
+        return try snapshot_address(state, module, checked, outcome, functions,
+            value, annotation, layout[0], descriptor.mutable, span, remaining)
     } else if (ir.integer_bits(value.type) != 0 and type.kind != .pointer) {
         negative :: !ir.unsigned_integer(value.type) and value.data.integer < 0
         magnitude :: if (negative) u64(-(value.data.integer + 1)) + 1 else value.data.unsigned
@@ -3469,6 +3880,10 @@ serialize_value proc(
     } else if (type.kind == .bool) {
         result = try ast.add_boolean(state.builder, span, value.data.boolean)
     } else if (type.kind == .string) {
+        if (value.forged or usize(value.data.string) >= module.strings.items.len) {
+            state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .invalid_pointer_access, span)
+            return no_node
+        }
         result = try ast.add_string(state.builder, span, ir.string_bytes(module, value.data.string))
     } else if (type.kind == .void) {
         result = try ast.add_literal(state.builder, .void, span)
@@ -3482,11 +3897,22 @@ constant_equal proc(state @mut State, left, right ast.NodeId) bool ! Error {
     kind :: ast.expr_kind(&state.tree, left)
     if (kind != ast.expr_kind(&state.tree, right)) return false
     if (kind == .literal_void) return true
-    if (kind == .typed_constant or kind == .union_constant or kind == .slice_constant) {
-        a :: if (kind == .union_constant) ast.union_constant(&state.tree, left)
-            else if (kind == .slice_constant) ast.slice_constant(&state.tree, left) else ast.typed_constant(&state.tree, left)
-        b :: if (kind == .union_constant) ast.union_constant(&state.tree, right)
-            else if (kind == .slice_constant) ast.slice_constant(&state.tree, right) else ast.typed_constant(&state.tree, right)
+    if (kind == .address_constant) {
+        a :: ast.address_constant(&state.tree, left)
+        b :: ast.address_constant(&state.tree, right)
+        return (
+            a.value == b.value and try same_type_context(state, a.type, b.type, true)
+            and try constant_equal(state, ast.address_constant_offset(&state.tree, left), ast.address_constant_offset(&state.tree, right))
+        )
+    }
+    if (kind == .memory_constant) {
+        a :: ast.memory_constant(&state.tree, left)
+        b :: ast.memory_constant(&state.tree, right)
+        return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
+    }
+    if (kind == .typed_constant or kind == .slice_constant) {
+        a :: if (kind == .slice_constant) ast.slice_constant(&state.tree, left) else ast.typed_constant(&state.tree, left)
+        b :: if (kind == .slice_constant) ast.slice_constant(&state.tree, right) else ast.typed_constant(&state.tree, right)
         return try same_type_context(state, a.type, b.type, true) and try constant_equal(state, a.value, b.value)
     }
     if (kind == .slice) {
@@ -3532,9 +3958,17 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
     kind :: ast.expr_kind(&state.tree, id)
     hash :: enum_index(kind)
     if (kind == .literal_void) return hash
-    if (kind == .typed_constant or kind == .union_constant or kind == .slice_constant) {
-        value :: if (kind == .union_constant) ast.union_constant(&state.tree, id)
-            else if (kind == .slice_constant) ast.slice_constant(&state.tree, id) else ast.typed_constant(&state.tree, id)
+    if (kind == .address_constant) {
+        value :: ast.address_constant(&state.tree, id)
+        return mix(mix(mix(hash, usize(value.value)), try type_hash_context(state, value.type, true)),
+            try constant_hash(state, ast.address_constant_offset(&state.tree, id)))
+    }
+    if (kind == .memory_constant) {
+        value :: ast.memory_constant(&state.tree, id)
+        return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
+    }
+    if (kind == .typed_constant or kind == .slice_constant) {
+        value :: if (kind == .slice_constant) ast.slice_constant(&state.tree, id) else ast.typed_constant(&state.tree, id)
         return mix(mix(hash, try type_hash_context(state, value.type, true)), try constant_hash(state, value.value))
     }
     if (kind == .slice) {
@@ -3561,6 +3995,16 @@ constant_hash proc(state @mut State, id ast.NodeId) usize ! Error {
         return mix(hash, try constant_hash(state, ast.call_arg(&state.tree, id, 0)))
     if (kind == .enum_literal) return mix(hash, usize(ast.name_id(&state.tree, ast.enum_literal(&state.tree, id))))
     return try value_hash(state, try evaluate(state, id))
+}
+
+@hide:file
+constant_addresses proc(state @State, id ast.NodeId, depth usize) bool {
+    if (depth >= 128) return true
+    if (ast.node_class(&state.tree, id) == .expression
+        and ast.expr_kind(&state.tree, id) == .address_constant) return true
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (constant_addresses(state, ast.child(&state.tree, id, i), depth + 1)) return true
+    return false
 }
 
 @hide:file
@@ -3672,6 +4116,19 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     value :: outcome.value
     source_type :: typecheck.type_of(&checked, result_type)
     remaining := usize(100000)
+    roots := arraylist.init(SnapshotRoot, state.allocator)
+    defer arraylist.deinit(&roots)
+    previous_roots :: state.snapshot_roots
+    state.snapshot_roots = &roots
+    defer state.snapshot_roots = previous_roots
+    previous_scan :: state.snapshot_scan_remaining
+    state.snapshot_scan_remaining = 100000
+    defer state.snapshot_scan_remaining = previous_scan
+    try snapshot_reserve(state, &module, &checked, &outcome, source_type, value, 0)
+    if (state.snapshot_scan_remaining == 0) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .comptime_execution_limit, span)
+        return Value{}
+    }
     node :: try serialize_value(state, &module, &checked, &outcome, functions.items, source_type, value, span, &remaining)
     if (node == no_node) {
         if (state.evaluation_diagnostic == diagnostics.no_diagnostic)
@@ -3681,8 +4138,8 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     if (
         (ir.aggregate(value.type) and source_type.kind != .slice)
         or (source_type.kind == .slice and (ast.expr_kind(&state.tree, node) == .slice
-            or ast.expr_kind(&state.tree, node) == .slice_constant))
-        or source_type.kind == .enumeration or source_type.kind == .void
+            or ast.expr_kind(&state.tree, node) == .slice_constant or ast.expr_kind(&state.tree, node) == .memory_constant))
+        or source_type.kind == .enumeration or source_type.kind == .void or source_type.kind == .pointer
     )
         return Value{ kind = .aggregate, node = node, annotation = result_type }
     result := try evaluate(state, node)
@@ -6889,6 +7346,28 @@ type_execution_value proc(state @mut State, input, annotation ast.NodeId) ast.No
     }
     kind :: ast.expr_kind(&state.tree, expression)
     result_type :: binding(state, try canonical_type(state, annotation))
+    # keep captured roots when reading an owned constant or unwrapping its presence.
+    # compatibility remains a deferred checking obligation.
+    if (
+        kind == .address_constant or kind == .memory_constant or kind == .slice_constant
+        or kind == .typed_constant or (kind == .unary and ast.unary_expr(&state.tree, expression).operator == .unwrap)
+    ) {
+        value :: try evaluate(state, expression)
+        primitive :: match value.kind {
+            .integer, .boolean, .string, .function, .null, .real: true
+            else: false
+        }
+        if (
+            value.annotation != no_node and try same_type(state, annotation, value.annotation)
+            and (primitive or (value.kind == .aggregate and constant_addresses(state, value.node, 0)))
+        ) {
+            concrete :: if (primitive) try materialize(state, value) else value
+            result :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, expression), annotation, concrete.node)
+            try refresh(state)
+            try arraylist.append(&state.rewrites.constraints, expression)
+            return result
+        }
+    }
     if (result_type.kind == .builtin and result_type.data.builtin == .void) {
         if (kind == .literal_void) return expression
         value :: try evaluate_ir(state, expression, annotation)
@@ -7889,14 +8368,22 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         return Value{}
     }
     match kind {
-        .union_constant, .slice_constant: {
-            value :: if (kind == .union_constant) ast.union_constant(&state.tree, id) else ast.slice_constant(&state.tree, id)
+        .slice_constant: {
+            value :: ast.slice_constant(&state.tree, id)
+            return Value{ kind = .aggregate, node = id, annotation = value.type }
+        }
+        .memory_constant, .address_constant: {
+            value :: if (kind == .memory_constant) ast.memory_constant(&state.tree, id) else ast.address_constant(&state.tree, id)
             return Value{ kind = .aggregate, node = id, annotation = value.type }
         }
         .typed_constant: {
             view :: ast.typed_constant(&state.tree, id)
             if (!is_type(state, view.type) and type_record_storage(state, view.type, 0)) {
                 if (!try type_array_initialized(state, id, id)) return Value{}
+                return Value{ kind = .aggregate, node = view.value, annotation = view.type }
+            }
+            if (branch_constant(state, view.value, 0) and constant_addresses(state, view.value, 0)) {
+                try arraylist.append(&state.rewrites.constraints, id)
                 return Value{ kind = .aggregate, node = view.value, annotation = view.type }
             }
             value := try evaluate_expected(state, view.value, view.type)
@@ -7943,11 +8430,25 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
             if (view.operator == .bit_not)
                 return try evaluate_ir(state, id, try expression_type(state, id, 0))
             if (view.operator == .unwrap) {
-                # source-known callbacks already own declaration identities, not interpreter handles.
+                # source-owned payloads retain declaration/backing identities across unwraps.
                 value := try evaluate(state, view.operand)
                 annotation :: try expression_type(state, view.operand, 0)
-                if (value.kind == .function and annotation != no_node
-                    and ast.expr_kind(&state.tree, annotation) == .optional_type) {
+                if (
+                    value.kind == .aggregate and annotation != no_node
+                    and ast.expr_kind(&state.tree, annotation) == .optional_type
+                ) {
+                    child :: ast.type_operand(&state.tree, annotation)
+                    payload_kind :: ast.expr_kind(&state.tree, value.node)
+                    if (
+                        payload_kind == .builtin_call
+                        and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, value.node).name), "some")
+                    ) return try evaluate_expected(state, ast.call_arg(&state.tree, value.node, 0), child)
+                    if (payload_kind == .address_constant) return try evaluate_expected(state, value.node, child)
+                }
+                if (
+                    value.kind == .function and annotation != no_node
+                    and ast.expr_kind(&state.tree, annotation) == .optional_type
+                ) {
                     try arraylist.append(&state.rewrites.constraints, id)
                     value.annotation = ast.type_operand(&state.tree, annotation)
                     return value
@@ -8378,10 +8879,14 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         .record_type, .array_type, .slice_type, .pointer_type, .function_type, .optional_type,
         .enum_type, .union_type, .union_tag_type, .distinct_type, .fallible_type, .sum_type, .alias_expr:
             return try builtin(state, id, .type)
-        .typed_constant, .union_constant, .slice_constant: {
-            annotation :: if (kind == .union_constant) ast.union_constant(&state.tree, id).type
-                else if (kind == .slice_constant) ast.slice_constant(&state.tree, id).type
+        .typed_constant, .slice_constant: {
+            annotation :: if (kind == .slice_constant) ast.slice_constant(&state.tree, id).type
                 else ast.typed_constant(&state.tree, id).type
+            return if (is_type(state, annotation)) annotation else try canonical_type(state, annotation)
+        }
+        .memory_constant, .address_constant: {
+            annotation :: if (kind == .memory_constant) ast.memory_constant(&state.tree, id).type
+                else ast.address_constant(&state.tree, id).type
             return if (is_type(state, annotation)) annotation else try canonical_type(state, annotation)
         }
         .literal_int: return try builtin(state, id, .i64)

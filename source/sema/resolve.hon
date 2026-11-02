@@ -553,15 +553,21 @@ resolve_expr proc(
             try resolve_expr(state, scope, value.type)
             try resolve_expr(state, scope, value.value)
         }
-        .union_constant: {
-            value :: ast.union_constant(tree, id)
-            try resolve_expr(state, scope, value.type)
-            try resolve_expr(state, scope, value.value)
-        }
         .slice_constant: {
             value :: ast.slice_constant(tree, id)
             try resolve_expr(state, scope, value.type)
             try resolve_expr(state, scope, value.value)
+        }
+        .memory_constant: {
+            value :: ast.memory_constant(tree, id)
+            try resolve_expr(state, scope, value.type)
+            try resolve_expr(state, scope, value.value)
+        }
+        .address_constant: {
+            value :: ast.address_constant(tree, id)
+            try resolve_expr(state, scope, value.type)
+            try resolve_expr(state, scope, value.value)
+            try resolve_expr(state, scope, ast.address_constant_offset(tree, id))
         }
         .literal_int, .literal_float, .literal_bool, .literal_string, .literal_null, .literal_void,
         .literal_undefined: {}

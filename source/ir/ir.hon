@@ -84,12 +84,22 @@ ValueData :: union {
     elements []mut Value
     address u32
 }
+
 Value :: struct {
     type Type = .void
     array_type ArrayId = no_array
     raw bool = false
     # interpreter poison survives copies; native storage uses LLVM poison directly.
     uninitialized bool = false
+    # byte cells retain the kind and position of address-bearing scalar writes.
+    # partial overwrites invalidate the relocation; integer bits never create one.
+    relocation Type = .invalid
+    relocation_byte u8 = 0
+    forged bool = false
+    # scalar byte views can split relocations across unrelated native leaves.
+    # two kind bits and four source-position bits per byte preserve those fragments.
+    provenance_kinds u32 = 0
+    provenance_positions u64 = 0
     data ValueData = ValueData{ integer = 0 }
 }
 
@@ -236,6 +246,7 @@ Global :: struct {
     array_type ArrayId = no_array
     initializer FunctionId
     span diagnostics.Span
+    alignment usize = 0
 }
 
 #! retains the original allocation for freeing while exposing only decoded bytes.
@@ -446,13 +457,39 @@ storage_size proc(module @Module, type Type, shape ArrayId) usize {
 #! loads a scalar or borrows an aggregate from byte cells without allocating.
 read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, raw bool) Value {
     if (aggregate(type)) return Value{ type = type, array_type = shape, raw = raw, data = ValueData{ elements = cells[..storage_size(module, type, shape)] } }
+    if (type == .u8) return cells[0]
     bits u64 := 0
     size :: storage_size(module, type, shape)
     count :: if (size > 8) usize(8) else size
-    for (0..count) |i| {
+    for (0..size) |i| {
         if (cells[i].uninitialized) return Value{ type = type, uninitialized = true }
     }
     for (0..count) |i| bits += cells[i].data.unsigned << u64(i * 8)
+    relocation := if (size == 0) Type.invalid else cells[0].relocation
+    complete := relocation != .invalid
+    provenance_kinds := u32(0)
+    provenance_positions := u64(0)
+    for (0..size) |i| {
+        code u32 :: match cells[i].relocation {
+            .pointer: 1
+            .function: 2
+            .string: 3
+            else: 0
+        }
+        if (code != 0) {
+            provenance_kinds = provenance_kinds | (code << u32(i * 2))
+            provenance_positions = provenance_positions | (u64(cells[i].relocation_byte) << u64(i * 4))
+        }
+        if (cells[i].relocation != relocation or usize(cells[i].relocation_byte) != i) complete = false
+    }
+    if (!complete) relocation = .invalid
+    forged := false
+    if (type == .pointer and (!complete or (relocation != .pointer and relocation != .function))) forged = true
+    if (
+        type == .function and (!complete
+            or (relocation != .function and !(relocation == .pointer and bits == maxval!(u64))))
+    ) forged = true
+    if (type == .string and (!complete or relocation != .string)) forged = true
     data := ValueData{ unsigned = bits }
     match type {
         .i8: data = ValueData{ integer = i64(ptrcast!(@i8, &bits)^) }
@@ -466,11 +503,18 @@ read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, r
         .void: return Value{}
         else: {}
     }
-    return Value{ type = type, data = data }
+    return Value{
+        type = type, data = data, relocation = relocation,
+        forged = forged, provenance_kinds = provenance_kinds, provenance_positions = provenance_positions,
+    }
 }
 
 #! stores a value in shared byte cells; recursive aggregates preserve their native field padding.
 write_storage proc(module @Module, cells []mut Value, value Value) void {
+    if (value.type == .u8) {
+        cells[0] = value
+        return
+    }
     if (aggregate(value.type)) {
         shape :: module.arrays.items[usize(value.array_type)]
         if (value.raw or shape.is_union) {
@@ -495,11 +539,33 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
         else: bits = ptrcast!(@u64, &value.data.integer)^
     }
     size :: storage_size(module, value.type, value.array_type)
+    relocation := Type.invalid
+    if (!value.forged) {
+        relocation = value.relocation
+        if (relocation == .invalid and (value.type == .pointer or value.type == .function or value.type == .string))
+            relocation = value.type
+    }
     for (0..size) |i| {
         byte u64 := 0
         if (i < 8) byte = (bits >> u64(i * 8)) & 255
         else byte = (u64(string_bytes(module, value.data.string).len) >> u64((i - 8) * 8)) & 255
-        cells[i] = Value{ type = .u8, uninitialized = value.uninitialized, data = ValueData{ unsigned = byte } }
+        byte_relocation := relocation
+        position := u8(i)
+        if (value.provenance_kinds != 0) {
+            code :: (value.provenance_kinds >> u32(i * 2)) & 3
+            byte_relocation = match code {
+                1: .pointer
+                2: .function
+                3: .string
+                else: .invalid
+            }
+            position = u8((value.provenance_positions >> u64(i * 4)) & 15)
+        }
+        cells[i] = Value{
+            type = .u8, uninitialized = value.uninitialized,
+            relocation = byte_relocation, relocation_byte = position,
+            data = ValueData{ unsigned = byte },
+        }
     }
 }
 

@@ -81,7 +81,10 @@ emit proc(
         try io.print("@g{} = internal global ", output, {index})
         storage_kind :: if (global.type == .void) ir.Type.invalid else global.type
         try write_type(output, module, Type{ kind = storage_kind, shape = global.array_type })
-        try io.print(" zeroinitializer\n@gs{} = internal global i8 0\n", output, {index})
+        alignment usize := global.alignment
+        if (alignment == 0) alignment = ir.storage_alignment(module, global.type, global.array_type)
+        try io.print(" zeroinitializer, align {}\n@gs{} = internal global i8 0\n",
+            output, {alignment, index})
         try emit_global(output, module, global, index)
     }
     for (module.arrays.items) |shape, index| {

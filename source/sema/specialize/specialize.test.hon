@@ -237,8 +237,11 @@ keeps_borrowed_snapshots_owned_and_explicit_numeric_annotations_rigid test {
         `    values [2]mut i16 := [19, 23]
         `    return borrow(values[..])
         `}
-        `main proc() void { values :: $(produce()) }
-        , .comptime_value_escape, 1,
+        `main proc() i16 { values :: $(produce())
+        `    values[0] += 4
+        `    return values[0] + values[1]
+        `}
+        , .comptime_value_escape, 0,
     )
     try expect_specialization(
         `produce proc() usize {
@@ -502,5 +505,55 @@ preserves_explicit_arguments_and_explicit_type_procedure_inputs test {
         `Box proc($T type) type { return struct { value T } }
         `main proc() void { value Box() :: { value = 7 } }
         , .argument_count_mismatch, 1,
+    )
+}
+
+rejects_integer_forged_and_incomplete_materialized_pointers test {
+    try expect_specialization(
+        `Overlay :: union { pointer @mut i16, bits u64 }
+        `forge proc() @mut i16 {
+        `    value Overlay :: { bits = 0 }
+        `    return value.pointer
+        `}
+        `main proc() void { pointer :: $(forge()) }
+        , .invalid_pointer_access, 1,
+    )
+    try expect_specialization(
+        `produce proc() @mut [2]i16 {
+        `    value i16 := 19
+        `    return ptrcast!(@mut [2]i16, &value)
+        `}
+        `main proc() void { pointer :: $(produce()) }
+        , .invalid_pointer_access, 1,
+    )
+}
+
+promotes_owned_pointer_and_slice_defaults_into_optional_parameters test {
+    try expect_specialization(
+        `make_pointer proc() @mut i16 {
+        `    value i16 := 19
+        `    return &value
+        `}
+        `make_slice proc() []mut i16 {
+        `    values [2]mut i16 := [19, 23]
+        `    return values[..]
+        `}
+        `PointerBox proc($default ?@mut i16) type {
+        `    return struct { left @mut i16 = default?, right @mut i16 = default? }
+        `}
+        `SliceBox proc($default ?[]mut i16) type {
+        `    return struct { left []mut i16 = default?, right []mut i16 = default? }
+        `}
+        `Pointers :: alias PointerBox(make_pointer())
+        `Slices :: alias SliceBox(make_slice())
+        `main proc() i16 {
+        `    pointers Pointers :: {}
+        `    slices Slices :: {}
+        `    pointers.left^ += 4
+        `    slices.left[0] += 4
+        `    if (pointers.right^ != 23 or slices.right[0] != 23) return -1
+        `    return pointers.left^ + slices.left[1]
+        `}
+        , .type_mismatch, 0,
     )
 }

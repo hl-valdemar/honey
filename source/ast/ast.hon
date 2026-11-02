@@ -83,8 +83,9 @@ ExprKind :: enum {
     try_expr
     catch_expr
     typed_constant
-    union_constant
     slice_constant
+    memory_constant
+    address_constant
     comptime_expr
     literal_void
     literal_undefined
@@ -198,8 +199,9 @@ NodeKind :: enum {
     stmt_errdefer
     stmt_block
     expr_typed_constant
-    expr_union_constant
     expr_slice_constant
+    expr_memory_constant
+    expr_address_constant
     expr_comptime
     literal_float_value
     literal_void
@@ -616,17 +618,6 @@ add_typed_constant proc(
     }, at)
 }
 
-#! retains an untagged union's complete native-layout bytes as a string literal.
-add_union_constant proc(
-    builder @mut Builder, at Span, type, bytes NodeId,
-) NodeId ! mem.AllocError {
-    return try add_node(builder, Node{
-        kind = .expr_union_constant,
-        data0 = NodeData{ node_id = type },
-        data1 = NodeData{ node_id = bytes },
-    }, at)
-}
-
 #! owns a readonly slice's typed fixed-array backing, including any sentinel.
 add_slice_constant proc(
     builder @mut Builder, at Span, type, elements NodeId,
@@ -635,6 +626,30 @@ add_slice_constant proc(
         kind = .expr_slice_constant,
         data0 = NodeData{ node_id = type },
         data1 = NodeData{ node_id = elements },
+    }, at)
+}
+
+#! retains native bytes and explicit relocations, never temporary interpreter handles.
+#! `parts` is [typed byte array, byte offset, typed value, ...].
+add_memory_constant proc(
+    builder @mut Builder, at Span, type, parts NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_memory_constant,
+        data0 = NodeData{ node_id = type },
+        data1 = NodeData{ node_id = parts },
+    }, at)
+}
+
+#! references an owned memory root at a native byte offset; shared roots preserve aliases.
+add_address_constant proc(
+    builder @mut Builder, at Span, type, root, offset NodeId,
+) NodeId ! mem.AllocError {
+    return try add_node(builder, Node{
+        kind = .expr_address_constant,
+        main = NodeData{ node_id = offset },
+        data0 = NodeData{ node_id = type },
+        data1 = NodeData{ node_id = root },
     }, at)
 }
 
@@ -1635,8 +1650,9 @@ expression_kind proc(kind NodeKind) ExprKind {
         .expr_try: .try_expr
         .expr_catch: .catch_expr
         .expr_typed_constant: .typed_constant
-        .expr_union_constant: .union_constant
         .expr_slice_constant: .slice_constant
+        .expr_memory_constant: .memory_constant
+        .expr_address_constant: .address_constant
         .expr_comptime: .comptime_expr
         .expr_block: .block_expr
         .literal_float_value: .literal_float
@@ -1690,15 +1706,6 @@ typed_constant proc(tree @Tree, id NodeId) TypedConstantView {
     }
 }
 
-union_constant proc(tree @Tree, id NodeId) TypedConstantView {
-    node :: get_node(&tree.storage, id)
-    debug.assert(node.kind == .expr_union_constant)
-    return TypedConstantView{
-        type = node.data0.node_id,
-        value = node.data1.node_id,
-    }
-}
-
 slice_constant proc(tree @Tree, id NodeId) TypedConstantView {
     node :: get_node(&tree.storage, id)
     debug.assert(node.kind == .expr_slice_constant)
@@ -1706,6 +1713,24 @@ slice_constant proc(tree @Tree, id NodeId) TypedConstantView {
         type = node.data0.node_id,
         value = node.data1.node_id,
     }
+}
+
+memory_constant proc(tree @Tree, id NodeId) TypedConstantView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_memory_constant)
+    return TypedConstantView{ type = node.data0.node_id, value = node.data1.node_id }
+}
+
+address_constant proc(tree @Tree, id NodeId) TypedConstantView {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_address_constant)
+    return TypedConstantView{ type = node.data0.node_id, value = node.data1.node_id }
+}
+
+address_constant_offset proc(tree @Tree, id NodeId) NodeId {
+    node :: get_node(&tree.storage, id)
+    debug.assert(node.kind == .expr_address_constant)
+    return node.main.node_id
 }
 
 catch_expr proc(tree @Tree, id NodeId) CatchExprView {
@@ -2063,10 +2088,12 @@ node_layout proc(node Node) NodeLayout {
         .literal_int, .literal_float, .literal_float_value, .literal_string, .literal_bool, .literal_null,
         .literal_void, .literal_undefined, .expr_identifier, .invalid_expr: {}
         .expr_unary: layout.direct_children = 2
-        .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant, .expr_union_constant, .expr_slice_constant,
+        .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant, .expr_slice_constant,
+        .expr_memory_constant,
         .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
+        .expr_address_constant: layout.direct_children = 7
         .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_union_tag_type, .expr_enum_literal,
         .expr_try, .expr_comptime, .expr_block: layout.direct_children = 1
         .expr_call, .expr_builtin_call, .expr_function_type, .expr_array_literal,
@@ -2260,6 +2287,8 @@ clone_subtree proc(
     if (root == no_node or usize(root) >= mapping.len) return root
     if (mapping[usize(root)] != no_node) return mapping[usize(root)]
     original :: get_node(&builder.storage, root)
+    # snapshots are already concrete; cloning a captured root would split aliases.
+    if (original.kind == .expr_memory_constant) return root
     span :: get_span(&builder.storage, root)
     layout :: node_layout(original)
     cloned := original

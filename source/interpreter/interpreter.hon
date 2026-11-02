@@ -108,6 +108,61 @@ EvaluationMemory :: struct {
     frames arraylist.ArrayList(Frame)
 }
 
+#! identifies a retained allocation independently of its interior pointer handles.
+EvaluationPointer :: struct {
+    identity usize
+    byte_offset usize
+    byte_size usize
+    readonly bool
+}
+
+@hide:file
+invalid_data_pointer proc(value ir.Value) bool {
+    return value.forged or value.relocation == .function or value.relocation == .string
+}
+
+@hide:file
+valid_comparison_operand proc(module @ir.Module, pointers []Pointer, value @ir.Value) bool {
+    if (value.forged) return false
+    if (value.type == .pointer) {
+        bits :: value.data.unsigned
+        if (bits == maxval!(u64)) return true
+        if (value.relocation == .function) return bits < u64(module.functions.items.len)
+        if (bits >= u64(pointers.len)) return false
+        return pointer_range(module, pointers[usize(bits)], 0)
+    }
+    if (value.type == .function)
+        return value.data.function == maxval!(ir.FunctionId) or usize(value.data.function) < module.functions.items.len
+    if (value.type == .string) return usize(value.data.string) < module.strings.items.len
+    return true
+}
+
+evaluation_pointer proc(outcome @Outcome, module @ir.Module, pointer ir.Value) ?EvaluationPointer {
+    if (outcome.evaluation_memory == null or pointer.type != .pointer or invalid_data_pointer(pointer)) return null
+    memory :: &outcome.evaluation_memory?[0]
+    if (pointer.data.unsigned >= u64(memory.pointers.items.len)) return null
+    location :: memory.pointers.items[usize(pointer.data.unsigned)]
+    size :: pointer_size(module, location)
+    if (location.byte_offset > size) return null
+    return EvaluationPointer{
+        identity = ptrcast!(@usize, &location.root)^,
+        byte_offset = location.byte_offset, byte_size = size, readonly = location.readonly,
+    }
+}
+
+#! borrows all bytes of the pointer's allocation, including relocation provenance.
+#! scratch-backed results remain valid only until the next evaluation accessor call.
+evaluation_storage proc(outcome @Outcome, module @ir.Module, pointer ir.Value) ?[]mut ir.Value {
+    if (evaluation_pointer(outcome, module, pointer) == null) return null
+    memory :: &outcome.evaluation_memory?[0]
+    location :: memory.pointers.items[usize(pointer.data.unsigned)]
+    if (location.bytes.len != 0) return location.bytes
+    cells :: memory.scratch[..pointer_size(module, location)]
+    mem.set(cells, ir.Value{ type = .u8, data = ir.ValueData{ unsigned = 0 } })
+    ir.write_storage(module, cells, location.root^)
+    return cells
+}
+
 #! borrows one checked typed element from retained evaluation storage; null means an invalid pointer/range.
 #! aggregate storage may borrow scratch valid only until the next evaluation accessor call.
 evaluation_element proc(
@@ -118,7 +173,7 @@ evaluation_element proc(
     type ir.Type,
     shape ir.ArrayId,
 ) ?ir.Value {
-    if (outcome.evaluation_memory == null or pointer.type != .pointer) return null
+    if (evaluation_pointer(outcome, module, pointer) == null) return null
     memory :: &outcome.evaluation_memory?[0]
     handle :: pointer.data.unsigned
     if (handle >= u64(memory.pointers.items.len)) return null
@@ -271,7 +326,8 @@ execute proc(
             }
             if (frames.items.len == 1) {
                 if $(bounded) {
-                    if (pointers.items.len != 0 and (ir.aggregate(value.type) or value.type == .pointer)) {
+                    if (pointers.items.len != 0 and (ir.aggregate(value.type) or value.type == .pointer
+                        or value.relocation != .invalid or value.provenance_kinds != 0)) {
                         owned :: try mem.alloc(EvaluationMemory, allocator, 1)
                         errdefer mem.free(allocator, owned)
                         try arraylist.append(&retained, completed)
@@ -310,6 +366,25 @@ execute proc(
         instruction :: &block.instructions.items[instruction_index]
         frames.items[frame_index].next_instruction += 1
         value := ir.Value{}
+        # native address bits are unavailable during evaluation; never compute on handle IDs.
+        if (instruction.left != ir.no_value) {
+            numeric :: match instruction.op {
+                .convert, .negate, .logical_not, .bit_not, .bit_and, .bit_or, .bit_xor,
+                .shift_left, .shift_right, .shift_left_saturating,
+                .add, .subtract, .multiply, .divide, .remainder: true
+                else: false
+            }
+            if (numeric) {
+                left :: frames.items[frame_index].values[usize(instruction.left)]
+                if (left.relocation != .invalid or left.provenance_kinds != 0 or left.forged)
+                    return try runtime_trap(diagnostic_store, .comptime_value_escape, instruction.span)
+                if (instruction.right != ir.no_value) {
+                    right :: frames.items[frame_index].values[usize(instruction.right)]
+                    if (right.relocation != .invalid or right.provenance_kinds != 0 or right.forged)
+                        return try runtime_trap(diagnostic_store, .comptime_value_escape, instruction.span)
+                }
+            }
+        }
         match instruction.op {
             .constant: value = instruction.constant
             .undefined_value: {
@@ -363,6 +438,9 @@ execute proc(
             }
             .call: {
                 callable :: frames.items[frame_index].values[usize(instruction.left)]
+                if (callable.forged or (callable.data.function != maxval!(ir.FunctionId)
+                    and usize(callable.data.function) >= module.functions.items.len))
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 if (callable.data.function == maxval!(ir.FunctionId)) return try runtime_trap(diagnostic_store, .null_unwrap, instruction.span)
                 callee :: callable.data.function
                 if (module.functions.items[usize(callee)].external_name.len != 0) return try runtime_trap(diagnostic_store, .unsupported_foreign_call, instruction.span)
@@ -408,10 +486,14 @@ execute proc(
             .union_tag: value = ir.union_tag(module, frames.items[frame_index].values[usize(instruction.left)])
             .string_length: {
                 string :: frames.items[frame_index].values[usize(instruction.left)].data.string
+                if (frames.items[frame_index].values[usize(instruction.left)].forged or usize(string) >= module.strings.items.len)
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 value = ir.Value{ type = .usize, data = ir.ValueData{ unsigned = u64(ir.string_bytes(module, string).len) } }
             }
             .string_pointer: {
                 string :: frames.items[frame_index].values[usize(instruction.left)].data.string
+                if (frames.items[frame_index].values[usize(instruction.left)].forged or usize(string) >= strings.len)
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 view :: &strings[usize(string)]
                 value = try pointer_value(&pointers, Pointer{
                     root = &view.root, root_type = .u8, root_array = ir.no_array,
@@ -427,6 +509,8 @@ execute proc(
             }
             .optional_check: {
                 operand :: frames.items[frame_index].values[usize(instruction.left)]
+                if ((operand.type == .pointer or operand.type == .function) and operand.forged)
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 absent := operand.data.unsigned == maxval!(u64)
                 if (operand.type == .bool) absent = !operand.data.boolean
                 else if (operand.type == .function) absent = operand.data.function == maxval!(ir.FunctionId)
@@ -435,6 +519,10 @@ execute proc(
             }
             .pointer_cast: {
                 value = frames.items[frame_index].values[usize(instruction.left)]
+                if (value.type != .pointer and value.type != .function) value.forged = true
+                if (instruction.type == .function and value.type == .pointer
+                    and value.relocation != .function and value.data.unsigned != maxval!(u64)) value.forged = true
+                if (value.type == .function) value.relocation = .function
                 if (value.type == .function) {
                     bits :: if (value.data.function == maxval!(ir.FunctionId)) maxval!(u64) else u64(value.data.function)
                     value.data = ir.ValueData{ unsigned = bits }
@@ -443,6 +531,8 @@ execute proc(
             }
             .sentinel_check: {
                 handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (invalid_data_pointer(frames.items[frame_index].values[usize(instruction.left)]))
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 if (handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 address :: pointer_address(module, pointers.items[usize(handle)], instruction.pointee, instruction.array_type)
                 if (address == null) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
@@ -458,12 +548,16 @@ execute proc(
                 if (count > u64(divtrunc!(maxval!(usize), width))) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 size :: usize(count) * width
                 destination_handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (invalid_data_pointer(frames.items[frame_index].values[usize(instruction.left)]))
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 if (destination_handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 destination := pointers.items[usize(destination_handle)]
                 if (destination.readonly or !pointer_range(module, destination, size)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 source := destination
                 if (instruction.op == .memory_copy) {
                     source_handle :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
+                    if (invalid_data_pointer(frames.items[frame_index].values[usize(instruction.right)]))
+                        return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                     if (source_handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                     source = pointers.items[usize(source_handle)]
                     if (!pointer_range(module, source, size)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
@@ -614,6 +708,8 @@ execute proc(
             }
             .pointer_address: {
                 handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (invalid_data_pointer(frames.items[frame_index].values[usize(instruction.left)]))
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 if (handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 location :: pointers.items[usize(handle)]
                 if (pointer_address(module, location, instruction.pointee, instruction.array_type)) |address| {
@@ -625,6 +721,8 @@ execute proc(
             }
             .pointer_offset: {
                 handle :: frames.items[frame_index].values[usize(instruction.left)].data.unsigned
+                if (invalid_data_pointer(frames.items[frame_index].values[usize(instruction.left)]))
+                    return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 if (handle >= u64(pointers.items.len)) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
                 address := pointers.items[usize(handle)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
@@ -732,6 +830,16 @@ execute proc(
             .equal, .not_equal, .less, .less_equal, .greater, .greater_equal: {
                 left :: frames.items[frame_index].values[usize(instruction.left)]
                 right :: frames.items[frame_index].values[usize(instruction.right)]
+                addressed :: left.type == .pointer or left.type == .function or left.type == .string
+                if (addressed) {
+                    if (
+                        !valid_comparison_operand(module, pointers.items, &left)
+                        or !valid_comparison_operand(module, pointers.items, &right)
+                    ) return try runtime_trap(diagnostic_store, .invalid_pointer_access, instruction.span)
+                } else if (
+                    left.relocation != .invalid or left.provenance_kinds != 0 or left.forged
+                    or right.relocation != .invalid or right.provenance_kinds != 0 or right.forged
+                ) return try runtime_trap(diagnostic_store, .comptime_value_escape, instruction.span)
                 result := false
                 match left.type {
                     .int, .isize, .i8, .i16, .i32: result = match instruction.op {
@@ -771,10 +879,25 @@ execute proc(
                         .not_equal: left.data.function != right.data.function
                         else: unreachable
                     }
-                    .pointer: result = match instruction.op {
-                        .equal: left.data.unsigned == right.data.unsigned
-                        .not_equal: left.data.unsigned != right.data.unsigned
-                        else: unreachable
+                    .pointer: {
+                        same_domain :: (
+                            left.data.unsigned == maxval!(u64)
+                            or (left.relocation == .function) == (right.relocation == .function)
+                        )
+                        equal :: same_domain and left.data.unsigned == right.data.unsigned
+                        result = match instruction.op {
+                            .equal: equal
+                            .not_equal: !equal
+                            else: unreachable
+                        }
+                    }
+                    .string: {
+                        equal :: mem.eql(ir.string_bytes(module, left.data.string), ir.string_bytes(module, right.data.string))
+                        result = match instruction.op {
+                            .equal: equal
+                            .not_equal: !equal
+                            else: unreachable
+                        }
                     }
                     else: unreachable
                 }
@@ -891,12 +1014,12 @@ pointer_value proc(pointers @mut arraylist.ArrayList(Pointer), address Pointer) 
         if (ptrcast!(@usize, &location.root)^ == root_bits and location.byte_offset == address.byte_offset) {
             # refresh metadata if a later invocation reused a released frame's allocation.
             pointers.items[handle] = address
-            return ir.Value{ type = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
+            return ir.Value{ type = .pointer, relocation = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
         }
     }
     handle :: pointers.items.len
     try arraylist.append(pointers, address)
-    return ir.Value{ type = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
+    return ir.Value{ type = .pointer, relocation = .pointer, data = ir.ValueData{ unsigned = u64(handle) } }
 }
 
 @hide:file
