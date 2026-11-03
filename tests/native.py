@@ -11,6 +11,80 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "multiline_strings_preserve_raw_bytes_and_content_indentation": (
+        r'''
+        main proc() string {
+            return `a\q\n\x41 "quoted" ` # raw content
+              `  é
+                `	end
+        }
+        ''', b'a\\q\\n\\x41 "quoted" ` # raw content\n  \xc3\xa9\n\tend\n', None,
+    ),
+    "multiline_strings_preserve_blank_lines_and_explicit_trailing_newline": (
+        """
+        main proc() string {
+            text ::
+                `hello
+                `
+                `world
+                `
+            return text
+        }
+        """, b"hello\n\nworld\n\n", None,
+    ),
+    "multiline_strings_allow_empty_content": (
+        """
+        main proc() string {
+            return `
+        }
+        """, b"\n", None,
+    ),
+    "multiline_strings_share_comptime_identity_and_generated_defaults": (
+        r'''
+        name ::
+            `value
+        raw ::
+            `a\n
+            `b
+        Tag proc($text string) type { return struct { value string = text } }
+        identity proc(text string) string { return text }
+        main proc() string {
+            if (Tag(raw) != Tag("a\\n\nb")) return "wrong identity"
+            value Tag(identity(raw)) :: {}
+            return field!(value, name)
+        }
+        ''', b"a\\n\nb\n", None,
+    ),
+    "multiline_strings_end_before_comments_and_unmarked_blank_lines": (
+        """
+        first ::
+            `a
+        # this breaks the literal
+        second ::
+            `b
+
+        main proc() string {
+            if (first.len != 1) return "joined"
+            return second
+        }
+        """, b"b\n", None,
+    ),
+    "multiline_strings_keep_following_diagnostic_locations": (
+        """
+        main proc() i16 {
+            text ::
+                `a
+                `b
+            return missing
+        }
+        """, b"", b":5:12:",
+    ),
+    "multiline_strings_are_not_import_paths": (
+        """
+        import `library
+        main proc() i16 { return 42 }
+        """, b"42\n", b"unexpected token",
+    ),
     "comptime_nonnull_pointer_results_own_mutable_scalar_storage": (
         """
         make proc() @mut i16 { value i16 := 40

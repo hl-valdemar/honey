@@ -3,6 +3,36 @@ import "@std/testing"
 import "@source/diagnostics"
 import "@source/strpool"
 
+scans_raw_marked_lines_without_consuming_statement_boundaries test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    literals [3][]u8 :: ["`", "`last", "`a\n \t`b\n\t`"]
+    for (literals) |literal| {
+        state := init(mem.c_allocator)
+        defer deinit(&state)
+        state.source_id = diagnostics.SourceId(7)
+        try scan(&state, literal, &pool, &diagnostic_store)
+        try testing.expect_equal(TokenKind.multiline_string, state.tokens.items[0].kind)
+        try testing.expect_equal(diagnostics.SourceId(7), state.tokens.items[0].span.source)
+        try testing.expect_equal(u32(literal.len), state.tokens.items[0].span.end)
+        try testing.expect_equal(TokenKind.eof, state.tokens.items[1].kind)
+    }
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "`a\n  `b\n # stop\n`c\n\n`d\nnext :: 1", &pool, &diagnostic_store)
+    expected [12]TokenKind :: [
+        .multiline_string, .newline, .newline, .multiline_string, .newline,
+        .newline, .multiline_string, .newline, .ident, .double_colon, .int, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal(u32(7), state.tokens.items[0].span.end)
+    try testing.expect_equal(u32(7), state.tokens.items[1].span.start)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
 scans_character_literals_and_preserves_unterminated_line_provenance test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)

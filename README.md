@@ -326,6 +326,17 @@ explicit numeric conversion uses `T(value)`, such as `u8(index)`, `usize(byte)` 
 
 character literals contain one Unicode scalar value, such as `'A'` or `'é'`, and use contextual integer typing. escapes support `\0`, `\n`, `\r`, `\t`, `\\` and `\'`; invalid UTF-8, multiple characters, unknown escapes and unterminated literals diagnose. destination integer widths still constrain code points.
 
+raw multiline strings use a backtick at the start of each content line. consecutive marked lines join with `\n`; spaces and tabs before each marker are discarded, while all bytes after it are preserved without escape processing. an empty marked line contributes an empty line, including a trailing newline when it is last. the final source newline terminates the surrounding statement rather than becoming string content; an unmarked blank or comment line ends the literal. initializers may put the first marker on the following line; `return` operands must still start on the same line. multiline strings use the ordinary string type, owned storage and content-based compile-time specialization identity; import paths still require quoted literals.
+
+```hon
+message ::
+    `hello
+    `world
+    `
+```
+
+this stores `"hello\nworld\n"`.
+
 `@std/strconv.parse_float(allocator, text)` parses a complete borrowed `[]u8` decimal into `f64`. it accepts an optional sign, decimal point, and exponent; whitespace, embedded NUL bytes, trailing input, hexadecimal, infinities, and NaNs return `invalid_number`. finite subnormals and signed zero are preserved; overflow and nonzero values rounded to zero return `out_of_range`. allocation failures propagate as `out_of_memory`, and temporary storage is always released. the Darwin backend uses libc's C-locale conversion without changing the process locale; rounding follows the caller's floating-point rounding mode. numeric lowering uses this interface, keeping exact integer-to-float validation compiler-specific.
 
 type errors carry source spans and diagnostic identities; invalid operands propagate their existing identity without duplicate errors, while independent expressions, arguments and nested bodies are still checked. inference cycles without a type anchor are diagnosed. function signatures are checked independently of their bodies. bare `return` and same-line `return expression` are supported inside function bodies and must match the declared result type. nonvoid return-path checking is structural: every path must return or terminate in a diagnostic trap, and both conditional successors are considered without constant folding. a missing `else` or a loop permits fallthrough, even for a literal `true` condition; a later return can close that path. statements after a return and untaken branches or loops are still type-checked but are not executed.

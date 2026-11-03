@@ -178,6 +178,24 @@ scan proc(
             cursor = result.end
             continue
         }
+        if (char == '`') {
+            start :: cursor
+            while (true) {
+                cursor += 1
+                while (cursor < program.len and program[cursor] != '\n') cursor += 1
+                look := cursor
+                if (look < program.len) look += 1
+                while (look < program.len and (program[look] == ' ' or program[look] == '\t')) look += 1
+                if (look >= program.len or program[look] != '`') break
+                cursor = look
+            }
+            # leave the final newline to terminate the surrounding statement.
+            try add_token(state, Token{
+                span = make_span(source, start, cursor),
+                kind = .multiline_string,
+            })
+            continue
+        }
 
         if (char == '.' and cursor + 1 < program.len and program[cursor + 1] == '.') {
             inclusive :: cursor + 2 < program.len and program[cursor + 2] == '='

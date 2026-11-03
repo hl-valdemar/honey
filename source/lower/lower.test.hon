@@ -96,6 +96,21 @@ owns_decoded_strings_after_source_and_frontend_are_freed test {
     try testing.expect(mem.eql(ir.string_bytes(&module, outcome.value.data.string), "a\\\"\n\r\t\x00Az"))
 }
 
+owns_raw_multiline_bytes_after_frontend_cleanup test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(
+        "main proc() string {\nreturn `a\\q\"`\n\t` \x00é\r\n  `\n}\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal([]u8, "a\\q\"`\n \x00é\r\n", ir.string_bytes(&module, outcome.value.data.string))
+}
+
 resolves_module_local_string_ids_after_frontend_cleanup test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
