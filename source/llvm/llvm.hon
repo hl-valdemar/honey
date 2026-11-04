@@ -99,6 +99,11 @@ emit proc(
             }
             if (
                 duplicate
+                or (module.entry_init_io != null and (
+                    mem.eql(function.external_name, "malloc")
+                    or mem.eql(function.external_name, "free")
+                    or mem.eql(function.external_name, "strlen")
+                ))
                 or mem.eql(function.external_name, "write")
                 or mem.eql(function.external_name, "__error")
                 or mem.eql(function.external_name, "snprintf")
@@ -116,7 +121,8 @@ emit proc(
         state := State{ output = output, module = module, line_starts = line_starts.items, values = values }
         try emit_function(&state, &function, index)
     }
-    try io.write_all(output, "define i32 @main() {\nentry:\n")
+    if (module.entry_init_io) |system| try emit_init_arguments(output, module, system)
+    else try io.write_all(output, "define i32 @main() {\nentry:\n")
     if (module.entry) |entry| {
         function :: module.functions.items[usize(entry)]
         result :: Type{ kind = function.result, shape = function.result_array_type }
@@ -126,7 +132,11 @@ emit proc(
         try write_abi_result(output, module, result)
         try io.write_all(output, " ")
         try function_symbol(output, module, entry)
-        try io.write_all(output, "()\n")
+        if (module.entry_init_io != null) {
+            try io.write_all(output, "(")
+            try write_type(output, module, local_type(&function, 0))
+            try io.write_all(output, " %init)\n  call void @free(ptr %descriptors)\n")
+        } else try io.write_all(output, "()\n")
         printable := result
         operand usize := 0
         if (function.result_fallible) {
@@ -151,17 +161,78 @@ emit proc(
                 try io.write_all(output, ", ptr %payload\n")
             }
         }
-        if (printable.kind != .void and printable.kind != .invalid) {
+        if (module.entry_init_io == null and printable.kind != .void and printable.kind != .invalid) {
             try print_call(output, module, printable, operand)
             try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
         }
         try io.write_all(output, "  call void @report(i64 -1)\n")
-        status i32 :: if (diagnostics.count(diagnostic_store) == 0) 0 else 1
-        try io.print("  ret i32 {}\n", output, {status})
+        if (module.entry_init_io != null and diagnostics.count(diagnostic_store) == 0) {
+            if (printable.kind == .i32) try io.print("  ret i32 %r{}\n", output, {operand})
+            else try io.write_all(output, "  ret i32 0\n")
+        } else {
+            status i32 :: if (diagnostics.count(diagnostic_store) == 0) 0 else 1
+            try io.print("  ret i32 {}\n", output, {status})
+        }
     } else {
         try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
     }
     try io.write_all(output, "}\n")
+}
+
+@hide:file
+emit_init_arguments proc(output io.Writer, module @ir.Module, system ir.FunctionId) void ! io.WriteError {
+    function :: &module.functions.items[usize(module.entry?)]
+    init :: local_type(function, 0)
+    io_function :: &module.functions.items[usize(system)]
+    io_type :: Type{ kind = io_function.result, shape = io_function.result_array_type }
+    try io.write_all(output,
+        `declare ptr @malloc(i64)
+        `declare void @free(ptr)
+        `declare i64 @strlen(ptr)
+        `@startup_error = private constant [59 x i8] c"infrastructure error: cannot allocate argument descriptors\0A"
+        `define i32 @main(i32 %argc, ptr %argv) {
+        `entry:
+        `  %argc64 = zext i32 %argc to i64
+        `  %empty = icmp eq i32 %argc, 0
+        `  %count = select i1 %empty, i64 1, i64 %argc64
+        `  %size = mul i64 %count, 16
+        `  %descriptors = call ptr @malloc(i64 %size)
+        `  %missing = icmp eq ptr %descriptors, null
+        `  br i1 %missing, label %allocation_error, label %arguments
+        `allocation_error:
+        `  call void @out(i32 2, ptr @startup_error, i64 59)
+        `  ret i32 2
+        `arguments:
+        `  br label %argument_loop
+        `argument_loop:
+        `  %index = phi i64 [ 0, %arguments ], [ %next, %argument ]
+        `  %done = icmp eq i64 %index, %argc64
+        `  br i1 %done, label %invoke, label %argument
+        `argument:
+        `  %argument_pointer = getelementptr ptr, ptr %argv, i64 %index
+        `  %bytes = load ptr, ptr %argument_pointer
+        `  %length = call i64 @strlen(ptr %bytes)
+        `  %descriptor = getelementptr { ptr, i64 }, ptr %descriptors, i64 %index
+        `  %length_pointer = getelementptr { ptr, i64 }, ptr %descriptor, i32 0, i32 1
+        `  store ptr %bytes, ptr %descriptor
+        `  store i64 %length, ptr %length_pointer
+        `  %next = add i64 %index, 1
+        `  br label %argument_loop
+        `invoke:
+    )
+    try io.write_all(output, "  %io = call ")
+    try write_type(output, module, io_type)
+    try io.write_all(output, " ")
+    try function_symbol(output, module, system)
+    try io.write_all(output, "()\n  %with_io = insertvalue ")
+    try write_type(output, module, init)
+    try io.write_all(output, " poison, ")
+    try write_type(output, module, io_type)
+    try io.write_all(output, " %io, 0\n  %with_arguments = insertvalue ")
+    try write_type(output, module, init)
+    try io.write_all(output, " %with_io, ptr %descriptors, 1, 0, 0\n  %init = insertvalue ")
+    try write_type(output, module, init)
+    try io.write_all(output, " %with_arguments, i64 %argc64, 1, 0, 1\n")
 }
 
 @hide:file

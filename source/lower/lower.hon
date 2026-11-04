@@ -379,6 +379,59 @@ add_function proc(module @mut ir.Module, span diagnostics.Span) ir.FunctionId ! 
 }
 
 @hide:file
+imported_package proc(state @State, path []u8) ?ast.NodeId {
+    for (0..ast.package_decl_count(state.tree)) |index| {
+        id :: ast.package_decl(state.tree, index)
+        if (ast.decl_kind(state.tree, id) != .import) continue
+        if (!mem.eql(ast.source_text(state.tree, ast.import_decl(state.tree, id).path), path)) continue
+        binding :: sema.binding(state.resolution, id)
+        if (binding.kind == .namespace) return binding.data.namespace
+    }
+    return null
+}
+
+@hide:file
+package_member proc(tree @ast.Tree, package ast.NodeId, name []u8) ?ast.NodeId {
+    for (0..ast.package_decl_count_at(tree, package)) |index| {
+        id :: ast.package_decl_at(tree, package, index)
+        span := diagnostics.Span{ start = 0, end = 0 }
+        match ast.decl_kind(tree, id) {
+            .function: span = ast.function_decl(tree, id).name
+            .statement: span = ast.statement_decl(tree, id).name
+            .import, .invalid: continue
+        }
+        if (mem.eql(ast.source_text(tree, span), name)) return id
+    }
+    return null
+}
+
+@hide:file
+init_entry_io proc(state @State, id ast.NodeId) ?ir.FunctionId {
+    tree :: state.tree
+    if (ast.function_param_count(tree, id) != 1) return null
+    # the project's @std/process package defines the startup ABI. import aliases
+    # preserve that package identity; matching the record declaration rejects lookalikes.
+    process :: imported_package(state, "@std/process")
+    if (process == null) return null
+    init :: package_member(tree, process?, "Init")
+    if (init == null) return null
+    if (ast.decl_kind(tree, init?) != .statement) return null
+    parameter :: typecheck.type_of(state.checked, ast.function_param(tree, id, 0))
+    if (parameter.kind != .record or parameter.nominal != maxval!(ast.NodeId)) return null
+    # nominal records retain their defining syntax node, even through imported aliases.
+    definition :: typecheck.record_type(state.checked, parameter.record_type).declaration
+    if (definition != ast.statement_decl(tree, init?).initializer) return null
+    result := typecheck.type_of(state.checked, ast.function_decl(tree, id).return_type)
+    if (result.kind == .fallible) result = typecheck.array_type(state.checked, result.array_type).element
+    if ((result.kind != .i32 and result.kind != .void) or result.nominal != maxval!(ast.NodeId)) return null
+    io :: imported_package(state, "@std/io")
+    if (io == null) return null
+    system :: package_member(tree, io?, "system")
+    if (system == null or state.storage[usize(system?)].kind != .function) return null
+    return ir.FunctionId(state.storage[usize(system?)].index)
+}
+
+@hide:file
 find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
     package_tree := state.tree^
     package_tree.root = root_package
@@ -398,11 +451,17 @@ find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocErro
         }
         declaration :: ast.function_decl(tree, id)
         result :: lower_type(state, typecheck.type_of(state.checked, declaration.return_type))
-        if (ast.function_param_count(tree, id) != 0 or result == .function) {
+        init_io :: init_entry_io(state, id)
+        if (
+            ast.function_external(tree, id)
+            or (ast.function_param_count(tree, id) != 0 and init_io == null)
+            or result == .function
+        ) {
             state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
             return
         }
         state.module.entry = ir.FunctionId(state.storage[usize(id)].index)
+        state.module.entry_init_io = init_io
         return
     }
     state.module.entry_diagnostic = try diagnostics.add(

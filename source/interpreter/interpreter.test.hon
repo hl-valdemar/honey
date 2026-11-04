@@ -87,6 +87,19 @@ expect_trap proc(
     return .expectation_failed
 }
 
+diagnoses_process_init_entry_before_invoking_it test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    entry :: try add_function(&module, &[], 0, .void)
+    module.entry = entry
+    module.entry_init_io = entry
+    outcome := try run(mem.c_allocator, &module, &store)
+    defer deinit(&outcome)
+    try expect_trap(outcome, &store, .unsupported_process_entry, module.functions.items[usize(entry)].span)
+}
+
 repeated_calls_have_fresh_parameters_locals_and_temporaries test {
     module := ir.init(mem.c_allocator)
     defer ir.deinit(&module)

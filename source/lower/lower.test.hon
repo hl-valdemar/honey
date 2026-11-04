@@ -360,11 +360,14 @@ traps_invalid_literals_escapes_and_checked_integer_arithmetic test {
 }
 
 validates_main_and_preserves_first_declaration test {
-    sources [4][]u8 :: [
+    sources [7][]u8 :: [
         "other proc() void {}\n",
         "main :: 42\n",
         "main proc(value int) int {\n return value\n}\n",
         "main proc() int {\n return 42\n}\nmain proc() int {\n return 7\n}\n",
+        "Init :: struct { value i32 }\nmain proc(init Init) i32 { return init.value }\n",
+        "main proc(first i32, second i32) i32 { return first + second }\n",
+        "main c_func() i32\n",
     ]
     for (sources) |source, i| {
         diagnostic_store := diagnostics.init(mem.c_allocator)

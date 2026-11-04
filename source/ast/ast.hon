@@ -16,6 +16,7 @@
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
 #! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'unreachable' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! assignment_op is '=' or a contiguous compound: '+=', '-=', '*=', '/=', '&=', '|=', 'xor=', '<<=', '>>=', '<<|='.
+#! plain '_ = expr' discards the result and canonicalizes to an expression statement; compound updates still require a place.
 #! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if. bitwise-OR headers require parentheses before captures.
 #! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -, !, ~, &, try higher than multiplication/division, addition/subtraction, shifts << / >> / <<|, bitwise &/xor/|, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! compound assignments share their target with the canonical binary value's left operand; lowering evaluates the place and loads its old value once before the RHS.

@@ -226,6 +226,8 @@ execute proc(
     } else {
         return Outcome{ trap = module.entry_diagnostic }
     }
+    if (module.entry_init_io != null)
+        return try runtime_trap(diagnostic_store, .unsupported_process_entry, module.functions.items[usize(entry)].span)
 
     transferred := false
     globals :: try mem.alloc(GlobalState, allocator, module.globals.items.len)

@@ -452,6 +452,11 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
         and !(allow_else and next_is(state, .else))
         and !(state.match_arm_body and next_is(state, .comma))
     ) return .unexpected_token
+    target_span :: ast.builder_span(state.builder, target)
+    if (
+        operator == null and ast.builder_expr_kind(state.builder, target) == .identifier
+        and mem.eql(state.builder.source[usize(target_span.start)..usize(target_span.end)], "_")
+    ) return try ast.add_expression_stmt(state.builder, value)
     span :: ast.Span{
         start = ast.builder_span(state.builder, target).start,
         end = state.tokens[state.next_token - 1].span.end,

@@ -11,6 +11,29 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "discard_assignments_preserve_evaluation_and_cleanup": (
+        """
+        Error :: enum { failed }
+        bump proc(value @mut i32) i32 {
+            value^ += 1
+            return value^
+        }
+        fail proc(value @mut i32) i32 ! Error {
+            value^ += 1
+            return .failed
+        }
+        main proc() i32 {
+            value i32 := 0
+            _ = bump(&value)
+            {
+                defer _ = bump(&value)
+                _ = bump(&value)
+            }
+            _ = fail(&value) catch 0
+            return value
+        }
+        """, b"4\n", None,
+    ),
     "multiline_strings_preserve_raw_bytes_and_content_indentation": (
         r'''
         main proc() string {
@@ -11544,8 +11567,8 @@ for name, expression in {
     )
 
 
-def run(*args, env=None):
-    return subprocess.run(args, cwd=ROOT, capture_output=True, timeout=30, env=env)
+def run(*args, env=None, input=None):
+    return subprocess.run(args, cwd=ROOT, capture_output=True, timeout=30, env=env, input=input)
 
 
 def outcome(result):
@@ -14157,6 +14180,204 @@ def check_standard_library_packages(temporary, executable):
     return 1, 1
 
 
+def check_native_driver(temporary=None, executable=None):
+    if temporary is None:
+        with tempfile.TemporaryDirectory(prefix="honey driver ' ; $") as directory:
+            root = Path(directory)
+            return check_native_driver(root, root / "driver ' ; $")
+    project = temporary / "native driver ' ; $"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+    app = project / "app"
+    library = project / "library"
+    binaries = project / "bin ' ; $"
+    for directory in (app, library, binaries):
+        directory.mkdir()
+    library_text = "result proc() i32 { return 37 }\n"
+    (library / "value.hon").write_text(library_text)
+    (library / "ignored.test.hon").write_text("not production Honey\n")
+    (project / "library-link").symlink_to(library, target_is_directory=True)
+    source = app / "main.hon"
+    source.write_text(textwrap.dedent(r'''
+        import "@std/process"
+        import "@std/io"
+        import "@std/mem"
+        import "@std/fs"
+        import "@std/arraylist"
+        import "@ffi/c"
+        import "../library"
+        Error :: alias (fs.ReadFileError | io.WriteError | process.RunError)
+
+        main proc(init process.Init) i32 ! Error {
+            arguments :: init.args.values
+            if (arguments.len < 7) return 80
+            for arguments |argument| {
+                if (argument.ptr[argument.len] != 0) return 81
+                try io.print("{}:{}\n", io.stdout(init.io), {argument.len, argument})
+            }
+            input := try io.read_all(mem.c_allocator, io.stdin(init.io), 16384)
+            defer arraylist.deinit(&input)
+            try io.print("stdin:{}\n", io.stdout(init.io), {input.items.len})
+            try io.write_all(io.stdout(init.io), input.items)
+            try io.write_all(io.stderr(init.io), "stderr: separate\n")
+
+            canonical :: try fs.canonical(mem.c_allocator, arguments[1])
+            defer mem.free(mem.c_allocator, canonical)
+            if (!mem.eql(u8, canonical, arguments[2])) return 82
+            if (try fs.kind(mem.c_allocator, canonical) != .directory) return 83
+            directory := try fs.open_directory(mem.c_allocator, canonical)
+            defer fs.close_directory(&directory) catch |_| {}
+            found usize := 0
+            while true {
+                entry :: try fs.next(&directory)
+                if entry |item| {
+                    if (mem.eql(u8, item.name, "value.hon")) found += 1
+                    if (mem.eql(u8, item.name, "ignored.test.hon")) found += 2
+                } else { break }
+            }
+            if (found != 3) return 84
+            bytes := try fs.read_file(mem.c_allocator, init.io, arguments[3], 4096)
+            defer arraylist.deinit(&bytes)
+            if (!mem.eql(u8, bytes.items, "result proc() i32 { return 37 }\n")) return 85
+
+            template :: try mem.alloc(u8, mem.c_allocator, arguments[4].len + 1)
+            defer mem.free(mem.c_allocator, template)
+            memcopy!(template[..arguments[4].len], arguments[4])
+            template[arguments[4].len] = 0
+            descriptor :: c.mkstemp(ptrcast!(template.ptr))
+            if (descriptor < 0) return 86
+            defer { _ = c.unlink(ptrcast!(template.ptr)) }
+            if (c.close(descriptor) != 0) return 87
+            path [;0]u8 :: template.ptr[..arguments[4].len;0]
+            {
+                file :: try io.open(init.io, path, .write_only)
+                defer io.close(file) catch |_| {}
+                try io.write_all(io.writer(file),
+                    `declare i32 @raise(i32)
+                    `define i32 @main(i32 %argc, ptr %argv) {
+                    `entry:
+                    `  %signal = icmp eq i32 %argc, 2
+                    `  br i1 %signal, label %terminate, label %result
+                    `terminate:
+                    `  %ignored = call i32 @raise(i32 15)
+                    `  ret i32 99
+                    `result:
+                    `
+                )
+                try io.print("  ret i32 {}\n}}\n", io.writer(file), {library.result()})
+            }
+            defer { _ = c.unlink(ptrcast!(arguments[5].ptr)) }
+            compiler [8][;0]u8 :: [
+                "clang", "-Wno-override-module", "-x", "ir",
+                path, "-o", arguments[5], arguments[6],
+            ]
+            if (try process.run(mem.c_allocator, compiler[..]) != 0) return 88
+            if (try fs.kind(mem.c_allocator, arguments[5]) != .file) return 89
+            child [1][;0]u8 :: ["native child ' ; $"]
+            if (try process.run(mem.c_allocator, child[..]) != 37) return 90
+            signal [2][;0]u8 :: ["native child ' ; $", "signal"]
+            if (try process.run(mem.c_allocator, signal[..]) != 143) return 91
+            missing [1][;0]u8 :: ["honey-no-such-driver-child-74d4a2"]
+            absent := false
+            _ = process.run(mem.c_allocator, missing[..]) catch |err| {
+                if (err != .spawn_failed) return 92
+                absent = true
+                yield i32(0)
+            }
+            if (!absent) return 93
+            try io.write_all(io.stdout(init.io), "files, clang, exit, signal, missing: ok\n")
+            return 23
+        }
+    ''').strip() + "\n")
+    interpreted = run(str(HONEY), "run", str(app))
+    assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+    assert b"process.Init entry points require native execution" in interpreted.stderr, outcome(interpreted)
+    assert len(interpreted.stderr.splitlines()) == 1, outcome(interpreted)
+    child = binaries / "native child ' ; $"
+    template = project / "emitted ' ; $.XXXXXX"
+    environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ.get("PATH", "")}
+    stdin = bytes(range(256)) * 35 + b"\nstdin end\n"
+    for optimization in ("-O0", "-O2"):
+        built = run(str(HONEY), "build", str(app), "-o", str(executable), optimization)
+        assert outcome(built) == (0, b"", b""), outcome(built)
+        arguments = [
+            str(executable), str(project / "library-link" / ".." / "library-link"),
+            str(library.resolve()), str(library / "value.hon"), str(template),
+            str(child), optimization, "", "héllø 世界", " \t\n", "'\";$()&|<>*?",
+            *(f"argument-{index}" for index in range(96)),
+        ]
+        expected = b"".join(
+            str(len(argument.encode())).encode() + b":" + argument.encode() + b"\n"
+            for argument in arguments
+        )
+        expected += (
+            b"stdin:" + str(len(stdin)).encode() + b"\n" + stdin
+            + b"files, clang, exit, signal, missing: ok\n"
+        )
+        try:
+            native = run(*arguments, env=environment, input=stdin)
+            assert outcome(native) == (23, expected, b"stderr: separate\n"), (
+                optimization, outcome(native), expected,
+            )
+            assert not child.exists(), child
+            assert not list(project.glob("emitted *")), list(project.iterdir())
+            missing_compiler = run(
+                *arguments, env={**os.environ, "PATH": str(binaries)}, input=stdin,
+            )
+            assert outcome(missing_compiler) == (
+                1, expected.removesuffix(b"files, clang, exit, signal, missing: ok\n"),
+                b"stderr: separate\n",
+            ), (optimization, outcome(missing_compiler))
+            assert not child.exists(), child
+            assert not list(project.glob("emitted *")), list(project.iterdir())
+        finally:
+            executable.unlink(missing_ok=True)
+
+    status_cases = (
+        ("i32", "return 23", 23),
+        ("void", "return", 0),
+        ("void", "", 0),
+        ("i32 ! Error", "return 23", 23),
+        ("void ! Error", "return", 0),
+        ("i32 ! Error", "return .failed", 1),
+        ("void ! Error", "return .failed", 1),
+    )
+    for result, body, status in status_cases:
+        source.write_text(
+            'import "@std/process"\n'
+            "Error :: enum { failed }\n"
+            f"main proc(init process.Init) {result} {{ {body} }}\n"
+        )
+        for optimization in ("-O0", "-O2"):
+            built = run(str(HONEY), "build", str(app), "-o", str(executable), optimization)
+            assert outcome(built) == (0, b"", b""), outcome(built)
+            try:
+                native = run(str(executable))
+                assert outcome(native) == (status, b"", b""), (result, body, optimization, outcome(native))
+            finally:
+                executable.unlink(missing_ok=True)
+
+    invalid_entries = (
+        ("", "init i32", "i32", "return 0"),
+        ("", "init @process.Init", "i32", "return 0"),
+        ("", "init process.Init, other i32", "i32", "return 0"),
+        ("", "$init process.Init", "i32", "return 0"),
+        ("", "init process.Init", "i16", "return 0"),
+        ("Init :: struct { io io.Io, args process.Args }\n", "init Init", "i32", "return 0"),
+    )
+    for declarations, parameters, result, body in invalid_entries:
+        source.write_text(
+            'import "@std/process"\nimport "@std/io"\n' + declarations
+            + f"main proc({parameters}) {result} {{ {body} }}\n"
+        )
+        check(app, executable, (
+            b"", b"main must be a runtime function with no parameters, or accept process.Init",
+        ))
+    return len(invalid_entries), len(status_cases) + 1
+
+
 def check_variadic_libc(temporary, executable):
     source = temporary / "variadic.hon"
     source.write_text(textwrap.dedent("""
@@ -14210,6 +14431,8 @@ def main():
         count += io_count
         stdlib_count, stdlib_native_count = check_standard_library_packages(temporary, executable)
         count += stdlib_count
+        driver_count, driver_native_count = check_native_driver(temporary, executable)
+        count += driver_count
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -14236,7 +14459,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count + io_native_count + stdlib_native_count + variadic_count} native allocator/IO programs, LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count + io_native_count + stdlib_native_count + variadic_count + driver_native_count} native-only programs, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":
