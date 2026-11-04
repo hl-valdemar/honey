@@ -13965,6 +13965,198 @@ def check_io_packages(temporary, executable):
     return len(cases) + len(errors), 1
 
 
+def check_standard_library_packages(temporary, executable):
+    project = temporary / "standard-library"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+
+    def put(path, text):
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(textwrap.dedent(text).strip() + "\n")
+        return target
+
+    put("pipeline/summarize.hon", """
+        import "@std/io"
+        import "@std/mem"
+        import "@std/arraylist"
+        Error :: alias (io.ReadAllError | io.WriteError)
+        summarize proc(allocator mem.Allocator, input io.Reader, output io.Writer, maximum usize) void ! Error {
+            bytes := try io.read_all(allocator, input, maximum)
+            defer arraylist.deinit(&bytes)
+            checksum usize := 0
+            for bytes.items |byte| { checksum += usize(byte) }
+            try io.print("{} bytes checksum={}\\n", output, {bytes.items.len, checksum})
+        }
+    """)
+    put("support/streams.hon", """
+        import "@std/io"
+        import "@std/mem"
+        import "@ffi/c"
+        State :: struct {
+            input []u8
+            offset usize = 0
+            fail_read bool = false
+            output []mut u8
+            length usize = 0
+            fail_write bool = false
+            backing mem.Allocator = mem.c_allocator
+            storage []mut u8
+            remaining usize = maxval!(usize)
+            live usize = 0
+            releases usize = 0
+        }
+        state proc(context ?@mut anyopaque) @mut State { return ptrcast!(context?) }
+        read proc(context ?@mut anyopaque, _ io.Handle, bytes []mut u8) usize ! io.ReadError {
+            current :: state(context)
+            if (current.fail_read and current.offset != 0) return .read_failed
+            count := current.input.len - current.offset
+            if (count > bytes.len) count = bytes.len
+            if (count > 137) count = 137
+            memcopy!(bytes[..count], current.input[current.offset..current.offset + count])
+            current.offset += count
+            return count
+        }
+        write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+            current :: state(context)
+            if (current.fail_write and current.length >= 4) return .write_failed
+            count := bytes.len
+            if (count > 2) count = 2
+            if (count > current.output.len - current.length) return .write_failed
+            memcopy!(current.output[current.length..current.length + count], bytes[..count])
+            current.length += count
+            return count
+        }
+        reader proc(current @mut State) io.Reader {
+            return { context = current, handle = { file_desc = -1 }, read = read }
+        }
+        writer proc(current @mut State) io.Writer {
+            return { context = current, handle = { file_desc = -1 }, write = write }
+        }
+        allocate proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+            current :: state(context)
+            if (current.remaining == 0) return null
+            current.remaining -= 1
+            memory :: mem.raw_alloc(current.backing, size, alignment)
+            if memory |_| { current.live += 1 }
+            return memory
+        }
+        resize proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, size usize, alignment usize) ?*mut u8 {
+            current :: state(context)
+            if (current.remaining == 0) return null
+            current.remaining -= 1
+            result :: mem.raw_realloc(current.backing, memory, old_size, size, alignment)
+            if result |_| {
+                if (memory == null) current.live += 1
+            }
+            return result
+        }
+        release proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignment usize) void {
+            current :: state(context)
+            if memory |_| {
+                current.live -= 1
+                current.releases += 1
+            }
+            mem.raw_free(current.backing, memory, size, alignment)
+        }
+        table :: mem.AllocatorVTable{ alloc = allocate, realloc = resize, free = release }
+        allocator proc(current @mut State) mem.Allocator { return { context = current, vtable = &table } }
+
+        # ponytail: one byte allocation grows in place; use a heap for concurrent allocations.
+        fixed_allocate proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u8 {
+            current :: state(context)
+            if (alignment != 1 or size > current.storage.len) return null
+            return current.storage[..].ptr
+        }
+        fixed_resize proc(context ?@mut anyopaque, _ ?*mut u8, _ usize, size usize, alignment usize) ?*mut u8 {
+            return fixed_allocate(context, size, alignment)
+        }
+        fixed_release proc(_ ?@mut anyopaque, _ ?*mut u8, _ usize, _ usize) void {}
+        fixed_table :: mem.AllocatorVTable{ alloc = fixed_allocate, realloc = fixed_resize, free = fixed_release }
+        fixed proc(current @mut State) mem.Allocator { return { context = current, vtable = &fixed_table } }
+
+        system_write proc(_ ?@mut anyopaque, handle io.Handle, bytes []u8) usize ! io.WriteError {
+            count :: c.write(handle.file_desc, bytes.ptr, c_ulong(bytes.len))
+            if (count < 0) return .write_failed
+            return usize(count)
+        }
+        report proc(bytes []u8) void ! io.WriteError {
+            output io.Writer :: { context = null, handle = { file_desc = 1 }, write = system_write }
+            try io.write_all(output, bytes)
+        }
+    """)
+    put("app/checks.hon", """
+        import "../pipeline"
+        import "../support"
+        import "@std/mem"
+        check_scenario proc(input []u8, scenario usize, native bool) bool {
+            output [64]mut u8 := undefined
+            storage [16384]mut u8 := undefined
+            current support.State := { input = input, output = output[..], storage = storage[..] }
+            if (!native) current.backing = support.fixed(&current)
+            maximum := input.len
+            match scenario {
+                1: current.fail_read = true
+                2: maximum = 4000
+                3: current.remaining = 0
+                4: current.remaining = 1
+                5: current.remaining = 2
+                6: current.fail_write = true
+                else: {}
+            }
+            failed := false
+            pipeline.summarize(support.allocator(&current), support.reader(&current),
+                support.writer(&current), maximum) catch |err| {
+                expected pipeline.Error :: match scenario {
+                    1: .read_failed
+                    2: .limit_exceeded
+                    3, 4, 5: .out_of_memory
+                    else: .write_failed
+                }
+                if (err != expected) return false
+                failed = true
+            }
+            if (current.live != 0) return false
+            if (current.releases != (if (scenario == 3) usize(0) else usize(1))) return false
+            if (scenario != 0) {
+                if (scenario == 2 and current.offset != maximum + 1) return false
+                if (scenario == 4 and current.offset != 4096) return false
+                if (scenario == 5 and current.offset != 8192) return false
+                if (scenario == 6 and current.length != 4) return false
+                return failed
+            }
+            if (failed or current.offset != input.len) return false
+            if (!mem.eql(u8, current.output[..current.length], "9000 bytes checksum=1121130\\n")) return false
+            if native { support.report(current.output[..current.length]) catch { return false } }
+            return true
+        }
+    """)
+    main = """
+        main proc() i16 {
+            input [9000]mut u8 := undefined
+            for (0..input.len) |index| { input[index] = u8(rem!(index, 251)) }
+            for (usize(0)..7) |scenario| {
+                if (!check_scenario(input[..], scenario, NATIVE)) return -i16(scenario + 1)
+            }
+            return 42
+        }
+    """
+    source = put("app/main.hon", main.replace("NATIVE", "false"))
+    check(source.parent, executable, (b"42\n", None))
+    source.write_text(textwrap.dedent(main.replace("NATIVE", "true")).strip() + "\n")
+    interpreted = run(str(HONEY), "run", str(source.parent))
+    assert interpreted.returncode == 1 and interpreted.stdout == b"", outcome(interpreted)
+    assert b"foreign function calls are unsupported by the interpreter" in interpreted.stderr, outcome(interpreted)
+    for optimization in ("-O0", "-O2"):
+        built = run(str(HONEY), "build", str(source.parent), "-o", str(executable), optimization)
+        assert outcome(built) == (0, b"", b""), outcome(built)
+        assert outcome(run(str(executable))) == (0, b"9000 bytes checksum=1121130\n42\n", b""), optimization
+        executable.unlink()
+    return 1, 1
+
+
 def check_variadic_libc(temporary, executable):
     source = temporary / "variadic.hon"
     source.write_text(textwrap.dedent("""
@@ -14016,6 +14208,8 @@ def main():
         count += hashmap_count
         io_count, io_native_count = check_io_packages(temporary, executable)
         count += io_count
+        stdlib_count, stdlib_native_count = check_standard_library_packages(temporary, executable)
+        count += stdlib_count
         count += check_packages(temporary, executable)
         count += check_namespace_packages(temporary, executable)
         count += check_record_packages(temporary, executable)
@@ -14042,7 +14236,7 @@ def main():
         assert not executable.exists()
         invalid = run(str(HONEY), "build", str(source), "-o", str(executable), "-O3")
         assert invalid.returncode == 2 and b"usage:" in invalid.stderr, outcome(invalid)
-        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count + io_native_count + variadic_count} native allocator/IO programs, LLVM output and CLI errors passed")
+        print(f"{count} programs matched interpreter at -O0 and -O2; {allocator_count + arraylist_native_count + hashmap_native_count + io_native_count + stdlib_native_count + variadic_count} native allocator/IO programs, LLVM output and CLI errors passed")
 
 
 if __name__ == "__main__":
