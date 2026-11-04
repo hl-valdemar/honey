@@ -168,3 +168,44 @@ streams_decoded_string_literal_bytes test {
         try testing.expect(false)
     }
 }
+
+clones_while_capture_and_update_as_owned_children test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    builder := init_builder(mem.c_allocator, "")
+    defer deinit_builder(&builder)
+    _ = try set_source(&builder, "", "")
+    span :: Span{ start = 0, end = 0 }
+    condition :: try add_boolean(&builder, span, true)
+    body :: try add_block(&builder, span, &[])
+    loop :: try add_while_stmt(&builder, span, condition, body)
+    tree := view(&builder, loop)
+    try testing.expect_equal(2, child_count(&tree, loop))
+    try testing.expect(while_stmt(&tree, loop).capture == null)
+    try testing.expect(while_stmt(&tree, loop).step == null)
+
+    capture :: try add_param(&builder, span, span, try strpool.intern(&strings, "item"), maxval!(NodeId))
+    update :: try add_expression_stmt(&builder, condition)
+    statements [1]NodeId :: [update]
+    step :: try add_block(&builder, span, statements[..])
+    set_capture(&builder, loop, capture)
+    set_while_step(&builder, loop, step)
+    tree = view(&builder, loop)
+    try testing.expect_equal(4, child_count(&tree, loop))
+    try testing.expect_equal(capture, child(&tree, loop, 2))
+    try testing.expect_equal(step, child(&tree, loop, 3))
+
+    mapping :: try mem.alloc(NodeId, mem.c_allocator, node_count(&tree))
+    defer mem.free(mem.c_allocator, mapping)
+    mem.set(mapping, maxval!(NodeId))
+    cloned :: try clone_subtree(&builder, loop, mapping)
+    tree = view(&builder, cloned)
+    copied :: while_stmt(&tree, cloned)
+    try testing.expect(copied.capture? != capture)
+    try testing.expect(copied.step? != step)
+    try testing.expect_equal(mapping[usize(capture)], copied.capture?)
+    try testing.expect_equal(mapping[usize(step)], copied.step?)
+    try testing.expect_equal(4, child_count(&tree, cloned))
+    try testing.expect_equal(copied.condition, statement_expr(&tree, block_statement(&tree, copied.step?, 0)))
+    try testing.expect_equal(step, while_stmt(&tree, loop).step?)
+}

@@ -17,6 +17,7 @@ ErrorCode :: enum {
     float_must_end_with_digit,
     unterminated_string,
     unterminated_character,
+    invalid_integer_literal,
 }
 SourceError :: enum { source_too_large }
 
@@ -33,6 +34,7 @@ keywords strmap.StaticStringMap(TokenKind) :: strmap.init([
     { "unreachable", .unreachable },
     { "try", .try },
     { "catch", .catch },
+    { "orelse", .orelse },
     { "defer", .defer },
     { "errdefer", .errdefer },
     { "if", .if },
@@ -437,6 +439,31 @@ ScanNumResult :: struct {
 @hide:file
 scan_number proc(start usize, program []u8, allow_decimal bool) ScanNumResult ! ScanError {
     cursor := start
+    base := u8(0)
+    if (program[start] == '0' and start + 1 < program.len) {
+        match program[start + 1] {
+            'b', 'B': base = 2
+            'o', 'O': base = 8
+            'x', 'X': base = 16
+            else: {}
+        }
+    }
+    if (base != 0) {
+        cursor += 2
+        digits_start :: cursor
+        valid := true
+        while (cursor < program.len and (is_alpha(program[cursor]) or is_digit(program[cursor]) or program[cursor] == '_')) {
+            byte :: program[cursor]
+            digit :: if (is_digit(byte)) byte - '0'
+                else if (byte >= 'a' and byte <= 'f') byte - 'a' + 10
+                else if (byte >= 'A' and byte <= 'F') byte - 'A' + 10
+                else u8(255)
+            if (digit >= base) valid = false
+            cursor += 1
+        }
+        if (!valid or cursor == digits_start) return ScanError{ code = .invalid_integer_literal, end = cursor }
+        return ScanNumResult{ end = cursor, has_decimal = false }
+    }
     has_decimal := false
     while (cursor < program.len and is_digit(program[cursor])) cursor += 1
     if (
@@ -502,6 +529,7 @@ diagnostic_codes :: $enummap.init(ErrorCode, diagnostics.Code, {
     float_must_end_with_digit = .float_must_end_with_digit,
     unterminated_string = .unterminated_string,
     unterminated_character = .unterminated_character,
+    invalid_integer_literal = .invalid_integer_literal,
 })
 
 @hide:file

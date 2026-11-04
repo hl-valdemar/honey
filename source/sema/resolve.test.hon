@@ -972,3 +972,231 @@ resolves_inline_match_captures_and_all_bodies test {
     last :: ast.match_arm_view(&tree, ast.match_arm(&tree, last_match, 1))
     try testing.expect_equal(BindingKind.invalid, binding(&resolution, last.body).kind)
 }
+
+resolves_fallback_builtin_names_and_unshadowed_builtin_references test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Record :: struct { type type }
+        `inspect proc(type int) int { return type }
+        `identity proc($type type, value type) type { return value }
+        `metatype proc() type { return type }
+        `stop proc() noreturn { unreachable }
+        `local proc() type { type :: i32
+        `    return type
+        `}
+        `strings proc(values []string) void {
+        `    for values |string| { string }
+        `    for values |string| { string }
+        `    string :: 1
+        `    string
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    record :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    field_type :: ast.field(&tree, ast.record_field(&tree, record, 0)).type?
+    try testing.expect_equal(BindingKind.builtin, binding(&resolution, field_type).kind)
+    try testing.expect_equal(BuiltinType.type, binding(&resolution, field_type).data.builtin)
+    inspect_id :: ast.package_decl(&tree, 1)
+    parameter :: ast.function_param(&tree, inspect_id, 0)
+    inspect_body :: ast.function_decl(&tree, inspect_id).body
+    reference :: ast.return_stmt(&tree, ast.block_statement(&tree, inspect_body, 0)).value?
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, parameter).kind)
+    try testing.expect_equal(parameter, binding(&resolution, reference).data.declaration)
+    identity_id :: ast.package_decl(&tree, 2)
+    comptime_parameter :: ast.function_param(&tree, identity_id, 0)
+    annotation :: ast.param(&tree, comptime_parameter).type
+    try testing.expect_equal(BindingKind.builtin, binding(&resolution, annotation).kind)
+    try testing.expect_equal(BuiltinType.type, binding(&resolution, annotation).data.builtin)
+    dependent :: ast.param(&tree, ast.function_param(&tree, identity_id, 1)).type
+    try testing.expect_equal(comptime_parameter, binding(&resolution, dependent).data.declaration)
+    try testing.expect_equal(comptime_parameter, binding(&resolution, ast.function_decl(&tree, identity_id).return_type).data.declaration)
+    metatype :: ast.function_decl(&tree, ast.package_decl(&tree, 3))
+    metatype_ref :: ast.return_stmt(&tree, ast.block_statement(&tree, metatype.body, 0)).value?
+    metatype_nodes [2]ast.NodeId :: [metatype.return_type, metatype_ref]
+    for (metatype_nodes) |id| {
+        try testing.expect_equal(BindingKind.builtin, binding(&resolution, id).kind)
+        try testing.expect_equal(BuiltinType.type, binding(&resolution, id).data.builtin)
+    }
+    result :: ast.function_decl(&tree, ast.package_decl(&tree, 4)).return_type
+    try testing.expect_equal(BindingKind.builtin, binding(&resolution, result).kind)
+    try testing.expect_equal(BuiltinType.noreturn, binding(&resolution, result).data.builtin)
+    local_body :: ast.function_decl(&tree, ast.package_decl(&tree, 5)).body
+    local_type :: ast.block_statement(&tree, local_body, 0)
+    local_ref :: ast.return_stmt(&tree, ast.block_statement(&tree, local_body, 1)).value?
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, local_type).kind)
+    try testing.expect_equal(local_type, binding(&resolution, local_ref).data.declaration)
+    try testing.expect_equal(BuiltinType.i32, binding(&resolution, ast.statement_decl(&tree, local_type).initializer).data.builtin)
+    strings_id :: ast.package_decl(&tree, 6)
+    element :: ast.slice_type(&tree, ast.param(&tree, ast.function_param(&tree, strings_id, 0)).type).element
+    try testing.expect_equal(BindingKind.builtin, binding(&resolution, element).kind)
+    try testing.expect_equal(BuiltinType.string, binding(&resolution, element).data.builtin)
+    strings_body :: ast.function_decl(&tree, strings_id).body
+    for (0..usize(2)) |index| {
+        loop :: ast.for_stmt(&tree, ast.block_statement(&tree, strings_body, index))
+        capture :: loop.capture?
+        capture_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 0))
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, capture).kind)
+        try testing.expect_equal(capture, binding(&resolution, capture_ref).data.declaration)
+    }
+    string_local :: ast.block_statement(&tree, strings_body, 2)
+    string_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, strings_body, 3))
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, string_local).kind)
+    try testing.expect_equal(string_local, binding(&resolution, string_ref).data.declaration)
+}
+
+capture_scopes_do_not_conflict_with_later_outer_locals test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `find proc(value ?int) int {
+        `    if value |id| return id
+        `    id :: 7
+        `    return id
+        `}
+        `nested proc(value ?int) void {
+        `    if (true) {
+        `        while value |item| { item }
+        `        for 0..1 |item, index| { item
+        `            index
+        `        }
+        `        item :: 1
+        `        index :: 0
+        `    }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    guard :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    capture :: guard.capture?
+    inner_ref :: ast.return_stmt(&tree, ast.block_statement(&tree, guard.then_block, 0)).value?
+    outer :: ast.block_statement(&tree, body, 1)
+    outer_ref :: ast.return_stmt(&tree, ast.block_statement(&tree, body, 2)).value?
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, capture).kind)
+    try testing.expect_equal(capture, binding(&resolution, inner_ref).data.declaration)
+    try testing.expect_equal(outer, binding(&resolution, outer_ref).data.declaration)
+    nested_body :: ast.function_decl(&tree, ast.package_decl(&tree, 1)).body
+    child :: ast.if_stmt(&tree, ast.block_statement(&tree, nested_body, 0)).then_block
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, child, 0))
+    loop_ref :: ast.statement_expr(&tree, ast.block_statement(&tree, loop.body, 0))
+    try testing.expect_equal(loop.capture?, binding(&resolution, loop_ref).data.declaration)
+    iteration :: ast.for_stmt(&tree, ast.block_statement(&tree, child, 1))
+    captures [2]ast.NodeId :: [iteration.capture?, iteration.index?]
+    for (captures) |id, index| {
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, id).kind)
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, iteration.body, index))
+        try testing.expect_equal(id, binding(&resolution, reference).data.declaration)
+    }
+}
+
+captures_still_reject_visible_names test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `check proc(value ?int, type int, string int) void {
+        `    id :: 0
+        `    if value |id| { id }
+        `    if value |type| { type }
+        `    if value |int| { int }
+        `    if value |global| { global }
+        `    if value |string| { string }
+        `    if value |u8| { u8 }
+        `}
+        `global :: 1
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(6, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    for (usize(1)..usize(7)) |index| {
+        guard :: ast.if_stmt(&tree, ast.block_statement(&tree, body, index))
+        capture :: guard.capture?
+        result :: binding(&resolution, capture)
+        try testing.expect_equal(BindingKind.invalid, result.kind)
+        try testing.expect_equal(diagnostics.Code.duplicate_name, diagnostics.get(&diagnostic_store, result.data.diagnostic)?.code)
+        reference :: ast.statement_expr(&tree, ast.block_statement(&tree, guard.then_block, 0))
+        try testing.expect_equal(result.data.diagnostic, binding(&resolution, reference).data.diagnostic)
+    }
+}
+
+ordinary_inner_locals_allow_later_ancestors_and_preserve_forward_lookup test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `inspect proc(flag bool) int {
+        `    if flag {
+        `        if flag {
+        `            before :: root
+        `            root :: later
+        `            root
+        `        }
+        `        root :: later
+        `        root
+        `    }
+        `    root :: later
+        `    later :: 7
+        `    return root
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    middle_body :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0)).then_block
+    inner_body :: ast.if_stmt(&tree, ast.block_statement(&tree, middle_body, 0)).then_block
+    before :: ast.block_statement(&tree, inner_body, 0)
+    roots [3]ast.NodeId :: [
+        ast.block_statement(&tree, inner_body, 1),
+        ast.block_statement(&tree, middle_body, 1),
+        ast.block_statement(&tree, body, 1),
+    ]
+    references [3]ast.NodeId :: [
+        ast.statement_expr(&tree, ast.block_statement(&tree, inner_body, 2)),
+        ast.statement_expr(&tree, ast.block_statement(&tree, middle_body, 2)),
+        ast.return_stmt(&tree, ast.block_statement(&tree, body, 3)).value?,
+    ]
+    later :: ast.block_statement(&tree, body, 2)
+    for (roots) |id, index| {
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, id).kind)
+        try testing.expect_equal(id, binding(&resolution, references[index]).data.declaration)
+        initializer :: ast.statement_decl(&tree, id).initializer
+        try testing.expect_equal(BindingKind.declaration, binding(&resolution, initializer).kind)
+        try testing.expect_equal(later, binding(&resolution, initializer).data.declaration)
+    }
+    forward :: ast.statement_decl(&tree, before).initializer
+    try testing.expect_equal(BindingKind.declaration, binding(&resolution, forward).kind)
+    try testing.expect_equal(roots[0], binding(&resolution, forward).data.declaration)
+}

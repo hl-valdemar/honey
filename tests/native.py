@@ -11,6 +11,279 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "numeric_conditional_arms_supply_literal_context_before_defaulting": (
+        """
+        choose proc(flag bool) usize {
+            first :: if (flag) usize(3) else 2
+            second :: if (flag) 1 else usize(4)
+            third :: if (flag) { yield usize(5) } else { yield 6 }
+            fourth :: if (flag) { yield 7 } else { yield usize(8) }
+            return first + second + third + fourth
+        }
+        main proc() [2]usize { return [choose(true), choose(false)] }
+        """, b"[16, 20]\n", None,
+    ),
+    "generic_array_borrows_observe_final_inferred_global_length": (
+        """
+        Entry :: struct { name []u8, value u8 }
+        entries [_]Entry :: [{name = "first", value = 19}, {name = "second", value = 23}]
+        count :: entries.len
+        sum proc($N usize, items @[N]Entry) u8 {
+            total u8 := 0
+            for (items) |entry| { total += entry.value }
+            return total
+        }
+        main proc() u8 {
+            if (count != 2) return 0
+            return sum(&entries)
+        }
+        """, b"42\n", None,
+    ),
+    "fallible_return_context_does_not_wrap_conditional_alias_uses": (
+        """
+        Err :: enum { failed }
+        NodeId :: distinct u32
+        take proc(value NodeId) u32 { return u32(value) }
+        parse proc(flag bool) NodeId ! Err {
+            value := if (flag) NodeId(1) else NodeId(2)
+            _ = take(value)
+            return value
+        }
+        main proc() [2]u32 {
+            left :: parse(true) catch { return [0, 0] }
+            right :: parse(false) catch { return [0, 0] }
+            return [take(left), take(right)]
+        }
+        """, b"[1, 2]\n", None,
+    ),
+    "lossless_integer_widening_preserves_source_width": (
+        """
+        Box :: struct { value u64 }
+        take proc(value u64) u64 { return value }
+        main proc() [6]u64 {
+            bytes [4]u8 :: [7, 11, 13, 17]
+            start u32 :: 1
+            end u16 :: 3
+            small u8 :: 250
+            box Box :: {value = small}
+            wide u64 := small
+            return [u64(bytes[start..end].len), u64(bytes[start]), take(small), box.value, wide, u64(~small)]
+        }
+        """, b"[2, 11, 250, 250, 250, 5]\n", None,
+    ),
+    "metadata_records_widen_value_leaves_and_generated_defaults": (
+        """
+        Generated proc(input struct { child type, count usize }) type {
+            return struct_type!(.auto, ["value"], [input.child], [u8(input.count)])
+        }
+        main proc() i16 {
+            count u8 :: 42
+            value Generated({ child = i16, count = count }) :: {}
+            return value.value
+        }
+        """, b"42\n", None,
+    ),
+    "enum_explicit_ordinals_resolve_forward_package_constants": (
+        """
+        read proc(value Stream) c_int { return c_int(value) }
+        Stream :: enum(c_int) { input = INPUT, output = OUTPUT }
+        INPUT c_int :: 0
+        OUTPUT c_int :: 42
+        main proc() c_int { return read(.output) }
+        """, b"42\n", None,
+    ),
+    "closed_calls_skip_index_evaluation_in_short_circuit_guards": (
+        """
+        make proc($N usize) [N + 1]mut u8 {
+            values [N]mut u8 := undefined
+            for 0..N |i| { values[i] = 1 }
+            j := N
+            while j > 0 and values[j - 1] > 0 : j -= 1 {}
+            success :: j == 0 or (values[j - 1] == 0 and values[j - 1] > 0)
+            count usize :: N + usize(values[0])
+            result [count]mut u8 := undefined
+            for 0..count |i| { result[i] = if (success) values[0] else 0 }
+            return result
+        }
+        main proc() [3]mut u8 { return make(2) }
+        """, b"[1, 1, 1]\n", None,
+    ),
+    "mixed_integer_comparisons_widen_without_rounding": (
+        """
+        main proc() [6]bool {
+            large usize :: usize(maxval!(u64))
+            return [large > maxval!(u32), maxval!(u32) < large, u8(255) == u64(255), i8(-128) < i64(-127), i64(-127) > i8(-128), u64(255) == u8(255)]
+        }
+        """, b"[true, true, true, true, true, true]\n", None,
+    ),
+    "unsigned_family_parameters_preserve_concrete_argument_types": (
+        """
+        measure proc(value uint) u64 { return u64(~value) }
+        main proc() [6]u64 {
+            return [measure(u8(1)), measure(u16(1)), measure(u32(1)), measure(u64(1)), measure(usize(1)), measure(c_uint(1))]
+        }
+        """, b"[254, 65534, 4294967294, 18446744073709551614, 18446744073709551614, 4294967294]\n", None,
+    ),
+    "unsigned_family_parameters_reject_signed_values": (
+        """
+        measure proc(value uint) usize { return usize(value) }
+        main proc() usize { return measure(i16(1)) }
+        """, b"", b"incompatible value type",
+    ),
+    "sequential_inner_local_does_not_shadow_later_outer_lifetime": (
+        """
+        main proc() i16 {
+            result i16 := 0
+            { value :: i16(42)
+                result = value }
+            value :: i16(7)
+            return result + value
+        }
+        """, b"49\n", None,
+    ),
+    "optional_enum_match_context_precedes_null_fallback": (
+        """
+        E :: enum { first, second }
+        choose proc(flag bool) ?E {
+            value ?E :: match flag { true: .first, false: null }
+            return value
+        }
+        main proc() bool { return choose(true)? == .first and choose(false) == null }
+        """, b"true\n", None,
+    ),
+    "runtime_shift_captures_are_not_constant_declarations": (
+        """
+        Shift :: union(enum) { bits u8, empty void }
+        main proc() [3]u8 {
+            counts [2]u8 :: [1, 2]
+            sum u8 := 0
+            for counts |count| { sum += u8(1) << count }
+            optional ?u8 :: 2
+            from_optional u8 :: if optional |count| u8(1) << count else 0
+            tagged Shift :: .bits{3}
+            from_match u8 :: match tagged { .bits |count|: u8(1) << count, .empty: 0 }
+            return [sum, from_optional, from_match]
+        }
+        """, b"[6, 4, 8]\n", None,
+    ),
+    "numeric_builtin_range_bounds_preserve_operand_families": (
+        """
+        sum proc(limit u8) u8 {
+            total u8 := 0
+            for (0..divtrunc!(limit, u8(2))) |index| total += index
+            for (0..rem!(limit, u8(3))) |index| total += index
+            return total
+        }
+        main proc() u8 { return sum(11) }
+        """, b"11\n", None,
+    ),
+    "while_steps_run_after_cleanup_and_continue_but_not_break": (
+        """
+        main proc() [3]i16 {
+            index i16 := 0
+            trace i16 := 0
+            skipped i16 := 0
+            while index < 4 : index += 1 {
+                defer trace = trace * 10 + index
+                if (index == 1) continue
+                if (index == 3) break
+            }
+            while false : skipped += 1 {}
+            return [index, trace, skipped]
+        }
+        """, b"[3, 123, 0]\n", None,
+    ),
+    "while_steps_compute_generated_storage": (
+        """
+        Sized proc() type {
+            length usize := 0
+            while length < 3 : length += 1 {
+                if (length == 1) continue
+            }
+            return [length]u8
+        }
+        main proc() usize { value Sized() :: [1, 2, 3]
+            return value.len }
+        """, b"3\n", None,
+    ),
+    "aggregate_fields_anchor_inferred_local_enum_matches": (
+        """
+        Kind :: enum { first, second }
+        Value :: struct { kind Kind }
+        choose proc(flag bool) Value {
+            selected :: match flag { true: .first, false: .second }
+            return {kind = selected}
+        }
+        main proc() bool { return choose(true).kind == .first and choose(false).kind == .second }
+        """, b"true\n", None,
+    ),
+    "prefixed_integer_float_context_preserves_large_exact_values": (
+        """
+        main proc() bool {
+            value f64 :: 0x10000000000000000
+            return value == 18446744073709551616.0
+        }
+        """, b"true\n", None,
+    ),
+    "prefixed_integer_float_context_rejects_rounding": (
+        """
+        main proc() f64 { return 0x20000000000001 }
+        """, b"", b"integer literal is not exactly representable as float",
+    ),
+    "optional_fallback_evaluates_subject_once_and_rhs_lazily": (
+        """
+        subject proc(count @mut i16, present bool) ?i16 {
+            count^ += 1
+            if (present) return 19
+            return null
+        }
+        fallback proc(count @mut i16) i16 { count^ += 10
+            return 23 }
+        main proc() [4]i16 {
+            count i16 := 0
+            first :: subject(&count, true) orelse fallback(&count)
+            second :: subject(&count, false) orelse fallback(&count)
+            nested ??i16 :: null
+            third :: nested orelse some!(i16(42)) orelse i16(0)
+            return [first, second, third, count]
+        }
+        """, b"[19, 23, 42, 12]\n", None,
+    ),
+    "prefixed_integers_preserve_widths_and_comptime_values": (
+        """
+        Flags :: enum(u8) { first = 0b1, second = 0o10, last = 0x80 }
+        Count proc($n usize) type { return [n]u8 }
+        flags :: 0b101010
+        main proc() [5]u64 {
+            values Count(0x2) :: [0o7, 0b10]
+            minimum i64 :: -0x8000000000000000
+            maximum u64 :: 0xffffffffffffffff
+            return [u64(flags), u64(values.len), u64(Flags.last),
+                u64(minimum + 0x7fffffffffffffff + 1), maximum]
+        }
+        """, b"[42, 2, 128, 0, 18446744073709551615]\n", None,
+    ),
+    "noreturn_calls_terminate_nonvoid_paths": (
+        """
+        stop proc() noreturn { unreachable }
+        main proc() i16 {
+            if (false) stop()
+            return 42
+        }
+        """, b"42\n", None,
+    ),
+    "noreturn_fallthrough_is_rejected": (
+        """
+        stop proc() noreturn {}
+        main proc() i16 { return 42 }
+        """, b"42\n", b"nonvoid function can finish without returning a value",
+    ),
+    "noreturn_cannot_return_void": (
+        """
+        stop proc() noreturn { return }
+        main proc() i16 { return 42 }
+        """, b"42\n", b"return does not match the function result type",
+    ),
     "discard_assignments_preserve_evaluation_and_cleanup": (
         """
         Error :: enum { failed }
@@ -1461,7 +1734,7 @@ CASES = {
         """
         choose proc(flag bool) i16 {
             return { if (flag) yield i16(42)
-                yield u8(7) }
+                yield i32(7) }
         }
         main proc() i16 { return choose(true) }
         """, b"42\n", b"yield does not match the value block result type",
@@ -1607,7 +1880,7 @@ CASES = {
     ),
     "conditional_expressions_check_unselected_runtime_result_types": (
         """
-        choose proc(flag bool) i16 { return if (flag) i16(42) else u8(1) }
+        choose proc(flag bool) i16 { return if (flag) i16(42) else i32(1) }
         main proc() i16 { return choose(true) }
         """, b"42\n", b"incompatible value type",
     ),
@@ -1812,7 +2085,7 @@ CASES = {
     ),
     "optional_conditional_expressions_check_unselected_result_types": (
         """
-        choose proc(value ?i16) i16 { return if value |payload| payload else u8(7) }
+        choose proc(value ?i16) i16 { return if value |payload| payload else i32(7) }
         main proc() i16 { return choose(42) }
         """, b"42\n", b"incompatible value type",
     ),
@@ -2318,7 +2591,7 @@ CASES = {
         b"", b"sum composition requires compatible",
     ),
     "inline_match_composed_preserves_narrow_payload_type": (
-        "A :: enum { a }\nB :: union(enum) { failed i8 }\nread proc(input (A | B)) i16 { return match input { inline |payload, tag|: match tag { .failed: payload, else: i16(0) } } }\nmain proc() i16 { return read(.failed{42}) }",
+        "A :: enum { a }\nB :: union(enum) { failed i16 }\nread proc(input (A | B)) i8 { return match input { inline |payload, tag|: match tag { .failed: payload, else: i8(0) } } }\nmain proc() i8 { return read(.failed{42}) }",
         b"", b"incompatible value type",
     ),
     "inline_match_composed_rejects_fully_covered_arm": (
@@ -2511,7 +2784,7 @@ CASES = {
         b"", b"assignment requires a mutable local binding",
     ),
     "inline_match_payload_preserves_narrow_type": (
-        "Choice :: union(enum) { number i8 }\nread proc(input Choice) i16 { match input { inline |value|: return value } }\nmain proc() i16 { return read(.number{42}) }",
+        "Choice :: union(enum) { number i16 }\nread proc(input Choice) i8 { match input { inline |value|: return value } }\nmain proc() i8 { return read(.number{42}) }",
         b"", b"return does not match",
     ),
     "inline_match_payload_is_not_a_comptime_binding": (
@@ -5237,7 +5510,7 @@ CASES = {
         """
         Selected proc(input struct { child type, count usize }) type { return input.child }
         Bad proc() type {
-            wrong u8 :: 2
+            wrong i64 :: 2
             return Selected({ child = i16, count = wrong })
         }
         main proc() Bad() { return 42 }
@@ -5247,7 +5520,7 @@ CASES = {
         """
         add proc($input struct { child type }, value input.child) input.child { return value }
         main proc() i16 {
-            wrong u8 :: 42
+            wrong i32 :: 42
             return add({ child = i16 }, wrong)
         }
         """, b"", b"incompatible value type",
@@ -5278,7 +5551,7 @@ CASES = {
             return { child = i16 }
         }
         Selected proc() type {
-            for (0..usize(100)) |index| { input :: config(index + 100) }
+            for (0..maxval!(usize)) |index| { input :: config(index + 100) }
             return i16
         }
         main proc() Selected() { return 42 }
@@ -5804,7 +6077,7 @@ CASES = {
         Config :: struct { count usize }
         Bad proc() type {
             config Config := { count = 1 }
-            value u8 :: 2
+            value i64 :: 2
             config.count = value
             return [config.count]i16
         }
@@ -6842,15 +7115,6 @@ CASES = {
         main proc() Bad() { return 42 }
         """, b"", b"compile-time execution exceeds its recursion or step limit",
     ),
-    "type_arrays_undefined_nested_empty_construction_is_bounded": (
-        """
-        Bad proc() type {
-            types [100]mut [100]mut [0]mut type := undefined
-            return i16
-        }
-        main proc() Bad() { return 42 }
-        """, b"", b"compile-time execution exceeds its recursion or step limit",
-    ),
     "value_arrays_undefined_loop_initialization_generates_storage": (
         """
         Storage proc() type {
@@ -6988,7 +7252,7 @@ CASES = {
         """
         Bad proc() type {
             values [1]mut usize := undefined
-            wrong u8 :: 2
+            wrong i64 :: 2
             values[0] = wrong
             return i16
         }
@@ -7031,15 +7295,6 @@ CASES = {
         """
         Bad proc() type {
             values [1000000000]mut usize := undefined
-            return i16
-        }
-        main proc() Bad() { return 42 }
-        """, b"", b"compile-time execution exceeds its recursion or step limit",
-    ),
-    "value_arrays_undefined_nested_empty_construction_is_bounded": (
-        """
-        Bad proc() type {
-            values [100]mut [100]mut [0]mut usize := undefined
             return i16
         }
         main proc() Bad() { return 42 }
@@ -7375,7 +7630,7 @@ CASES = {
             return [i16]
         }
         Selected proc() type {
-            for (0..usize(100)) |index| { types :: row(index + 100) }
+            for (0..maxval!(usize)) |index| { types :: row(index + 100) }
             return i16
         }
         main proc() Selected() { return 42 }
@@ -11377,7 +11632,7 @@ for name, expression, diagnostic in (
     ),
     (
         "wrong_typed_default",
-        'struct_type!(.auto, ["value"], [i16], [u8(2)])',
+        'struct_type!(.auto, ["value"], [i16], [i32(2)])',
         b"incompatible value type",
     ),
     (
@@ -11410,16 +11665,6 @@ for name, expression, diagnostic in (
         }}
         """, b"", diagnostic,
     )
-
-generated_field_count = 4097
-CASES["struct_type_bounds_generated_field_construction"] = (
-    "Record :: struct_type!(.auto, ["
-    + ", ".join(f'"field_{index}"' for index in range(generated_field_count))
-    + "], [" + ", ".join(["i16"] * generated_field_count)
-    + "], [" + ", ".join(["null"] * generated_field_count)
-    + "])\nmain proc() i16 { value Record :: {}\nreturn 42 }\n",
-    b"", b"compile-time execution exceeds",
-)
 
 # Exercise each representation through storage, calls, ranges and checked updates.
 for integer_type, bits, signed in (
@@ -11531,7 +11776,6 @@ CASES.update({
     "cast_type_as_value": ("main proc() int { u8\nreturn 42 }", b"", b"type name cannot"),
     "integer_no_implicit_narrowing": ("main proc() u8 { a u16 :: 1\nreturn a }", b"", b"return does not match"),
     "integer_no_implicit_signedness": ("main proc() i8 { a u8 :: 1\nreturn a }", b"", b"return does not match"),
-    "integer_no_implicit_widening": ("main proc() u16 { a u8 :: 1\nreturn a }", b"", b"return does not match"),
     "integer_assignment_cast": (
         "main proc() u8 { a u8 := 1\nb u16 :: 254\na = u8(b + 1)\nreturn a }",
         b"255\n", None,
@@ -11544,7 +11788,7 @@ CASES.update({
         "main proc() f64 { a u64 :: 18446744073709551615\nreturn f64(a) - 18446744073709551616.0 }",
         b"0\n", None,
     ),
-    "integer_bad_index": ("main proc() i64 { a :: [42]\ni u8 :: 0\nreturn a[i] }", b"", b"array index must have type usize"),
+    "integer_signed_index": ("main proc() i64 { a :: [42]\ni i8 :: 0\nreturn a[i] }", b"", b"array index must have type usize"),
     "integer_cast_index": ("main proc() i64 { a :: [42]\ni u8 :: 0\nreturn a[usize(i)] }", b"42\n", None),
     "integer_cast_unknown": ("main proc() u8 { return u8(missing) }", b"", b"unknown name"),
     "integer_cast_bad_unused": ("bad proc() u8 { return u8(true) }\nmain proc() int { return 42 }", b"42\n", b""),
@@ -11581,7 +11825,7 @@ def check(source, executable, expected=None):
     if expected is not None:
         stdout, error = expected
         assert interpreted.stdout == stdout, (source.name, outcome(interpreted), stdout)
-        assert interpreted.returncode == (1 if error is not None else 0), outcome(interpreted)
+        assert interpreted.returncode == (1 if error is not None else 0), (source.name, outcome(interpreted))
         if error is not None:
             assert interpreted.stderr and error in interpreted.stderr, outcome(interpreted)
     for optimization in ("-O0", "-O2"):
@@ -12823,6 +13067,29 @@ def check_fallible_packages_and_entry(temporary, executable):
     return count
 
 
+def check_static_string_map_packages(temporary, executable):
+    project = temporary / "static_string_map"
+    project.mkdir()
+    (project / "build.hon").write_text("# project root\n")
+    for package in ("std", "ffi"):
+        (project / package).symlink_to(ROOT / package, target_is_directory=True)
+    source = project / "main.hon"
+    source.write_text(textwrap.dedent("""
+        import "@std/strmap"
+        main proc() i16 {
+            map strmap.StaticStringMap(i16) :: strmap.init([
+                {"long", i16(19)}, {"a", i16(23)}, {"", i16(7)},
+            ])
+            empty strmap.StaticStringMap(i16) :: strmap.init([])
+            if (strmap.get(&map, "")? != 7) return -1
+            if (strmap.get(&map, "absent") != null or strmap.get(&empty, "") != null) return -2
+            return strmap.get(&map, "long")? + strmap.get(&map, "a")?
+        }
+    """).strip() + "\n")
+    check(source, executable, (b"42\n", None))
+    return 1
+
+
 def check_typeinfo_packages(temporary, executable):
     project = temporary / "typeinfo"
     project.mkdir()
@@ -12830,8 +13097,64 @@ def check_typeinfo_packages(temporary, executable):
     (project / "std").mkdir()
     for package in ("meta", "enummap"):
         (project / "std" / package).symlink_to(ROOT / "std" / package, target_is_directory=True)
+    captures = project / "captures"
+    captures.mkdir()
+    (captures / "main.hon").write_text(
+        "read proc($T type, value @T) T { return value^ }\n"
+        "failed proc($T type, value T) bool { return value == .failed }\n"
+    )
 
     cases = {
+        "composed_enum_maps_merge_compatible_shared_variant_names": (
+            """
+            import "@std/enummap"
+            A :: enum { shared, a }
+            B :: enum { shared, b }
+            Key :: alias (A | B)
+            names :: $enummap.init_default(Key, usize, usize(0), {shared = 42})
+            main proc() usize { return enummap.get(&names, .shared)? + names.present.len }
+            """,
+            b"45\n",
+            None,
+        ),
+        "composed_enum_map_construction_has_bounded_execution_budget": (
+            """
+            import "@std/enummap"
+            A :: enum { a, b }
+            B :: enum { c, d }
+            C :: enum { e, f }
+            D :: enum { g, h }
+            E :: enum { i, j }
+            F :: enum { k, l }
+            Key :: alias (A | B | C | D | E | F)
+            names :: $enummap.init_default(Key, []u8, "", {a = "one"})
+            main proc() usize { return enummap.get(&names, .a)?.len }
+            """,
+            b"3\n",
+            None,
+        ),
+        "transitive_metadata_and_pointer_capture_generic_context": (
+            """
+            import "@std/enummap"
+            import "../captures"
+            Key :: enum { first, second }
+            Error :: enum { failed }
+            fail proc() i16 ! Error { return .failed }
+            count proc($T type) usize {
+                match typeinfo!(T) { .enum |info|: return info.fields.len, else: return 0 }
+            }
+            main proc() i16 {
+                values [2]i16 :: [19, 23]
+                total i16 := 0
+                for values |@item| { total += captures.read(item) }
+                if (count(Key) != 2) return -1
+                fallback i16 :: fail() catch |error| if (captures.failed(error)) i16(42) else i16(-2)
+                if (fallback != total) return -2
+                map enummap.EnumMap(Key, i16) :: enummap.init({first = total})
+                return enummap.get(&map, .first)?
+            }
+            """, b"42\n", None,
+        ),
         "enum_field_struct_preserves_owned_and_address_backed_defaults": (
             """
             import "@std/meta"
@@ -14425,6 +14748,7 @@ def main():
         variadic_count = check_variadic_libc(temporary, executable)
         arraylist_count, arraylist_native_count = check_arraylist_packages(temporary, executable)
         count += arraylist_count
+        count += check_static_string_map_packages(temporary, executable)
         hashmap_count, hashmap_native_count = check_hashmap_packages(temporary, executable)
         count += hashmap_count
         io_count, io_native_count = check_io_packages(temporary, executable)

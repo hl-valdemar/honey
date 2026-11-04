@@ -3,6 +3,75 @@ import "@std/testing"
 import "@source/diagnostics"
 import "@source/strpool"
 
+scans_optional_fallback_keyword_without_splitting_names test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "orelse orelse_value orelse2", &pool, &diagnostic_store)
+    expected [4]TokenKind :: [.orelse, .ident, .ident, .eof]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    try testing.expect_equal("orelse", strpool.get_str(&pool, state.tokens.items[0].data.str_id)?)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+scans_prefixed_integers_without_consuming_ranges_or_selections test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    source :: "0b00000001 0B10 0o17 0O70 0xAf 0XfF 007 0b1..0b10 0xF.member"
+    try scan(&state, source, &pool, &diagnostic_store)
+    expected [14]TokenKind :: [
+        .int, .int, .int, .int, .int, .int, .int,
+        .int, .range, .int, .int, .dot, .ident, .eof,
+    ]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+    literals [10][]u8 :: ["0b00000001", "0B10", "0o17", "0O70", "0xAf", "0XfF", "007", "0b1", "0b10", "0xF"]
+    indices [10]usize :: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+    for (literals) |literal, index| {
+        span :: state.tokens.items[indices[index]].span
+        try testing.expect_equal(literal, source[usize(span.start)..usize(span.end)])
+    }
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+}
+
+diagnoses_entire_malformed_prefixed_integer_and_preserves_next_line test {
+    literals [8][]u8 :: ["0b", "0o", "0x", "0b102", "0o89", "0xG", "0b_1", "0x1g"]
+    for (literals) |literal| {
+        pool := strpool.init(mem.c_allocator)
+        defer strpool.deinit(&pool)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        state := init(mem.c_allocator)
+        defer deinit(&state)
+        try scan(&state, literal, &pool, &diagnostic_store)
+        try testing.expect_equal(2, state.tokens.items.len)
+        try testing.expect_equal(TokenKind.invalid, state.tokens.items[0].kind)
+        try testing.expect_equal(u32(literal.len), state.tokens.items[0].span.end)
+        try testing.expect_equal(TokenKind.eof, state.tokens.items[1].kind)
+        try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+        diagnostic :: diagnostics.get(&diagnostic_store, state.tokens.items[0].data.diagnostic)?
+        try testing.expect_equal(diagnostics.Code.invalid_integer_literal, diagnostic.code)
+    }
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    state := init(mem.c_allocator)
+    defer deinit(&state)
+    try scan(&state, "0b2\nnext :: 1", &pool, &diagnostic_store)
+    expected [6]TokenKind :: [.invalid, .newline, .ident, .double_colon, .int, .eof]
+    try testing.expect_equal(expected.len, state.tokens.items.len)
+    for (expected) |kind, index| try testing.expect_equal(kind, state.tokens.items[index].kind)
+}
+
 scans_raw_marked_lines_without_consuming_statement_boundaries test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)

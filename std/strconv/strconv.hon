@@ -6,6 +6,33 @@ ParseError :: enum {
     out_of_range
 }
 
+#! parses a complete unsigned decimal or 0b/0o/0x integer without allocation.
+#! returns null for invalid digits, empty input or a magnitude above `limit`.
+parse_unsigned proc(text []u8, limit u64) ?u64 {
+    base := u64(10)
+    start := usize(0)
+    if (text.len >= 2 and text[0] == '0') {
+        match text[1] {
+            'b', 'B': base = 2
+            'o', 'O': base = 8
+            'x', 'X': base = 16
+            else: {}
+        }
+        if (base != 10) start = 2
+    }
+    if (start == text.len) return null
+    value := u64(0)
+    for (text[start..]) |byte| {
+        digit := u64(16)
+        if (byte >= '0' and byte <= '9') digit = u64(byte - '0')
+        else if (byte >= 'a' and byte <= 'f') digit = u64(byte - 'a') + 10
+        else if (byte >= 'A' and byte <= 'F') digit = u64(byte - 'A') + 10
+        if (digit >= base or digit > limit or value > divtrunc!(limit - digit, base)) return null
+        value = value * base + digit
+    }
+    return value
+}
+
 #! parse a complete ASCII decimal with an optional sign, decimal point, and exponent.
 #! at least one mantissa digit and, after an exponent marker, one exponent digit are required.
 #! whitespace, embedded NUL bytes, trailing bytes, hexadecimal, infinities, and NaNs are invalid.

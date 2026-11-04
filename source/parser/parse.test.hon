@@ -8,6 +8,146 @@ import "@source/lexer"
 import "@source/ast"
 import "@source/ast/renderer"
 
+parses_production_prefixed_flags_and_leading_dot_conditional_values test {
+    source ::
+        `@hide:file file_local_flag u8 :: 0b00000001
+        `@hide:file package_local_flag u8 :: 0b01000000
+        `run proc(fallible bool, error_only bool) void {
+        `    kind NodeKind :: if (fallible) .expr_fallible_type else .expr_sum_type
+        `    cleanup NodeKind :: if (error_only) .stmt_errdefer else .stmt_defer
+        `    nested :: if ((fallible)) .first else if (error_only) .second else .third
+        `}
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(3, ast.package_decl_count(&tree))
+    flag :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    try testing.expect_equal(ast.ExprKind.literal_int, ast.expr_kind(&tree, flag))
+    try testing.expect_equal("0b00000001", ast.literal_text(&tree, flag))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 2)).body
+    try testing.expect_equal(3, ast.block_statement_count(&tree, body))
+    for (usize(0)..usize(3)) |index| {
+        conditional :: ast.statement_decl(&tree, ast.block_statement(&tree, body, index)).initializer
+        try testing.expect_equal(ast.ExprKind.match_expr, ast.expr_kind(&tree, conditional))
+        try testing.expect_equal(2, ast.match_arm_count(&tree, conditional))
+        first :: ast.match_arm_view(&tree, ast.match_arm(&tree, conditional, 0))
+        try testing.expect_equal(ast.ExprKind.enum_literal, ast.expr_kind(&tree, first.body))
+    }
+}
+
+parses_newline_unbraced_control_bodies_without_swallowing_siblings test {
+    source ::
+        `run proc(flag bool, value ?u32) void {
+        `    if (flag)
+        `        target.items[0] = target.items[0] | 4
+        `    else if (!flag)
+        `        target.direct_children = 1
+        `    if (flag or !flag)
+        `        target.direct_children = 3
+        `    if (value) |capture|
+        `        use(capture)
+        `    while (flag)
+        `        break
+        `    return
+        `}
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(5, ast.block_statement_count(&tree, body))
+    branch :: ast.if_stmt(&tree, ast.block_statement(&tree, body, 0))
+    try testing.expect_equal(1, ast.block_statement_count(&tree, branch.then_block))
+    try testing.expect_equal(ast.StmtKind.assignment_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, branch.then_block, 0)))
+    try testing.expect(branch.else_block != null)
+    loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal(ast.StmtKind.break_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, loop.body, 0)))
+    try testing.expect_equal(ast.StmtKind.return_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, body, 4)))
+}
+
+parses_bare_compile_time_prefix_with_unary_precedence test {
+    source ::
+        `messages :: $enummap.init(Code, []u8, { invalid_character = "invalid character" })
+        `sum :: $calculate(1).value + 2
+        `grouped :: $(1 + 2)
+        `bits :: $(1 | 2)
+        `run proc(value Record) void {
+        `    if ((value).ready) return
+        `}
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(5, ast.package_decl_count(&tree))
+    messages :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    try testing.expect_equal(ast.ExprKind.comptime_expr, ast.expr_kind(&tree, messages))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, ast.comptime_operand(&tree, messages)))
+    sum :: ast.binary_expr(&tree, ast.statement_decl(&tree, ast.package_decl(&tree, 1)).initializer)
+    try testing.expect_equal(ast.BinaryOperator.add, sum.operator)
+    try testing.expect_equal(ast.ExprKind.comptime_expr, ast.expr_kind(&tree, sum.left))
+    try testing.expect_equal(ast.ExprKind.selection, ast.expr_kind(&tree, ast.comptime_operand(&tree, sum.left)))
+    grouped :: ast.statement_decl(&tree, ast.package_decl(&tree, 2)).initializer
+    try testing.expect_equal("$(1 + 2)", ast.source_text(&tree, ast.node_span(&tree, grouped)))
+    try testing.expect_equal(ast.ExprKind.binary, ast.expr_kind(&tree, ast.comptime_operand(&tree, grouped)))
+    bits :: ast.statement_decl(&tree, ast.package_decl(&tree, 3)).initializer
+    try testing.expect_equal(ast.BinaryOperator.bit_or, ast.binary_expr(&tree, ast.comptime_operand(&tree, bits)).operator)
+}
+
+canonicalizes_optional_fallback_with_one_subject_and_scoped_payload test {
+    source ::
+        `kind :: strmap.get(&keywords, text) orelse .ident
+        `combined :: first orelse second orelse false or true
+        `nested :: (
+        `    first
+        `    orelse second
+        `)
+        `Keyword :: enum { orelse }
+        `keyword :: Keyword.orelse
+        `enum_fallback :: first orelse .orelse
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    fallback :: ast.statement_decl(&tree, ast.package_decl(&tree, 0)).initializer
+    try testing.expect(ast.match_expr(&tree, fallback).optional_capture)
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, ast.match_expr(&tree, fallback).subject))
+    present :: ast.match_arm_view(&tree, ast.match_arm(&tree, fallback, 0))
+    try testing.expect(present.capture != null)
+    try testing.expect_equal(ast.name_id(&tree, present.capture?), ast.name_id(&tree, present.body))
+    absent :: ast.match_arm_view(&tree, ast.match_arm(&tree, fallback, 1))
+    try testing.expect(absent.catch_all)
+    try testing.expect_equal(ast.ExprKind.enum_literal, ast.expr_kind(&tree, absent.body))
+    combined :: ast.statement_decl(&tree, ast.package_decl(&tree, 1)).initializer
+    try testing.expect_equal(ast.ExprKind.match_expr, ast.expr_kind(&tree, ast.match_expr(&tree, combined).subject))
+    final :: ast.match_arm_view(&tree, ast.match_arm(&tree, combined, 1)).body
+    try testing.expect_equal(ast.BinaryOperator.logical_or, ast.binary_expr(&tree, final).operator)
+}
+
 parses_characters_as_integer_literals_with_original_spans test {
     source :: "values :: ['a', '\\0', '\\n', '\\r', '\\t', '\\\\', '\\'', 'é', '😀']"
     expected [9][]u8 :: ["97", "0", "10", "13", "9", "92", "39", "233", "128512"]
@@ -2497,4 +2637,46 @@ renders_compound_updates_in_scoped_statement_bodies test {
     try renderer.render(&output, &tree)
     expected :: "package\n  function run\n    declaration value := 1\n    block\n      assignment value += 2\n    defer\n      assignment value -= 3\n    errdefer |err|\n      assignment value xor= 4\n    for 0..2 |item, index|\n      assignment value |= 5\n"
     try testing.expect(mem.eql(output.bytes.items, expected))
+}
+
+parses_while_update_clauses_as_separate_canonical_blocks test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `run proc() void {
+        `    while (cursor < 4) : cursor += 1 { continue }
+        `    while cursor < 8 : cursor = cursor + 1 { break }
+        `    while next() |item| : advance(item) { use(item) }
+        `    while (false) : _ = tick() { return }
+        `    while (false) { break }
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+    tree := try parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    body :: ast.function_decl(&tree, ast.package_decl(&tree, 0)).body
+    try testing.expect_equal(5, ast.block_statement_count(&tree, body))
+    for (usize(0)..usize(2)) |index| {
+        loop :: ast.while_stmt(&tree, ast.block_statement(&tree, body, index))
+        try testing.expect_equal(ast.BinaryOperator.less, ast.binary_expr(&tree, loop.condition).operator)
+        try testing.expect(loop.capture == null)
+        try testing.expect_equal(1, ast.block_statement_count(&tree, loop.body))
+        try testing.expect_equal(1, ast.block_statement_count(&tree, loop.step?))
+        assignment :: ast.assignment_stmt(&tree, ast.block_statement(&tree, loop.step?, 0))
+        try testing.expect_equal(index == 0, assignment.compound)
+        try testing.expect_equal(ast.BinaryOperator.add, ast.binary_expr(&tree, assignment.value).operator)
+    }
+    captured :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 2))
+    try testing.expect(captured.capture != null)
+    update :: ast.block_statement(&tree, captured.step?, 0)
+    try testing.expect_equal(ast.StmtKind.expression, ast.stmt_kind(&tree, update))
+    try testing.expect_equal(ast.ExprKind.call, ast.expr_kind(&tree, ast.statement_expr(&tree, update)))
+    discarded :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 3))
+    try testing.expect_equal(ast.StmtKind.expression, ast.stmt_kind(&tree, ast.block_statement(&tree, discarded.step?, 0)))
+    plain :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 4))
+    try testing.expect(plain.capture == null and plain.step == null)
 }

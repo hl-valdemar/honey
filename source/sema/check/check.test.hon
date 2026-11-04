@@ -2597,3 +2597,264 @@ inferred_counts_follow_forward_fixed_aliases_empty_shapes_and_reject_local_count
     try testing.expect_equal(1, code_count(&fixture.diagnostics, .invalid_array_length))
     try testing.expect_equal(1, diagnostics.count(&fixture.diagnostics))
 }
+
+borrowing_fixed_arrays_refreshes_counts_resolved_by_earlier_references test {
+    source ::
+        `Entry :: struct { value u8 }
+        `entries [_]Entry :: [{ value = 1 }, { value = 2 }]
+        `count :: entries.len
+        `take proc(values @[2]Entry) void {}
+        `main proc() void { take(&entries) }
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    body :: ast.function_decl(tree, ast.package_decl(tree, 4)).body
+    call :: ast.statement_expr(tree, ast.block_statement(tree, body, 0))
+    address :: ast.call_arg(tree, call, 0)
+    try expect_kind(result, address, .pointer)
+    pointer :: pointer_type(result, type_of(result, address).pointer_type)
+    try testing.expect(!pointer.mutable and !pointer.many)
+    shape :: array_type(result, pointer.element.array_type)
+    try testing.expect_equal(2, shape.len)
+    try testing.expect(!shape.mutable)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+enum_local_aliases_receive_match_and_conditional_context_from_rigid_uses test {
+    source ::
+        `E :: enum { a, b }
+        `S :: struct { kind E }
+        `take proc(value E) E { return value }
+        `from_match proc(flag bool) S {
+        `    value :: match flag { true: .a, false: .b }
+        `    copy :: value
+        `    return { kind = copy }
+        `}
+        `from_conditional proc(flag bool) S {
+        `    value :: if (flag) .a else .b
+        `    return { kind = value }
+        `}
+        `from_call proc(flag bool) E {
+        `    value :: if (flag) .a else .b
+        `    copy :: value
+        `    return take(copy)
+        `}
+        `from_return proc(flag bool) E {
+        `    value :: match flag { true: .a, false: .b }
+        `    return value
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    expected :: type_of(result, ast.function_param(tree, ast.package_decl(tree, 2), 0)).enum_type
+    for usize(3)..usize(7) |i| {
+        body :: ast.function_decl(tree, ast.package_decl(tree, i)).body
+        declaration :: ast.block_statement(tree, body, 0)
+        expression :: ast.statement_decl(tree, declaration).initializer
+        try expect_kind(result, declaration, .enumeration)
+        try expect_kind(result, expression, .enumeration)
+        try testing.expect_equal(expected, type_of(result, declaration).enum_type)
+        for 0..ast.match_arm_count(tree, expression) |j| {
+            arm :: ast.match_arm_view(tree, ast.match_arm(tree, expression, j))
+            try expect_kind(result, arm.body, .enumeration)
+            try testing.expect_equal(expected, type_of(result, arm.body).enum_type)
+        }
+    }
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+enum_match_aliases_preserve_conflicting_rigid_contexts_and_fixed_boundaries test {
+    source ::
+        `A :: enum { a, b }
+        `B :: enum { a, b }
+        `SA :: struct { kind A }
+        `SB :: struct { kind B }
+        `take_a proc(value A) void {}
+        `take_b proc(value B) void {}
+        `conflicting proc(flag bool) void {
+        `    value :: if (flag) .a else .b
+        `    take_a(value)
+        `    take_b(value)
+        `}
+        `fixed proc(flag bool) void {
+        `    value A :: if (flag) .a else .b
+        `    take_b(value)
+        `}
+        `fields proc(flag bool) void {
+        `    value :: match flag { true: .a, false: .b }
+        `    first SA :: { kind = value }
+        `    second SB :: { kind = value }
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    fixed_body :: ast.function_decl(tree, ast.package_decl(tree, 7)).body
+    fixed :: ast.block_statement(tree, fixed_body, 0)
+    try expect_kind(result, fixed, .enumeration)
+    call :: ast.statement_expr(tree, ast.block_statement(tree, fixed_body, 1))
+    argument :: ast.call_arg(tree, call, 0)
+    _ = try expect_error(result, &fixture.diagnostics, argument, .type_mismatch, ast.node_span(tree, argument))
+    for usize(6)..usize(9) |i| {
+        if (i == 7) continue
+        body :: ast.function_decl(tree, ast.package_decl(tree, i)).body
+        expression :: ast.statement_decl(tree, ast.block_statement(tree, body, 0)).initializer
+        for 0..ast.match_arm_count(tree, expression) |j| {
+            arm :: ast.match_arm_view(tree, ast.match_arm(tree, expression, j))
+            _ = try expect_error(result, &fixture.diagnostics, arm.body, .type_mismatch, ast.node_span(tree, arm.body))
+        }
+    }
+    try testing.expect(code_count(&fixture.diagnostics, .type_mismatch) >= 5)
+    try testing.expect_equal(0, code_count(&fixture.diagnostics, .enum_context_required))
+}
+
+mixed_integer_comparisons_preserve_concrete_operands_and_nominal_boundaries test {
+    source ::
+        `small u8 :: 255
+        `medium u32 :: 4294967295
+        `large usize :: 18446744073709551615
+        `signed_small i8 :: -128
+        `signed_large i64 :: -127
+        `forward :: small < large
+        `reverse :: large > medium
+        `equal :: medium == u64(4294967295)
+        `signed :: signed_small < signed_large
+        `Count :: distinct u32
+        `Other :: distinct u32
+        `count :: Count(1)
+        `other :: Other(1)
+        `nominal :: count == other
+        `native :: count < medium
+        `sign :: signed_small < small
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for (usize(5)..usize(9)) |i| try expect_kind(result, ast.package_decl(tree, i), .bool)
+    forward :: ast.binary_expr(tree, ast.statement_decl(tree, ast.package_decl(tree, 5)).initializer)
+    try expect_kind(result, forward.left, .u8)
+    try expect_kind(result, forward.right, .usize)
+    for usize(13)..usize(16) |i| {
+        value :: ast.statement_decl(tree, ast.package_decl(tree, i)).initializer
+        _ = try expect_error(result, &fixture.diagnostics, value, .invalid_operand, ast.node_span(tree, value))
+    }
+    try testing.expect_equal(3, diagnostics.count(&fixture.diagnostics))
+}
+
+conditional_aliases_keep_payload_types_in_fallible_and_optional_return_contexts test {
+    source ::
+        `Id :: distinct u32
+        `Error :: enum { failed }
+        `make proc() Id ! Error { return Id(1) }
+        `take proc(value Id) void {}
+        `fallible proc(flag bool) Id ! Error {
+        `    value := if (flag) {
+        `        yield try make()
+        `    } else {
+        `        yield try make()
+        `    }
+        `    take(value)
+        `    value = try make()
+        `    return value
+        `}
+        `optional proc(flag bool) ?Id {
+        `    value :: if (flag) Id(1) else Id(2)
+        `    take(value)
+        `    return value
+        `}
+        `lifted_error proc(flag bool) Id ! Error {
+        `    return if (flag) Id(1) else .failed
+        `}
+        `lifted_null proc(flag bool) ?Id {
+        `    return if (flag) Id(1) else null
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for usize(4)..usize(6) |i| {
+        body :: ast.function_decl(tree, ast.package_decl(tree, i)).body
+        value :: ast.block_statement(tree, body, 0)
+        try expect_kind(result, value, .u32)
+        try testing.expect(type_of(result, value).nominal != ast.NodeId(maxval!(u32)))
+    }
+    for usize(6)..usize(8) |i| {
+        body :: ast.function_decl(tree, ast.package_decl(tree, i)).body
+        value :: ast.return_stmt(tree, ast.block_statement(tree, body, 0)).value?
+        expected TypeKind :: if (i == 6) .fallible else .optional
+        try expect_kind(result, value, expected)
+    }
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+conditional_offsets_in_nested_range_bodies_keep_the_resolved_bound_family test {
+    source ::
+        `Kind :: enum { record, array }
+        `Field :: struct { offset usize }
+        `Shape :: struct { kind Kind, fields []mut Field, len usize }
+        `Value :: struct { type Kind, data []mut Value }
+        `Module :: struct { arrays []mut Shape }
+        `copy proc(module @Module, destination Value, source Value) void {
+        `    shape :: module.arrays[usize(0)]
+        `    count :: if (shape.kind == .record) shape.fields.len else shape.len
+        `    for (0..count) |i| {
+        `        child :: source.data[i]
+        `        if (child.type == .record) copy(module, destination, child)
+        `        else {
+        `            offset :: if (shape.kind == .record) shape.fields[i].offset else i
+        `            destination.data[offset] = child
+        `        }
+        `    }
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    body :: ast.function_decl(tree, ast.package_decl(tree, 5)).body
+    loop :: ast.for_stmt(tree, ast.block_statement(tree, body, 2))
+    try expect_kind(result, loop.capture?, .usize)
+    conditional :: ast.if_stmt(tree, ast.block_statement(tree, loop.body, 1))
+    offset :: ast.block_statement(tree, conditional.else_block?, 0)
+    try expect_kind(result, offset, .usize)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+integer_widening_is_value_only_and_preserves_rigid_source_types test {
+    source ::
+        `Wide :: struct { value u64 }
+        `take proc(value u64) void {}
+        `widen proc(small u8, start u32, end u16, bytes []u8) u64 {
+        `    copy u64 := small
+        `    record Wide :: { value = small }
+        `    view :: bytes[start..end]
+        `    element :: bytes[start]
+        `    take(small)
+        `    signed i64 :: start
+        `    return small
+        `}
+        `reject proc(wide u64, signed i8, pointer @u8) void {
+        `    narrow u8 :: wide
+        `    unsigned u64 :: signed
+        `    borrowed @u64 :: pointer
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    function :: ast.package_decl(tree, 2)
+    try expect_kind(result, ast.function_param(tree, function, 0), .u8)
+    try expect_kind(result, ast.function_param(tree, function, 1), .u32)
+    body :: ast.function_decl(tree, function).body
+    try expect_kind(result, ast.block_statement(tree, body, 0), .u64)
+    view :: ast.slice_expr(tree, ast.statement_decl(tree, ast.block_statement(tree, body, 2)).initializer)
+    try expect_kind(result, view.start?, .u32)
+    try expect_kind(result, view.end?, .u16)
+    rejected :: ast.function_decl(tree, ast.package_decl(tree, 3)).body
+    for 0..usize(3) |i| {
+        value :: ast.statement_decl(tree, ast.block_statement(tree, rejected, i)).initializer
+        _ = try expect_error(result, &fixture.diagnostics, value, .type_mismatch, ast.node_span(tree, value))
+    }
+    try testing.expect_equal(3, diagnostics.count(&fixture.diagnostics))
+}

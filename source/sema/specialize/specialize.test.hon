@@ -492,7 +492,7 @@ rejects_unrelated_nominal_results_and_unresolved_compile_time_arguments test {
 preserves_explicit_arguments_and_explicit_type_procedure_inputs test {
     try expect_specialization(
         `identity proc($T type, value T) T { return value }
-        `main proc() i16 { return identity(u8, 7) }
+        `main proc() i8 { return identity(i16, 7) }
         , .return_type_mismatch, 1,
     )
     try expect_specialization(
@@ -555,5 +555,175 @@ promotes_owned_pointer_and_slice_defaults_into_optional_parameters test {
         `    return pointers.left^ + slices.left[1]
         `}
         , .type_mismatch, 0,
+    )
+}
+
+infers_helpers_from_pointer_collection_and_catch_captures test {
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T, bytes []u8 } }
+        `observe proc($T type, value T) void {}
+        `release proc($T type, value @mut Box(T)) void { observe(value.bytes) }
+        `Error :: union(enum) { failed struct { code i16 }, empty void }
+        `fail proc() void ! Error { return .failed{code = 7} }
+        `main proc() void {
+        `    values [1]mut Box(i16) := [{value = 42, bytes = "ok"}]
+        `    for values |@value| {
+        `        release(value)
+        `        observe(value.bytes)
+        `    }
+        `    fail() catch |err| {
+        `        observe(err)
+        `        match err { .failed |detail|: observe(detail.code), .empty: {} }
+        `    }
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+infers_dependent_comptime_inputs_after_nominal_result_context test {
+    try expect_specialization(
+        `Kind :: enum { first, second }
+        `Pair proc($V type) type { return struct { []u8, V } }
+        `Map proc($V type) type { return struct { value V, len usize } }
+        `init proc($V type, $N usize, $entries [N]Pair(V)) Map(V) {
+        `    return {value = entries[0].1, len = N}
+        `}
+        `first Map(Kind) :: init([{"first", .first}, {"second", .second}])
+        `second Map(Kind) :: init(Kind, [{"second", .second}])
+        `main proc() usize { return first.len + second.len }
+        , .cannot_infer_generic, 0,
+    )
+}
+
+keeps_unbound_reflection_templates_unexpanded test {
+    try expect_specialization(
+        `unused proc($E type) usize {
+        `    match typeinfo!(E) {
+        `        .enum |info|: return info.fields.len
+        `        else: compile_error!("not an enum")
+        `    }
+        `}
+        `identity proc($T type, value T) T { return value }
+        `main proc() i16 { return $(identity(i16(42))) }
+        , .comptime_argument_required, 0,
+    )
+}
+
+substitutes_generic_annotations_before_evaluating_comptime_values test {
+    try expect_specialization(
+        `Box proc($T type) type { return struct { value T } }
+        `read proc($T type, $value Box(T)) T { return value.value }
+        `consume proc($T type, value Box(T)) T {
+        `    inline for ([usize(0)]) |_| {}
+        `    return value.value
+        `}
+        `saved Box(i16) :: {value = 42}
+        `main proc() i16 { return read(i16, saved) + read(saved) + $(consume(saved)) }
+        , .comptime_argument_required, 0,
+    )
+}
+
+infers_dependent_callbacks_from_nominal_inputs_and_results test {
+    try expect_specialization(
+        `Map proc($K, $V type, $hash ?proc(key K) usize, $equal ?proc(left, right K) bool) type {
+        `    return struct { value V }
+        `}
+        `init proc($K, $V type, $hash ?proc(key K) usize, $equal ?proc(left, right K) bool) Map(K, V, hash, equal) {
+        `    return {value = 42}
+        `}
+        `get proc($K, $V type, $hash ?proc(key K) usize, $equal ?proc(left, right K) bool, map @Map(K, V, hash, equal)) V {
+        `    return map.value
+        `}
+        `hash_key proc(value i16) usize { return usize(value) }
+        `keys_equal proc(left, right i16) bool { return left == right }
+        `main proc() i16 {
+        `    automatic Map(i16, i16, null, null) :: init()
+        `    custom Map(i16, i16, hash_key, keys_equal) :: init()
+        `    return get(&automatic) + get(&custom)
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+executes_closed_zero_runtime_calls_and_retains_returned_views test {
+    try expect_specialization_guards(
+        `Map proc($T type) type { return struct { values []T, indexes []usize } }
+        `init proc($T type, $N usize, $entries [N]T) Map(T) {
+        `    values [N]mut T := undefined
+        `    for entries |entry, i| { values[i] = entry }
+        `    if N == 0 {
+        `        empty [0]usize :: undefined
+        `        return {values = values[..], indexes = empty[..]}
+        `    }
+        `    if values[0] == 0 { compile_error!("unexpected zero") }
+        `    length usize :: usize(values[0])
+        `    indexes [length]mut usize := undefined
+        `    for 0..length |i| { indexes[i] = i }
+        `    return {values = values[..], indexes = indexes[..]}
+        `}
+        `main proc() i16 {
+        `    map Map(i16) :: init([i16(19), i16(23)])
+        `    empty Map(i16) :: init([])
+        `    return map.values[0] + map.values[1]
+        `}
+        , .compile_error, 0, 0,
+    )
+    try expect_specialization(
+        `produce proc() i16 {
+        `    value i16 := 0
+        `    if value == 0 { compile_error!("selected failure") }
+        `    return value
+        `}
+        `main proc() i16 { return produce() }
+        , .compile_error, 1,
+    )
+}
+
+infers_array_lengths_from_contextually_typed_storage_initializers test {
+    try expect_specialization(
+        `Kind :: enum { first, second }
+        `Entry :: struct { name []u8, kind Kind }
+        `entries [_]Entry :: [{name = "a", kind = .first}, {name = "b", kind = .second}]
+        `length proc($N usize, values @[N]Entry) usize { return N }
+        `main proc() usize { return length(&entries) }
+        , .cannot_infer_generic, 0,
+    )
+}
+
+infers_byte_slices_from_nonliteral_string_bindings test {
+    try expect_specialization(
+        `same_length proc($T type, left, right []T) bool { return left.len == right.len }
+        `main proc() bool {
+        `    expected :: if (true) "auto" else "c"
+        `    return same_length("auto", expected)
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+infers_range_capture_types_from_rigid_bounds_before_generic_calls test {
+    try expect_specialization(
+        `identity proc($T type, value T) T { return value }
+        `main proc() usize {
+        `    count usize :: 2
+        `    total usize := 0
+        `    for 0..count |index| { total += identity(index) }
+        `    return total
+        `}
+        , .cannot_infer_generic, 0,
+    )
+}
+
+executes_demanded_local_dependent_array_extents_before_checking_layout test {
+    try expect_specialization(
+        `make proc() []i16 {
+        `    sizes [1]mut usize := [2]
+        `    length usize :: sizes[0]
+        `    values [length]mut i16 := undefined
+        `    for 0..length |index| { values[index] = 42 }
+        `    return values[..]
+        `}
+        `main proc() i16 { return $(make())[0] }
+        , .invalid_array_length, 0,
     )
 }

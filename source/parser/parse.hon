@@ -33,6 +33,7 @@ State :: struct {
     allow_record_literals bool = true
     allow_bit_or bool = true
     match_arm_body bool = false
+    guard_depth usize = maxval!(usize)
 }
 
 @hide:file
@@ -337,7 +338,7 @@ parse_statement proc(state @mut State, allow_else bool) ast.NodeId ! ParseError 
         .ident, .int, .float, .string, .multiline_string, .true, .false, .minus, .bang, .tilde, .open_paren, .open_bracket, .struct, .c_struct, .opaque, .c_func,
         .enum, .union, .distinct, .alias, .dot, .match, .ampersand, .at, .star, .question, .null, .undefined, .try, .dollar: {
             expression :: try parse_expr(state)
-            if (is_assignment_operator(current(state).kind)) return try parse_assignment(state, expression, allow_else)
+            if (is_assignment_operator(current(state).kind)) return try parse_assignment(state, expression, allow_else, false)
             return try ast.add_expression_stmt(state.builder, expression)
         }
         else: return .unexpected_token
@@ -441,7 +442,7 @@ parse_loop_control proc(state @mut State, allow_else bool) ast.NodeId ! ParseErr
 }
 
 @hide:file
-parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.NodeId ! ParseError {
+parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool, before_body bool) ast.NodeId ! ParseError {
     operator :: enummap.get(&assignment_operators, current(state).kind)
     state.next_token += 1
     value := try parse_expr(state)
@@ -451,6 +452,7 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
         and !next_is(state, .eof)
         and !(allow_else and next_is(state, .else))
         and !(state.match_arm_body and next_is(state, .comma))
+        and !(before_body and next_is(state, .open_curly))
     ) return .unexpected_token
     target_span :: ast.builder_span(state.builder, target)
     if (
@@ -471,7 +473,7 @@ parse_assignment proc(state @mut State, target ast.NodeId, allow_else bool) ast.
 @hide:file
 parse_if proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
-    condition :: try parse_guard(state)
+    condition :: try parse_guard(state, false)
     capture :: try parse_optional_capture(state)
     then_block :: try parse_arm(state, true)
     after_then :: state.next_token
@@ -505,7 +507,7 @@ parse_if proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
     keyword :: try consume(state, .if)
-    condition :: try parse_guard(state)
+    condition :: try parse_guard(state, false)
     capture :: try parse_optional_capture(state)
     skip_newlines(state)
     then_value :: try parse_expr(state)
@@ -538,8 +540,24 @@ parse_if_expr proc(state @mut State) ast.NodeId ! ParseError {
 @hide:file
 parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
     keyword :: try consume(state, .while)
-    condition :: try parse_guard(state)
+    condition :: try parse_guard(state, true)
     capture :: try parse_optional_capture(state)
+    step ?ast.NodeId := null
+    if (next_is(state, .colon)) {
+        state.next_token += 1
+        previous :: state.allow_record_literals
+        state.allow_record_literals = false
+        defer state.allow_record_literals = previous
+        expression :: try parse_expr(state)
+        statement :: if (is_assignment_operator(current(state).kind))
+            try parse_assignment(state, expression, false, true)
+        else
+            try ast.add_expression_stmt(state.builder, expression)
+        statements [1]ast.NodeId :: [statement]
+        step = try ast.add_block(state.builder, ast.builder_span(state.builder, statement), statements[..])
+        skip_newlines(state)
+        if (!next_is(state, .open_curly)) return .unexpected_token
+    }
     body :: try parse_arm(state, allow_else)
     id :: try ast.add_while_stmt(
         state.builder,
@@ -552,6 +570,7 @@ parse_while proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
         body,
     )
     if (capture) |node| ast.set_capture(state.builder, id, node)
+    if (step) |block| ast.set_while_step(state.builder, id, block)
     return id
 }
 
@@ -685,8 +704,11 @@ parse_guard_expr proc(state @mut State) ast.NodeId ! ParseError {
 }
 
 @hide:file
-parse_guard proc(state @mut State) ast.NodeId ! ParseError {
+parse_guard proc(state @mut State, allow_step bool) ast.NodeId ! ParseError {
     condition_start :: state.next_token
+    previous_guard_depth :: state.guard_depth
+    state.guard_depth = state.paren_depth
+    defer state.guard_depth = previous_guard_depth
     condition := parse_guard_expr(state) catch |err| {
         match err {
             .unexpected_token: {}
@@ -713,6 +735,7 @@ parse_guard proc(state @mut State) ast.NodeId ! ParseError {
     if (
         !next_is(state, .open_curly)
         and !next_is(state, .pipe)
+        and !(allow_step and next_is(state, .colon))
         and !parenthesized_guard(state, condition_start)
         and ast.builder_expr_kind(state.builder, condition) != .call
         and ast.builder_expr_kind(state.builder, condition) != .comptime_expr
@@ -745,6 +768,7 @@ parenthesized_guard proc(state @State, start usize) bool {
 
 @hide:file
 parse_arm proc(state @mut State, allow_else bool) ast.NodeId ! ParseError {
+    skip_newlines(state)
     if next_is(state, .open_curly) return try parse_block(state)
     start :: state.next_token
     statement :: parse_statement(state, allow_else) catch |err| {
@@ -970,7 +994,7 @@ member_name proc(kind lexer.TokenKind) bool {
         .ident, .if, .else, .for, .inline, .while, .proc, .return, .yield, .break,
         .continue, .true, .false, .and, .or, .xor, .mut, .struct, .c_struct, .opaque,
         .enum, .union, .distinct, .alias, .match, .import, .test, .c_func, .null,
-        .undefined, .try, .catch, .defer, .errdefer, .unreachable: true
+        .undefined, .try, .catch, .orelse, .defer, .errdefer, .unreachable: true
         else: false
     }
 }
@@ -1211,7 +1235,7 @@ parse_match_arm proc(state @mut State) ast.NodeId ! ParseError {
     } else {
         value :: try parse_expr(state)
         if (is_assignment_operator(current(state).kind)) {
-            statement :: try parse_assignment(state, value, false)
+            statement :: try parse_assignment(state, value, false, false)
             statements [1]ast.NodeId :: [statement]
             body = try ast.add_block(state.builder, ast.builder_span(state.builder, statement), statements[..])
         } else {
@@ -1397,13 +1421,16 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     skip_operand_newlines(state)
     token := current(state)
     expression_start :: state.next_token
-    left := if (enummap.get(&prefix_binding_powers, token.kind)) |right_bp| {
+    prefix := enummap.get(&prefix_binding_powers, token.kind)
+    if (token.kind == .dollar and next_n_is(state, 1, .open_paren)) prefix = null
+    left := if (prefix) |right_bp| {
         state.next_token += 1
         operand :: try parse_expr_bp(state, right_bp)
         operand_span :: ast.builder_span(state.builder, operand)
+        end :: if (token.kind == .dollar) state.tokens[state.next_token - 1].span.end else operand_span.end
         span :: ast.Span{
             start = token.span.start,
-            end = operand_span.end,
+            end = end,
             source = token.span.source,
         }
         operator ast.UnaryOperator :: match token.kind {
@@ -1414,6 +1441,8 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
         }
         prefixed :: if (token.kind == .try)
             try ast.add_try_expr(state.builder, span, operand)
+        else if (token.kind == .dollar)
+            try ast.add_comptime_expr(state.builder, span, operand)
         else
             try ast.add_unary(state.builder, span, operator, operand)
         yield prefixed
@@ -1425,6 +1454,8 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
     while true {
         skip_continuation_newlines(state)
         token = current(state)
+        # a grouped guard ends before an unbraced leading-dot conditional value.
+        if (left_grouped and state.paren_depth == state.guard_depth and token.kind == .dot) break
         if (token.kind == .caret or token.kind == .question) {
             state.next_token += 1
             operator ast.UnaryOperator :: if (token.kind == .caret) .dereference else .unwrap
@@ -1477,6 +1508,28 @@ parse_expr_bp proc(state @mut State, min_bp BindingPowerScalar) ast.NodeId ! Par
                 },
                 left, member_id,
             )
+            left_grouped = false
+            continue
+        }
+        if (token.kind == .orelse) {
+            if (min_bp > BindingPowerScalar(1)) break
+            state.next_token += 1
+            fallback :: try parse_expr_bp(state, BindingPowerScalar(2))
+            # the reserved keyword supplies an inaccessible name for the unwrapped payload.
+            capture :: try ast.add_param(state.builder, token.span, token.span, token.data.str_id, maxval!(ast.NodeId))
+            payload :: try ast.add_identifier(state.builder, token.span, token.data.str_id)
+            patterns [1]ast.NodeId :: [try ast.add_boolean(state.builder, token.span, true)]
+            present :: try ast.add_match_arm(state.builder, token.span, patterns[..], capture, payload, true, false)
+            absent :: try ast.add_match_arm(
+                state.builder, ast.builder_span(state.builder, fallback), &[], null, fallback, true, true,
+            )
+            arms [2]ast.NodeId :: [present, absent]
+            left = try ast.add_match(state.builder, ast.Span{
+                start = ast.builder_span(state.builder, left).start,
+                end = ast.builder_span(state.builder, fallback).end,
+                source = token.span.source,
+            }, left, arms[..])
+            ast.set_match_optional(state.builder, left)
             left_grouped = false
             continue
         }
@@ -1852,21 +1905,12 @@ parse_primary proc(state @mut State) ast.NodeId ! ParseError {
         .if: return try parse_if_expr(state)
         .dollar: {
             state.next_token += 1
-            _ = try consume(state, .open_paren)
-            previous :: state.allow_record_literals
-            previous_bit_or :: state.allow_bit_or
-            state.allow_bit_or = true
-            defer state.allow_bit_or = previous_bit_or
-            state.allow_record_literals = true
-            defer state.allow_record_literals = previous
-            state.paren_depth += 1
-            defer state.paren_depth -= 1
-            expression :: try parse_expr(state)
-            skip_operand_newlines(state)
-            close :: try consume(state, .close_paren)
+            operand :: try parse_primary(state)
             return try ast.add_comptime_expr(state.builder, ast.Span{
-                start = token.span.start, end = close.span.end, source = token.span.source,
-            }, expression)
+                start = token.span.start,
+                end = state.tokens[state.next_token - 1].span.end,
+                source = token.span.source,
+            }, operand)
         }
         .dot: {
             state.next_token += 1
@@ -2002,6 +2046,7 @@ is_expression_recovery_boundary proc(kind lexer.TokenKind) bool {
         or kind == .or
         or kind == .pipe
         or kind == .catch
+        or kind == .orelse
         or is_expression_boundary(kind)
     )
 }
@@ -2044,6 +2089,7 @@ skip_continuation_newlines proc(state @mut State) void {
         and kind != .close_bracket and kind != .open_bracket
         and kind != .range and kind != .range_inclusive
         and kind != .pipe and kind != .bang and kind != .catch
+        and kind != .orelse
         and enummap.get(&infix_binding_powers, kind) == null
     ) state.next_token = start
 }
@@ -2194,7 +2240,7 @@ consume_either proc(state @mut State, kinds []lexer.TokenKind) lexer.Token ! Syn
 prefix_binding_powers :: $enummap.init_default(
     lexer.TokenKind, BindingPowerScalar, BindingPowerScalar(0), {
     minus = BindingPowerScalar(50), bang = BindingPowerScalar(50), tilde = BindingPowerScalar(50),
-    ampersand = BindingPowerScalar(50), try = BindingPowerScalar(50),
+    ampersand = BindingPowerScalar(50), try = BindingPowerScalar(50), dollar = BindingPowerScalar(50),
 })
 
 @hide:file

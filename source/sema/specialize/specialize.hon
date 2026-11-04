@@ -2,6 +2,7 @@ import "@std/mem"
 import "@std/arraylist"
 import "@std/hashmap"
 import "@std/enummap"
+import "@std/strconv"
 import "@source/ast"
 import "@source/diagnostics"
 import "@source/strpool"
@@ -14,6 +15,11 @@ typecheck :: import "@source/sema/check"
 
 @hide:file no_node :: maxval!(ast.NodeId)
 @hide:file no_index :: maxval!(usize)
+# metadata snapshots revisit complete field schemas; reflected compositions need
+# the same finite step ceiling as ordinary checked evaluation.
+@hide:file type_execution_limit :: usize(100000)
+# ponytail: snapshot evaluation copies arena-sized bindings; compact it before raising control-flow fuel.
+@hide:file type_control_limit :: usize(4096)
 
 @hide:file
 Error :: alias mem.AllocError | diagnostics.CapacityError | strpool.InternError
@@ -100,6 +106,7 @@ State :: struct {
     evaluation_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
     type_execution_depth usize = 0
     type_execution_remaining usize = 0
+    type_control_remaining usize = 0
     value_expansion_depth usize = 0
     return_type ast.NodeId = no_node
     yield_type ast.NodeId = no_node
@@ -156,6 +163,8 @@ elaborate proc(
                 ast.function_decl(&original, id).return_type, 0)) needed = true
             for (0..ast.function_param_count(&original, id)) |position| {
                 parameter :: ast.param(&original, ast.function_param(&original, id, position))
+                resolved :: resolution.storage.bindings[usize(parameter.type)]
+                if (!parameter.comptime and resolved.kind == .builtin and resolved.data.builtin == .uint) needed = true
                 if (!parameter.comptime and type_storage_annotation(&original,
                     resolution.storage.bindings, parameter.type, 0)) needed = true
             }
@@ -230,8 +239,7 @@ elaborate proc(
             and ast.stmt_kind(&state.tree, declaration) == .declaration) {
             view :: ast.statement_decl(&state.tree, declaration)
             if (view.mutability == .constant and type_record_storage(&state, view.initializer, 0)) {
-                state.type_execution_remaining = 4096
-                state.type_execution_depth += 1
+                begin_type_execution(&state)
                 defer state.type_execution_depth -= 1
                 state.evaluation_diagnostic = diagnostics.no_diagnostic
                 if (try type_record_check(&state, view.initializer)) continue
@@ -358,6 +366,10 @@ scan_demand_execution proc(state @mut State, id, body ast.NodeId, static_control
         kind :: ast.expr_kind(&state.tree, id)
         if (!static_control and kind == .builtin_call
             and mem.eql(ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name), "compile_error")) return true
+        if (kind == .array_type) {
+            if (ast.array_type(&state.tree, id).count) |count|
+                if (runtime_dependency(state, count, body, 0)) return true
+        }
         if (kind == .match_expr) {
             subject :: ast.match_expr(&state.tree, id).subject
             if (ast.expr_kind(&state.tree, subject) == .builtin_call
@@ -423,6 +435,91 @@ needs_demand_execution proc(state @mut State, function ast.NodeId) bool ! mem.Al
     return required
 }
 
+# optional zero-runtime execution only admits closed computations. in particular,
+# writes through parameters, external calls, and mutable globals remain runtime.
+# ponytail: a syntax proof rejects indirect calls and recursion; broaden only with
+# an effect-aware speculative evaluator that can roll back all elaboration state.
+@hide:file
+closed_computation proc(state @State, id, body ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration) {
+        target :: resolved.data.declaration
+        if (ast.node_class(&state.tree, target) == .statement and !subtree_has(state, body, target)) {
+            declaration :: ast.statement_decl(&state.tree, target)
+            if (declaration.mutability != .constant
+                or !branch_constant(state, declaration.initializer, depth + 1)
+                or !closed_computation(state, declaration.initializer, body, depth + 1)) return false
+        }
+    }
+    class :: ast.node_class(&state.tree, id)
+    if (class == .statement) {
+        kind :: ast.stmt_kind(&state.tree, id)
+        if (kind == .unreachable_stmt) return false
+        if (kind == .assignment_stmt) {
+            target :: ast.assignment_stmt(&state.tree, id).target
+            root :: assignment_root(state, target)
+            if (root == no_node or ast.node_class(&state.tree, root) != .statement
+                or !subtree_has(state, body, root)) return false
+            # a local pointer can still borrow caller-owned or global storage.
+            place := target
+            while (ast.expr_kind(&state.tree, place) == .selection or ast.expr_kind(&state.tree, place) == .index) {
+                place = if (ast.expr_kind(&state.tree, place) == .selection)
+                    ast.selection_expr(&state.tree, place).base else ast.index_expr(&state.tree, place).base
+            }
+            if (ast.expr_kind(&state.tree, place) == .unary) return false
+            declaration :: ast.statement_decl(&state.tree, root)
+            if (target != place and (ast.expr_kind(&state.tree, target) != .index
+                or ast.index_expr(&state.tree, target).base != place
+                or declaration.type == null
+                or ast.expr_kind(&state.tree, declaration.type?) != .array_type)) return false
+        }
+    }
+    if (class == .expression) {
+        kind :: ast.expr_kind(&state.tree, id)
+        if (kind == .address_constant or kind == .memory_constant or kind == .slice_constant) return false
+        if (kind == .unary) {
+            operator :: ast.unary_expr(&state.tree, id).operator
+            if (operator == .address_of or operator == .dereference) return false
+        }
+    }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .builtin_call) {
+        name :: ast.literal_text(&state.tree, ast.builtin_call(&state.tree, id).name)
+        if (!mem.eql(name, "compile_error") and !mem.eql(name, "maxval")
+            and !mem.eql(name, "minval") and !mem.eql(name, "sizeof")
+            and !mem.eql(name, "alignof") and !mem.eql(name, "typeinfo")
+            and !mem.eql(name, "field") and !mem.eql(name, "struct_type")
+            and !mem.eql(name, "some")) return false
+    }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .call) {
+        callee :: binding(state, ast.call_expr(&state.tree, id).callee)
+        if (callee.kind != .builtin) {
+            if (callee.kind != .declaration) return false
+            function :: callee.data.declaration
+            if (ast.node_class(&state.tree, function) != .function
+                or ast.function_external(&state.tree, function)) return false
+            called_body :: ast.function_decl(&state.tree, function).body
+            if (!closed_computation(state, called_body, called_body, depth + 1)) return false
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (!closed_computation(state, ast.child(&state.tree, id, i), body, depth + 1)) return false
+    return true
+}
+
+@hide:file
+closed_zero_runtime_call proc(state @State, function ast.NodeId) bool {
+    if (ast.function_external(&state.tree, function)) return false
+    # ordinary parameterless calls retain runtime traps and lazy-call semantics.
+    if (ast.function_param_count(&state.tree, function) == 0) return false
+    result :: binding(state, ast.function_decl(&state.tree, function).return_type)
+    if (result.kind == .builtin and (result.data.builtin == .void or result.data.builtin == .type)) return false
+    for (0..ast.function_param_count(&state.tree, function)) |i|
+        if (!ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) return false
+    body :: ast.function_decl(&state.tree, function).body
+    return closed_computation(state, body, body, 0)
+}
+
 # find demanded callees before walking runtime declarations, independent of source
 # order. a later runtime reference retains the original declaration as usual.
 @hide:file
@@ -444,7 +541,7 @@ collect_demanded_functions proc(state @mut State, id ast.NodeId, demanded bool) 
             if (callee.kind == .declaration
                 and ast.node_class(&state.tree, callee.data.declaration) == .function) {
                 function :: callee.data.declaration
-                if (demand and !ast.function_external(&state.tree, function)
+                if ((demand or closed_zero_runtime_call(state, function)) and !ast.function_external(&state.tree, function)
                     and state.demanded_functions[usize(function)] == 0
                     and try needs_demand_execution(state, function)) {
                     state.demanded_functions[usize(function)] = 1
@@ -492,6 +589,8 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
         state.yield_type = saved_yield
     }
     if (class == .function) {
+        # dependent annotations and reflection bodies belong to concrete instances.
+        if (usize(id) < state.original_count and template(state, id)) return
         state.return_type = ast.function_decl(&state.tree, id).return_type
         state.yield_type = no_node
         if (!ast.function_external(&state.tree, id)
@@ -594,25 +693,40 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
                 }
             }
         }
-        if (!loop.pointer_capture and loop.capture != null) {
+        if (loop.capture != null) {
             iterable :: try expression_type(state, loop.iterable, 0)
             element := no_node
+            mutable := false
             if (ast.expr_kind(&state.tree, loop.iterable) == .range) {
-                element = try expression_type(state, ast.range_expr(&state.tree, loop.iterable).start, 0)
+                bounds :: ast.range_expr(&state.tree, loop.iterable)
+                bound :: if (flexible(state, bounds.start)) bounds.end else bounds.start
+                element = try expression_type(state, bound, 0)
             } else if (iterable != no_node) {
                 kind :: ast.expr_kind(&state.tree, iterable)
-                if (kind == .array_type) element = ast.array_type(&state.tree, iterable).element
-                if (kind == .slice_type) element = ast.slice_type(&state.tree, iterable).element
+                if (kind == .array_type) {
+                    element = ast.array_type(&state.tree, iterable).element
+                    mutable = ast.array_type(&state.tree, iterable).mutable
+                }
+                if (kind == .slice_type) {
+                    element = ast.slice_type(&state.tree, iterable).element
+                    mutable = ast.slice_type(&state.tree, iterable).mutable
+                }
                 if (kind == .pointer_type) {
                     array :: try canonical_type(state, ast.pointer_type(&state.tree, iterable).element)
-                    if (array != no_node and ast.expr_kind(&state.tree, array) == .array_type)
+                    if (array != no_node and ast.expr_kind(&state.tree, array) == .array_type) {
                         element = ast.array_type(&state.tree, array).element
+                        mutable = ast.pointer_type(&state.tree, iterable).mutable and ast.array_type(&state.tree, array).mutable
+                    }
                 }
                 if (binding(state, iterable).kind == .builtin
                     and binding(state, iterable).data.builtin == .string)
                     element = try builtin(state, id, .u8)
             }
             if (element != no_node) {
+                if (loop.pointer_capture) {
+                    element = try ast.add_pointer_type(state.builder, loop.span, element, mutable, false)
+                    try refresh(state)
+                }
                 hashmap.put(&state.capture_types, loop.capture?, element) catch |err| {
                     match err {
                         .key_exists: {}
@@ -768,12 +882,20 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .call) {
         callee :: ast.call_expr(&state.tree, id).callee
+        resolved_callee :: binding(state, callee)
+        closed :: (resolved_callee.kind == .declaration
+            and ast.node_class(&state.tree, resolved_callee.data.declaration) == .function
+            and closed_zero_runtime_call(state, resolved_callee.data.declaration))
+        saved_demand :: state.demand_depth
+        if (closed) state.demand_depth += 1
+        defer state.demand_depth = saved_demand
         try expand(state, callee)
         resolved :: binding(state, callee)
         if (
             resolved.kind == .declaration
             and ast.node_class(&state.tree, resolved.data.declaration) == .function
             and (template(state, resolved.data.declaration)
+                or closed
                 or (state.demand_depth > 0 and usize(resolved.data.declaration) < state.original_count
                     and !ast.function_external(&state.tree, resolved.data.declaration)
                     and try needs_demand_execution(state, resolved.data.declaration)))
@@ -795,6 +917,23 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
                 annotation :: ast.param(&state.tree, ast.function_param(&state.tree, signature, i)).type
                 try expand_expected(state, ast.call_arg(&state.tree, id, i), annotation)
             }
+            return
+        }
+    }
+    if (class == .expression and ast.expr_kind(&state.tree, id) == .binary) {
+        view :: ast.binary_expr(&state.tree, id)
+        if (view.operator == .logical_and or view.operator == .logical_or) {
+            boolean :: try builtin(state, id, .bool)
+            try expand_expected(state, view.left, boolean)
+            saved_demand :: state.demand_depth
+            defer state.demand_depth = saved_demand
+            if (state.demand_depth > 0 and branch_constant(state, view.left, 0)) {
+                value :: try evaluate_ir(state, view.left, boolean)
+                if (value.kind == .boolean and value.boolean == (view.operator == .logical_or))
+                    state.demand_depth = 0
+            }
+            # retain ordinary checking, but never execute skipped runtime projections.
+            try expand_expected(state, view.right, boolean)
             return
         }
     }
@@ -929,11 +1068,9 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
         if (
             (view.operator == .equal or view.operator == .not_equal)
             and branch_constant(state, view.left, 0) and branch_constant(state, view.right, 0)
-        ) {
-            left :: try evaluate(state, view.left)
-            right :: try evaluate(state, view.right)
-            if (left.kind == .type and right.kind == .type) _ = try evaluate_binary(state, id)
-        }
+            and is_type(state, try expression_type(state, view.left, 0))
+            and is_type(state, try expression_type(state, view.right, 0))
+        ) _ = try evaluate_binary(state, id)
     }
     if (usize(id) >= state.original_count and class == .expression and ast.expr_kind(&state.tree, id) == .array_type) {
         view :: ast.array_type(&state.tree, id)
@@ -985,14 +1122,6 @@ metadata_member proc(state @mut State, at ast.NodeId, text []u8) ast.NodeId ! Er
 }
 
 @hide:file
-metadata_package_contains proc(state @State, package ast.NodeId, source diagnostics.SourceId) bool {
-    for (0..ast.package_decl_count_at(&state.tree, package)) |i| {
-        if (ast.node_span(&state.tree, ast.package_decl_at(&state.tree, package, i)).source == source) return true
-    }
-    return false
-}
-
-@hide:file
 metadata_tags proc(state @mut State, type ast.NodeId) ast.NodeId ! Error {
     if (ast.expr_kind(&state.tree, type) == .enum_type) return type
     if (ast.union_type(&state.tree, type).tag) |tag| return try canonical_type(state, tag)
@@ -1016,24 +1145,15 @@ metadata_variant_tags proc(state @mut State, type ast.NodeId) ast.NodeId ! Error
 }
 
 @hide:file
-metadata_import proc(state @State, at ast.NodeId) ast.NodeId {
-    source :: ast.node_span(&state.tree, at).source
+metadata_import proc(state @State) ast.NodeId {
+    # reflection uses the real metadata package loaded anywhere in this compilation.
+    # generated helpers retain their source spans, not the importer's lexical scope.
     for (0..state.original_count) |i| {
         imported :: ast.NodeId(i)
         resolved :: binding(state, imported)
         if (ast.node_class(&state.tree, imported) != .import or resolved.kind != .namespace) continue
-        if (!mem.eql(ast.source_text(&state.tree, ast.import_decl(&state.tree, imported).path), "@std/meta")) continue
-        other :: ast.node_span(&state.tree, imported).source
-        if (source == other) return resolved.data.namespace
-        if (metadata_package_contains(state, resolved.data.namespace, source)) return resolved.data.namespace
-        for (0..state.original_count) |j| {
-            package :: ast.NodeId(j)
-            if (package == state.tree.root or ast.node_class(&state.tree, package) != .package) continue
-            if (
-                metadata_package_contains(state, package, source)
-                and metadata_package_contains(state, package, other)
-            ) return resolved.data.namespace
-        }
+        if (mem.eql(ast.source_text(&state.tree, ast.import_decl(&state.tree, imported).path), "@std/meta"))
+            return resolved.data.namespace
     }
     return no_node
 }
@@ -1152,8 +1272,7 @@ expand_typeinfo proc(state @mut State, id ast.NodeId) void ! Error {
         try reject(state, id, .argument_count_mismatch)
         return
     }
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     state.evaluation_diagnostic = diagnostics.no_diagnostic
     argument :: ast.call_arg(&state.tree, id, 0)
@@ -1163,7 +1282,7 @@ expand_typeinfo proc(state @mut State, id ast.NodeId) void ! Error {
         else try reject(state, id, .expected_type)
         return
     }
-    package :: metadata_import(state, id)
+    package :: metadata_import(state)
     if (package == no_node) {
         try reject(state, id, .missing_metadata_import)
         return
@@ -1203,6 +1322,7 @@ expand_typeinfo proc(state @mut State, id ast.NodeId) void ! Error {
         else if (builtin_kind == .float) tag = "float"
         else if (builtin_kind == .bool) tag = "bool"
         else if (builtin_kind == .void) tag = "void"
+        else if (builtin_kind == .noreturn) tag = "noreturn"
         else if (builtin_kind == .anyopaque) tag = "anyopaque"
         else if (builtin_kind == .string) tag = "pointer"
     } else if (kind == .array_type) {
@@ -1455,8 +1575,7 @@ expand_struct_type proc(state @mut State, id ast.NodeId) void ! Error {
         try reject(state, id, .argument_count_mismatch)
         return
     }
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     state.evaluation_diagnostic = diagnostics.no_diagnostic
     layout_input :: ast.call_arg(&state.tree, id, 0)
@@ -1602,8 +1721,8 @@ member_name proc(state @mut State, name ast.NodeId) ast.NodeId ! Error {
     return result
 }
 
-# flatten source member names and payload annotations only; ordinary checking still
-# validates composition, variant identity and collisions on the original sum type.
+# flatten source names and payloads with native (name, payload) variant identity,
+# not AST provenance; ordinary checking still validates the original composition.
 @hide:file
 inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist.ArrayList(ast.NodeId)) bool ! Error {
     if (!try type_step(state, input)) return false
@@ -1647,15 +1766,15 @@ inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist
         field :: ast.field(&state.tree, member)
         if (field.name == null) return false
         if (kind == .union_type and field.type == null) return false
+        payload :: if (kind == .enum_type) try builtin(state, member, .void) else field.type?
         duplicate := false
         for (fields.items) |previous| {
-            name :: ast.field(&state.tree, previous).name?
-            if (ast.name_id(&state.tree, name) != ast.name_id(&state.tree, field.name?)) continue
-            if (name != field.name?) return false
+            previous_field :: ast.field(&state.tree, previous)
+            if (ast.name_id(&state.tree, previous_field.name?) != ast.name_id(&state.tree, field.name?)) continue
+            if (!try same_type(state, previous_field.type?, payload)) return false
             duplicate = true
         }
         if (duplicate) continue
-        payload :: if (kind == .enum_type) try builtin(state, member, .void) else field.type?
         generated :: try ast.add_field(state.builder, field.span, field.name, payload, null)
         try refresh(state)
         try arraylist.append(fields, generated)
@@ -1666,8 +1785,7 @@ inline_sum_fields proc(state @mut State, input ast.NodeId, fields @mut arraylist
 @hide:file
 inline_match_shape proc(state @mut State, annotation ast.NodeId) ast.NodeId ! Error {
     if (ast.expr_kind(&state.tree, annotation) != .sum_type) return annotation
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     fields := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&fields)
@@ -1699,8 +1817,7 @@ expand_inline_match proc(state @mut State, id, subject_type ast.NodeId) void ! E
         }
     }
     if (inline_arm == no_node) return
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     state.evaluation_diagnostic = diagnostics.no_diagnostic
     arm :: ast.match_arm_view(&state.tree, inline_arm)
@@ -2560,6 +2677,51 @@ annotation_ready proc(
     return true
 }
 
+# dependent values are explicit inputs unless an ordinary input or result carries
+# their value in its type, as nominal callback arguments do.
+@hide:file
+annotation_mentions proc(state @State, id, parameter ast.NodeId) bool {
+    resolved :: binding(state, id)
+    if (resolved.kind == .declaration and resolved.data.declaration == parameter) return true
+    for (0..ast.child_count(&state.tree, id)) |i|
+        if (annotation_mentions(state, ast.child(&state.tree, id, i), parameter)) return true
+    return false
+}
+
+@hide:file
+dependent_input proc(state @State, function, declaration ast.NodeId) bool {
+    parameter :: ast.param(&state.tree, declaration)
+    if (!parameter.comptime or !annotation_generic(state, function, parameter.type, 0)) return false
+    if (annotation_mentions(state, ast.function_decl(&state.tree, function).return_type, declaration)) return false
+    for (0..ast.function_param_count(&state.tree, function)) |i| {
+        candidate :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
+        if (!candidate.comptime and annotation_mentions(state, candidate.type, declaration)) return false
+    }
+    return true
+}
+
+@hide:file
+specialization_argument proc(
+    state @mut State, function, parameter, argument ast.NodeId,
+    arguments []Value, metadata_result bool,
+) Value ! Error {
+    view :: ast.param(&state.tree, parameter)
+    annotation :: try argument_annotation(state, function, view.type, arguments)
+    try expand_expected(state, argument, annotation)
+    state.evaluation_diagnostic = diagnostics.no_diagnostic
+    value := try evaluate_expected(state, argument, annotation)
+    if ((view.comptime or !metadata_result) and value.kind == .aggregate
+        and metadata_has_view(state, value.node)) {
+        wrapped :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, argument),
+            value.annotation, value.node)
+        try refresh(state)
+        owned :: try metadata_own(state, wrapped, argument)
+        if (owned == no_node or !try type_array_initialized(state, owned, argument)) return Value{}
+        value.node = ast.typed_constant(&state.tree, owned).value
+    }
+    return value
+}
+
 @hide:file
 specialize_call proc(state @mut State, call, function, expected ast.NodeId) void ! Error {
     if (state.depth >= 128 or state.instances.items.len >= 4096) {
@@ -2569,64 +2731,61 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     state.depth += 1
     defer state.depth -= 1
     count :: ast.function_param_count(&state.tree, function)
-    # demand is scoped to explicit evaluation, never inferred from constant arguments.
+    # constant arguments alone never demand a runtime-parameter procedure.
     metadata_result :: compiletime_call(state, function)
-    demanded :: !metadata_result and state.demand_depth > 0 and try needs_demand_execution(state, function)
+    demanded :: !metadata_result and (closed_zero_runtime_call(state, function)
+        or (state.demand_depth > 0 and try needs_demand_execution(state, function)))
     type_result :: metadata_result or demanded
-    runtime := usize(0)
+    inputs := usize(0)
     for (0..count) |i| {
-        if (!metadata_result and !ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) runtime += 1
+        parameter :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
+        if (!metadata_result and (!parameter.comptime
+            or dependent_input(state, function, ast.function_param(&state.tree, function, i)))) inputs += 1
     }
     supplied :: ast.call_arg_count(&state.tree, call)
     explicit :: supplied == count
-    if (!explicit and (metadata_result or supplied < runtime or supplied > count)) {
+    if (!explicit and (metadata_result or supplied < inputs or supplied > count)) {
         try reject(state, call, .argument_count_mismatch)
         return
     }
     arguments :: try mem.alloc(Value, state.allocator, count)
     defer mem.free(state.allocator, arguments)
     mem.set(arguments, Value{})
-    runtime_arguments := arraylist.init(ast.NodeId, state.allocator)
-    defer arraylist.deinit(&runtime_arguments)
-    # supplied compile-time arguments form a declaration-order prefix; infer the rest.
-    supplied_comptime :: if (metadata_result) count else supplied - runtime
+    parameter_arguments := arraylist.init(ast.NodeId, state.allocator)
+    defer arraylist.deinit(&parameter_arguments)
+    try arraylist.reserve(&parameter_arguments, count)
+    for (0..count) |_| try arraylist.append(&parameter_arguments, no_node)
+    # independent compile-time arguments form a prefix; dependent values remain inputs.
+    supplied_comptime :: if (metadata_result) count else supplied - inputs
     comptime_position := usize(0)
     position := 0
     for (0..count) |i| {
         parameter :: ast.function_param(&state.tree, function, i)
         view :: ast.param(&state.tree, parameter)
-        if (view.comptime and !metadata_result) {
+        dependent :: !metadata_result and dependent_input(state, function, parameter)
+        if (view.comptime and !metadata_result and !dependent) {
             if (comptime_position >= supplied_comptime) continue
             comptime_position += 1
         }
         argument :: ast.call_arg(&state.tree, call, position)
         position += 1
-        if (type_result or view.comptime) {
-            context_annotation :: try argument_annotation(state, function, view.type, arguments)
-            try expand_expected(state, argument, context_annotation)
-            state.evaluation_diagnostic = diagnostics.no_diagnostic
-            annotation := view.type
-            contextual := contextual_literal(state, argument)
-            if (!contextual and !is_type(state, annotation)) {
-                type :: try canonical_type(state, annotation)
-                contextual = type != no_node and (ast.expr_kind(&state.tree, type) == .fallible_type
-                    or ast.expr_kind(&state.tree, type) == .optional_type)
+        parameter_arguments.items[i] = argument
+        if (!type_result and unsigned_parameter(state, parameter)) {
+            try expand(state, argument)
+            actual := if (flexible(state, argument)) try builtin(state, argument, .u64)
+                else try expression_type(state, argument, 0)
+            if (actual != no_node) actual = try canonical_type(state, actual)
+            if (actual == no_node or !try unsigned_type(state, actual)) {
+                try reject(state, call, .type_mismatch)
+                return
             }
-            if (contextual or type_record_storage(state, annotation, 0))
-                annotation = try argument_annotation(state, function, view.type, arguments)
-            arguments[i] = try evaluate_expected(state, argument, annotation)
-            if ((view.comptime or !metadata_result) and arguments[i].kind == .aggregate
-                and metadata_has_view(state, arguments[i].node)) {
-                wrapped :: try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, argument),
-                    arguments[i].annotation, arguments[i].node)
-                try refresh(state)
-                owned :: try metadata_own(state, wrapped, argument)
-                if (owned == no_node or !try type_array_initialized(state, owned, argument)) {
-                    try reject_evaluation(state, call)
-                    return
-                }
-                arguments[i].node = ast.typed_constant(&state.tree, owned).value
-            }
+            if (binding(state, actual).kind == .builtin and binding(state, actual).data.builtin == .uint)
+                actual = try builtin(state, argument, .u64)
+            arguments[i] = Value{ kind = .type, node = actual }
+        }
+        if ((type_result or view.comptime) and (explicit or !dependent)
+            and annotation_ready(state, function, view.type, arguments, 0)) {
+            arguments[i] = try specialization_argument(state, function, parameter, argument, arguments, metadata_result)
             if (arguments[i].kind == .invalid) {
                 try reject_evaluation(state, call)
                 return
@@ -2636,7 +2795,6 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
                 return
             }
         }
-        if (!view.comptime and !metadata_result) try arraylist.append(&runtime_arguments, argument)
     }
     if (!explicit) {
         # rigid arguments constrain first; result context then types nested generic
@@ -2649,15 +2807,27 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
                     return
                 }
             }
-            position = 0
             for (0..count) |i| {
                 parameter :: ast.function_param(&state.tree, function, i)
                 view :: ast.param(&state.tree, parameter)
-                if (view.comptime) continue
-                argument :: runtime_arguments.items[position]
-                position += 1
+                if (view.comptime and !dependent_input(state, function, parameter)) continue
+                argument :: parameter_arguments.items[i]
                 contextual :: inference_contextual(state, argument)
                 if (inference_phase(state, argument) != phase) continue
+                if (ast.expr_kind(&state.tree, argument) == .array_literal
+                    and ast.expr_kind(&state.tree, view.type) == .array_type) {
+                    if (ast.array_type(&state.tree, view.type).count) |length| {
+                        literal :: try ast.add_integer(state.builder, ast.node_span(&state.tree, argument),
+                            u64(ast.array_element_count(&state.tree, argument)))
+                        try refresh(state)
+                        value :: Value{ kind = .integer, node = literal,
+                            magnitude = u64(ast.array_element_count(&state.tree, argument)) }
+                        if (!try infer_value(state, function, length, value, arguments, false)) {
+                            try reject(state, call, .cannot_infer_generic)
+                            return
+                        }
+                    }
+                }
                 if (annotation_ready(state, function, view.type, arguments, 0)) {
                     annotation :: try argument_annotation(state, function, view.type, arguments)
                     try expand_expected(state, argument, annotation)
@@ -2677,17 +2847,36 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     }
     for (0..count) |i| {
         parameter :: ast.function_param(&state.tree, function, i)
+        view :: ast.param(&state.tree, parameter)
+        deferred :: !explicit and !metadata_result and dependent_input(state, function, parameter)
+        if ((type_result or view.comptime) and (deferred or arguments[i].kind == .invalid)
+            and parameter_arguments.items[i] != no_node
+            and annotation_ready(state, function, view.type, arguments, 0)) {
+            value :: try specialization_argument(state, function, parameter,
+                parameter_arguments.items[i], arguments, metadata_result)
+            if (value.kind == .invalid) {
+                try reject_evaluation(state, call)
+                return
+            }
+            if (is_type(state, view.type) != (value.kind == .type)) {
+                try reject(state, call, .type_mismatch)
+                return
+            }
+            if (arguments[i].kind != .invalid and !try value_equal(state, arguments[i], value)) {
+                try reject(state, call, .cannot_infer_generic)
+                return
+            }
+            arguments[i] = value
+        }
         if (ast.param(&state.tree, parameter).comptime and arguments[i].kind == .invalid) {
             try reject(state, call, .cannot_infer_generic)
             return
         }
     }
-    position = 0
     for (0..count) |i| {
         view :: ast.param(&state.tree, ast.function_param(&state.tree, function, i))
         if (view.comptime or type_result) continue
-        argument :: runtime_arguments.items[position]
-        position += 1
+        argument :: parameter_arguments.items[i]
         if (state.expanded.items[usize(argument)] != 0) continue
         annotation :: try argument_annotation(state, function, view.type, arguments)
         try expand_expected(state, argument, annotation)
@@ -2737,6 +2926,8 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
     while (current != no_index) {
         entry :: state.instances.items[current]
         equal := entry.function == function and entry.arguments.len == count and entry.demanded == demanded
+        # separate invocations own separate retained mutable backing.
+        if (equal and entry.value != no_node and constant_addresses(state, entry.value, 0)) equal = false
         if (equal) {
             for (0..count) |i| {
                 if (!try value_equal(state, entry.arguments[i], arguments[i])) {
@@ -2801,19 +2992,13 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         try reject(state, call, .specialization_cycle)
         return
     }
-    if (type_result or supplied_comptime != 0) {
+    if (type_result or supplied != 0) {
         signature :: state.instances.items[instance].signature
-        position = 0
-        comptime_position = 0
         for (0..count) |i| {
             parameter :: ast.function_param(&state.tree, signature, i)
             view :: ast.param(&state.tree, parameter)
-            if (view.comptime and !metadata_result) {
-                if (comptime_position >= supplied_comptime) continue
-                comptime_position += 1
-            }
-            original :: ast.call_arg(&state.tree, call, position)
-            position += 1
+            original :: parameter_arguments.items[i]
+            if (original == no_node) continue
             if (
                 (!type_result and !view.comptime) or is_type(state, view.type)
                 or type_record_storage(state, view.type, 0)
@@ -2828,7 +3013,16 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
         callee :: try reference(state, call, target)
         if (state.instances.items[instance].type != no_node)
             replacement = try ast.add_type_operand(state.builder, ast.node_span(&state.tree, call), callee, true)
-        else replacement = try ast.add_call(state.builder, ast.node_span(&state.tree, call), callee, runtime_arguments.items)
+        else {
+            retained := usize(0)
+            for (0..count) |i| {
+                if (ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime) continue
+                parameter_arguments.items[retained] = parameter_arguments.items[i]
+                retained += 1
+            }
+            replacement = try ast.add_call(state.builder, ast.node_span(&state.tree, call),
+                callee, parameter_arguments.items[..retained])
+        }
     }
     try replace(state, call, replacement)
     try refresh(state)
@@ -2877,6 +3071,17 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
         }
         state.bindings.items[usize(target)] = value
     }
+    if (!type_result) {
+        for (0..parameters) |i| {
+            if (!unsigned_parameter(state, ast.function_param(&state.tree, function, i))) continue
+            parameter :: ast.function_param(&state.tree, clone, i)
+            original :: ast.param(&state.tree, parameter)
+            concrete :: try ast.add_param(state.builder, original.span, original.name,
+                ast.name_id(&state.tree, parameter), state.instances.items[index].arguments[i].node)
+            ast.replace_node(state.builder, parameter, concrete)
+            try refresh(state)
+        }
+    }
     state.instances.items[index].signature = try ast.copy_node(state.builder, clone)
     try refresh(state)
     view :: ast.function_decl(&state.tree, clone)
@@ -2896,10 +3101,23 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     if (type_result) {
         state.demand_depth += 1
         defer state.demand_depth -= 1
-        if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-        state.type_execution_depth += 1
+        begin_type_execution(state)
         defer state.type_execution_depth -= 1
         state.evaluation_diagnostic = diagnostics.no_diagnostic
+        if (state.instances.items[index].demanded and !try needs_demand_execution(state, function)) {
+            # ordinary results keep one interpreter frame, including mutable local
+            # backing shared by returned pointers and slices.
+            value :: try evaluate_ir_body(state, call, view.body, view.return_type)
+            if (value.kind == .invalid) {
+                try reject_evaluation(state, call)
+                return
+            }
+            concrete :: try materialize(state, value)
+            state.instances.items[index].value = try ast.add_typed_constant(state.builder,
+                ast.node_span(&state.tree, call), view.return_type, concrete.node)
+            try refresh(state)
+            return
+        }
         constraints_start :: state.rewrites.constraints.items.len
         returned :: try return_type_value(state, view.body, ast.NodeId(clone_start), view.return_type)
         if (returned == no_node) {
@@ -3002,6 +3220,9 @@ evaluation_dependencies proc(
         if ((flags[usize(target)] & 8) == 0 and (flags[usize(target)] & 2) == 0) {
             class :: ast.node_class(&state.tree, target)
             if (class == .parameter) return false
+            # references must reach a concrete instance before evaluation checking;
+            # an unbound template is not an executable dependency.
+            if (class == .function and template(state, target)) return false
             if (class == .statement and ast.statement_decl(&state.tree, target).mutability == .variable) return false
             flags[usize(target)] = flags[usize(target)] | 2
             try arraylist.append(declarations, target)
@@ -3092,8 +3313,7 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     defer state.demand_depth -= 1
     try expand_expected(state, id, annotation)
     if (!is_type(state, annotation) and type_record_storage(state, annotation, 0)) {
-        if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-        state.type_execution_depth += 1
+        begin_type_execution(state)
         defer state.type_execution_depth -= 1
         constant :: try type_execution_value(state, id, annotation)
         if (constant == no_node or !try type_array_initialized(state, constant, id)) return Value{}
@@ -4070,7 +4290,11 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     while (index < declarations.items.len) {
         declaration :: declarations.items[index]
         try expand(state, declaration)
-        while (flags.items.len < ast.node_count(&state.tree)) try arraylist.append(&flags, u8(0))
+        previous_count :: flags.items.len
+        count :: ast.node_count(&state.tree)
+        try arraylist.reserve(&flags, count)
+        flags.items = flags.items.ptr[..count]
+        mem.set(flags.items[previous_count..], 0)
         flags.items[usize(declaration)] = flags.items[usize(declaration)] | 2
         evaluation_owned(state, declaration, flags.items)
         if (!try evaluation_dependencies(state, declaration, flags.items, &declarations)) return Value{}
@@ -4927,7 +5151,7 @@ residual_block proc(state @mut State, execution @mut TypeExecution, block ast.No
     }
     for (0..ast.block_statement_count(&state.tree, block)) |i| {
         statement :: ast.block_statement(&state.tree, block, i)
-        if (!try type_step(state, statement)) return no_node
+        if (!try type_control_step(state, statement)) return no_node
         kind :: ast.stmt_kind(&state.tree, statement)
         if ((kind == .break_stmt or kind == .continue_stmt) and execution.loop_depth > 0) {
             execution.residual_flow = if (kind == .break_stmt) TypeFlow.break else TypeFlow.continue
@@ -5079,8 +5303,7 @@ residual_block proc(state @mut State, execution @mut TypeExecution, block ast.No
 @hide:file
 expand_runtime_metadata proc(state @mut State, function ast.NodeId) void ! Error {
     view :: ast.function_decl(&state.tree, function)
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     state.evaluation_diagnostic = diagnostics.no_diagnostic
     execution := TypeExecution{
@@ -5112,7 +5335,7 @@ expand_runtime_metadata proc(state @mut State, function ast.NodeId) void ! Error
 # owned constants into snapshots; ordinary value operations still use checked IR.
 @hide:file
 return_type_value proc(state @mut State, block, first_owned, result_type ast.NodeId) ast.NodeId ! Error {
-    # ponytail: snapshots recheck scalar IR; cap type-control work at 4096 steps
+    # ponytail: snapshots recheck scalar IR; retain a finite type-control budget
     # until type values can share one persistent checked execution frame.
     execution := TypeExecution{
         locals = arraylist.init(state.allocator),
@@ -5145,8 +5368,7 @@ type_void_completion proc(state @mut State, annotation, at ast.NodeId) ast.NodeI
 
 @hide:file
 evaluate_type_value_block proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     execution := TypeExecution{
         locals = arraylist.init(state.allocator),
@@ -5191,6 +5413,27 @@ execute_type_value_block proc(
         execution.pending_flow = .invalid
     }
     return no_node
+}
+
+@hide:file
+begin_type_execution proc(state @mut State) void {
+    if (state.type_execution_depth == 0) {
+        state.type_execution_remaining = type_execution_limit
+        state.type_control_remaining = type_control_limit
+    }
+    state.type_execution_depth += 1
+}
+
+@hide:file
+type_control_step proc(state @mut State, at ast.NodeId) bool ! Error {
+    if (!try type_step(state, at)) return false
+    if (state.type_control_remaining == 0) {
+        state.evaluation_diagnostic = try diagnostics.add(state.diagnostics,
+            .comptime_execution_limit, ast.node_span(&state.tree, at))
+        return false
+    }
+    state.type_control_remaining -= 1
+    return true
 }
 
 @hide:file
@@ -5394,13 +5637,18 @@ prepare_type_snapshot proc(state @mut State, execution @mut TypeExecution, id as
                         return
                     }
                     saved :: execution.evaluate_values
+                    saved_views :: execution.resolve_views
+                    defer {
+                        execution.evaluate_values = saved
+                        execution.resolve_views = saved_views
+                    }
                     execution.evaluate_values = false
+                    execution.resolve_views = false
                     right = try type_snapshot(state, execution, view.right)
                     if (right != no_node and !try skip_type_value_blocks(state, right)) {
                         execution.pending_flow = .invalid
                         return
                     }
-                    execution.evaluate_values = saved
                 } else right = try type_snapshot_expected(state, execution, view.right, boolean)
                 if (right == no_node and execution.pending_flow == .next) {
                     execution.pending_flow = .invalid
@@ -5877,7 +6125,7 @@ inline_block proc(state @mut State, block ast.NodeId) TypeFlow ! Error {
     flow := TypeFlow.next
     for (0..ast.block_statement_count(&state.tree, block)) |i| {
         statement :: ast.block_statement(&state.tree, block, i)
-        if (!try type_step(state, statement)) return .invalid
+        if (!try type_control_step(state, statement)) return .invalid
         flow = try inline_statement(state, statement)
         if (flow == .invalid) return flow
         kind :: ast.stmt_kind(&state.tree, statement)
@@ -5895,8 +6143,7 @@ expand_inline_for proc(state @mut State, id ast.NodeId) void ! Error {
     state.demand_depth += 1
     defer state.demand_depth -= 1
     loop :: ast.for_stmt(&state.tree, id)
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     state.evaluation_diagnostic = diagnostics.no_diagnostic
     blocks := arraylist.init(ast.NodeId, state.allocator)
@@ -6138,6 +6385,20 @@ type_value_expression proc(state @mut State, input ast.NodeId) ast.NodeId ! Erro
 @hide:file
 expand_type_matches proc(state @mut State, id ast.NodeId) bool ! Error {
     if (id == no_node) return false
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .binary) {
+        view :: ast.binary_expr(&state.tree, id)
+        if (view.operator == .logical_and or view.operator == .logical_or) {
+            if (!try expand_type_matches(state, view.left)) return false
+            saved_demand :: state.demand_depth
+            defer state.demand_depth = saved_demand
+            if (state.demand_depth > 0 and branch_constant(state, view.left, 0)) {
+                value :: try evaluate_ir(state, view.left, try builtin(state, id, .bool))
+                if (value.kind == .boolean and value.boolean == (view.operator == .logical_or))
+                    state.demand_depth = 0
+            }
+            return try expand_type_matches(state, view.right)
+        }
+    }
     if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .match_expr) {
         selected :: try type_value_expression(state, id)
         if (selected == no_node) return false
@@ -6211,6 +6472,7 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
         }
         if (ast.expr_kind(&state.tree, base) != .typed_constant) return true
         array := ast.typed_constant(&state.tree, base)
+        if (state.demand_depth == 0 and !type_record_storage(state, array.type, 0)) return true
         if (metadata_view_index(state, base) != no_index
             and ast.expr_kind(&state.tree, try canonical_type(state, array.type)) == .pointer_type) {
             offset :: if (kind == .index) ast.index_expr(&state.tree, id).index else no_node
@@ -6876,8 +7138,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
 # local handles retain borrowing; owned readonly literals cross execution boundaries.
 @hide:file
 type_slice_value proc(state @mut State, expression, annotation ast.NodeId) ast.NodeId ! Error {
-    if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-    state.type_execution_depth += 1
+    begin_type_execution(state)
     defer state.type_execution_depth -= 1
     type :: try canonical_type(state, annotation)
     if (!try type_record_check(state, type)) return no_node
@@ -7689,7 +7950,7 @@ execute_type_block proc(state @mut State, execution @mut TypeExecution, block as
     flow := TypeFlow.next
     for (0..ast.block_statement_count(&state.tree, block)) |i| {
         statement :: ast.block_statement(&state.tree, block, i)
-        if (!try type_step(state, statement)) return .invalid
+        if (!try type_control_step(state, statement)) return .invalid
         reached = i + 1
         flow = try execute_type_statement(state, execution, statement)
         if (flow != .next) break
@@ -7964,12 +8225,14 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
             condition := no_node
             body := no_node
             other := no_node
+            step ?ast.NodeId := null
             capture ?ast.NodeId := null
             if (looping) {
                 view :: ast.while_stmt(&state.tree, statement)
                 capture = view.capture
                 condition = view.condition
                 body = view.body
+                step = view.step
             } else {
                 view :: ast.if_stmt(&state.tree, statement)
                 capture = view.capture
@@ -7984,7 +8247,7 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
             invariant :: branch_constant(state, condition, 0)
             value := Value{}
             while (true) {
-                if (!try type_step(state, condition)) return .invalid
+                if (!try type_control_step(state, condition)) return .invalid
                 if (!invariant or value.kind == .invalid) {
                     expression :: try type_snapshot(state, execution, condition)
                     if (expression == no_node) return .invalid
@@ -8016,6 +8279,11 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 flow :: try execute_type_block(state, execution, body)
                 if (!looping or flow == .returned or flow == .yielded or flow == .invalid) return flow
                 if (flow == .break) return .next
+                if (step) |block| {
+                    step_flow :: try execute_type_block(state, execution, block)
+                    if (step_flow == .returned or step_flow == .yielded or step_flow == .invalid) return step_flow
+                    if (step_flow == .break) return .next
+                }
             }
         }
         .expression: {
@@ -8236,7 +8504,7 @@ execute_type_collection proc(state @mut State, execution @mut TypeExecution, sta
     execution.loop_depth += 1
     defer execution.loop_depth -= 1
     for (0..usize(count.magnitude)) |i| {
-        if (!try type_step(state, statement)) return .invalid
+        if (!try type_control_step(state, statement)) return .invalid
         execution.locals.items = execution.locals.items[..saved]
         index :: try ast.add_integer(state.builder, span, u64(i))
         try refresh(state)
@@ -8311,7 +8579,7 @@ execute_type_for proc(state @mut State, execution @mut TypeExecution, statement 
     execution.loop_depth += 1
     defer execution.loop_depth -= 1
     while (true) {
-        if (!try type_step(state, statement)) return .invalid
+        if (!try type_control_step(state, statement)) return .invalid
         span :: ast.node_span(&state.tree, statement)
         operator ast.BinaryOperator :: if (bounds.inclusive) .less_equal else .less
         comparison :: try ast.add_binary(state.builder, span, operator, current, limit)
@@ -8391,14 +8659,9 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
             return value
         }
         .literal_int: {
-            value := u64(0)
-            for ast.literal_text(&state.tree, id) |byte| {
-                if (byte < '0' or byte > '9') return Value{}
-                digit :: u64(byte - '0')
-                if (value > divtrunc!(maxval!(u64) - digit, u64(10))) return Value{}
-                value = value * 10 + digit
-            }
-            return Value{ kind = .integer, node = id, magnitude = value }
+            if (strconv.parse_unsigned(ast.literal_text(&state.tree, id), maxval!(u64))) |value|
+                return Value{ kind = .integer, node = id, magnitude = value }
+            return Value{}
         }
         .literal_float: {
             if (ast.float_value(&state.tree, id)) |value| return Value{
@@ -8478,8 +8741,7 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         .match_expr: {
             annotation :: try expression_type(state, id, 0)
             if (annotation != no_node and (is_type(state, annotation) or type_record_storage(state, annotation, 0))) {
-                if (state.type_execution_depth == 0) state.type_execution_remaining = 4096
-                state.type_execution_depth += 1
+                begin_type_execution(state)
                 defer state.type_execution_depth -= 1
                 selected :: try type_value_expression(state, id)
                 if (selected == no_node or selected == id) return Value{}
@@ -8842,6 +9104,33 @@ value_block_type proc(state @mut State, block ast.NodeId, depth usize) ast.NodeI
         else try builtin(state, block, .void)
 }
 
+# inferred dimensions belong to the storage initializer, not to a generic caller.
+@hide:file
+storage_array_type proc(state @mut State, annotation, initializer ast.NodeId, depth usize) ast.NodeId ! Error {
+    type :: try canonical_type(state, annotation)
+    if (type == no_node or depth >= 128 or ast.expr_kind(&state.tree, type) != .array_type) return type
+    array :: ast.array_type(&state.tree, type)
+    count := array.count
+    element := array.element
+    if (ast.expr_kind(&state.tree, initializer) == .array_literal) {
+        length :: ast.array_element_count(&state.tree, initializer)
+        if (count == null) {
+            count = try ast.add_integer(state.builder, ast.node_span(&state.tree, initializer), u64(length))
+            try refresh(state)
+        }
+        if (length != 0) element = try storage_array_type(state, element, ast.array_element(&state.tree, initializer, 0), depth + 1)
+    } else if (count == null) {
+        actual :: try expression_type(state, initializer, depth + 1)
+        if (actual != no_node and ast.expr_kind(&state.tree, actual) == .array_type)
+            count = ast.array_type(&state.tree, actual).count
+    }
+    unchanged_count :: if (array.count) |length| count != null and count? == length else count == null
+    if (unchanged_count and element == array.element) return type
+    result :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, type), count, element, array.mutable)
+    try refresh(state)
+    return result
+}
+
 @hide:file
 expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! Error {
     if (id == no_node) return no_node
@@ -8859,7 +9148,8 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
         }
         if (class == .statement) {
             declaration :: ast.statement_decl(&state.tree, target)
-            if (declaration.type) |annotation| return try canonical_type(state, annotation)
+            if (declaration.type) |annotation|
+                return try storage_array_type(state, annotation, declaration.initializer, depth + 1)
             return try expression_type(state, declaration.initializer, depth + 1)
         }
         if (class == .function) {
@@ -9121,6 +9411,7 @@ infer_value proc(state @mut State, function, pattern ast.NodeId, actual Value, a
 @hide:file
 infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []mut Value, contextual bool) bool ! Error {
     resolved :: binding(state, pattern)
+    if (resolved.kind == .builtin and resolved.data.builtin == .uint) return try unsigned_type(state, actual)
     if (resolved.kind == .declaration) {
         index :: parameter_index(state, function, resolved.data.declaration)
         if (index != no_index) {
@@ -9149,6 +9440,9 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
             element := no_node
             if (actual_kind == .slice_type) element = ast.slice_type(&state.tree, concrete).element
             if (actual_kind == .array_type) element = ast.array_type(&state.tree, concrete).element
+            scalar :: binding(state, concrete)
+            if (scalar.kind == .builtin and scalar.data.builtin == .string)
+                element = try builtin(state, concrete, .u8)
             if (element == no_node) return false
             return try infer(state, function, ast.slice_type(&state.tree, pattern).element, element, arguments, contextual)
         }
@@ -9442,6 +9736,31 @@ flexible proc(state @State, id ast.NodeId) bool {
 }
 
 @hide:file
+unsigned_parameter proc(state @State, parameter ast.NodeId) bool {
+    view :: ast.param(&state.tree, parameter)
+    resolved :: binding(state, view.type)
+    return !view.comptime and resolved.kind == .builtin and resolved.data.builtin == .uint
+}
+
+@hide:file
+unsigned_type proc(state @mut State, annotation ast.NodeId) bool ! Error {
+    concrete :: try canonical_type(state, annotation)
+    if (concrete == no_node) return false
+    if (ast.expr_kind(&state.tree, concrete) == .distinct_type)
+        return try unsigned_type(state, ast.type_operand(&state.tree, concrete))
+    resolved :: binding(state, concrete)
+    if (resolved.kind != .builtin) return false
+    return match builtin_identity(resolved.data.builtin) {
+        .u8, .u16, .u32, .u64, .usize: true
+        else: false
+    }
+}
+
+@hide:file
 template proc(state @State, id ast.NodeId) bool {
-    return ast.function_generic(&state.tree, id) or compiletime_call(state, id)
+    if (ast.function_generic(&state.tree, id) or compiletime_call(state, id)) return true
+    for (0..ast.function_param_count(&state.tree, id)) |i| {
+        if (unsigned_parameter(state, ast.function_param(&state.tree, id, i))) return true
+    }
+    return false
 }

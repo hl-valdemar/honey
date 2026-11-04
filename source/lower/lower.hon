@@ -250,6 +250,7 @@ base_types :: $enummap.init_default(
         bool = .bool,
         string = .string,
         void = .void,
+        noreturn = .void,
         function = .function,
         none = .invalid,
         invalid = .invalid,
@@ -700,6 +701,7 @@ predeclare_locals proc(state @mut State, block ast.NodeId) void ! (mem.AllocErro
                 loop :: ast.while_stmt(state.tree, statement)
                 if (loop.capture) |capture| try predeclare_capture(state, capture)
                 try predeclare_locals(state, loop.body)
+                if (loop.step) |step| try predeclare_locals(state, step)
             }
             .for_stmt: {
                 loop :: ast.for_stmt(state.tree, statement)
@@ -949,6 +951,7 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
     guard_end :: state.block
     body :: try add_block(state)
     exit :: try add_block(state)
+    update :: if (loop.step != null) try add_block(state) else guard
     state.module.functions.items[state.function].blocks.items[usize(guard_end)].terminator = ir.Terminator{
         kind = .branch,
         value = condition,
@@ -957,14 +960,27 @@ lower_while proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagn
         span = ast.node_span(state.tree, loop.condition),
     }
     previous_loop :: state.loop
-    state.loop = LoopTargets{ continue_target = guard, exit = exit, cleanup_depth = state.cleanups.items.len }
+    state.loop = LoopTargets{ continue_target = update, exit = exit, cleanup_depth = state.cleanups.items.len }
     defer state.loop = previous_loop
     state.block = body
     if (loop.capture) |capture| try store_capture(state, capture, value, typecheck.type_of(state.checked, loop.condition), loop.span)
     try lower_block(state, loop.body, true)
     if (!state.terminated) {
         state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
-            kind = .jump, target = guard, span = loop.span,
+            kind = .jump, target = update, span = loop.span,
+        }
+    }
+    if (loop.step) |step| {
+        state.block = update
+        state.terminated = false
+        targets := state.loop?
+        targets.continue_target = guard
+        state.loop = targets
+        try lower_block(state, step, true)
+        if (!state.terminated) {
+            state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{
+                kind = .jump, target = guard, span = loop.span,
+            }
         }
     }
     state.block = exit
@@ -1745,6 +1761,8 @@ lower_as proc(state @mut State, id ast.NodeId, expected typecheck.Type) ir.Value
 
 @hide:file
 convert_value proc(state @mut State, value ir.ValueId, actual, expected typecheck.Type, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
+    if (actual.kind != expected.kind and typecheck.integer_widens(actual, expected))
+        return try emit(state, ir.Instruction{ op = .convert, type = lower_type(state, expected), left = value, span = span })
     if (actual.kind == .fallible and expected.kind == .fallible) {
         if (actual.array_type == expected.array_type) return value
         source :: typecheck.array_type(state.checked, actual.array_type)
@@ -2067,11 +2085,11 @@ lower_slice proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
     parts :: try slice_parts(state, expression.base)
     if (state.terminated) return ir.no_value
     start := ir.no_value
-    if (expression.start) |node| start = try lower_expression(state, node)
+    if (expression.start) |node| start = try lower_as(state, node, typecheck.Type{ kind = .usize })
     else start = try usize_constant(state, 0, span)
     if (state.terminated) return ir.no_value
     end := parts.bound
-    if (expression.end) |node| end = try lower_expression(state, node)
+    if (expression.end) |node| end = try lower_as(state, node, typecheck.Type{ kind = .usize })
     if (state.terminated or trap_type(state, id)) return ir.no_value
     _ = try emit(state, ir.Instruction{ op = .slice_check, left = start, right = end, extra = parts.bound, span = span })
     child :: parts.element
@@ -2210,7 +2228,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         if (base_type.kind == .slice or base_type.kind == .string) {
             parts :: try slice_parts(state, expression.base)
             if (state.terminated) return ir.no_value
-            index :: try lower_expression(state, expression.index)
+            index :: try lower_as(state, expression.index, typecheck.Type{ kind = .usize })
             if (state.terminated or trap_type(state, id)) return ir.no_value
             one :: try usize_constant(state, 1, span)
             end :: try emit(state, ir.Instruction{ op = .add, type = .usize, left = index, right = one, span = span })
@@ -2227,7 +2245,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
             if (state.terminated or trap_type(state, id)) return ir.no_value
             descriptor :: typecheck.pointer_type(state.checked, base_type.pointer_type)
             if (descriptor.many) {
-                index :: try lower_expression(state, expression.index)
+                index :: try lower_as(state, expression.index, typecheck.Type{ kind = .usize })
                 if (state.terminated) return ir.no_value
                 offset :: try emit(state, ir.Instruction{
                     op = .pointer_offset, type = .pointer, left = pointer, right = index,
@@ -2238,7 +2256,7 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
             base = try pointer_address(state, pointer, descriptor.element, span)
         } else base = try lower_place(state, expression.base)
         if (state.terminated) return ir.no_value
-        index :: try lower_expression(state, expression.index)
+        index :: try lower_as(state, expression.index, typecheck.Type{ kind = .usize })
         if (state.terminated or trap_type(state, id)) return ir.no_value
         return try emit(state, ir.Instruction{
             op = .index_address,
@@ -2406,7 +2424,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             expression :: ast.index_expr(tree, id)
             base :: try lower_expression(state, expression.base)
             if (state.terminated) return ir.no_value
-            index :: try lower_expression(state, expression.index)
+            index :: try lower_as(state, expression.index, typecheck.Type{ kind = .usize })
             if (state.terminated or trap_type(state, id)) return ir.no_value
             return try emit(state, ir.Instruction{
                 op = .index, type = type, array_type = shape, left = base, right = index, span = span,
@@ -2535,7 +2553,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             if (expression.operator == .negate and ir.integer_bits(type) != 0 and !ir.unsigned_integer(type) and ast.expr_kind(tree, expression.operand) == .literal_int) {
                 text :: ast.literal_text(tree, expression.operand)
                 magnitude_limit :: enummap.get(&ir.integer_maxima, type)? + 1
-                if (integer_magnitude(text, magnitude_limit)) |magnitude| {
+                if (strconv.parse_unsigned(text, magnitude_limit)) |magnitude| {
                     if (magnitude == magnitude_limit) return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = enummap.get(&ir.integer_minima, type)? } }, span)
                 }
             }
@@ -2560,9 +2578,9 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 if (expression.operator == .not_equal) return present
                 return try emit(state, ir.Instruction{ op = .logical_not, type = .bool, left = present, span = span })
             }
-            left :: try lower_expression(state, expression.left)
+            left := try lower_expression(state, expression.left)
             if (state.terminated) return ir.no_value
-            right :: try lower_expression(state, expression.right)
+            right := try lower_expression(state, expression.right)
             if (state.terminated or trap_type(state, id)) return ir.no_value
             if (expression.operator == .add and type == .pointer) {
                 pointer :: typecheck.pointer_type(state.checked, typecheck.type_of(state.checked, id).pointer_type)
@@ -2573,6 +2591,16 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 })
             }
             op :: enummap.get(&binary_ops, expression.operator)?
+            if (type == .bool) {
+                common :: typecheck.integer_comparison_kind(left_type, right_type)
+                if (common != .none) {
+                    promoted :: lower_type(state, typecheck.Type{ kind = common })
+                    if (lower_type(state, left_type) != promoted)
+                        left = try emit(state, ir.Instruction{ op = .convert, type = promoted, left = left, span = span })
+                    if (lower_type(state, right_type) != promoted)
+                        right = try emit(state, ir.Instruction{ op = .convert, type = promoted, left = right, span = span })
+                }
+            }
             return try emit(state, ir.Instruction{ op = op, type = type, left = left, right = right, span = span })
         }
         .call: {
@@ -2614,7 +2642,7 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             start :: block.arguments.items.len
             try arraylist.reserve(&block.arguments, start + count)
             for (0..count) |i| try arraylist.append(&block.arguments, state.arguments.items[scratch_start + i])
-            return try emit(state, ir.Instruction{
+            result :: try emit(state, ir.Instruction{
                 op = .call,
                 type = type,
                 array_type = shape,
@@ -2625,21 +2653,14 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
                 fixed_arguments = fixed_arguments,
                 span = span,
             })
+            if (typecheck.type_of(state.checked, id).kind == .noreturn) {
+                state.module.functions.items[state.function].blocks.items[usize(state.block)].terminator = ir.Terminator{ kind = .unreachable, span = span }
+                state.terminated = true
+            }
+            return result
         }
     }
     return ir.no_value
-}
-
-@hide:file
-integer_magnitude proc(text []u8, limit u64) ?u64 {
-    value := u64(0)
-    for (text) |byte| {
-        if (byte < '0' or byte > '9') return null
-        digit :: u64(byte - '0')
-        if (digit > limit or value > divtrunc!(limit - digit, u64(10))) return null
-        value = value * 10 + digit
-    }
-    return value
 }
 
 @hide:file
@@ -2665,10 +2686,32 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
     text :: ast.literal_text(state.tree, id)
     type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
+        if (strconv.parse_unsigned(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
     } else if (ir.unsigned_integer(type)) {
-        if (integer_magnitude(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
+        if (strconv.parse_unsigned(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
     } else {
+        if (text.len > 2 and text[0] == '0' and (text[1] < '0' or text[1] > '9') and ast.expr_kind(state.tree, id) == .literal_int) {
+            base :: if (text[1] == 'b' or text[1] == 'B') f64(2)
+                else if (text[1] == 'o' or text[1] == 'O') f64(8) else f64(16)
+            value := f64(0)
+            exact := true
+            for (text[2..]) |byte| {
+                digit :: if (byte <= '9') f64(byte - '0')
+                    else if (byte <= 'F') f64(byte - 'A' + 10) else f64(byte - 'a' + 10)
+                scaled :: value * base
+                value = scaled + digit
+                if (value - scaled != digit) exact = false
+            }
+            if (ptrcast!(@u64, &value)^ >= u64(9218868437227405312)) {
+                trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
+                return ir.no_value
+            }
+            if (!exact) {
+                trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
+                return ir.no_value
+            }
+            return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
+        }
         value :: strconv.parse_float(state.module.allocator, text) catch |err| {
             match err {
                 .out_of_memory: return err

@@ -17,7 +17,7 @@ BuiltinType :: enum {
     anyopaque
     c_int, c_uint, c_long, c_ulong, c_longlong, c_ulonglong
     c_char, c_uchar, c_short, c_ushort
-    type
+    type, noreturn
     unavailable
 }
 
@@ -62,6 +62,7 @@ builtins [_]Builtin :: [
     { name = "c_float", type = .unavailable },
     { name = "c_longdouble", type = .unavailable },
     { name = "type", type = .type },
+    { name = "noreturn", type = .noreturn },
 ]
 
 @hide:file
@@ -111,6 +112,7 @@ Resolution :: struct { storage Storage }
 Scope :: struct {
     names hashmap.AutoHashMap(strpool.StringId, Binding)
     parent ?@Scope
+    local bool = false
 }
 
 @hide:file
@@ -317,6 +319,31 @@ lookup proc(state @State, scope ?@Scope, name strpool.StringId) ?Binding {
 }
 
 @hide:file
+conflicts proc(state @State, scope ?@Scope, name strpool.StringId, before ast.Span) bool {
+    if scope |current| {
+        if hashmap.get(&current.names, name) |found| {
+            if (
+                current.local
+                and found.kind == .declaration
+                and ast.node_class(state.tree, found.data.declaration) == .statement
+            ) {
+                declaration :: ast.node_span(state.tree, found.data.declaration)
+                # forward lookup does not extend an outer local's lifetime into an earlier inner scope.
+                if (declaration.source == before.source and declaration.start > before.start)
+                    return conflicts(state, current.parent, name, before)
+            }
+            return true
+        }
+        return conflicts(state, current.parent, name, before)
+    }
+    if lookup(state, null, name) |found| {
+        # identifier-spelled builtin names are fallbacks; builtin type keywords remain reserved.
+        return found.data.builtin != .type and found.data.builtin != .string
+    }
+    return false
+}
+
+@hide:file
 put_name proc(scope @mut Scope, name strpool.StringId, value Binding) void ! mem.AllocError {
     hashmap.put(&scope.names, name, value) catch |err| {
         match err {
@@ -348,7 +375,7 @@ predeclare proc(
     }
 
     value := Binding{ kind = .declaration, data = BindingData{ declaration = id } }
-    if lookup(state, scope.parent, name) |_| {
+    if (conflicts(state, scope.parent, name, name_span)) {
         diagnostic :: try diagnostics.add(state.diagnostics, .duplicate_name, name_span)
         # poison the inner name rather than silently binding uses to its ancestor.
         value = Binding{ kind = .invalid, data = BindingData{ diagnostic = diagnostic } }
@@ -377,6 +404,7 @@ resolve_function proc(
     scope := Scope{
         names = hashmap.init(state.allocator),
         parent = package_scope,
+        local = true,
     }
     defer hashmap.deinit(&scope.names)
     for (0..ast.function_param_count(tree, id)) |i| {
@@ -391,6 +419,7 @@ resolve_arm proc(state @mut State, parent @Scope, id ast.NodeId) void ! (mem.All
     scope := Scope{
         names = hashmap.init(state.allocator),
         parent = parent,
+        local = true,
     }
     defer hashmap.deinit(&scope.names)
     try resolve_block(state, &scope, id)
@@ -432,7 +461,11 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
             .while_stmt: {
                 loop :: ast.while_stmt(tree, statement)
                 try resolve_expr(state, scope, loop.condition)
-                try resolve_capture_arm(state, scope, loop.body, loop.capture)
+                loop_scope := Scope{ names = hashmap.init(state.allocator), parent = scope, local = true }
+                defer hashmap.deinit(&loop_scope.names)
+                if (loop.capture) |capture| try predeclare(state, &loop_scope, capture, ast.node_span(tree, capture))
+                try resolve_arm(state, &loop_scope, loop.body)
+                if (loop.step) |step| try resolve_arm(state, &loop_scope, step)
             }
             .for_stmt: {
                 loop :: ast.for_stmt(tree, statement)
@@ -440,6 +473,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
                 body_scope := Scope{
                     names = hashmap.init(state.allocator),
                     parent = scope,
+                    local = true,
                 }
                 defer hashmap.deinit(&body_scope.names)
                 if (loop.capture) |capture| try predeclare(state, &body_scope, capture, ast.node_span(tree, capture))
@@ -453,7 +487,7 @@ resolve_block proc(state @mut State, scope @mut Scope, id ast.NodeId) void ! (me
 
 @hide:file
 resolve_capture_arm proc(state @mut State, scope @Scope, block ast.NodeId, capture ?ast.NodeId) void ! (mem.AllocError | diagnostics.CapacityError) {
-    child := Scope{ names = hashmap.init(state.allocator), parent = scope }
+    child := Scope{ names = hashmap.init(state.allocator), parent = scope, local = true }
     defer hashmap.deinit(&child.names)
     if (capture) |id| try predeclare(state, &child, id, ast.node_span(state.tree, id))
     try resolve_block(state, &child, block)
@@ -588,7 +622,7 @@ resolve_expr proc(
                 for (0..ast.match_pattern_count(tree, arm_id)) |j| {
                     try resolve_expr(state, scope, ast.match_pattern(tree, arm_id, j))
                 }
-                arm_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+                arm_scope := Scope{ names = hashmap.init(state.allocator), parent = scope, local = true }
                 defer hashmap.deinit(&arm_scope.names)
                 if (arm.capture) |capture| try predeclare(state, &arm_scope, capture, ast.node_span(tree, capture))
                 if (arm.tag_capture) |capture| try predeclare(state, &arm_scope, capture, ast.node_span(tree, capture))
@@ -599,7 +633,7 @@ resolve_expr proc(
         .catch_expr: {
             expression :: ast.catch_expr(tree, id)
             try resolve_expr(state, scope, expression.operand)
-            handler_scope := Scope{ names = hashmap.init(state.allocator), parent = scope }
+            handler_scope := Scope{ names = hashmap.init(state.allocator), parent = scope, local = true }
             defer hashmap.deinit(&handler_scope.names)
             if (expression.capture) |capture| try predeclare(state, &handler_scope, capture, ast.node_span(tree, capture))
             if (expression.handler_is_block) try resolve_block(state, &handler_scope, expression.handler)

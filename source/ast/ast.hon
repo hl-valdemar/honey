@@ -1,12 +1,12 @@
 #! grammar:
 #! * type ..... -> type_sum ['!' type]; type_sum -> type_atom {'|' type_atom}; type_atom includes '(' type ')', identifier {'.' member | '(' [expr {',' expr} [',']] ')' | '[' expr ']'}, '?' type_atom, ('@' | '*') ['mut'] type_atom, ['@'] 'proc' '(' parameters ')' type, '[' (expr | '_') ']' ['mut'] type_atom, '[' [';' expr] ']' ['mut'] type_atom, record/enum/union declarations, and ('distinct' | 'alias') type.
 #! * binding ... -> :: | :=
-#! * literal .. -> int | float | string | 'true' | 'false' | 'null'
+#! * literal .. -> int (decimal or 0b/0o/0x-prefixed) | float | string | 'true' | 'false' | 'null'
 #! * op ....... -> '+' | '-' | '*' | '/' | '&' | 'xor' | '|' | '<<' | '>>' | '<<|' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
-#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '~' | '&' | 'try') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block)
+#! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '~' | '&' | 'try' | '$') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block) | expr 'orelse' expr
 #! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
-#! '$(' expr ')' is an explicit compile-time expression with primary-expression precedence.
+#! bare '$' is a compile-time prefix with unary precedence; '$(' expr ')' retains primary precedence. 'orelse' canonicalizes to an optional match.
 #! value expressions also accept 'if' guard ['|' identifier '|'] expr 'else' expr, canonicalized to matches; else is required.
 #! bare braces containing statement syntax form a value block; contextual record literals keep their initializer grammar.
 #! 'yield' requires an expression on the same line and targets the nearest enclosing value construct, not a statement block.
@@ -14,11 +14,12 @@
 #! * arm ...... -> block | stmt (single statements become canonical blocks)
 #! * match_arm -> (expr {',' expr} ['|' identifier '|'] | 'else') ':' (block | stmt | expr); arms are comma/newline separated.
 #! enum members and tagged-union variants accept keyword names; member names do not enter lexical scopes.
-#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'unreachable' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
+#! * stmt ..... -> decl | expr | block | ('defer' | 'errdefer' ['|' identifier '|']) arm | expr assignment_op expr | 'return' [expr] | 'yield' expr | 'break' | 'continue' | 'unreachable' | 'if' expr ['|' identifier '|'] arm ['else' arm] | 'while' expr ['|' identifier '|'] [':' (expr assignment_op expr | expr)] arm | ['inline'] 'for' expr '|' ['@'] identifier [',' identifier] '|' arm
 #! assignment_op is '=' or a contiguous compound: '+=', '-=', '*=', '/=', '&=', '|=', 'xor=', '<<=', '>>=', '<<|='.
 #! plain '_ = expr' discards the result and canonicalizes to an expression statement; compound updates still require a place.
+#! while update clauses require a braced body; the update is a canonical block, run after body cleanup on fallthrough/continue, before the next guard.
 #! braceless guards/iterables require parentheses unless they are calls, explicit comptime expressions or optional captures; else binds to the nearest if. bitwise-OR headers require parentheses before captures.
-#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -, !, ~, &, try higher than multiplication/division, addition/subtraction, shifts << / >> / <<|, bitwise &/xor/|, relational comparisons, equality, and, or, ranges/catch. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
+#! precedence (tightest first): calls/indices/selections/dereference/unwrap, unary -, !, ~, &, try, $ higher than multiplication/division, addition/subtraction, shifts << / >> / <<|, bitwise &/xor/|, relational comparisons, equality, and, or, ranges/catch/orelse. type composition | binds tighter than fallible !; pointer/optional/array prefixes bind to type atoms. compound range endpoints require their own parentheses.
 #! compound assignments share their target with the canonical binary value's left operand; lowering evaluates the place and loads its old value once before the RHS.
 #! binary operators associate left; unary operators associate right.
 
@@ -429,6 +430,7 @@ WhileView :: struct {
     condition NodeId
     body NodeId
     capture ?NodeId = null
+    step ?NodeId = null
 }
 
 RangeView :: struct {
@@ -1091,10 +1093,13 @@ add_while_stmt proc(
     condition NodeId,
     body NodeId,
 ) NodeId ! mem.AllocError {
+    extra :: try add_extra(builder, u32(no_node))
+    _ = try add_extra(builder, u32(no_node))
     return try add_node(builder, Node{
         kind = .stmt_while,
         main = NodeData{ node_id = condition },
         data0 = NodeData{ node_id = body },
+        data1 = NodeData{ extra = extra },
     }, span)
 }
 
@@ -1103,8 +1108,14 @@ set_capture proc(builder @mut Builder, id NodeId, capture NodeId) void {
     if (node.kind == .stmt_if) builder.storage.extra.items[usize(node.main.extra) + 1] = u32(capture)
     else {
         debug.assert(node.kind == .stmt_while)
-        node.data1.node_id = capture
+        builder.storage.extra.items[usize(node.data1.extra)] = u32(capture)
     }
+}
+
+set_while_step proc(builder @mut Builder, id NodeId, step NodeId) void {
+    node :: get_node(&builder.storage, id)
+    debug.assert(node.kind == .stmt_while)
+    builder.storage.extra.items[usize(node.data1.extra) + 1] = u32(step)
 }
 
 add_for_stmt proc(
@@ -1499,7 +1510,8 @@ while_stmt proc(tree @Tree, id NodeId) WhileView {
         span = get_span(&tree.storage, id),
         condition = node.main.node_id,
         body = node.data0.node_id,
-        capture = maybe_node_id(u32(node.data1.node_id)),
+        capture = maybe_node_id(tree.storage.extra.items[usize(node.data1.extra)]),
+        step = maybe_node_id(tree.storage.extra.items[usize(node.data1.extra) + 1]),
     }
 }
 
@@ -2158,7 +2170,11 @@ node_layout proc(node Node) NodeLayout {
         }
         .stmt_while: {
             layout.class = .statement
-            layout.direct_children = 7
+            layout.direct_children = 3
+            layout.extra_pointers = 4
+            layout.extra_start = usize(node.data1.extra)
+            layout.extra_count = 2
+            layout.extra_children = 3
         }
         .stmt_if: {
             layout.class = .statement

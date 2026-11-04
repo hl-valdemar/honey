@@ -129,6 +129,10 @@ render_block proc(renderer @mut Renderer, tree @ast.Tree, block ast.NodeId, dept
                 loop :: ast.while_stmt(tree, statement)
                 try append_text(renderer, "while ")
                 try append_text(renderer, ast.source_text(tree, ast.node_span(tree, loop.condition)))
+                if (loop.step) |step| {
+                    try append_text(renderer, " : ")
+                    try append_text(renderer, ast.source_text(tree, ast.node_span(tree, step)))
+                }
                 try append_text(renderer, "\n")
                 try render_block(renderer, tree, loop.body, depth + 1)
             }

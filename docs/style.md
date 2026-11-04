@@ -1,6 +1,6 @@
 # Honey style
 
-these guidelines apply to Honey programs, the compiler, and the standard library. the compiler is currently written in Bro; apply the same conventions using syntax supported by the bootstrap compiler. generated C bindings retain the generator's declarations and formatting.
+these guidelines apply to Honey programs, the compiler, and the standard library. the compiler builds with Honey and with the Bro bootstrap; use syntax supported by both. generated C bindings retain the generator's declarations and formatting.
 
 ## names
 
