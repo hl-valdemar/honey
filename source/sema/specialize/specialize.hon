@@ -4302,9 +4302,9 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     root :: try ast.add_package(state.builder, span, declarations.items)
     try refresh(state)
-    bindings :: try mem.alloc(sema.Binding, state.allocator, state.bindings.items.len)
-    memcopy!(bindings, state.bindings.items)
-    sema.replace_bindings(state.resolution, bindings)
+    # checking and lowering only read bindings; serialization may grow the arena afterward.
+    resolution := sema.borrow_bindings(state.resolution, state.bindings.items)
+    defer sema.deinit(&resolution)
     tree :: ast.view(state.builder, root)
     diagnostic_store := diagnostics.init(state.allocator)
     defer diagnostics.deinit(&diagnostic_store)
@@ -4315,7 +4315,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
         } else _ = try diagnostics.add(&diagnostic_store, diagnostic.code, diagnostic.span)
     }
     original_diagnostics :: diagnostics.count(&diagnostic_store)
-    checked := try typecheck.check(state.allocator, &tree, state.resolution, &diagnostic_store)
+    checked := try typecheck.check(state.allocator, &tree, &resolution, &diagnostic_store)
     defer typecheck.deinit(&checked)
     if (diagnostics.count(&diagnostic_store) != original_diagnostics) {
         diagnostic :: diagnostic_store.list.items[original_diagnostics]
@@ -4324,7 +4324,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     }
     functions := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&functions)
-    module := try lower.lower_evaluation(state.allocator, &tree, state.resolution, &checked,
+    module := try lower.lower_evaluation(state.allocator, &tree, &resolution, &checked,
         wrapper, &functions, &diagnostic_store)
     defer ir.deinit(&module)
     outcome := try interpreter.run_evaluation(state.allocator, &module, &diagnostic_store)

@@ -7,6 +7,28 @@ import "@source/lexer"
 import "@source/parser"
 import "@source/ast"
 
+borrowed_resolution_preserves_external_storage_and_owns_replacements test {
+    original :: try mem.alloc(Binding, mem.c_allocator, 1)
+    original[0] = Binding{ kind = .builtin, data = BindingData{ builtin = .i16 } }
+    owner := Resolution{ storage = { bindings = original, allocator = mem.c_allocator } }
+    defer deinit(&owner)
+    external [1]mut Binding := [Binding{ kind = .builtin, data = BindingData{ builtin = .u8 } }]
+    view := borrow_bindings(&owner, external[..])
+    try testing.expect_equal(BuiltinType.u8, binding(&view, ast.NodeId(0)).data.builtin)
+    deinit(&view)
+    try testing.expect_equal(BuiltinType.u8, external[0].data.builtin)
+    try testing.expect_equal(BuiltinType.i16, binding(&owner, ast.NodeId(0)).data.builtin)
+
+    replacement :: try mem.alloc(Binding, mem.c_allocator, 1)
+    replacement[0] = Binding{ kind = .builtin, data = BindingData{ builtin = .u32 } }
+    view = borrow_bindings(&owner, external[..])
+    replace_bindings(&view, replacement)
+    defer deinit(&view)
+    try testing.expect_equal(BuiltinType.u32, binding(&view, ast.NodeId(0)).data.builtin)
+    try testing.expect_equal(BuiltinType.u8, external[0].data.builtin)
+    try testing.expect_equal(BuiltinType.i16, binding(&owner, ast.NodeId(0)).data.builtin)
+}
+
 resolves_forward_references_recursion_and_builtin_signatures test {
     pool := strpool.init(mem.c_allocator)
     defer strpool.deinit(&pool)

@@ -102,9 +102,10 @@ Import :: struct {
 Storage :: struct {
     bindings []mut Binding
     allocator mem.Allocator
+    owned bool = true
 }
 
-#! owns binding storage and retains its allocator; release with deinit.
+#! owns binding storage unless created by borrow_bindings; release either form with deinit.
 #! node and diagnostic IDs refer to the caller's Tree and diagnostics.Store.
 Resolution :: struct { storage Storage }
 
@@ -287,9 +288,10 @@ resolve_import proc(
     state.bindings[usize(imported.node)] = value
 }
 
-#! releases binding storage with the allocator retained by resolve.
+#! releases owned binding storage; borrowed storage remains with its caller.
 deinit proc(resolution @mut Resolution) void {
-    mem.free(resolution.storage.allocator, resolution.storage.bindings)
+    if (resolution.storage.owned)
+        mem.free(resolution.storage.allocator, resolution.storage.bindings)
 }
 
 binding proc(resolution @Resolution, id ast.NodeId) Binding {
@@ -297,10 +299,21 @@ binding proc(resolution @Resolution, id ast.NodeId) Binding {
     return resolution.storage.bindings[usize(id)]
 }
 
-#! replaces owned binding storage after AST elaboration; takes ownership of `bindings`.
+#! borrows `bindings` without allocation; the slice must remain valid during lookups.
+#! owned replacements must use the allocator retained from `resolution`.
+borrow_bindings proc(resolution @Resolution, bindings []mut Binding) Resolution {
+    return Resolution{ storage = Storage{
+        bindings = bindings,
+        allocator = resolution.storage.allocator,
+        owned = false,
+    } }
+}
+
+#! installs owned bindings, releasing the previous storage only if it was owned.
 replace_bindings proc(resolution @mut Resolution, bindings []mut Binding) void {
-    mem.free(resolution.storage.allocator, resolution.storage.bindings)
+    deinit(resolution)
     resolution.storage.bindings = bindings
+    resolution.storage.owned = true
 }
 
 @hide:file
