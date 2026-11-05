@@ -92,6 +92,29 @@ CASES = {
         main proc() c_int { return read(.output) }
         """, b"42\n", None,
     ),
+    "optional_capture_aliases_preserve_matched_error_residuals": (
+        """
+        First :: enum { first }
+        Second :: enum { second }
+        read proc(value ?(First | Second)) i16 ! Second {
+            if value |captured| {
+                original :: captured
+                match captured {
+                    .first: return 1,
+                    else: {
+                        same :: match original { .first: false, .second: true }
+                        if (!same) return 0
+                        return captured
+                    }
+                }
+            }
+            return 0
+        }
+        main proc() [3]i16 {
+            return [read(.second) catch 42, read(.first) catch 99, read(null) catch 99]
+        }
+        """, b"[42, 1, 0]\n", None,
+    ),
     "closed_calls_skip_index_evaluation_in_short_circuit_guards": (
         """
         make proc($N usize) [N + 1]mut u8 {

@@ -3672,7 +3672,11 @@ prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.Allo
         if (type.kind != .optional) continue
         child :: state.arrays.items[usize(type.array_type)].element
         seed(state, capture, child)
-        for (state.nodes) |j| {
+        # declaration dependencies already index these uses; avoid a scan per capture.
+        edge := state.cells[usize(capture)].first_edge
+        while (edge != no_index) {
+            j :: usize(state.edges.items[edge].dependent)
+            edge = state.edges.items[edge].next
             if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
             binding :: sema.binding(state.resolution, ast.NodeId(j))
             if (
