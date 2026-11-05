@@ -20,6 +20,8 @@ python3 tests/self_host.py
 
 the check copies production sources without test-only imports or the testing package, builds `build/honey-stage1`, then uses it to build `build/honey-stage2`. both generations run with only Clang on `PATH`, without Bro. the second generation runs interpreter/native examples, package/provenance and formatted-IO checks, standalone LLVM assembly and CLI/error scenarios.
 
+bootstrap compatibility: compiler feature adoption and releases MUST follow the [required two-release policy](AGENTS.md#bootstrap-compatibility-required).
+
 run a source file with the interpreter:
 
 ```sh
