@@ -63,6 +63,48 @@ code_count proc(diagnostic_store @diagnostics.Store, code diagnostics.Code) usiz
     return count
 }
 
+checks_only_reachable_nodes_and_retained_constraints test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    source ::
+        `unused :: true + 1
+        `first i16 :: later
+        `later :: 42
+        `main proc() i16 { return first }
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &strings, &store)
+    builder := ast.init_builder(mem.c_allocator, source)
+    defer ast.deinit_builder(&builder)
+    parsed :: try parser.parse_source(&builder, scan_state.tokens.items, &store)
+    original :: ast.view(&builder, parsed)
+    unused :: ast.statement_decl(&original, ast.package_decl(&original, 0)).initializer
+    first :: ast.package_decl(&original, 1)
+    later :: ast.package_decl(&original, 2)
+    main :: ast.package_decl(&original, 3)
+    declarations [3]ast.NodeId :: [main, first, later]
+    root :: try ast.add_package(&builder, ast.node_span(&original, parsed), declarations[..])
+    tree := ast.finish(&builder, root)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &store)
+    defer sema.deinit(&resolution)
+    result := try check(mem.c_allocator, &tree, &resolution, &store)
+    defer deinit(&result)
+    try expect_kind(&result, first, .i16)
+    try expect_kind(&result, later, .i16)
+    try testing.expect_equal(TypeKind.none, type_of(&result, unused).kind)
+    try testing.expect_equal(0, diagnostics.count(&store))
+
+    constraints [2]ast.NodeId :: [unused, unused]
+    constrained := try check_elaborated(mem.c_allocator, &tree, &resolution, constraints[..], &store)
+    defer deinit(&constrained)
+    _ = try expect_error(&constrained, &store, unused, .invalid_operand, ast.node_span(&tree, unused))
+    try expect_kind(&constrained, first, .i16)
+    try testing.expect_equal(1, diagnostics.count(&store))
+}
+
 propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)

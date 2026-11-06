@@ -241,12 +241,51 @@ State :: struct {
 }
 
 @hide:file
-mark_check_nodes proc(tree @ast.Tree, resolution @sema.Resolution, id ast.NodeId, marked []mut bool) void {
+mark_check_nodes proc(
+    tree @ast.Tree,
+    resolution @sema.Resolution,
+    id ast.NodeId,
+    marked []mut bool,
+    nodes @mut arraylist.ArrayList(usize),
+) void ! mem.AllocError {
     if (marked[usize(id)]) return
+    try arraylist.append(nodes, usize(id))
     marked[usize(id)] = true
-    for (0..ast.child_count(tree, id)) |i| mark_check_nodes(tree, resolution, ast.child(tree, id, i), marked)
+    for (0..ast.child_count(tree, id)) |i| {
+        try mark_check_nodes(tree, resolution, ast.child(tree, id, i), marked, nodes)
+    }
     binding :: sema.binding(resolution, id)
-    if (binding.kind == .declaration) mark_check_nodes(tree, resolution, binding.data.declaration, marked)
+    if (binding.kind == .declaration)
+        try mark_check_nodes(tree, resolution, binding.data.declaration, marked, nodes)
+}
+
+@hide:file
+sift_check_nodes proc(nodes []mut usize, start, count usize) void {
+    parent := start
+    while (parent < divtrunc!(count, 2)) {
+        child := parent * 2 + 1
+        if (child + 1 < count and nodes[child] < nodes[child + 1]) child += 1
+        if (nodes[parent] >= nodes[child]) break
+        temporary :: nodes[parent]
+        nodes[parent] = nodes[child]
+        nodes[child] = temporary
+        parent = child
+    }
+}
+
+@hide:file
+sort_check_nodes proc(nodes []mut usize) void {
+    # in-place heapsort preserves node-ID pass order without another allocation.
+    count := nodes.len
+    start :: divtrunc!(count, 2)
+    for (0..start) |i| sift_check_nodes(nodes, start - i - 1, count)
+    while (count > 1) {
+        count -= 1
+        temporary :: nodes[0]
+        nodes[0] = nodes[count]
+        nodes[count] = temporary
+        sift_check_nodes(nodes, 0, count)
+    }
 }
 
 #! borrows `resolution` and `diagnostic_store` during checking; Result retains the AST borrow for signature comparisons.
@@ -288,14 +327,11 @@ check_elaborated proc(
     marked :: try mem.alloc(bool, allocator, count)
     errdefer mem.free(allocator, marked)
     mem.set(marked, false)
-    mark_check_nodes(tree, resolution, tree.root, marked)
-    for (constraints) |constraint| mark_check_nodes(tree, resolution, constraint, marked)
     nodes := arraylist.init(usize, allocator)
     defer arraylist.deinit(&nodes)
-    # preserve node-ID pass order while excluding unrelated evaluation-arena nodes.
-    for (marked) |active, index| {
-        if (active) try arraylist.append(&nodes, index)
-    }
+    try mark_check_nodes(tree, resolution, tree.root, marked, &nodes)
+    for (constraints) |constraint| try mark_check_nodes(tree, resolution, constraint, marked, &nodes)
+    sort_check_nodes(nodes.items)
     # only the reachable closure can enter inference; unrelated arena cells stay untouched.
     for (nodes.items) |index| {
         cells[index] = Cell{}
