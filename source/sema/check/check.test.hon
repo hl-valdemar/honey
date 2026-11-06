@@ -105,6 +105,38 @@ checks_only_reachable_nodes_and_retained_constraints test {
     try testing.expect_equal(1, diagnostics.count(&store))
 }
 
+checks_sparse_retained_literals_across_large_arena test {
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    builder := ast.init_builder(mem.c_allocator, "42")
+    defer ast.deinit_builder(&builder)
+    span :: diagnostics.Span{ start = 0, end = 2 }
+    literals [194]mut ast.NodeId := undefined
+    for (0..literals.len) |index| literals[index] = try ast.add_literal(&builder, .int, span)
+    root :: try ast.add_package(&builder, span, &[])
+    tree := ast.finish(&builder, root)
+    defer ast.deinit(&tree)
+    resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &store)
+    defer sema.deinit(&resolution)
+    constraints [_]ast.NodeId :: [
+        literals[0], literals[63], literals[64], literals[127],
+        literals[128], literals[193], literals[64],
+    ]
+    result := try check_elaborated(mem.c_allocator, &tree, &resolution, constraints[..], &store)
+    defer deinit(&result)
+    for (literals) |literal| {
+        retained := false
+        for (constraints) |constraint| {
+            if (constraint == literal) retained = true
+        }
+        if (retained) try expect_kind(&result, literal, .int)
+        else try testing.expect_equal(TypeKind.none, type_of(&result, literal).kind)
+    }
+    try testing.expect_equal(0, diagnostics.count(&store))
+}
+
 propagates_numeric_context_before_defaulting_forward_and_mutable_aliases test {
     strings := strpool.init(mem.c_allocator)
     defer strpool.deinit(&strings)

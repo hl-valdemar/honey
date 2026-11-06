@@ -112,7 +112,7 @@ Type :: struct {
 @hide:file
 Storage :: struct {
     tree @ast.Tree
-    covered []bool
+    covered []u64
     nodes arraylist.ArrayList(usize)
     types []mut Type
     arrays arraylist.ArrayList(ArrayType)
@@ -242,16 +242,27 @@ State :: struct {
 }
 
 @hide:file
+node_covered proc(covered []u64, id ast.NodeId) bool {
+    index :: usize(id)
+    bit :: rem!(index, 64)
+    return (covered[divtrunc!(index, 64)] & (u64(1) << bit)) != 0
+}
+
+@hide:file
 mark_check_nodes proc(
     tree @ast.Tree,
     resolution @sema.Resolution,
     id ast.NodeId,
-    marked []mut bool,
+    marked []mut u64,
     nodes @mut arraylist.ArrayList(usize),
 ) void ! mem.AllocError {
-    if (marked[usize(id)]) return
-    try arraylist.append(nodes, usize(id))
-    marked[usize(id)] = true
+    index :: usize(id)
+    word :: divtrunc!(index, 64)
+    bit :: rem!(index, 64)
+    mask :: u64(1) << bit
+    if ((marked[word] & mask) != 0) return
+    try arraylist.append(nodes, index)
+    marked[word] |= mask
     for (0..ast.child_count(tree, id)) |i| {
         try mark_check_nodes(tree, resolution, ast.child(tree, id, i), marked, nodes)
     }
@@ -325,9 +336,11 @@ check_elaborated proc(
     errdefer mem.free(allocator, exhaustive)
     variant_slots :: try mem.alloc(usize, allocator, count)
     errdefer mem.free(allocator, variant_slots)
-    marked :: try mem.alloc(bool, allocator, count)
+    coverage_words := divtrunc!(count, 64)
+    if (rem!(count, 64) != 0) coverage_words += 1
+    marked :: try mem.alloc(u64, allocator, coverage_words)
     errdefer mem.free(allocator, marked)
-    mem.set(marked, false)
+    mem.set(marked, u64(0))
     nodes := arraylist.init(usize, allocator)
     errdefer arraylist.deinit(&nodes)
     try mark_check_nodes(tree, resolution, tree.root, marked, &nodes)
@@ -726,7 +739,7 @@ node_indices proc(result @Result) []usize {
 #! returns a type without retaining a reference to checker temporaries.
 type_of proc(result @Result, id ast.NodeId) Type {
     debug.assert(usize(id) < result.storage.types.len)
-    if (!result.storage.covered[usize(id)]) return Type{}
+    if (!node_covered(result.storage.covered, id)) return Type{}
     return result.storage.types[usize(id)]
 }
 
@@ -768,25 +781,25 @@ enum_type proc(result @Result, id EnumId) EnumType {
 
 backing_type proc(result @Result, type Type) Type {
     if (type.nominal == ast.NodeId(maxval!(u32))) return type
-    if (!result.storage.covered[usize(type.nominal)]) return Type{}
+    if (!node_covered(result.storage.covered, type.nominal)) return Type{}
     return result.storage.backings[usize(type.nominal)]
 }
 
 is_type_constructor proc(result @Result, id ast.NodeId) bool {
-    return result.storage.covered[usize(id)] and result.storage.backings[usize(id)].kind != .none
+    return node_covered(result.storage.covered, id) and result.storage.backings[usize(id)].kind != .none
 }
 
 constructor_backing proc(result @Result, id ast.NodeId) Type {
-    if (!result.storage.covered[usize(id)]) return Type{}
+    if (!node_covered(result.storage.covered, id)) return Type{}
     return result.storage.backings[usize(id)]
 }
 
 match_exhaustive proc(result @Result, id ast.NodeId) bool {
-    return result.storage.covered[usize(id)] and result.storage.exhaustive[usize(id)]
+    return node_covered(result.storage.covered, id) and result.storage.exhaustive[usize(id)]
 }
 
 is_enum_member proc(result @Result, id ast.NodeId) bool {
-    if (!result.storage.covered[usize(id)]) return false
+    if (!node_covered(result.storage.covered, id)) return false
     return (
         result.storage.backings[usize(id)].kind == .enumeration
         and result.storage.slots[usize(id)] != no_index
@@ -794,37 +807,37 @@ is_enum_member proc(result @Result, id ast.NodeId) bool {
 }
 
 enum_member_value proc(result @Result, id ast.NodeId) EnumMember {
-    debug.assert(result.storage.covered[usize(id)])
+    debug.assert(node_covered(result.storage.covered, id))
     type :: result.storage.backings[usize(id)]
     return result.storage.enums.items[usize(type.enum_type)].members[result.storage.slots[usize(id)]]
 }
 
 enum_member_index proc(result @Result, id ast.NodeId) usize {
-    if (!result.storage.covered[usize(id)]) return no_index
+    if (!node_covered(result.storage.covered, id)) return no_index
     return result.storage.slots[usize(id)]
 }
 
 is_union_variant proc(result @Result, id ast.NodeId) bool {
-    return result.storage.covered[usize(id)] and result.storage.variant_slots[usize(id)] != no_index
+    return node_covered(result.storage.covered, id) and result.storage.variant_slots[usize(id)] != no_index
 }
 
 union_variant_index proc(result @Result, id ast.NodeId) usize {
-    if (!result.storage.covered[usize(id)]) return no_index
+    if (!node_covered(result.storage.covered, id)) return no_index
     return result.storage.variant_slots[usize(id)]
 }
 
 union_payload_type proc(result @Result, id ast.NodeId) Type {
-    if (!result.storage.covered[usize(id)]) return Type{}
+    if (!node_covered(result.storage.covered, id)) return Type{}
     return result.storage.backings[usize(id)]
 }
 
 field_index proc(result @Result, selection ast.NodeId) usize {
-    debug.assert(result.storage.covered[usize(selection)] and result.storage.slots[usize(selection)] != no_index)
+    debug.assert(node_covered(result.storage.covered, selection) and result.storage.slots[usize(selection)] != no_index)
     return result.storage.slots[usize(selection)]
 }
 
 initializer_field proc(result @Result, literal ast.NodeId, index usize) ast.NodeId {
-    debug.assert(result.storage.covered[usize(literal)])
+    debug.assert(node_covered(result.storage.covered, literal))
     slot :: result.storage.slots[usize(literal)]
     debug.assert(slot != no_index)
     return result.storage.initializers.items[slot].fields[index]
