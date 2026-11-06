@@ -15,6 +15,54 @@ owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
     return bytes
 }
 
+generic_substitutions_and_evaluations_keep_instance_local_state test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        package :: try add_package(&session)
+        bytes := try owned_text(
+            `size proc(seed usize) usize {
+            `    step :: seed + 1
+            `    return step
+            `}
+            `Box proc($T type, $N usize) type { return struct { values [N]mut T } }
+            `make proc($T type, $N usize, value T) Box(T, N) {
+            `    result Box(T, N) := undefined
+            `    for (0..N) |index| result.values[index] = value
+            `    return result
+            `}
+            `sum proc($T type, $N usize, values [N]mut T) T {
+            `    total T := 0
+            `    for (values) |value| total += value
+            `    return total
+            `}
+            `main proc() i16 {
+            `    two :: make(i16, 2, 7)
+            `    three :: make(i16, 3, 4)
+            `    first :: $(sum(i16, 2, [i16(2), 2]))
+            `    second :: $(sum(i16, 3, [i16(3), 4, 5]))
+            `    if (Box(i16, 2) != Box(i16, size(1))) return -1
+            `    if (Box(i16, 3) != Box(i16, size(2))) return -2
+            `    return sum(i16, 2, two.values) + sum(i16, 3, three.values) + first + second
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        _ = try add_source(&session, package, "instances.hon", &bytes, &diagnostic_store)
+        module = try compile(&session, package, &diagnostic_store)
+    }
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.i16, outcome.value.type)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
 capture_dependencies_preserve_nested_match_and_catch_narrowing test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

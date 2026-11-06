@@ -3029,6 +3029,22 @@ specialize_call proc(state @mut State, call, function, expected ast.NodeId) void
 }
 
 @hide:file
+substitute_parameter_references proc(
+    state @State, id, parameter, replacement ast.NodeId, mapping []mut ast.NodeId,
+) void {
+    # follow only syntax clone_subtree copies; captured memory roots stay concrete.
+    if (id == no_node or usize(id) >= mapping.len) return
+    if (ast.node_class(&state.tree, id) == .expression) {
+        if (ast.expr_kind(&state.tree, id) == .memory_constant) return
+        resolved :: binding(state, id)
+        if (resolved.kind == .declaration and resolved.data.declaration == parameter)
+            mapping[usize(id)] = replacement
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        substitute_parameter_references(state, ast.child(&state.tree, id, i), parameter, replacement, mapping)
+}
+
+@hide:file
 instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     function :: state.instances.items[index].function
     type_result :: compiletime_call(state, function) or state.instances.items[index].demanded
@@ -3048,13 +3064,7 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
             replacement = try ast.add_typed_constant(state.builder, ast.node_span(&state.tree, parameter), concrete_type, value.node)
             try refresh(state)
         }
-        for (0..count) |n| {
-            resolved :: binding(state, ast.NodeId(n))
-            if (
-                resolved.kind == .declaration and resolved.data.declaration == parameter
-                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression
-            ) mapping[n] = replacement
-        }
+        substitute_parameter_references(state, function, parameter, replacement, mapping)
     }
     clone :: try ast.clone_subtree(state.builder, function, mapping)
     try refresh(state)
@@ -3205,26 +3215,42 @@ reject_type_result proc(state @mut State, call, result ast.NodeId, constraints_s
         try reject_evaluation(state, state.rewrites.constraints.items[i])
 }
 
+# four bits per node retain queued (2), visited (4), and owned (8) independently.
+@hide:file
+evaluation_flags proc(flags []u64, id ast.NodeId) u64 {
+    index :: usize(id)
+    shift :: rem!(index, 16) * 4
+    return (flags[divtrunc!(index, 16)] >> shift) & 15
+}
+
+@hide:file
+evaluation_mark proc(flags []mut u64, id ast.NodeId, mask u64) void {
+    index :: usize(id)
+    shift :: rem!(index, 16) * 4
+    flags[divtrunc!(index, 16)] |= mask << shift
+}
+
 @hide:file
 evaluation_dependencies proc(
-    state @mut State, id ast.NodeId, flags []mut u8, declarations @mut arraylist.ArrayList(ast.NodeId),
+    state @mut State, id ast.NodeId, flags []mut u64, declarations @mut arraylist.ArrayList(ast.NodeId),
 ) bool ! Error {
-    if ((flags[usize(id)] & 4) != 0) return true
-    flags[usize(id)] = flags[usize(id)] | 4
+    if ((evaluation_flags(flags, id) & 4) != 0) return true
+    evaluation_mark(flags, id, 4)
     if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .typed_constant) {
         if (!try type_array_initialized(state, id, id)) return false
     }
     resolved :: binding(state, id)
     if (resolved.kind == .declaration) {
         target :: resolved.data.declaration
-        if ((flags[usize(target)] & 8) == 0 and (flags[usize(target)] & 2) == 0) {
+        target_flags :: evaluation_flags(flags, target)
+        if ((target_flags & 8) == 0 and (target_flags & 2) == 0) {
             class :: ast.node_class(&state.tree, target)
             if (class == .parameter) return false
             # references must reach a concrete instance before evaluation checking;
             # an unbound template is not an executable dependency.
             if (class == .function and template(state, target)) return false
             if (class == .statement and ast.statement_decl(&state.tree, target).mutability == .variable) return false
-            flags[usize(target)] = flags[usize(target)] | 2
+            evaluation_mark(flags, target, 2)
             try arraylist.append(declarations, target)
         }
     }
@@ -3235,9 +3261,9 @@ evaluation_dependencies proc(
 }
 
 @hide:file
-evaluation_owned proc(state @State, id ast.NodeId, flags []mut u8) void {
-    if ((flags[usize(id)] & 8) != 0) return
-    flags[usize(id)] = flags[usize(id)] | 8
+evaluation_owned proc(state @State, id ast.NodeId, flags []mut u64) void {
+    if ((evaluation_flags(flags, id) & 8) != 0) return
+    evaluation_mark(flags, id, 8)
     for (0..ast.child_count(&state.tree, id)) |i| evaluation_owned(state, ast.child(&state.tree, id, i), flags)
 }
 
@@ -3289,13 +3315,7 @@ argument_annotation proc(
                 ast.node_span(&state.tree, value.node), value.annotation, value.node)
             try refresh(state)
         }
-        for (0..mapping.len) |n| {
-            resolved :: binding(state, ast.NodeId(n))
-            if (
-                resolved.kind == .declaration and resolved.data.declaration == parameter
-                and ast.node_class(&state.tree, ast.NodeId(n)) == .expression
-            ) mapping[n] = value.node
-        }
+        substitute_parameter_references(state, annotation, parameter, value.node, mapping)
     }
     start :: ast.node_count(&state.tree)
     result :: try ast.clone_subtree(state.builder, annotation, mapping)
@@ -4284,18 +4304,20 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     declarations := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&declarations)
     try arraylist.append(&declarations, wrapper)
-    flags := arraylist.init(u8, state.allocator)
+    flags := arraylist.init(u64, state.allocator)
     defer arraylist.deinit(&flags)
     index := usize(0)
     while (index < declarations.items.len) {
         declaration :: declarations.items[index]
         try expand(state, declaration)
-        previous_count :: flags.items.len
+        previous_words :: flags.items.len
         count :: ast.node_count(&state.tree)
-        try arraylist.reserve(&flags, count)
-        flags.items = flags.items.ptr[..count]
-        mem.set(flags.items[previous_count..], 0)
-        flags.items[usize(declaration)] = flags.items[usize(declaration)] | 2
+        flag_words := divtrunc!(count, 16)
+        if (rem!(count, 16) != 0) flag_words += 1
+        try arraylist.reserve(&flags, flag_words)
+        flags.items = flags.items.ptr[..flag_words]
+        mem.set(flags.items[previous_words..], u64(0))
+        evaluation_mark(flags.items, declaration, 2)
         evaluation_owned(state, declaration, flags.items)
         if (!try evaluation_dependencies(state, declaration, flags.items, &declarations)) return Value{}
         index += 1
