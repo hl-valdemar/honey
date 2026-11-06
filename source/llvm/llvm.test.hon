@@ -1,0 +1,89 @@
+import "@std/mem"
+import "@std/io"
+import "@std/arraylist"
+import "@std/testing"
+import "@source/ir"
+import "@source/diagnostics"
+
+@hide:file
+OutputCapture :: struct {
+    bytes arraylist.ArrayList(u8)
+    chunk usize = maxval!(usize)
+    fail_at usize = maxval!(usize)
+    failed bool = false
+    mode u8 = 0
+}
+
+@hide:file
+capture_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    state @mut OutputCapture :: ptrcast!(context?)
+    if (state.mode == 1) return 0
+    if (state.mode == 2) return bytes.len + 1
+    length :: state.bytes.items.len
+    if (!state.failed and length >= state.fail_at) {
+        state.failed = true
+        return .write_failed
+    }
+    count := bytes.len
+    if (count > state.chunk) count = state.chunk
+    if (!state.failed and count > state.fail_at - length) count = state.fail_at - length
+    arraylist.reserve(&state.bytes, length + count) catch |_| { return .write_failed }
+    state.bytes.items = state.bytes.items.ptr[..length + count]
+    memcopy!(state.bytes.items[length..], bytes[..count])
+    return count
+}
+
+@hide:file
+capture_output proc(state @mut OutputCapture) io.Writer {
+    return io.Writer{ context = state, handle = io.Handle{ file_desc = -1 }, write = capture_write }
+}
+
+preserves_stream_bytes_and_write_failures test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    {
+        bytes :: try mem.alloc(u8, mem.c_allocator, 20000)
+        errdefer mem.free(mem.c_allocator, bytes)
+        for (0..bytes.len) |index| bytes[index] = u8(rem!(index, 251))
+        try arraylist.append(&module.strings, ir.StringStorage{ allocation = bytes, len = bytes.len })
+    }
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    sources [_]diagnostics.Source :: [{ path = "fixture.hon", text = "" }]
+    reference := OutputCapture{ bytes = arraylist.init(u8, mem.c_allocator) }
+    defer arraylist.deinit(&reference.bytes)
+    try emit(mem.c_allocator, capture_output(&reference), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0))
+    actual := OutputCapture{ bytes = arraylist.init(u8, mem.c_allocator), chunk = 7 }
+    defer arraylist.deinit(&actual.bytes)
+    try emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0))
+    try testing.expect(mem.eql(reference.bytes.items, actual.bytes.items))
+
+    boundaries [_]usize :: [divtrunc!(reference.bytes.items.len, 2), reference.bytes.items.len - 1]
+    failed := false
+    for (boundaries) |boundary| {
+        arraylist.clear(&actual.bytes)
+        actual.fail_at = boundary
+        actual.failed = false
+        failed = false
+        emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+            failed = err == .write_failed
+        }
+        try testing.expect(failed)
+        try testing.expect(mem.eql(reference.bytes.items[..boundary], actual.bytes.items))
+    }
+
+    arraylist.clear(&actual.bytes)
+    actual.mode = 1
+    failed = false
+    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+        failed = err == .no_progress
+    }
+    try testing.expect(failed)
+
+    actual.mode = 2
+    failed = false
+    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+        failed = err == .write_failed
+    }
+    try testing.expect(failed)
+}

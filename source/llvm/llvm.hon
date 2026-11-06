@@ -20,15 +20,44 @@ State :: struct {
     next_register usize = 0
 }
 
+@hide:file
+BufferedOutput :: struct {
+    output io.Writer
+    bytes []mut u8
+    len usize = 0
+}
+
+@hide:file
+flush_output proc(state @mut BufferedOutput) void ! io.WriteError {
+    try io.write_all(state.output, state.bytes[..state.len])
+    state.len = 0
+}
+
+@hide:file
+buffered_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    state @mut BufferedOutput :: ptrcast!(context?)
+    if (state.len == state.bytes.len) try flush_output(state)
+    if (state.len == 0 and bytes.len >= state.bytes.len) return try io.write(state.output, bytes)
+    count := state.bytes.len - state.len
+    if (count > bytes.len) count = bytes.len
+    memcopy!(state.bytes[state.len..state.len + count], bytes[..count])
+    state.len += count
+    return count
+}
+
 #! writes a standalone native LLVM module; all temporary emitter storage is released before returning.
+#! buffers writes and flushes before success; does not close the borrowed destination.
 emit proc(
     allocator mem.Allocator,
-    output io.Writer,
+    destination io.Writer,
     module @ir.Module,
     diagnostic_store @diagnostics.Store,
     sources []diagnostics.Source,
     primary diagnostics.SourceId,
 ) void ! (mem.AllocError | io.WriteError) {
+    storage [16384]mut u8 := undefined
+    buffered := BufferedOutput{ output = destination, bytes = storage[..] }
+    output :: io.Writer{ context = &buffered, handle = destination.handle, write = buffered_write }
     line_starts := arraylist.init(arraylist.ArrayList(usize), allocator)
     defer {
         for (line_starts.items) |@starts| arraylist.deinit(starts)
@@ -177,6 +206,7 @@ emit proc(
         try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
     }
     try io.write_all(output, "}\n")
+    try flush_output(&buffered)
 }
 
 @hide:file
