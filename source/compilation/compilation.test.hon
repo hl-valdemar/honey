@@ -15,6 +15,56 @@ owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
     return bytes
 }
 
+capture_dependencies_preserve_nested_match_and_catch_narrowing test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        package :: try add_package(&session)
+        bytes := try owned_text(
+            `Item :: union(enum) { count i16, text string }
+            `Box :: union(enum) { item Item, empty void }
+            `match_score proc(input Box) i16 {
+            `    return match input {
+            `        .item |value|: match value {
+            `            .count: value.count,
+            `            .text: i16(value.text.len),
+            `        },
+            `        .empty: 0,
+            `    }
+            `}
+            `fail proc(input Item) i16 ! Item { return input }
+            `catch_score proc(input Item) i16 {
+            `    return fail(input) catch |err| {
+            `        yield match err {
+            `            .count: err.count,
+            `            .text: i16(err.text.len),
+            `        }
+            `    }
+            `}
+            `main proc() i16 {
+            `    return (
+            `        match_score(.item{.count{19}}) + catch_score(.count{19})
+            `        + match_score(.item{.text{"ok"}}) + catch_score(.text{"ok"})
+            `    )
+            `}
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        _ = try add_source(&session, package, "captures.hon", &bytes, &diagnostic_store)
+        module = try compile(&session, package, &diagnostic_store)
+    }
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect_equal(ir.Type.i16, outcome.value.type)
+    try testing.expect_equal(i64(42), outcome.value.data.integer)
+}
+
 keeps_package_declarations_distinct_and_ir_independent test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

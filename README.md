@@ -344,7 +344,7 @@ function fallthrough obligations are separate from body types. `check.fallthroug
 
 the checker keeps union-find parent links and group sizes in a compact array separate from per-node inference metadata. root walks and path compression access only that link storage; both temporary arrays are released before `check.check` returns.
 
-optional-capture payload inference follows existing declaration-dependency edges to update each capture's uses, without a new index or a full reachable-node scan per capture. narrowed occurrences retain their branch-specific types.
+optional, match and catch capture inference shares one declaration-dependency walk to update each capture's uses, without a new index or a full reachable-node scan per capture. narrowed occurrences retain their branch-specific types.
 
 checking collects reachable node IDs while following package/constraint children and declaration bindings, then sorts those IDs in place to preserve ascending pass order without a full-arena collection scan. node-indexed allocations retain original identities, but only covered cells are initialized; result queries for uncovered nodes retain their empty/default answers. the result owns its packed 64-bit coverage mask and sorted node-index list, both released by `check.deinit`. packing coverage avoids clearing one boolean per arena node for each isolated check. `check.node_indices` borrows the sorted list until deinit; lowering reuses it to initialize temporary storage only for covered nodes, including isolated compile-time evaluations.
 

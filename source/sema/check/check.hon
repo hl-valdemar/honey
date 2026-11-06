@@ -3728,19 +3728,7 @@ prepare_optional_captures proc(state @mut State, defaults bool) void ! (mem.Allo
         type :: try infer_shape(state, ast.NodeId(i), defaults)
         if (type.kind != .optional) continue
         child :: state.arrays.items[usize(type.array_type)].element
-        seed(state, capture, child)
-        # declaration dependencies already index these uses; avoid a scan per capture.
-        edge := state.cells[usize(capture)].first_edge
-        while (edge != no_index) {
-            j :: usize(state.edges.items[edge].dependent)
-            edge = state.edges.items[edge].next
-            if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
-            binding :: sema.binding(state.resolution, ast.NodeId(j))
-            if (
-                binding.kind == .declaration and binding.data.declaration == capture
-                and !has_narrowing(state, ast.NodeId(j))
-            ) seed(state, ast.NodeId(j), child)
-        }
+        seed_capture(state, capture, child)
     }
 }
 
@@ -4835,15 +4823,7 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             if (key.kind != .none and (!capture_valid or (!view.optional_capture and payload.kind == .void) or payload.kind == .none)) {
                 try fail(state, id, .invalid_match_capture, ast.node_span(state.tree, capture))
             } else if (payload.kind != .none and state.cells[usize(capture)].type.kind != .invalid) {
-                seed(state, capture, payload)
-                for (state.nodes) |j| {
-                    if (state.cells[j].role != .expression or !declaration_reference(state.tree, ast.NodeId(j))) continue
-                    binding :: sema.binding(state.resolution, ast.NodeId(j))
-                    if (
-                        binding.kind == .declaration and binding.data.declaration == capture
-                        and !has_narrowing(state, ast.NodeId(j))
-                    ) seed(state, ast.NodeId(j), payload)
-                }
+                seed_capture(state, capture, payload)
             }
         }
         if (arm.expression or state.cells[usize(arm.body)].first_yield != ast.NodeId(maxval!(u32))) {
@@ -5290,7 +5270,11 @@ check_sum_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | di
 @hide:file
 seed_capture proc(state @mut State, capture ast.NodeId, type Type) void {
     seed(state, capture, type)
-    for (state.nodes) |i| {
+    # declaration edges index capture uses; other dependents must not be seeded.
+    edge := state.cells[usize(capture)].first_edge
+    while (edge != no_index) {
+        i :: usize(state.edges.items[edge].dependent)
+        edge = state.edges.items[edge].next
         if (state.cells[i].role != .expression or !declaration_reference(state.tree, ast.NodeId(i))) continue
         binding :: sema.binding(state.resolution, ast.NodeId(i))
         if (
