@@ -113,6 +113,7 @@ Type :: struct {
 Storage :: struct {
     tree @ast.Tree
     covered []bool
+    nodes arraylist.ArrayList(usize)
     types []mut Type
     arrays arraylist.ArrayList(ArrayType)
     pointers arraylist.ArrayList(PointerType)
@@ -127,7 +128,7 @@ Storage :: struct {
     allocator mem.Allocator
 }
 
-#! owns node-indexed types, aggregate descriptors, initializer mappings, and function/value-block fallthrough obligations; release with deinit.
+#! owns checked node indexes, node-indexed types, aggregate descriptors, initializer mappings, and function/value-block fallthrough obligations; release with deinit.
 #! borrows the caller-owned AST for signature comparisons; diagnostic IDs refer to the caller-owned store.
 Result :: struct { storage Storage }
 
@@ -328,7 +329,7 @@ check_elaborated proc(
     errdefer mem.free(allocator, marked)
     mem.set(marked, false)
     nodes := arraylist.init(usize, allocator)
-    defer arraylist.deinit(&nodes)
+    errdefer arraylist.deinit(&nodes)
     try mark_check_nodes(tree, resolution, tree.root, marked, &nodes)
     for (constraints) |constraint| try mark_check_nodes(tree, resolution, constraint, marked, &nodes)
     sort_check_nodes(nodes.items)
@@ -701,6 +702,7 @@ check_elaborated proc(
     return Result{ storage = Storage{
         tree = tree,
         covered = marked,
+        nodes = nodes,
         types = types,
         arrays = state.arrays,
         pointers = state.pointers,
@@ -714,6 +716,11 @@ check_elaborated proc(
         fallthroughs = fallthroughs,
         allocator = allocator,
     } }
+}
+
+#! borrows ascending AST node indexes covered by this result until deinit.
+node_indices proc(result @Result) []usize {
+    return result.storage.nodes.items
 }
 
 #! returns a type without retaining a reference to checker temporaries.
@@ -823,8 +830,9 @@ initializer_field proc(result @Result, literal ast.NodeId, index usize) ast.Node
     return result.storage.initializers.items[slot].fields[index]
 }
 
-#! releases type, descriptor, and fallthrough storage using the allocator retained by check.
+#! releases checked node indexes, types, descriptors, and fallthrough storage using the retained allocator.
 deinit proc(result @mut Result) void {
+    arraylist.deinit(&result.storage.nodes)
     mem.free(result.storage.allocator, result.storage.covered)
     mem.free(result.storage.allocator, result.storage.types)
     arraylist.deinit(&result.storage.arrays)

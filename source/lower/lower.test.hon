@@ -511,7 +511,10 @@ limited_alloc proc(context ?@mut anyopaque, size usize, alignment usize) ?*mut u
         if (state.remaining == 0) return null
         state.remaining -= 1
         memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
-        if (memory) |_| state.live += 1
+        if (memory) |pointer| {
+            state.live += 1
+            mem.set(pointer[..size], u8(0xA5))
+        }
         return memory
     }
     unreachable
@@ -524,8 +527,9 @@ limited_realloc proc(context ?@mut anyopaque, memory ?*mut u8, old_size usize, n
         if (state.remaining == 0) return null
         state.remaining -= 1
         resized :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
-        if (resized) |_| {
+        if (resized) |pointer| {
             if (memory) |_| {} else state.live += 1
+            if (new_size > old_size) mem.set(pointer[old_size..new_size], u8(0xA5))
         }
         return resized
     }
@@ -545,6 +549,66 @@ limited_free proc(context ?@mut anyopaque, memory ?*mut u8, size usize, alignmen
 
 @hide:file
 limited_vtable :: mem.AllocatorVTable{ alloc = limited_alloc, realloc = limited_realloc, free = limited_free }
+
+lowers_checked_subsets_with_dirty_scratch_storage test {
+    for (usize(0)..usize(2)) |mode| {
+        state := AllocationState{ remaining = maxval!(usize) }
+        allocator :: mem.Allocator{ context = &state, vtable = &limited_vtable }
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        {
+            module ir.Module := undefined
+            {
+                source ::
+                    `base :: 40
+                    `helper proc(value int) int {
+                    `    local :: value + base
+                    `    return local
+                    `}
+                    `main proc() int { return helper(2) }
+                    `unused :: true + 1
+                    `main proc() int { return helper(3) }
+                strings := strpool.init(mem.c_allocator)
+                defer strpool.deinit(&strings)
+                scan_state := lexer.init(mem.c_allocator)
+                defer lexer.deinit(&scan_state)
+                try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
+                builder := ast.init_builder(mem.c_allocator, source)
+                defer ast.deinit_builder(&builder)
+                parsed :: try parser.parse_source(&builder, scan_state.tokens.items, &diagnostic_store)
+                original :: ast.view(&builder, parsed)
+                entry_index usize :: if (mode == 0) 2 else 4
+                declarations [3]ast.NodeId :: [
+                    ast.package_decl(&original, entry_index),
+                    ast.package_decl(&original, 1),
+                    ast.package_decl(&original, 0),
+                ]
+                package :: try ast.add_package(&builder, ast.node_span(&original, parsed), declarations[..])
+                tree := ast.finish(&builder, package)
+                defer ast.deinit(&tree)
+                resolution := try sema.resolve(mem.c_allocator, &tree, &strings, &diagnostic_store)
+                defer sema.deinit(&resolution)
+                checked := try typecheck.check(allocator, &tree, &resolution, &diagnostic_store)
+                defer typecheck.deinit(&checked)
+                if (mode == 0) module = try lower(allocator, &tree, &resolution, &checked, &diagnostic_store)
+                else {
+                    functions := arraylist.init(ast.NodeId, mem.c_allocator)
+                    defer arraylist.deinit(&functions)
+                    module = try lower_evaluation(allocator, &tree, &resolution, &checked,
+                        declarations[0], &functions, &diagnostic_store)
+                }
+            }
+            defer ir.deinit(&module)
+            outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+            defer interpreter.deinit(&outcome)
+            try testing.expect(outcome.trap == null)
+            expected i64 :: if (mode == 0) 42 else 43
+            try testing.expect_equal(expected, outcome.value.data.integer)
+            try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        }
+        try testing.expect_equal(usize(0), state.live)
+    }
+}
 
 releases_temporaries_and_partially_owned_modules_on_allocation_failure test {
     strings := strpool.init(mem.c_allocator)

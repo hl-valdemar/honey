@@ -142,7 +142,8 @@ lower_module proc(
     errdefer ir.deinit(&module)
     storage :: try mem.alloc(Storage, allocator, ast.node_count(tree))
     defer mem.free(allocator, storage)
-    mem.set(storage, Storage{})
+    # lowering follows checked syntax and bindings; other arena slots are never read.
+    for (typecheck.node_indices(checked)) |index| storage[index] = Storage{}
     arrays :: try mem.alloc(ir.ArrayId, allocator, typecheck.array_type_count(checked))
     defer mem.free(allocator, arrays)
     mem.set(arrays, ir.no_array)
