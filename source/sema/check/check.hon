@@ -121,6 +121,7 @@ Storage :: struct {
     enums arraylist.ArrayList(EnumType)
     backings []mut Type
     exhaustive []mut bool
+    # slots and variant_slots use nodes-list indexes; other tables use arena IDs.
     variant_slots []mut usize
     initializers arraylist.ArrayList(RecordInitializer)
     slots []mut usize
@@ -300,6 +301,20 @@ sort_check_nodes proc(nodes []mut usize) void {
     }
 }
 
+@hide:file
+checked_node_index proc(nodes []usize, id ast.NodeId) usize {
+    target :: usize(id)
+    start := usize(0)
+    end := nodes.len
+    while (start < end) {
+        middle :: start + divtrunc!(end - start, 2)
+        value :: nodes[middle]
+        if (value == target) return middle
+        if (value < target) start = middle + 1 else end = middle
+    }
+    unreachable # every slot query refers to a covered node.
+}
+
 #! borrows `resolution` and `diagnostic_store` during checking; Result retains the AST borrow for signature comparisons.
 #! temporary constraints are freed on every exit; Result owns types, aggregate descriptors, initializer mappings, and fallthrough obligations.
 check proc(
@@ -326,16 +341,10 @@ check_elaborated proc(
     defer mem.free(allocator, cells)
     groups :: try mem.alloc(GroupLink, allocator, count)
     defer mem.free(allocator, groups)
-    queue :: try mem.alloc(ast.NodeId, allocator, count)
-    defer mem.free(allocator, queue)
-    slots :: try mem.alloc(usize, allocator, count)
-    errdefer mem.free(allocator, slots)
     backings :: try mem.alloc(Type, allocator, count)
     errdefer mem.free(allocator, backings)
     exhaustive :: try mem.alloc(bool, allocator, count)
     errdefer mem.free(allocator, exhaustive)
-    variant_slots :: try mem.alloc(usize, allocator, count)
-    errdefer mem.free(allocator, variant_slots)
     coverage_words := divtrunc!(count, 64)
     if (rem!(count, 64) != 0) coverage_words += 1
     marked :: try mem.alloc(u64, allocator, coverage_words)
@@ -346,6 +355,15 @@ check_elaborated proc(
     try mark_check_nodes(tree, resolution, tree.root, marked, &nodes)
     for (constraints) |constraint| try mark_check_nodes(tree, resolution, constraint, marked, &nodes)
     sort_check_nodes(nodes.items)
+    # propagation enqueues each reachable node at most once.
+    queue :: try mem.alloc(ast.NodeId, allocator, nodes.items.len)
+    defer mem.free(allocator, queue)
+    slots :: try mem.alloc(usize, allocator, nodes.items.len)
+    errdefer mem.free(allocator, slots)
+    mem.set(slots, no_index)
+    variant_slots :: try mem.alloc(usize, allocator, nodes.items.len)
+    errdefer mem.free(allocator, variant_slots)
+    mem.set(variant_slots, no_index)
     # only the reachable closure can enter inference; unrelated arena cells stay untouched.
     for (nodes.items) |index| {
         cells[index] = Cell{}
@@ -353,8 +371,6 @@ check_elaborated proc(
         types[index] = Type{}
         backings[index] = Type{}
         exhaustive[index] = false
-        slots[index] = no_index
-        variant_slots[index] = no_index
     }
     state := State{
         tree = tree,
@@ -802,28 +818,28 @@ is_enum_member proc(result @Result, id ast.NodeId) bool {
     if (!node_covered(result.storage.covered, id)) return false
     return (
         result.storage.backings[usize(id)].kind == .enumeration
-        and result.storage.slots[usize(id)] != no_index
+        and result.storage.slots[checked_node_index(result.storage.nodes.items, id)] != no_index
     )
 }
 
 enum_member_value proc(result @Result, id ast.NodeId) EnumMember {
     debug.assert(node_covered(result.storage.covered, id))
     type :: result.storage.backings[usize(id)]
-    return result.storage.enums.items[usize(type.enum_type)].members[result.storage.slots[usize(id)]]
+    return result.storage.enums.items[usize(type.enum_type)].members[result.storage.slots[checked_node_index(result.storage.nodes.items, id)]]
 }
 
 enum_member_index proc(result @Result, id ast.NodeId) usize {
     if (!node_covered(result.storage.covered, id)) return no_index
-    return result.storage.slots[usize(id)]
+    return result.storage.slots[checked_node_index(result.storage.nodes.items, id)]
 }
 
 is_union_variant proc(result @Result, id ast.NodeId) bool {
-    return node_covered(result.storage.covered, id) and result.storage.variant_slots[usize(id)] != no_index
+    return node_covered(result.storage.covered, id) and result.storage.variant_slots[checked_node_index(result.storage.nodes.items, id)] != no_index
 }
 
 union_variant_index proc(result @Result, id ast.NodeId) usize {
     if (!node_covered(result.storage.covered, id)) return no_index
-    return result.storage.variant_slots[usize(id)]
+    return result.storage.variant_slots[checked_node_index(result.storage.nodes.items, id)]
 }
 
 union_payload_type proc(result @Result, id ast.NodeId) Type {
@@ -832,13 +848,15 @@ union_payload_type proc(result @Result, id ast.NodeId) Type {
 }
 
 field_index proc(result @Result, selection ast.NodeId) usize {
-    debug.assert(node_covered(result.storage.covered, selection) and result.storage.slots[usize(selection)] != no_index)
-    return result.storage.slots[usize(selection)]
+    debug.assert(node_covered(result.storage.covered, selection))
+    slot :: result.storage.slots[checked_node_index(result.storage.nodes.items, selection)]
+    debug.assert(slot != no_index)
+    return slot
 }
 
 initializer_field proc(result @Result, literal ast.NodeId, index usize) ast.NodeId {
     debug.assert(node_covered(result.storage.covered, literal))
-    slot :: result.storage.slots[usize(literal)]
+    slot :: result.storage.slots[checked_node_index(result.storage.nodes.items, literal)]
     debug.assert(slot != no_index)
     return result.storage.initializers.items[slot].fields[index]
 }
@@ -2463,9 +2481,12 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     actual :: state.types[usize(id)]
                     if (actual.kind != .record) return
                     descriptor := state.records.items[usize(actual.record_type)]
-                    if (state.variant_slots[usize(id)] != no_index and state.backings[usize(id)].kind == .record) descriptor = state.records.items[usize(state.backings[usize(id)].record_type)]
+                    if (
+                        state.variant_slots[checked_node_index(state.nodes, id)] != no_index
+                        and state.backings[usize(id)].kind == .record
+                    ) descriptor = state.records.items[usize(state.backings[usize(id)].record_type)]
                     fields :: descriptor.fields
-                    slot :: state.slots[usize(id)]
+                    slot :: state.slots[checked_node_index(state.nodes, id)]
                     if (slot == no_index) return
                     values :: state.initializers.items[slot].fields
                     for fields |field, i| {
@@ -2773,10 +2794,13 @@ evaluate_integer proc(state @mut State, id ast.NodeId, allow_local bool) ?Consta
             return null
         }
         .identifier, .selection: {
-            if (state.backings[usize(id)].kind == .enumeration and state.slots[usize(id)] != no_index) {
-                type :: state.backings[usize(id)]
-                member :: state.enums.items[usize(type.enum_type)].members[state.slots[usize(id)]]
-                return ConstantInteger{ magnitude = member.magnitude, negative = member.negative }
+            if (state.backings[usize(id)].kind == .enumeration) {
+                slot :: state.slots[checked_node_index(state.nodes, id)]
+                if (slot != no_index) {
+                    type :: state.backings[usize(id)]
+                    member :: state.enums.items[usize(type.enum_type)].members[slot]
+                    return ConstantInteger{ magnitude = member.magnitude, negative = member.negative }
+                }
             }
             binding :: sema.binding(state.resolution, id)
             if (binding.kind != .declaration) return null
@@ -3590,7 +3614,7 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             fields :: state.records.items[usize(base.record_type)].fields
             slot :: selected_field(state, fields, view.member)
             if (slot != no_index) {
-                state.slots[usize(id)] = slot
+                state.slots[checked_node_index(state.nodes, id)] = slot
                 seed(state, id, fields[slot].type)
                 return fields[slot].type
             }
@@ -4195,14 +4219,14 @@ infer_record_literal proc(state @mut State, literal ast.NodeId, index usize, def
         expected = try intern_record(state, ast.NodeId(maxval!(u32)), fields)
     }
     fields :: state.records.items[usize(expected.record_type)].fields
-    slot := state.slots[usize(literal)]
+    slot := state.slots[checked_node_index(state.nodes, literal)]
     fresh :: slot == no_index
     if (slot == no_index) {
         values :: try mem.alloc(ast.NodeId, state.initializers.allocator, fields.len)
         errdefer mem.free(state.initializers.allocator, values)
         try arraylist.append(&state.initializers, RecordInitializer{ fields = values })
         slot = state.initializers.items.len - 1
-        state.slots[usize(literal)] = slot
+        state.slots[checked_node_index(state.nodes, literal)] = slot
     }
     values :: state.initializers.items[slot].fields
     if (values.len != fields.len) {
@@ -4230,7 +4254,7 @@ infer_record_literal proc(state @mut State, literal ast.NodeId, index usize, def
         }
         values[field_slot] = view.value?
         if (state.records.items[usize(expected.record_type)].is_union) {
-            state.variant_slots[usize(literal)] = field_slot
+            state.variant_slots[checked_node_index(state.nodes, literal)] = field_slot
         }
         try demand(state, view.value?, fields[field_slot].type, .type_mismatch)
         _ = try infer_shape(state, view.value?, defaults)
@@ -4561,7 +4585,7 @@ select_enum_member proc(state @mut State, id, name ast.NodeId, type Type) Type !
         seed(state, id, state.types[usize(id)])
         return state.types[usize(id)]
     }
-    state.slots[usize(id)] = slot
+    state.slots[checked_node_index(state.nodes, id)] = slot
     state.backings[usize(id)] = type
     state.cells[root(state, usize(id))].expected = type
     seed(state, id, type)
@@ -4587,7 +4611,7 @@ infer_enum_literal proc(state @mut State, id ast.NodeId, expected Type, defaults
                 try fail(state, id, .type_mismatch, ast.node_span(state.tree, id))
                 return state.types[usize(id)]
             }
-            state.variant_slots[usize(id)] = slot
+            state.variant_slots[checked_node_index(state.nodes, id)] = slot
             seed(state, id, expected)
             return expected
         }
@@ -4644,7 +4668,7 @@ infer_variant_payload proc(state @mut State, id ast.NodeId, expected Type, defau
         try fail(state, id, .unknown_field, ast.node_span(state.tree, name))
         return state.types[usize(id)]
     }
-    state.variant_slots[usize(id)] = slot
+    state.variant_slots[checked_node_index(state.nodes, id)] = slot
     _ = try select_enum_member(state, annotation, name, descriptor.tag_type)
     payload :: descriptor.fields[slot].type
     count :: ast.record_field_count(state.tree, id)
@@ -4653,13 +4677,13 @@ infer_variant_payload proc(state @mut State, id ast.NodeId, expected Type, defau
         value :: ast.field(state.tree, ast.record_field(state.tree, id, 0)).value?
         try demand(state, value, payload, .type_mismatch)
         _ = try infer_shape(state, value, defaults)
-        if (state.slots[usize(id)] == no_index) {
+        if (state.slots[checked_node_index(state.nodes, id)] == no_index) {
             values :: try mem.alloc(ast.NodeId, state.initializers.allocator, descriptor.fields.len)
             errdefer mem.free(state.initializers.allocator, values)
             mem.set(values, ast.NodeId(maxval!(u32)))
             values[slot] = value
             try arraylist.append(&state.initializers, RecordInitializer{ fields = values })
-            state.slots[usize(id)] = state.initializers.items.len - 1
+            state.slots[checked_node_index(state.nodes, id)] = state.initializers.items.len - 1
         }
     } else {
         if (payload.kind != .record and !(payload.kind == .void and count == 0)) {
@@ -4669,13 +4693,13 @@ infer_variant_payload proc(state @mut State, id ast.NodeId, expected Type, defau
         state.backings[usize(id)] = payload
         if (payload.kind == .record) {
             fields :: state.records.items[usize(payload.record_type)].fields
-            if (state.slots[usize(id)] == no_index) {
+            if (state.slots[checked_node_index(state.nodes, id)] == no_index) {
                 values :: try mem.alloc(ast.NodeId, state.initializers.allocator, fields.len)
                 errdefer mem.free(state.initializers.allocator, values)
                 try arraylist.append(&state.initializers, RecordInitializer{ fields = values })
-                state.slots[usize(id)] = state.initializers.items.len - 1
+                state.slots[checked_node_index(state.nodes, id)] = state.initializers.items.len - 1
             }
-            values :: state.initializers.items[state.slots[usize(id)]].fields
+            values :: state.initializers.items[state.slots[checked_node_index(state.nodes, id)]].fields
             mem.set(values, ast.NodeId(maxval!(u32)))
             for 0..count |i| {
                 field :: ast.field(state.tree, ast.record_field(state.tree, id, i))
@@ -4805,7 +4829,7 @@ infer_match proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
                     fields :: state.records.items[usize(subject.record_type)].fields
                     slot :: named_field(state.tree, fields, ast.enum_literal(state.tree, pattern))
                     if (slot != no_index) {
-                        state.variant_slots[usize(pattern)] = slot
+                        state.variant_slots[checked_node_index(state.nodes, pattern)] = slot
                         if (payload.kind == .none) {
                             payload = fields[slot].type
                         } else if (!same_type(state, payload, fields[slot].type)) capture_valid = false
@@ -5020,9 +5044,11 @@ validate_match proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
                     previous :: ast.match_pattern(state.tree, previous_arm, previous_j)
                     duplicate := false
                     if (key.kind == .enumeration) {
+                        previous_slot :: state.slots[checked_node_index(state.nodes, previous)]
+                        pattern_slot :: state.slots[checked_node_index(state.nodes, pattern)]
                         duplicate = (
-                            state.slots[usize(previous)] != no_index
-                            and state.slots[usize(previous)] == state.slots[usize(pattern)]
+                            previous_slot != no_index
+                            and previous_slot == pattern_slot
                         )
                     } else if (current) |interval| {
                         if (try pattern_interval(state, previous, key)) |other| duplicate = interval_overlap(interval, other)
