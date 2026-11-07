@@ -3045,10 +3045,41 @@ substitute_parameter_references proc(
 }
 
 @hide:file
+bind_instance_subtree proc(
+    state @mut State, id, function ast.NodeId, mapping []ast.NodeId, start usize,
+) void {
+    if (id == no_node or usize(id) >= mapping.len) return
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .memory_constant) return
+    target :: mapping[usize(id)]
+    if (target != no_node and usize(target) >= start) {
+        if (ast.node_class(&state.tree, target) != .expression or ast.expr_kind(&state.tree, target) != .typed_constant) {
+            value := binding(state, id)
+            if (value.kind == .declaration) {
+                original :: value.data.declaration
+                if (original != function and usize(original) < mapping.len and mapping[usize(original)] != no_node)
+                    value.data.declaration = mapping[usize(original)]
+            }
+            state.bindings.items[usize(target)] = value
+        }
+    }
+    for (0..ast.child_count(&state.tree, id)) |i|
+        bind_instance_subtree(state, ast.child(&state.tree, id, i), function, mapping, start)
+}
+
+@hide:file
+bind_annotation_subtree proc(state @mut State, id ast.NodeId, mapping []ast.NodeId, start usize) void {
+    if (id == no_node or usize(id) >= mapping.len) return
+    if (ast.node_class(&state.tree, id) == .expression and ast.expr_kind(&state.tree, id) == .memory_constant) return
+    target :: mapping[usize(id)]
+    if (target != no_node and usize(target) >= start) state.bindings.items[usize(target)] = binding(state, id)
+    for (0..ast.child_count(&state.tree, id)) |i|
+        bind_annotation_subtree(state, ast.child(&state.tree, id, i), mapping, start)
+}
+
+@hide:file
 instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     function :: state.instances.items[index].function
     type_result :: compiletime_call(state, function) or state.instances.items[index].demanded
-    count :: state.original_count
     clone_start :: ast.node_count(&state.tree)
     mapping :: state.mapping
     mem.set(mapping, no_node)
@@ -3069,18 +3100,7 @@ instantiate proc(state @mut State, index usize, call ast.NodeId) void ! Error {
     clone :: try ast.clone_subtree(state.builder, function, mapping)
     try refresh(state)
     # copy original resolution, remapping references to cloned locals and runtime parameters.
-    for (0..count) |i| {
-        target :: mapping[i]
-        if (target == no_node or usize(target) < clone_start) continue
-        if (ast.node_class(&state.tree, target) == .expression and ast.expr_kind(&state.tree, target) == .typed_constant) continue
-        value := state.bindings.items[i]
-        if (value.kind == .declaration) {
-            original :: value.data.declaration
-            if (original != function and usize(original) < count and mapping[usize(original)] != no_node)
-                value.data.declaration = mapping[usize(original)]
-        }
-        state.bindings.items[usize(target)] = value
-    }
+    bind_instance_subtree(state, function, function, mapping, clone_start)
     if (!type_result) {
         for (0..parameters) |i| {
             if (!unsigned_parameter(state, ast.function_param(&state.tree, function, i))) continue
@@ -3216,23 +3236,41 @@ reject_type_result proc(state @mut State, call, result ast.NodeId, constraints_s
 }
 
 # four bits per node retain queued (2), visited (4), and owned (8) independently.
+# a separate bitmap makes untouched words read as zero without clearing the arena.
 @hide:file
-evaluation_flags proc(flags []u64, id ast.NodeId) u64 {
-    index :: usize(id)
-    shift :: rem!(index, 16) * 4
-    return (flags[divtrunc!(index, 16)] >> shift) & 15
+EvaluationFlags :: struct {
+    words arraylist.ArrayList(u64)
+    initialized arraylist.ArrayList(u64)
 }
 
 @hide:file
-evaluation_mark proc(flags []mut u64, id ast.NodeId, mask u64) void {
+evaluation_flags proc(flags @EvaluationFlags, id ast.NodeId) u64 {
     index :: usize(id)
+    word :: divtrunc!(index, 16)
+    bit :: rem!(word, 64)
+    if ((flags.initialized.items[divtrunc!(word, 64)] & (u64(1) << bit)) == 0) return 0
     shift :: rem!(index, 16) * 4
-    flags[divtrunc!(index, 16)] |= mask << shift
+    return (flags.words.items[word] >> shift) & 15
+}
+
+@hide:file
+evaluation_mark proc(flags @mut EvaluationFlags, id ast.NodeId, mask u64) void {
+    index :: usize(id)
+    word :: divtrunc!(index, 16)
+    bit :: rem!(word, 64)
+    initialized_word :: divtrunc!(word, 64)
+    initialized_mask :: u64(1) << bit
+    if ((flags.initialized.items[initialized_word] & initialized_mask) == 0) {
+        flags.words.items[word] = 0
+        flags.initialized.items[initialized_word] |= initialized_mask
+    }
+    shift :: rem!(index, 16) * 4
+    flags.words.items[word] |= mask << shift
 }
 
 @hide:file
 evaluation_dependencies proc(
-    state @mut State, id ast.NodeId, flags []mut u64, declarations @mut arraylist.ArrayList(ast.NodeId),
+    state @mut State, id ast.NodeId, flags @mut EvaluationFlags, declarations @mut arraylist.ArrayList(ast.NodeId),
 ) bool ! Error {
     if ((evaluation_flags(flags, id) & 4) != 0) return true
     evaluation_mark(flags, id, 4)
@@ -3261,7 +3299,7 @@ evaluation_dependencies proc(
 }
 
 @hide:file
-evaluation_owned proc(state @State, id ast.NodeId, flags []mut u64) void {
+evaluation_owned proc(state @State, id ast.NodeId, flags @mut EvaluationFlags) void {
     if ((evaluation_flags(flags, id) & 8) != 0) return
     evaluation_mark(flags, id, 8)
     for (0..ast.child_count(&state.tree, id)) |i| evaluation_owned(state, ast.child(&state.tree, id, i), flags)
@@ -3320,10 +3358,7 @@ argument_annotation proc(
     start :: ast.node_count(&state.tree)
     result :: try ast.clone_subtree(state.builder, annotation, mapping)
     try refresh(state)
-    for (0..mapping.len) |i| {
-        target :: mapping[i]
-        if (target != no_node and usize(target) >= start) state.bindings.items[usize(target)] = state.bindings.items[i]
-    }
+    bind_annotation_subtree(state, annotation, mapping, start)
     return result
 }
 
@@ -4304,22 +4339,32 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     declarations := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&declarations)
     try arraylist.append(&declarations, wrapper)
-    flags := arraylist.init(u64, state.allocator)
-    defer arraylist.deinit(&flags)
+    flags := EvaluationFlags{
+        words = arraylist.init(u64, state.allocator),
+        initialized = arraylist.init(u64, state.allocator),
+    }
+    defer {
+        arraylist.deinit(&flags.words)
+        arraylist.deinit(&flags.initialized)
+    }
     index := usize(0)
     while (index < declarations.items.len) {
         declaration :: declarations.items[index]
         try expand(state, declaration)
-        previous_words :: flags.items.len
+        previous_initialized_words :: flags.initialized.items.len
         count :: ast.node_count(&state.tree)
         flag_words := divtrunc!(count, 16)
         if (rem!(count, 16) != 0) flag_words += 1
-        try arraylist.reserve(&flags, flag_words)
-        flags.items = flags.items.ptr[..flag_words]
-        mem.set(flags.items[previous_words..], u64(0))
-        evaluation_mark(flags.items, declaration, 2)
-        evaluation_owned(state, declaration, flags.items)
-        if (!try evaluation_dependencies(state, declaration, flags.items, &declarations)) return Value{}
+        try arraylist.reserve(&flags.words, flag_words)
+        flags.words.items = flags.words.items.ptr[..flag_words]
+        initialized_words := divtrunc!(flag_words, 64)
+        if (rem!(flag_words, 64) != 0) initialized_words += 1
+        try arraylist.reserve(&flags.initialized, initialized_words)
+        flags.initialized.items = flags.initialized.items.ptr[..initialized_words]
+        mem.set(flags.initialized.items[previous_initialized_words..], u64(0))
+        evaluation_mark(&flags, declaration, 2)
+        evaluation_owned(state, declaration, &flags)
+        if (!try evaluation_dependencies(state, declaration, &flags, &declarations)) return Value{}
         index += 1
     }
     root :: try ast.add_package(state.builder, span, declarations.items)

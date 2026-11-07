@@ -15,12 +15,36 @@ owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
     return bytes
 }
 
+@hide:file
+nonzero_alloc proc(_ ?@mut anyopaque, size, alignment usize) ?*mut u8 {
+    memory :: mem.raw_alloc(mem.c_allocator, size, alignment)
+    if (memory) |data| mem.set(data[..size], u8(0xa5))
+    return memory
+}
+
+@hide:file
+nonzero_realloc proc(
+    _ ?@mut anyopaque, memory ?*mut u8, old_size, new_size, alignment usize,
+) ?*mut u8 {
+    result :: mem.raw_realloc(mem.c_allocator, memory, old_size, new_size, alignment)
+    if (result) |data| {
+        if (new_size > old_size) mem.set(data[old_size..new_size], u8(0xa5))
+    }
+    return result
+}
+
 generic_substitutions_and_evaluations_keep_instance_local_state test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    module ir.Module := undefined
+    vtable :: mem.AllocatorVTable{
+        alloc = nonzero_alloc,
+        realloc = nonzero_realloc,
+        free = mem.c_allocator.vtable.free,
+    }
+    allocator :: mem.Allocator{ context = null, vtable = &vtable }
+    modules [2]mut ir.Module := undefined
     {
-        session := init(mem.c_allocator)
+        session := init(allocator)
         defer deinit(&session)
         package :: try add_package(&session)
         bytes := try owned_text(
@@ -39,28 +63,36 @@ generic_substitutions_and_evaluations_keep_instance_local_state test {
             `    for (values) |value| total += value
             `    return total
             `}
+            `fold proc($T type, count usize) T {
+            `    if (count == 0) return 0
+            `    previous :: fold(T, count - 1)
+            `    return previous + 1
+            `}
+            `nested proc(value i16) i16 { return value + $(sum(i16, 2, [i16(1), 1])) }
             `main proc() i16 {
             `    two :: make(i16, 2, 7)
             `    three :: make(i16, 3, 4)
             `    first :: $(sum(i16, 2, [i16(2), 2]))
-            `    second :: $(sum(i16, 3, [i16(3), 4, 5]))
+            `    second :: $(nested(10))
             `    if (Box(i16, 2) != Box(i16, size(1))) return -1
             `    if (Box(i16, 3) != Box(i16, size(2))) return -2
-            `    return sum(i16, 2, two.values) + sum(i16, 3, three.values) + first + second
+            `    return sum(i16, 2, two.values) + sum(i16, 3, three.values) + first + second + fold(i16, 2) - 2
             `}
             ,
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, package, "instances.hon", &bytes, &diagnostic_store)
-        module = try compile(&session, package, &diagnostic_store)
+        for (0..modules.len) |i| modules[i] = try compile(&session, package, &diagnostic_store)
     }
-    defer ir.deinit(&module)
+    defer for (0..modules.len) |i| ir.deinit(&modules[i])
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
-    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
-    defer interpreter.deinit(&outcome)
-    try testing.expect(outcome.trap == null)
-    try testing.expect_equal(ir.Type.i16, outcome.value.type)
-    try testing.expect_equal(i64(42), outcome.value.data.integer)
+    for (0..modules.len) |i| {
+        outcome := try interpreter.run(mem.c_allocator, &modules[i], &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.i16, outcome.value.type)
+        try testing.expect_equal(i64(42), outcome.value.data.integer)
+    }
 }
 
 capture_dependencies_preserve_nested_match_and_catch_narrowing test {
