@@ -1,0 +1,1541 @@
+import "@tests/support"
+
+yielding_blocks_check_skipped_compile_time_guard_result_types test {
+    context := try support.init("yielding_blocks_check_skipped_compile_time_guard_result_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "yielding_blocks_check_skipped_compile_time_guard_result_types",
+        "Bad proc() type {\n    if (false and { yield 1 }) return bool\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+conditional_expressions_evaluate_guard_once_and_only_selected_arm test {
+    context := try support.init("conditional_expressions_evaluate_guard_once_and_only_selected_arm")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_evaluate_guard_once_and_only_selected_arm",
+        "next proc(calls @mut i16, value bool) bool { calls^ = calls^ + 1\n    return value }\nmain proc() [3]i16 {\n    calls i16 := 0\n    first i16 :: if next(&calls, true) 42 else divtrunc!(1, 0)\n    second i16 :: if next(&calls, false) divtrunc!(1, 0) else 7\n    return [first, second, calls]\n}\n",
+        support.Expected{ stdout = "[42, 7, 2]\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_nest_bind_else_and_preserve_precedence test {
+    context := try support.init("conditional_expressions_nest_bind_else_and_preserve_precedence")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_nest_bind_else_and_preserve_precedence",
+        "choose proc(a, b bool) i16 { return if (a) if (b) 1 else 40 else 3 + 4 }\nmain proc() [3]i16 {\n    return [choose(true, false) + 2, choose(false, true),\n        2 * (if (false) 10 else 21)]\n}\n",
+        support.Expected{ stdout = "[42, 7, 42]\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_preserve_aggregate_copy_isolation test {
+    context := try support.init("conditional_expressions_preserve_aggregate_copy_isolation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_preserve_aggregate_copy_isolation",
+        "Item :: struct { values [1]mut i16 }\nchoose proc(flag bool, left, right Item) Item { return if (flag) left else right }\nmain proc() i16 {\n    left Item := { values = [42] }\n    right Item :: { values = [7] }\n    saved :: choose(true, left, right)\n    left.values[0] = 0\n    return saved.values[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_select_generated_types_and_specialized_bodies test {
+    context := try support.init("conditional_expressions_select_generated_types_and_specialized_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_select_generated_types_and_specialized_bodies",
+        "Choose proc(wide bool) type { return if (wide) i16 else i8 }\nlength proc(flag bool) usize { return if (flag) 2 else 1 }\nBox proc($wide bool) type {\n    return struct {\n        value Choose(wide)\n        items [length(wide)]i16\n        other (if (wide) i16 else i8)\n    }\n}\nselect proc($flag bool, value i16) i16 {\n    return if $(flag) value else compile_error!(\"unselected\")\n}\nmain proc() [3]i16 {\n    value Box(true) :: { value = 40, items = [1, 2], other = 42 }\n    return [value.value, i16(value.items.len), select(true, value.other)]\n}\n",
+        support.Expected{ stdout = "[40, 2, 42]\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_keep_outer_match_default test {
+    context := try support.init("conditional_expressions_keep_outer_match_default")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_keep_outer_match_default",
+        "choose proc(flag bool) i16 {\n    return match flag {\n        true: (if (flag) 42\n            else 1)\n        else: 7\n    }\n}\nmain proc() i16 { return choose(false) }\n",
+        support.Expected{ stdout = "7\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_check_unselected_runtime_result_types test {
+    context := try support.init("conditional_expressions_check_unselected_runtime_result_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_check_unselected_runtime_result_types",
+        "choose proc(flag bool) i16 { return if (flag) i16(42) else i32(1) }\nmain proc() i16 { return choose(true) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "incompatible value type" },
+    )
+}
+
+conditional_expressions_require_else test {
+    context := try support.init("conditional_expressions_require_else")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_require_else",
+        "main proc() i16 { return if (true) 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "unexpected token" },
+    )
+}
+
+conditional_expressions_preserve_optional_and_fallible_result_context test {
+    context := try support.init("conditional_expressions_preserve_optional_and_fallible_result_context")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_preserve_optional_and_fallible_result_context",
+        "Error :: enum { failed }\noptional proc(flag bool) ?i16 { return if (flag) 42 else null }\nfallible proc(flag bool) i16 ! Error { return if (flag) 42 else .failed }\nmain proc() [3]i16 {\n    if (optional(false) != null) return [0, 0, 0]\n    return [optional(true)?, fallible(true) catch 0, fallible(false) catch 7]\n}\n",
+        support.Expected{ stdout = "[42, 42, 7]\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_materialize_direct_constants test {
+    context := try support.init("conditional_expressions_materialize_direct_constants")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_materialize_direct_constants",
+        "main proc() [2]i16 {\n    return [i16($(if (true) 42 else divtrunc!(1, 0))),\n        $(if (false) 0 else i16(7))]\n}\n",
+        support.Expected{ stdout = "[42, 7]\n", diagnostic = null },
+    )
+}
+
+conditional_expressions_reject_nonboolean_guards test {
+    context := try support.init("conditional_expressions_reject_nonboolean_guards")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "conditional_expressions_reject_nonboolean_guards",
+        "main proc() i16 { return if (1) 42 else 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+optional_conditional_expressions_evaluate_once_and_keep_branches_lazy test {
+    context := try support.init("optional_conditional_expressions_evaluate_once_and_keep_branches_lazy")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_evaluate_once_and_keep_branches_lazy",
+        "next proc(calls @mut i16, value ?i16) ?i16 {\n    calls^ = calls^ + 1\n    return value\n}\nmain proc() [3]i16 {\n    calls i16 := 0\n    first i16 :: if next(&calls, 42) |payload| payload else divtrunc!(1, 0)\n    second i16 :: if next(&calls, null) |payload| divtrunc!(payload, 0) else 7\n    return [first, second, calls]\n}\n",
+        support.Expected{ stdout = "[42, 7, 2]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_keep_nested_presence_and_else_binding test {
+    context := try support.init("optional_conditional_expressions_keep_nested_presence_and_else_binding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_keep_nested_presence_and_else_binding",
+        "identity proc($T type, value T) T { return value }\nchoose proc(value ??i16) i16 {\n    return if value |inner| if identity(inner) |payload| payload else 7 else 3\n}\nmain proc() [3]i16 {\n    return [choose(some!(null)), choose(null), choose(some!(some!(42)))]\n}\n",
+        support.Expected{ stdout = "[7, 3, 42]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_snapshot_aggregate_payloads test {
+    context := try support.init("optional_conditional_expressions_snapshot_aggregate_payloads")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_snapshot_aggregate_payloads",
+        "Item :: struct { values [1]mut i16 }\nreplace proc(value @mut ?Item) i16 {\n    value^ = Item { values = [0] }\n    return 0\n}\nmain proc() [2]i16 {\n    original ?Item := Item { values = [42] }\n    saved i16 :: if original |payload| replace(&original) + payload.values[0] else -1\n    return [saved, (original?).values[0]]\n}\n",
+        support.Expected{ stdout = "[42, 0]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_preserve_narrow_payload_types test {
+    context := try support.init("optional_conditional_expressions_preserve_narrow_payload_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_preserve_narrow_payload_types",
+        "identity proc($T type, value T) T { return value }\nexact proc(value i8) i16 { return i16(value) }\nchoose proc(value ?i8) i16 { return if value |payload| exact(identity(payload)) else 7 }\nmain proc() [2]i16 { return [choose(42), choose(null)] }\n",
+        support.Expected{ stdout = "[42, 7]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_capture_pointer_callback_slice_and_zero_size test {
+    context := try support.init("optional_conditional_expressions_capture_pointer_callback_slice_and_zero_size")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_capture_pointer_callback_slice_and_zero_size",
+        "increment proc(value i16) i16 { return value + 2 }\nread_pointer proc(value ?@i16) i16 { return if value |pointer| pointer^ else 7 }\ninvoke proc(value ?@proc(value i16) i16) i16 {\n    return if value |callback| callback(40) else 8\n}\nsum proc(value ?[]i16) i16 {\n    return if value |items| items[0] + items[1] else 9\n}\nempty proc(value ?[0]i16) i16 { return if value |items| i16(items.len) else 10 }\nmain proc() [8]i16 {\n    value i16 :: 42\n    items [2]i16 :: [19, 23]\n    return [read_pointer(&value), read_pointer(null), invoke(increment), invoke(null),\n        sum(items[..]), sum(null), empty([]), empty(null)]\n}\n",
+        support.Expected{ stdout = "[42, 7, 42, 8, 42, 9, 0, 10]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_preserve_optional_and_fallible_context test {
+    context := try support.init("optional_conditional_expressions_preserve_optional_and_fallible_context")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_preserve_optional_and_fallible_context",
+        "Error :: enum { failed }\noptional proc(value ?i16) ?i16 { return if value |payload| payload + 2 else null }\nfallible proc(value ?i16) i16 ! Error {\n    return if value |payload| payload + 2 else .failed\n}\nmain proc() [3]i16 {\n    if (optional(null) != null) return [0, 0, 0]\n    return [optional(40)?, fallible(40) catch 0, fallible(null) catch 7]\n}\n",
+        support.Expected{ stdout = "[42, 42, 7]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_materialize_compile_time_scalars test {
+    context := try support.init("optional_conditional_expressions_materialize_compile_time_scalars")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_materialize_compile_time_scalars",
+        "choose proc(value ?i8) i16 { return if value |payload| i16(payload) + 2 else 7 }\nnested proc(value ??i16) i16 {\n    return if value |inner| if inner |payload| payload else 11 else 13\n}\nmain proc() [4]i16 {\n    return [$(choose(40)), $(choose(null)), $(nested(some!(null))), $(nested(null))]\n}\n",
+        support.Expected{ stdout = "[42, 7, 11, 13]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_generate_types_and_captured_defaults test {
+    context := try support.init("optional_conditional_expressions_generate_types_and_captured_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_generate_types_and_captured_defaults",
+        "Choose proc(value ?usize) type { return if value |_| i16 else i8 }\nBox proc(count ?usize) type {\n    return if count |length| struct { values [length]i16, bias i16 = i16(length) }\n        else struct { value i16 = 7 }\n}\nmain proc() [3]i16 {\n    first Box(2) :: { values = [19, 21] }\n    same Box(usize(2)) :: first\n    absent Box(null) :: {}\n    narrow Choose(null) :: 5\n    wide Choose(2) :: 40\n    return [same.values[0] + same.values[1] + same.bias, absent.value,\n        wide + i16(narrow)]\n}\n",
+        support.Expected{ stdout = "[42, 7, 45]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_own_compile_time_aggregate_captures test {
+    context := try support.init("optional_conditional_expressions_own_compile_time_aggregate_captures")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_own_compile_time_aggregate_captures",
+        "Config :: struct { name string, counts [2]usize }\nStorage proc(config ?Config) type {\n    return if config |payload| struct {\n        items [payload.counts[0]]i16\n        name string = payload.name\n    } else struct { value i16 = 7 }\n}\nmain proc() i16 {\n    value Storage(Config { name = \"abc\", counts = [2, 1] }) :: { items = [19, 20] }\n    return value.items[0] + value.items[1] + i16(value.name.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_specialize_selected_capture_only test {
+    context := try support.init("optional_conditional_expressions_specialize_selected_capture_only")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_specialize_selected_capture_only",
+        "present proc($value ?i8) i16 {\n    return if $(value) |payload| i16(payload) + 2 else compile_error!(\"absent\")\n}\nabsent proc($value ?i8) i16 {\n    return if $(value) |_| compile_error!(\"present\") else 7\n}\nselect proc($value ?i8) i16 {\n    return if $(value) |payload| i16(payload) + 2 else 7\n}\nmain proc() [6]i16 {\n    return [present(40), absent(null), select(40), select(null), select(1), select(40)]\n}\n",
+        support.Expected{ stdout = "[42, 7, 42, 7, 3, 42]\n", diagnostic = null },
+    )
+}
+
+optional_conditional_expressions_keep_compile_time_narrow_overflow test {
+    context := try support.init("optional_conditional_expressions_keep_compile_time_narrow_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_keep_compile_time_narrow_overflow",
+        "narrow proc(value ?i8) i8 { return if value |payload| payload + 1 else 0 }\nmain proc() i8 { return $(narrow(127)) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+optional_conditional_expressions_reject_runtime_explicit_comptime_subject test {
+    context := try support.init("optional_conditional_expressions_reject_runtime_explicit_comptime_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_reject_runtime_explicit_comptime_subject",
+        "choose proc(value ?i16) i16 { return if $(value) |payload| payload else 0 }\nmain proc() i16 { return choose(42) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+optional_conditional_expressions_reject_nonoptional_subject test {
+    context := try support.init("optional_conditional_expressions_reject_nonoptional_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_reject_nonoptional_subject",
+        "main proc() i16 { return if true |payload| 42 else 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "condition" },
+    )
+}
+
+optional_conditional_expressions_capture_does_not_reach_else test {
+    context := try support.init("optional_conditional_expressions_capture_does_not_reach_else")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_capture_does_not_reach_else",
+        "main proc() i16 { value ?i16 :: null\nreturn if value |payload| 42 else payload }\n",
+        support.Expected{ stdout = "", diagnostic = "unknown name" },
+    )
+}
+
+optional_conditional_expressions_capture_does_not_escape test {
+    context := try support.init("optional_conditional_expressions_capture_does_not_escape")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_capture_does_not_escape",
+        "main proc() i16 {\n    value ?i16 :: 42\n    saved i16 :: if value |payload| payload else 0\n    return saved + payload\n}\n",
+        support.Expected{ stdout = "", diagnostic = "unknown name" },
+    )
+}
+
+optional_conditional_expressions_reject_capture_shadowing test {
+    context := try support.init("optional_conditional_expressions_reject_capture_shadowing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_reject_capture_shadowing",
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |value| value else 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name or forbidden shadowing" },
+    )
+}
+
+optional_conditional_expressions_check_unselected_result_types test {
+    context := try support.init("optional_conditional_expressions_check_unselected_result_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_check_unselected_result_types",
+        "choose proc(value ?i16) i16 { return if value |payload| payload else i32(7) }\nmain proc() i16 { return choose(42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "incompatible value type" },
+    )
+}
+
+optional_conditional_expressions_require_else test {
+    context := try support.init("optional_conditional_expressions_require_else")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_require_else",
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |payload| payload }\n",
+        support.Expected{ stdout = "", diagnostic = "unexpected token" },
+    )
+}
+
+optional_conditional_expressions_reject_pointer_capture_syntax test {
+    context := try support.init("optional_conditional_expressions_reject_pointer_capture_syntax")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_conditional_expressions_reject_pointer_capture_syntax",
+        "main proc() i16 { value ?i16 :: 42\nreturn if value |@payload| payload^ else 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "unexpected token" },
+    )
+}
+
+integer_divtrunc_preserves_sign_and_single_evaluation test {
+    context := try support.init("integer_divtrunc_preserves_sign_and_single_evaluation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_preserves_sign_and_single_evaluation",
+        "next proc(calls @mut i16) i16 { calls^ = calls^ + 1\n    return calls^ + 5 }\nquotient proc(value i16) i16 { return divtrunc!(value, 3) }\nmain proc() [6]i16 {\n    calls i16 := 0\n    result :: divtrunc!(next(&calls), next(&calls))\n    return [result, calls, quotient(-7), quotient(7),\n        $(quotient(-7)), divtrunc!(-7, i16(-3))]\n}\n",
+        support.Expected{ stdout = "[0, 2, -2, 2, -2, 2]\n", diagnostic = null },
+    )
+}
+
+integer_divtrunc_rejects_zero test {
+    context := try support.init("integer_divtrunc_rejects_zero")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_rejects_zero",
+        "main proc() u64 { return divtrunc!(maxval!(u64), 0) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer division by zero" },
+    )
+}
+
+integer_divtrunc_checks_narrow_signed_overflow test {
+    context := try support.init("integer_divtrunc_checks_narrow_signed_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_checks_narrow_signed_overflow",
+        "main proc() i8 { return divtrunc!(minval!(i8), -1) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+integer_divtrunc_checks_full_width_signed_overflow test {
+    context := try support.init("integer_divtrunc_checks_full_width_signed_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_checks_full_width_signed_overflow",
+        "main proc() i64 { return divtrunc!(minval!(i64), -1) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+integer_divtrunc_rejects_float_operands test {
+    context := try support.init("integer_divtrunc_rejects_float_operands")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_rejects_float_operands",
+        "main proc() f64 { return divtrunc!(7.0, 3.0) }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+integer_limits_reject_noninteger_types test {
+    context := try support.init("integer_limits_reject_noninteger_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_limits_reject_noninteger_types",
+        "main proc() bool { return maxval!(bool) }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+integer_divtrunc_rejects_rigid_width_conflicts test {
+    context := try support.init("integer_divtrunc_rejects_rigid_width_conflicts")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "integer_divtrunc_rejects_rigid_width_conflicts",
+        "main proc() i16 { return divtrunc!(i8(7), i16(3)) }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+c_layout_records_and_nominal_opaque_pointers test {
+    context := try support.init("c_layout_records_and_nominal_opaque_pointers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "c_layout_records_and_nominal_opaque_pointers",
+        "Handle :: opaque\nOther :: opaque\nHeader :: c_struct { tag c_uchar, value c_ulong }\nmain proc() c_ulong {\n    header Header := { tag = 2, value = 40 }\n    if (sizeof!(Header) != 16 or alignof!(Header) != 8) return 0\n    pointer ?*mut Handle :: ptrcast!(&header)\n    restored *mut Header :: ptrcast!(pointer?)\n    return restored.value + c_ulong(restored.tag)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+c_opaque_pointer_types_remain_nominal test {
+    context := try support.init("c_opaque_pointer_types_remain_nominal")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "c_opaque_pointer_types_remain_nominal",
+        "Left :: opaque\nRight :: opaque\nconsume proc(value ?*Left) bool { return value == null }\nmain proc() bool { value ?*Right :: null\n    return consume(value) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+runtime_undefined_nested_storage_and_copy_isolation test {
+    context := try support.init("runtime_undefined_nested_storage_and_copy_isolation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "runtime_undefined_nested_storage_and_copy_isolation",
+        "Item :: struct { values [2]mut i16, label string }\nfill proc() Item {\n    item Item := undefined\n    for (usize(0)..item.values.len) |i| { item.values[i] = i16(i) + 19 }\n    item.label = \"yes\"\n    return item\n}\nmain proc() i16 {\n    item := fill()\n    saved :: item\n    pointer :: &item\n    pointer.values[0] = 0\n    return saved.values[0] + saved.values[1] + i16(saved.label.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+ordinary_constant_procedures_fill_undefined_arrays test {
+    context := try support.init("ordinary_constant_procedures_fill_undefined_arrays")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_constant_procedures_fill_undefined_arrays",
+        "values proc() [2]mut i16 {\n    result [2]mut i16 := undefined\n    for (usize(0)..result.len) |i| { result[i] = i16(i) + 20 }\n    return result\n}\nmain proc() i16 { result :: $(values())\n    return result[0] + result[1] + 1 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+ordinary_constants_reject_partial_undefined_snapshots test {
+    context := try support.init("ordinary_constants_reject_partial_undefined_snapshots")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_constants_reject_partial_undefined_snapshots",
+        "values proc() [2]mut i16 {\n    result [2]mut i16 := undefined\n    result[0] = 42\n    saved :: result\n    result[1] = 0\n    return saved\n}\nmain proc() [2]mut i16 { return $(values()) }\n",
+        support.Expected{ stdout = "", diagnostic = "read before initialization" },
+    )
+}
+
+ordinary_constants_reject_undefined_optional_presence test {
+    context := try support.init("ordinary_constants_reject_undefined_optional_presence")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_constants_reject_undefined_optional_presence",
+        "missing proc() ?i16 { value ?i16 := undefined\n    return value }\nmain proc() ?i16 { return $(missing()) }\n",
+        support.Expected{ stdout = "", diagnostic = "read before initialization" },
+    )
+}
+
+ordinary_constants_reject_undefined_union_tags test {
+    context := try support.init("ordinary_constants_reject_undefined_union_tags")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_constants_reject_undefined_union_tags",
+        "Choice :: union(enum) { value i16, empty void }\nmissing proc() Choice { value Choice := undefined\n    return value }\nmain proc() Choice { return $(missing()) }\n",
+        support.Expected{ stdout = "", diagnostic = "read before initialization" },
+    )
+}
+
+undefined_zero_leaf_shapes_cross_runtime_and_constant_calls test {
+    context := try support.init("undefined_zero_leaf_shapes_cross_runtime_and_constant_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_zero_leaf_shapes_cross_runtime_and_constant_calls",
+        "empty proc() [2]mut [0]i16 {\n    rows [2]mut [0]i16 := undefined\n    return rows\n}\nmain proc() usize {\n    runtime :: empty()\n    constant :: $(empty())\n    return runtime.len + constant.len\n}\n",
+        support.Expected{ stdout = "4\n", diagnostic = null },
+    )
+}
+
+some_nested_present_null_survives_constant_roundtrip test {
+    context := try support.init("some_nested_present_null_survives_constant_roundtrip")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "some_nested_present_null_survives_constant_roundtrip",
+        "nested proc() ??i16 { return some!(null) }\npresent proc() ??i16 { return some!(some!(42)) }\nmain proc() i16 {\n    first ??i16 :: $(nested())\n    second ??i16 :: $(present())\n    absent ??i16 :: null\n    if (first == null or first? != null or absent != null) return -1\n    return second??\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+some_optional_specialization_keys_preserve_every_presence_layer test {
+    context := try support.init("some_optional_specialization_keys_preserve_every_presence_layer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "some_optional_specialization_keys_preserve_every_presence_layer",
+        "Box proc($value ??i16) type { return struct { value ??i16 = value } }\nmain proc() i16 {\n    empty Box(null) :: {}\n    nested Box(some!(null)) :: {}\n    present Box(some!(some!(42))) :: {}\n    same Box(some!(some!(42))) :: present\n    if (empty.value != null or nested.value == null or nested.value? != null) return -1\n    if (Box(null) == Box(some!(null))) return -2\n    if (Box(some!(some!(42))) == Box(some!(some!(41)))) return -3\n    return same.value??\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_contextual_literals_use_rigid_arguments_in_either_order test {
+    context := try support.init("generic_contextual_literals_use_rigid_arguments_in_either_order")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_contextual_literals_use_rigid_arguments_in_either_order",
+        "Key :: enum { first, last }\nchoose proc($T type, value T, anchor @T) T { return value }\npayload proc($T type, anchor @T, value struct { item T }) T { return value.item }\nmain proc() i16 {\n    key Key :: .first\n    selected :: choose(.last, &key)\n    other :: payload(&key, { item = .first })\n    return match selected { .last: match other { .first: 42, else: 0 }, else: 0 }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_direct_return_without_runtime_arguments test {
+    context := try support.init("expected_result_inference_direct_return_without_runtime_arguments")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_direct_return_without_runtime_arguments",
+        "answer proc($T type) T { return 42 }\nmain proc() i16 { return answer() }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_assignment_return_and_nested_parameters test {
+    context := try support.init("expected_result_inference_assignment_return_and_nested_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_assignment_return_and_nested_parameters",
+        "answer proc($T type) T { return 42 }\nidentity proc($T type, value T) T { return value }\nread proc() i16 { return identity(42) }\nconsume proc(value i16) i16 { return value }\nmain proc() [4]i16 {\n    value i16 := identity(0)\n    value = answer()\n    return [value, read(), consume(identity(42)), consume(identity(answer()))]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_nested_aggregate_fields_and_elements test {
+    context := try support.init("expected_result_inference_nested_aggregate_fields_and_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_nested_aggregate_fields_and_elements",
+        "identity proc($T type, value T) T { return value }\nanswer proc($T type) T { return 42 }\nInner :: struct { value i16 }\nOuter :: struct { rows [2]Inner }\nmain proc() [2]i16 {\n    result Outer :: { rows = [{ value = identity(42) }, { value = answer() }] }\n    return [result.rows[0].value, result.rows[1].value]\n}\n",
+        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_precedes_contextual_literal_defaults test {
+    context := try support.init("expected_result_inference_precedes_contextual_literal_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_precedes_contextual_literal_defaults",
+        "Key :: enum { first, last }\nRecord :: struct { value i16 }\nidentity proc($T type, value T) T { return value }\nmain proc() i16 {\n    number u8 :: identity(42)\n    key Key :: identity(.last)\n    record Record :: identity({ value = 42 })\n    absent ?i16 :: identity(null)\n    text []u8 :: identity(\"ab\")\n    if (number != 42 or key != .last or absent != null or text.len != 2) return -1\n    return record.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_generated_nominal_type_and_value_arguments test {
+    context := try support.init("expected_result_inference_generated_nominal_type_and_value_arguments")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_generated_nominal_type_and_value_arguments",
+        "Box proc($T type, $count usize) type {\n    return struct { value T, length usize = count }\n}\ncreate proc($T type, $count usize, value T) Box(T, count) {\n    return { value = value }\n}\nmain proc() i16 {\n    box Box(i16, 2) :: create(40)\n    explicit Box(i16, 2) :: create(i16, 2, 40)\n    if (box.value != explicit.value or box.length != 2) return -1\n    return box.value + i16(box.length)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_optional_and_fallible_success_contexts test {
+    context := try support.init("expected_result_inference_optional_and_fallible_success_contexts")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_optional_and_fallible_success_contexts",
+        "Error :: enum { failed }\nidentity proc($T type, value T) T { return value }\noptional proc() ?i16 { return identity(42) }\nfallible proc() i16 ! Error { return identity(42) }\nmain proc() [2]i16 { return [optional()?, fallible() catch 0] }\n",
+        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_match_arms_and_value_block_yields test {
+    context := try support.init("expected_result_inference_match_arms_and_value_block_yields")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_match_arms_and_value_block_yields",
+        "answer proc($T type) T { return 42 }\nchoose proc(flag bool) i16 {\n    return match flag {\n        true: answer(),\n        false: { yield answer() },\n    }\n}\nmain proc() [2]i16 { return [choose(true), choose(false)] }\n",
+        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_inside_compile_time_type_producers test {
+    context := try support.init("expected_result_inference_inside_compile_time_type_producers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_inside_compile_time_type_producers",
+        "answer proc($T type) T { return 2 }\nFixed proc() type {\n    count usize :: answer()\n    return [count]i16\n}\nmain proc() Fixed() { return [19, 23] }\n",
+        support.Expected{ stdout = "[19, 23]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_cleanup_comptime_and_expression_contexts test {
+    context := try support.init("expected_result_inference_cleanup_comptime_and_expression_contexts")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_cleanup_comptime_and_expression_contexts",
+        "Error :: enum { failed }\nanswer proc($T type) T { return 21 }\nfail proc($T type) T ! Error { return .failed }\nrecover proc() i16 { return fail() catch |error| { yield answer() } }\npropagate proc() i16 ! Error { return try fail() }\nDefault :: struct { value i16 = answer() }\nmain proc() [7]i16 {\n    value ?i16 :: some!(answer())\n    constant i16 :: $(answer())\n    defaults Default :: {}\n    return [answer() + answer(), -answer(), ~answer(), fail() catch answer(),\n        recover(), (value?), constant + defaults.value]\n}\n",
+        support.Expected{ stdout = "[42, -21, -22, 21, 21, 21, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_structural_returns_and_nested_optional_presence test {
+    context := try support.init("expected_result_inference_structural_returns_and_nested_optional_presence")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_structural_returns_and_nested_optional_presence",
+        "Error :: enum { failed }\nexact proc(value i16) i16 { return value }\ncallback proc($T type) @proc(value T) T { return exact }\noptional proc($T type) ?T { return 42 }\nfallible proc($T, $E type) T ! E { return 42 }\nidentity proc($T type, value T) T { return value }\nmain proc() [4]i16 {\n    call @proc(value i16) i16 :: callback()\n    maybe ?i16 :: optional()\n    result i16 ! Error :: fallible()\n    nested ??i16 :: identity(some!(null))\n    if (nested == null or nested? != null) return [0, 0, 0, 0]\n    return [call(42), (maybe?), result catch 0, 42]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+expected_result_inference_rejects_conflicting_rigid_argument test {
+    context := try support.init("expected_result_inference_rejects_conflicting_rigid_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_rejects_conflicting_rigid_argument",
+        "identity proc($T type, value T) T { return value }\nmain proc() u16 {\n    value i16 :: 42\n    return identity(value)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "cannot infer consistent compile-time arguments" },
+    )
+}
+
+expected_result_inference_requires_context_for_result_only_arguments test {
+    context := try support.init("expected_result_inference_requires_context_for_result_only_arguments")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "expected_result_inference_requires_context_for_result_only_arguments",
+        "answer proc($T type) T { return 42 }\nmain proc() i16 {\n    value :: answer()\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "cannot infer consistent compile-time arguments" },
+    )
+}
+
+generic_contextual_enum_rejects_unknown_member test {
+    context := try support.init("generic_contextual_enum_rejects_unknown_member")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_contextual_enum_rejects_unknown_member",
+        "Key :: enum { first }\nchoose proc($T type, anchor @T, value T) T { return value }\nmain proc() i16 { key Key :: .first\n    choose(&key, .missing)\n    return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "record has no such field" },
+    )
+}
+
+generic_contextual_only_call_cannot_infer_nominal_type test {
+    context := try support.init("generic_contextual_only_call_cannot_infer_nominal_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_contextual_only_call_cannot_infer_nominal_type",
+        "choose proc($T type, value T) T { return value }\nmain proc() i16 { choose(.first)\n    return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "cannot infer consistent compile-time arguments" },
+    )
+}
+
+generic_contextual_arguments_do_not_hide_rigid_type_conflicts test {
+    context := try support.init("generic_contextual_arguments_do_not_hide_rigid_type_conflicts")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_contextual_arguments_do_not_hide_rigid_type_conflicts",
+        "First :: enum { first }\nSecond :: enum { first }\nchoose proc($T type, left @T, right @T, value T) T { return value }\nmain proc() i16 {\n    left First :: .first\n    right Second :: .first\n    choose(&left, &right, .first)\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "cannot infer consistent compile-time arguments" },
+    )
+}
+
+undefined_rejects_immutable_local test {
+    context := try support.init("undefined_rejects_immutable_local")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_rejects_immutable_local",
+        "main proc() i16 { value i16 :: undefined\nreturn value }\n",
+        support.Expected{ stdout = "", diagnostic = "undefined requires a concrete mutable local declaration" },
+    )
+}
+
+undefined_rejects_untyped_local test {
+    context := try support.init("undefined_rejects_untyped_local")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_rejects_untyped_local",
+        "main proc() i16 { value := undefined\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "undefined requires a concrete mutable local declaration" },
+    )
+}
+
+undefined_rejects_noninitializer_expression test {
+    context := try support.init("undefined_rejects_noninitializer_expression")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_rejects_noninitializer_expression",
+        "main proc() i16 { return undefined }\n",
+        support.Expected{ stdout = "", diagnostic = "undefined requires a concrete mutable local declaration" },
+    )
+}
+
+undefined_rejects_inferred_array_length test {
+    context := try support.init("undefined_rejects_inferred_array_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_rejects_inferred_array_length",
+        "main proc() i16 { values [_]mut i16 := undefined\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "undefined requires a concrete mutable local declaration" },
+    )
+}
+
+undefined_rejects_global_storage test {
+    context := try support.init("undefined_rejects_global_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "undefined_rejects_global_storage",
+        "value i16 := undefined\nmain proc() i16 { return value }\n",
+        support.Expected{ stdout = "", diagnostic = "undefined requires a concrete mutable local declaration" },
+    )
+}
+
+inline_match_composed_enums_keep_static_sum_tags_and_runtime_dispatch test {
+    context := try support.init("inline_match_composed_enums_keep_static_sum_tags_and_runtime_dispatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_enums_keep_static_sum_tags_and_runtime_dispatch",
+        "First :: enum { skipped, first }\nSecond :: enum { second, last }\nErrors :: alias (First | (Second | First))\nselected proc(input Errors, calls @mut i16) Errors {\n    calls^ = calls^ + 1\n    return input\n}\nknown proc($tag Errors) i16 {\n    return match tag { .first: 19, .second: 23, else: 0 }\n}\nread proc(input Errors, calls @mut i16) i16 {\n    return match selected(input, calls) {\n        .skipped: 0,\n        inline |tag|: known(tag),\n    }\n}\nmain proc() [2]i16 {\n    calls i16 := 0\n    total :: read(.skipped, &calls) + read(.first, &calls) + read(.second, &calls) + read(.last, &calls)\n    return [total, calls]\n}\n",
+        support.Expected{ stdout = "[42, 4]\n", diagnostic = null },
+    )
+}
+
+inline_match_composed_payloads_catch_static_tags_and_owned_copies test {
+    context := try support.init("inline_match_composed_payloads_catch_static_tags_and_owned_copies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_payloads_catch_static_tags_and_owned_copies",
+        "Missing :: enum { missing }\nDetail :: union(enum) { number i8, text string, empty void }\nFailure :: struct { values [2]mut i16 }\nErrors :: alias ((Missing | Detail) | (Failure | Missing))\nfail proc(input Errors) i16 ! Errors { return input }\nexact proc(value i8) i16 { return i16(value) }\nread proc(input Errors) i16 {\n    fail(input) catch |err| {\n        match err {\n            .missing: return 0,\n            inline |payload, tag|: {\n                match tag {\n                    inline |selected|: {\n                        if (selected == .number) { return exact(payload) }\n                        else if (selected == .text) { return i16(payload.len) }\n                        else if (selected == .Failure) {\n                            copy := payload\n                            copy.values[0] = 0\n                            return payload.values[0] + payload.values[1]\n                        } else {\n                            payload\n                            return 1\n                        }\n                    },\n                }\n            },\n        }\n    }\n    return -1\n}\nmain proc() i16 {\n    return read(.missing) + read(.number{19}) + read(.text{\"ok\"}) + read(.Failure{values = [9, 11]}) + read(.empty)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_composed_type_producers_and_constant_inputs test {
+    context := try support.init("inline_match_composed_type_producers_and_constant_inputs")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_type_producers_and_constant_inputs",
+        "Missing :: enum { missing }\nDetail :: union(enum) { count usize, empty void }\nFailure :: struct { count usize }\nErrors :: alias (Missing | Detail | (Failure | Detail))\nStorage proc(input Errors) type {\n    length usize := 0\n    match input {\n        inline |payload, tag|: {\n            if (tag == .count) { length = payload }\n            else if (tag == .Failure) { length = payload.count }\n            else if (tag == .missing) { length = 1 }\n            else { length = 0 }\n        },\n    }\n    return struct { values [length]i16 }\n}\nscore proc(input Errors) i16 {\n    return match input {\n        inline |payload, tag|: match tag { .count: i16(payload), else: 0 },\n    }\n}\nknown proc($input Errors) i16 { return score(input) }\nmain proc() i16 {\n    first Storage(.count{2}) :: { values = [19, 20] }\n    same Storage(.count{2}) :: first\n    record Storage(.Failure{count = 2}) :: { values = [0, 0] }\n    other Storage(.missing) :: { values = [0] }\n    empty Storage(.empty) :: { values = [] }\n    return same.values[0] + same.values[1] + $(score(.count{2})) + known(.count{1}) + other.values[0] + i16(empty.values.len) + record.values[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_composed_payload_cleanup_on_error_return test {
+    context := try support.init("inline_match_composed_payload_cleanup_on_error_return")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_payload_cleanup_on_error_return",
+        "Missing :: enum { missing }\nDetail :: union(enum) { failed i16 }\nErrors :: alias (Missing | Detail)\nforward proc(input Errors, cleanups @mut i16) i16 ! Errors {\n    match input {\n        inline |payload, tag|: {\n            defer cleanups^ = cleanups^ + 1\n            if (tag == .failed) { return .failed{payload} }\n            else { return .missing }\n        },\n    }\n}\nmain proc() i16 {\n    cleanups i16 := 0\n    value :: forward(.failed{41}, &cleanups) catch |err| match err {\n        inline |payload, tag|: match tag { .failed: payload, else: 0 },\n    }\n    return value + cleanups\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_composed_enums_reject_second_capture test {
+    context := try support.init("inline_match_composed_enums_reject_second_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_enums_reject_second_capture",
+        "A :: enum { a }\nB :: enum { b }\nmain proc() i16 { input (A | B) :: .a\nreturn match input { inline |value, tag|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "inline match arm requires one enum capture" },
+    )
+}
+
+inline_match_composed_rejects_conflicting_variant_payloads test {
+    context := try support.init("inline_match_composed_rejects_conflicting_variant_payloads")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_rejects_conflicting_variant_payloads",
+        "A :: union(enum) { failed i8 }\nB :: union(enum) { failed i16 }\nmain proc() i16 { input (A | B) :: .failed{42}\nreturn match input { inline |payload, tag|: i16(payload) } }\n",
+        support.Expected{ stdout = "", diagnostic = "sum composition requires compatible" },
+    )
+}
+
+inline_match_composed_preserves_narrow_payload_type test {
+    context := try support.init("inline_match_composed_preserves_narrow_payload_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_preserves_narrow_payload_type",
+        "A :: enum { a }\nB :: union(enum) { failed i16 }\nread proc(input (A | B)) i8 { return match input { inline |payload, tag|: match tag { .failed: payload, else: i8(0) } } }\nmain proc() i8 { return read(.failed{42}) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+inline_match_composed_rejects_fully_covered_arm test {
+    context := try support.init("inline_match_composed_rejects_fully_covered_arm")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_composed_rejects_fully_covered_arm",
+        "A :: enum { a }\nB :: enum { b }\nmain proc() i16 { input (A | B) :: .a\nreturn match input { .a, .b: 42, inline |_|: 0 } }\n",
+        support.Expected{ stdout = "", diagnostic = "match arm is unreachable" },
+    )
+}
+
+inline_match_runtime_enum_static_capture_expression_and_single_subject test {
+    context := try support.init("inline_match_runtime_enum_static_capture_expression_and_single_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_runtime_enum_static_capture_expression_and_single_subject",
+        "Mode :: enum(i16) { handled = -7, first = 3, second = 8, answer = 42, zero = 90 }\nselected proc(value Mode, calls @mut i16) Mode {\n    calls^ = calls^ + 1\n    return value\n}\nremaining proc($tag Mode) i16 {\n    if (tag == .answer) { return 42 }\n    else if (tag == .zero) { return 0 }\n    else { return false }\n}\nread proc(value Mode, calls @mut i16) i16 {\n    return match selected(value, calls) {\n        .handled: 0,\n        .first, .second: 0,\n        inline |tag|: remaining(tag),\n    }\n}\nmain proc() [2]i16 {\n    calls i16 := 0\n    total :: (\n        read(.handled, &calls) + read(.first, &calls) + read(.second, &calls)\n        + read(.answer, &calls) + read(.zero, &calls)\n    )\n    return [total, calls]\n}\n",
+        support.Expected{ stdout = "[42, 5]\n", diagnostic = null },
+    )
+}
+
+inline_match_generic_heterogeneous_payloads_static_tags_and_nested_selection test {
+    context := try support.init("inline_match_generic_heterogeneous_payloads_static_tags_and_nested_selection")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_generic_heterogeneous_payloads_static_tags_and_nested_selection",
+        "Tag :: enum(i16) { handled = -7, first = 3, second = 8, number = 42, record = 90, text = 100, empty = 120 }\nPair :: struct { values [2]i16 }\nChoice :: union(Tag) { text string, empty void, record Pair, number i8, handled bool, second bool, first bool }\nnarrow proc($tag Tag, value i8) i16 {\n    if (tag == .number) return i16(value) else return false\n}\npair proc(value Pair) i16 { return value.values[0] + value.values[1] }\nread proc($T type, input T) i16 {\n    return match input {\n        .handled: 0,\n        .first, .second: 0,\n        inline |payload, tag|: match tag {\n            .number: narrow(tag, payload),\n            .record: pair(payload),\n            .text: i16(payload.len),\n            .empty: 1,\n            else: false,\n        },\n    }\n}\nnested proc(input Choice) i16 {\n    match input {\n        .handled, .first, .second: return 0,\n        inline |payload, tag|: {\n            match tag {\n                inline |selected|: {\n                    if (selected == .number) { return narrow(tag, payload) }\n                    else if (selected == .record) { return pair(payload) }\n                    else if (selected == .text) { return i16(payload.len) }\n                    else {\n                        payload\n                        return 1\n                    }\n                },\n            }\n        },\n    }\n}\nmain proc() i16 {\n    if (read(Choice, .handled{false}) + read(Choice, .first{true}) + read(Choice, .second{false}) != 0) return -1\n    if (nested(.number{19}) + nested(.record{values = [9, 11]}) + nested(.text{\"ok\"}) + nested(.empty) != 42) return -2\n    return (\n        read(Choice, .number{19}) + read(Choice, .record{values = [9, 11]})\n        + read(Choice, .text{\"ok\"}) + read(Choice, .empty)\n    )\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_union_subject_once_and_payload_copy_isolation_without_tag test {
+    context := try support.init("inline_match_union_subject_once_and_payload_copy_isolation_without_tag")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_union_subject_once_and_payload_copy_isolation_without_tag",
+        "Pair :: struct { values [2]mut i16 }\nChoice :: union(enum) { record Pair, other Pair }\nexact proc(value Pair) i16 { return value.values[0] + value.values[1] }\nselected proc(input @Choice, calls @mut i16) Choice {\n    calls^ = calls^ + 1\n    return input^\n}\nmain proc() i16 {\n    input Choice := .record{values = [19, 23]}\n    calls i16 := 0\n    match selected(&input, &calls) {\n        inline |payload|: {\n            input.record.values[0] = 0\n            copied := payload\n            copied.values[1] = 0\n            if (calls != 1 or input.record.values[0] != 0 or copied.values[1] != 0) return -1\n            return exact(payload)\n        },\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_return_break_continue_run_arm_cleanup test {
+    context := try support.init("inline_match_return_break_continue_run_arm_cleanup")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_return_break_continue_run_arm_cleanup",
+        "Mode :: enum { skip, add, stop }\nfinish proc(input Mode, cleanups @mut i16) i16 {\n    match input {\n        .skip, .stop: return 0,\n        inline |tag|: {\n            defer cleanups^ = cleanups^ + 1\n            if (tag == .add) return 19 else return false\n        },\n    }\n}\nmain proc() i16 {\n    total i16 := 0\n    cleanups i16 := 0\n    for [Mode.skip, .add, .stop, .add] |input| {\n        match input {\n            inline |tag|: {\n                defer cleanups = cleanups + 1\n                if (tag == .skip) { continue }\n                else if (tag == .stop) { break }\n                else { total = total + 19 }\n            },\n        }\n    }\n    result :: finish(.add, &cleanups)\n    return total + result + cleanups\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_rejects_scalar_subject test {
+    context := try support.init("inline_match_rejects_scalar_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_scalar_subject",
+        "main proc() i16 { return match i16(42) { inline |value|: value } }\n",
+        support.Expected{ stdout = "", diagnostic = "inline match arm requires an enum or tagged union" },
+    )
+}
+
+inline_match_rejects_untagged_union_subject test {
+    context := try support.init("inline_match_rejects_untagged_union_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_untagged_union_subject",
+        "Choice :: union { number i16 }\nmain proc() i16 { input Choice :: { number = 42 }\nreturn match input { inline |value|: value } }\n",
+        support.Expected{ stdout = "", diagnostic = "inline match arm requires an enum or tagged union" },
+    )
+}
+
+inline_match_rejects_second_enum_capture test {
+    context := try support.init("inline_match_rejects_second_enum_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_second_enum_capture",
+        "Mode :: enum { answer }\nmain proc() i16 { return match Mode.answer { inline |value, tag|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "inline match arm requires one enum capture" },
+    )
+}
+
+inline_match_rejects_redundant_remaining_arm test {
+    context := try support.init("inline_match_rejects_redundant_remaining_arm")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_redundant_remaining_arm",
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { .first, .second: 42, inline |_|: 0 } }\n",
+        support.Expected{ stdout = "", diagnostic = "match arm is unreachable" },
+    )
+}
+
+inline_match_rejects_following_arm test {
+    context := try support.init("inline_match_rejects_following_arm")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_following_arm",
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { inline |_|: 42, .second: 0 } }\n",
+        support.Expected{ stdout = "", diagnostic = "match arm is unreachable" },
+    )
+}
+
+inline_match_rejects_arm_after_else test {
+    context := try support.init("inline_match_rejects_arm_after_else")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_arm_after_else",
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { else: 42, inline |_|: 0 } }\n",
+        support.Expected{ stdout = "", diagnostic = "match arm is unreachable" },
+    )
+}
+
+inline_match_checks_preceding_duplicate_patterns test {
+    context := try support.init("inline_match_checks_preceding_duplicate_patterns")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_checks_preceding_duplicate_patterns",
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { .first: 42, .first: 0, inline |_|: 0 } }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate or overlapping match pattern" },
+    )
+}
+
+inline_match_rejects_duplicate_capture_names test {
+    context := try support.init("inline_match_rejects_duplicate_capture_names")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_duplicate_capture_names",
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nreturn match input { inline |value, value|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name or forbidden shadowing" },
+    )
+}
+
+inline_match_rejects_shadowed_enum_capture test {
+    context := try support.init("inline_match_rejects_shadowed_enum_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_shadowed_enum_capture",
+        "Mode :: enum { answer }\nmain proc() i16 { value :: 42\nreturn match Mode.answer { inline |value|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name or forbidden shadowing" },
+    )
+}
+
+inline_match_rejects_shadowed_tag_capture test {
+    context := try support.init("inline_match_rejects_shadowed_tag_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_shadowed_tag_capture",
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { tag :: 42\ninput Choice :: .number{42}\nreturn match input { inline |value, tag|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name or forbidden shadowing" },
+    )
+}
+
+inline_match_enum_capture_is_immutable test {
+    context := try support.init("inline_match_enum_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_enum_capture_is_immutable",
+        "Mode :: enum { first, second }\nmain proc() i16 { match Mode.first { inline |value|: value = .second }\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_match_payload_capture_is_immutable test {
+    context := try support.init("inline_match_payload_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_payload_capture_is_immutable",
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nmatch input { inline |value|: value = 0 }\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_match_tag_capture_is_immutable test {
+    context := try support.init("inline_match_tag_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_tag_capture_is_immutable",
+        "Choice :: union(enum) { number i8, empty void }\nmain proc() i16 { input Choice :: .number{42}\nmatch input { inline |value, tag|: tag = .empty }\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_match_payload_preserves_narrow_type test {
+    context := try support.init("inline_match_payload_preserves_narrow_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_payload_preserves_narrow_type",
+        "Choice :: union(enum) { number i16 }\nread proc(input Choice) i8 { match input { inline |value|: return value } }\nmain proc() i8 { return read(.number{42}) }\n",
+        support.Expected{ stdout = "", diagnostic = "return does not match" },
+    )
+}
+
+inline_match_payload_is_not_a_comptime_binding test {
+    context := try support.init("inline_match_payload_is_not_a_comptime_binding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_payload_is_not_a_comptime_binding",
+        "Choice :: union(enum) { number i8 }\nknown proc($value i8) i16 { return i16(value) }\nread proc(input Choice) i16 { return match input { inline |value|: known(value) } }\nmain proc() i16 { return read(.number{42}) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time" },
+    )
+}
+
+inline_match_resolves_unselected_bodies test {
+    context := try support.init("inline_match_resolves_unselected_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_resolves_unselected_bodies",
+        "Mode :: enum { first, second }\nmain proc() i16 { return match Mode.first { inline |tag|: match tag { .first: 42, .second: missing } } }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "unknown name" },
+    )
+}
+
+inline_match_rejects_pointer_capture_syntax test {
+    context := try support.init("inline_match_rejects_pointer_capture_syntax")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_rejects_pointer_capture_syntax",
+        "Choice :: union(enum) { number i8 }\nmain proc() i16 { input Choice :: .number{42}\nreturn match input { inline |*value|: 42 } }\n",
+        support.Expected{ stdout = "", diagnostic = "unexpected token" },
+    )
+}
+
+inline_match_nested_optional_loop_and_ordinary_match_captures test {
+    context := try support.init("inline_match_nested_optional_loop_and_ordinary_match_captures")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_nested_optional_loop_and_ordinary_match_captures",
+        "Mode :: enum { skip, answer }\nChoice :: union(enum) { mode Mode }\nscore proc(value Mode) i16 {\n    return match value { inline |tag|: match tag { .skip: 0, .answer: 14 } }\n}\nread proc(input ?Mode, choice Choice) i16 {\n    total i16 := 0\n    if input |value| {\n        total = match value { inline |tag|: score(tag) }\n    }\n    pending ?Mode := input\n    while pending |value| {\n        total = total + match value { inline |tag|: score(tag) }\n        pending = null\n    }\n    match choice {\n        .mode |value|: {\n            total = total + match value { inline |tag|: score(tag) }\n        }\n    }\n    return total\n}\nmain proc() i16 { return read(.answer, .mode{.answer}) + read(null, .mode{.skip}) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_type_producer_selects_generated_storage test {
+    context := try support.init("inline_match_type_producer_selects_generated_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_type_producer_selects_generated_storage",
+        "Mode :: enum { small, wide }\nStorage proc(input Mode) type {\n    match input { inline |tag|: {\n        if (tag == .small) { return struct { value i8 = 19 } }\n        else { return struct { value i16 = 23 } }\n    } }\n}\nmain proc() i16 {\n    small Storage(.small) :: {}\n    wide Storage(.wide) :: {}\n    return i16(small.value) + wide.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_auto_tag_nested_expansion_infers_exact_payload_generics test {
+    context := try support.init("inline_match_auto_tag_nested_expansion_infers_exact_payload_generics")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_auto_tag_nested_expansion_infers_exact_payload_generics",
+        "Choice :: union(enum) { number i8, empty void }\nidentity proc($T type, value T) T { return value }\nread proc(input Choice) i16 {\n    match input { inline |payload, tag|: match tag {\n        inline |value|: {\n            if (value == .number) { return i16(identity(payload)) }\n            else {\n                payload\n                return 2\n            }\n        }\n    } }\n}\nmain proc() i16 { return read(.number{40}) + read(.empty) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_match_type_producer_updates_outer_type_and_value_locals test {
+    context := try support.init("inline_match_type_producer_updates_outer_type_and_value_locals")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_match_type_producer_updates_outer_type_and_value_locals",
+        "Choice :: union(enum) { number u8, empty void }\nStorage proc(input Choice) type {\n    length usize := 1\n    Element := i8\n    for [input] |item| {\n        match item { inline |payload, tag|: {\n            if (tag == .number) {\n                length = usize(payload)\n                Element = i16\n            } else { length = 2 }\n        } }\n    }\n    return struct { values [length]Element }\n}\nmain proc() i16 {\n    value Storage(.number{2}) :: { values = [19, 23] }\n    return value.values[0] + value.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_heterogeneous_tuple_exact_captures_and_nested_values test {
+    context := try support.init("inline_for_heterogeneous_tuple_exact_captures_and_nested_values")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_heterogeneous_tuple_exact_captures_and_nested_values",
+        "Choice :: union(enum) { number i8, empty void }\nvalues proc() struct { i8, bool, string, [2]i16, Choice, ?i16 } {\n    return {19, true, \"ok\", [10, 11], .number{2}, 0}\n}\nnarrow proc(value i8) i16 { return i16(value) }\nmain proc() i16 {\n    total i16 := 0\n    inline for values() |value, index| {\n        at usize :: index\n        if (at == 0) {\n            total = total + narrow(value)\n        } else if (at == 1) {\n            if (!value) return -1\n        } else if (at == 2) {\n            text string :: value\n            if (text.len != 2) return -2\n        } else if (at == 3) {\n            total = total + value[0] + value[1]\n        } else if (at == 4) {\n            match value { .number |payload|: { total = total + narrow(payload) }, .empty: {} }\n        } else total = total + value?\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_mixed_type_value_tuple_generates_runtime_storage test {
+    context := try support.init("inline_for_mixed_type_value_tuple_generates_runtime_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_mixed_type_value_tuple_generates_runtime_storage",
+        "Child :: struct { value i16 = 40 }\nMetadata :: alias struct { type, usize, type, string }\nmetadata proc() Metadata { return {Child, 2, i16, \"ok\"} }\nanswer proc($input Metadata, bias i16) i16 {\n    total i16 := 0\n    inline for input |item, index| {\n        if (index == 0) {\n            value item :: {}\n            total = total + value.value\n        } else if (index == 1) {\n            values [item]i16 :: [0, bias]\n            total = total + values[1]\n        } else if (index == 2) {\n            value item :: total\n            total = value\n        } else if (item.len != 2) return -1\n    }\n    return total\n}\nmain proc() i16 { return answer(metadata(), 2) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_tuple_literals_empty_shapes_and_static_transfers test {
+    context := try support.init("inline_for_tuple_literals_empty_shapes_and_static_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_literals_empty_shapes_and_static_transfers",
+        "main proc() i16 {\n    total i16 := 0\n    cleanups i16 := 0\n    inline for ({}) |_| { return false }\n    inline for ({i8(19), true, \"stop\", i16(99)}) |item, index| {\n        defer cleanups = cleanups + 1\n        if (index == 0) {\n            total = total + i16(item)\n        } else if (index == 1) {\n            continue\n        } else if (index == 2) {\n            break\n        } else total = false\n        total = total + 20\n    }\n    return total + cleanups\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_type_producer_tuple_places_observe_updates_and_isolate_copies test {
+    context := try support.init("inline_for_type_producer_tuple_places_observe_updates_and_isolate_copies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_type_producer_tuple_places_observe_updates_and_isolate_copies",
+        "Storage proc() type {\n    config := {i8, usize(1), \"before\"}\n    saved :: config\n    length usize := 0\n    inline for config |item, index| {\n        if (index == 0) {\n            if (item != i8) return bool\n            config.0 = i16\n            config.1 = 2\n            config.2 = \"after\"\n        } else if (index == 1) {\n            length = item\n        } else if (item.len != 5) return bool\n    }\n    if (saved.0 != i8 or saved.1 != 1 or (saved.2).len != 6) return bool\n    Element :: config.0\n    return struct { values [length]Element }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 23] }\n    return value.values[0] + value.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_nested_tuple_projections_and_aggregate_copy_isolation test {
+    context := try support.init("inline_for_nested_tuple_projections_and_aggregate_copy_isolation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_nested_tuple_projections_and_aggregate_copy_isolation",
+        "Item :: struct { values [2]mut i16 }\ntuples proc() struct { struct { Item, bool }, string } {\n    return {{Item { values = [19, 23] }, true}, \"ok\"}\n}\nmain proc() i16 {\n    input :: tuples()\n    total i16 := 0\n    inline for input.0 |item, index| {\n        if (index == 0) {\n            copy := item\n            copy.values[0] = 0\n            total = item.values[0] + item.values[1]\n        } else if (!item) return -1\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_tuple_rejects_runtime_dependency_even_with_discard_capture test {
+    context := try support.init("inline_for_tuple_rejects_runtime_dependency_even_with_discard_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_rejects_runtime_dependency_even_with_discard_capture",
+        "walk proc(value i16) i16 {\n    inline for ({i8(1), value}) |_| { break }\n    return 42\n}\nmain proc() i16 { return walk(42) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time" },
+    )
+}
+
+inline_for_tuple_rejects_named_records test {
+    context := try support.init("inline_for_tuple_rejects_named_records")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_rejects_named_records",
+        "main proc() i16 {\n    inline for ({number = i16(42)}) |value| { return value }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "for-loop iteration requires" },
+    )
+}
+
+inline_for_tuple_capture_is_immutable test {
+    context := try support.init("inline_for_tuple_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_capture_is_immutable",
+        "main proc() i16 {\n    inline for ({i8(1), true}) |value, index| {\n        if (index == 0) value = 42\n    }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_for_tuple_preserves_narrow_overflow test {
+    context := try support.init("inline_for_tuple_preserves_narrow_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_preserves_narrow_overflow",
+        "main proc() i16 {\n    inline for ({i8(127), true}) |value, index| {\n        if (index == 0) next :: value + 1\n    }\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+inline_for_tuple_materializes_storage_before_break test {
+    context := try support.init("inline_for_tuple_materializes_storage_before_break")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tuple_materializes_storage_before_break",
+        "values proc() struct { i16, @i16 } {\n    local i16 :: 2\n    return {42, &local}\n}\nmain proc() i16 {\n    inline for values() |_| { break }\n    return 42\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+ordinary_for_still_rejects_heterogeneous_tuple test {
+    context := try support.init("ordinary_for_still_rejects_heterogeneous_tuple")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_for_still_rejects_heterogeneous_tuple",
+        "main proc() i16 {\n    for ({i16(42), true}) |_| {}\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "for-loop iteration requires" },
+    )
+}
+
+inline_for_range_runtime_calls_and_constant_branches test {
+    context := try support.init("inline_for_range_runtime_calls_and_constant_branches")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_range_runtime_calls_and_constant_branches",
+        "add proc(value i16, bias i16) i16 { return value + bias }\nanswer proc(bias i16) i16 {\n    total i16 := 0\n    inline for (i8(0)..i8(3)) |index| {\n        if (index == 0) {\n            total = add(total, bias)\n        } else {\n            total = add(total, i16(index))\n        }\n        if (index > 9) return false\n    }\n    return total\n}\nmain proc() i16 { return answer(39) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_inferred_arrays_concretize_scalar_shorthand test {
+    context := try support.init("inline_for_inferred_arrays_concretize_scalar_shorthand")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_inferred_arrays_concretize_scalar_shorthand",
+        "signed proc(value i64) i64 { return value }\nreal proc(value f64) f64 { return value }\ninteger proc() int { return 23 }\nfloating proc() float { return 22.5 }\nmain proc() i64 {\n    total i64 := 0\n    inline for [int(19), integer()] |value| { total = total + signed(value) }\n    fraction f64 := 0.0\n    inline for [float(19.5), floating()] |value| { fraction = fraction + real(value) }\n    return total + i64(fraction) - 42\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_array_constants_and_usize_indices test {
+    context := try support.init("inline_for_array_constants_and_usize_indices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_array_constants_and_usize_indices",
+        "data proc() [2]i16 { return [19, 22] }\nat proc(index usize, value i16) i16 { return value + i16(index) }\nmain proc() i16 {\n    total i16 := 0\n    inline for data() |value, index| {\n        if (value == 19) {\n            total = total + at(index, value)\n        } else if (value == 22) {\n            total = total + at(index, value)\n        } else return false\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_string_bytes_embedded_nul_and_usize_indices test {
+    context := try support.init("inline_for_string_bytes_embedded_nul_and_usize_indices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_string_bytes_embedded_nul_and_usize_indices",
+        "text proc() string { return \"a\\0b\" }\nat proc(index usize, byte u8) i16 {\n    if (byte == 0) return i16(index) + 39\n    return 1\n}\nmain proc() i16 {\n    total i16 := 0\n    inline for text() |byte, index| {\n        if (index == 1) {\n            if (byte != 0) return false\n        } else if (byte == 0) return false\n        total = total + at(index, byte)\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_type_array_specializes_each_runtime_body test {
+    context := try support.init("inline_for_type_array_specializes_each_runtime_body")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_type_array_specializes_each_runtime_body",
+        "types proc() [2]type { return [i16, bool] }\nadd proc(value i16) i16 { return value + 1 }\nmain proc() i16 {\n    total i16 := 0\n    inline for types() |T, index| {\n        if (T == i16) {\n            value T :: 39\n            total = total + add(value)\n        } else {\n            value T :: true\n            if (value) total = total + i16(index) + 1\n        }\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_narrow_signed_and_unsigned_inclusive_maxima test {
+    context := try support.init("inline_for_narrow_signed_and_unsigned_inclusive_maxima")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_narrow_signed_and_unsigned_inclusive_maxima",
+        "signed proc(value i8) i16 { return i16(value) }\nunsigned proc(value u8) i16 { return i16(value) }\nmain proc() [3]i16 {\n    negative i16 := 0\n    inline for (i8(-2)..i8(0)) |value| { negative = negative + signed(value) }\n    high i16 := 0\n    inline for (i8(126)..=i8(127)) |value| { high = high + signed(value) }\n    top i16 := 0\n    inline for (u8(254)..=u8(255)) |value| { top = top + unsigned(value) }\n    return [negative, high, top]\n}\n",
+        support.Expected{ stdout = "[-3, 253, 509]\n", diagnostic = null },
+    )
+}
+
+inline_for_nested_inline_and_ordinary_loops test {
+    context := try support.init("inline_for_nested_inline_and_ordinary_loops")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_nested_inline_and_ordinary_loops",
+        "answer proc(length usize) i16 {\n    total i16 := 0\n    inline for [i16(10), i16(11)] |base| {\n        inline for (i8(0)..i8(2)) |offset| {\n            if (offset == 0) continue\n            for (0..length) |index| {\n                if (index == 0) continue\n                total = total + base\n                break\n            }\n        }\n    }\n    return total\n}\nmain proc() i16 { return answer(3) + answer(2) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_static_break_continue_run_iteration_defers test {
+    context := try support.init("inline_for_static_break_continue_run_iteration_defers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_static_break_continue_run_iteration_defers",
+        "walk proc(cleanups @mut i16) i16 {\n    total i16 := 0\n    inline for (i8(0)..i8(5)) |index| {\n        defer cleanups^ = cleanups^ + 1\n        if (index < 1) continue\n        if (index == 3) break\n        total = total + i16(index)\n    }\n    return total\n}\nmain proc() i16 {\n    cleanups i16 := 0\n    total :: walk(&cleanups)\n    return total + cleanups + 35\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_static_transfers_skip_invalid_tail_and_later_iterations test {
+    context := try support.init("inline_for_static_transfers_skip_invalid_tail_and_later_iterations")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_static_transfers_skip_invalid_tail_and_later_iterations",
+        "main proc() i16 {\n    inline for (i8(0)..i8(3)) |index| {\n        if (index == 0) continue\n        if (index == 1) break\n        return false\n    }\n    return 42\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_tagged_match_transfers_prune_tail_and_payloads test {
+    context := try support.init("inline_for_tagged_match_transfers_prune_tail_and_payloads")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_tagged_match_transfers_prune_tail_and_payloads",
+        "Choice :: union(enum) { number i16, stop void }\nchoices proc() [4]Choice { return [.number{0}, .number{39}, .stop, .number{99}] }\nmain proc() i16 {\n    total i16 := 0\n    inline for choices() |choice| {\n        defer total = total + 1\n        match choice {\n            .number |value|: {\n                if (value == 0) continue\n                total = total + value\n                continue\n            },\n            .stop: break,\n        }\n        return false\n    }\n    return total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_rejects_runtime_break test {
+    context := try support.init("inline_for_rejects_runtime_break")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_runtime_break",
+        "walk proc(stop bool) i16 {\n    inline for (i8(0)..i8(2)) |_| {\n        if (stop) break\n    }\n    return 42\n}\nmain proc() i16 { return walk(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time-resolvable" },
+    )
+}
+
+inline_for_rejects_runtime_continue test {
+    context := try support.init("inline_for_rejects_runtime_continue")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_runtime_continue",
+        "walk proc(skip bool) i16 {\n    inline for [i16(1), i16(2)] |_| {\n        if (skip) continue\n    }\n    return 42\n}\nmain proc() i16 { return walk(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time-resolvable" },
+    )
+}
+
+inline_for_runtime_return_runs_iteration_defer test {
+    context := try support.init("inline_for_runtime_return_runs_iteration_defer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_runtime_return_runs_iteration_defer",
+        "find proc(take bool, cleanups @mut i16) i16 {\n    inline for [i16(1), i16(2), i16(3)] |value| {\n        defer cleanups^ = cleanups^ + 1\n        if (take and value == 2) return 40\n    }\n    return 0\n}\nmain proc() i16 {\n    cleanups i16 := 0\n    value :: find(true, &cleanups)\n    return value + cleanups\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_runtime_error_return_runs_errdefer_only_on_error test {
+    context := try support.init("inline_for_runtime_error_return_runs_errdefer_only_on_error")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_runtime_error_return_runs_errdefer_only_on_error",
+        "Error :: enum { failed }\nwalk proc(fail bool, cleanups @mut i16) i16 ! Error {\n    inline for (i8(0)..i8(3)) |index| {\n        defer cleanups^ = cleanups^ + 1\n        errdefer cleanups^ = cleanups^ + 10\n        if (fail and index == 1) return .failed\n    }\n    return 39\n}\nmain proc() [2]i16 {\n    failed i16 := 0\n    success i16 := 0\n    left :: walk(true, &failed) catch 30\n    right :: walk(false, &success) catch 0\n    return [left + failed, right + success]\n}\n",
+        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+    )
+}
+
+inline_for_empty_ranges_arrays_strings_skip_invalid_typing test {
+    context := try support.init("inline_for_empty_ranges_arrays_strings_skip_invalid_typing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_empty_ranges_arrays_strings_skip_invalid_typing",
+        "empty proc() [0]type { return [] }\nmain proc() i16 {\n    inline for (i8(2)..i8(-2)) |_| { return false }\n    inline for (i8(1)..i8(1)) |_| { return i8(128) }\n    inline for empty() |_| { return false }\n    inline for \"\" |_| { return i8(128) }\n    return 42\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_capture_keeps_narrow_arithmetic_overflow test {
+    context := try support.init("inline_for_capture_keeps_narrow_arithmetic_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_capture_keeps_narrow_arithmetic_overflow",
+        "main proc() i16 {\n    inline for (i8(127)..=i8(127)) |value| { next :: value + 1 }\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+inline_for_capture_is_immutable test {
+    context := try support.init("inline_for_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_capture_is_immutable",
+        "main proc() i16 {\n    inline for [i16(1)] |value| { value = 42 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_for_index_is_immutable test {
+    context := try support.init("inline_for_index_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_index_is_immutable",
+        "main proc() i16 {\n    inline for \"a\" |_, index| { index = 42 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+inline_for_rejects_runtime_range_bound test {
+    context := try support.init("inline_for_rejects_runtime_range_bound")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_runtime_range_bound",
+        "walk proc(length usize) i16 {\n    inline for (0..length) |_| {}\n    return 42\n}\nmain proc() i16 { return walk(2) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time value" },
+    )
+}
+
+inline_for_rejects_runtime_array test {
+    context := try support.init("inline_for_rejects_runtime_array")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_runtime_array",
+        "walk proc(values [2]i16) i16 {\n    inline for values |_| {}\n    return 42\n}\nmain proc() i16 { return walk([19, 23]) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time value" },
+    )
+}
+
+inline_for_rejects_runtime_string test {
+    context := try support.init("inline_for_rejects_runtime_string")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_runtime_string",
+        "walk proc(text string) i16 {\n    inline for text |_| {}\n    return 42\n}\nmain proc() i16 { return walk(\"ok\") }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time value" },
+    )
+}
+
+inline_for_rejects_pointer_capture test {
+    context := try support.init("inline_for_rejects_pointer_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_rejects_pointer_capture",
+        "main proc() i16 {\n    inline for [i16(42)] |@value| { return value^ }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "escape" },
+    )
+}
+
+inline_for_materializes_readonly_byte_slice_elements test {
+    context := try support.init("inline_for_materializes_readonly_byte_slice_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_materializes_readonly_byte_slice_elements",
+        "data proc() [1][]u8 { return [\"borrowed\"] }\nmain proc() usize {\n    inline for data() |value| { return value.len }\n    return 0\n}\n",
+        support.Expected{ stdout = "8\n", diagnostic = null },
+    )
+}
+
+inline_for_materializes_mutable_byte_slice_elements test {
+    context := try support.init("inline_for_materializes_mutable_byte_slice_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_materializes_mutable_byte_slice_elements",
+        "data proc() [1][]mut u8 {\n    values [1]mut u8 := [42]\n    return [values[..]]\n}\nmain proc() u8 {\n    inline for data() |value| { value[0] += 1\n        return value[0] }\n    return 0\n}\n",
+        support.Expected{ stdout = "43\n", diagnostic = null },
+    )
+}
+
+inline_for_expansion_is_bounded test {
+    context := try support.init("inline_for_expansion_is_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_expansion_is_bounded",
+        "main proc() i16 {\n    inline for (0..usize(100000)) |_| {}\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "step limit" },
+    )
+}
+
+struct_type_literal_fields_contextual_defaults_and_required_null test {
+    context := try support.init("struct_type_literal_fields_contextual_defaults_and_required_null")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "struct_type_literal_fields_contextual_defaults_and_required_null",
+        "present proc() ??i16 { return 2 }\nRecord :: struct_type!(\n    .auto,\n    {\"number\", \"ready\", \"text\", \"maybe\", \"required\"},\n    {i16, bool, string, ?i16, ?i16},\n    {null, true, \"ok\", present(), null},\n)\nmain proc() i16 {\n    value Record :: { number = 40, required = 2 }\n    if (!value.ready or value.text.len != 2) return -1\n    if (value.maybe? != 2) return -2\n    return value.number + value.required?\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+struct_type_computed_arrays_snapshots_and_nominal_cache_identity test {
+    context := try support.init("struct_type_computed_arrays_snapshots_and_nominal_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "struct_type_computed_arrays_snapshots_and_nominal_cache_identity",
+        "names proc() [2]mut string {\n    result [2]mut string := [\"\", \"\"]\n    result[0] = \"value\"\n    result[1] = \"bias\"\n    return result\n}\nchange proc(input [2]mut type, T type) [2]mut type {\n    copied := input\n    copied[0] = T\n    return copied\n}\nGenerated proc(T type, bias i16) type {\n    fields := names()\n    types [2]mut type := undefined\n    types[0] = i8\n    types[1] = i16\n    changed := change(types, T)\n    if (types[0] != i8 or changed[0] != T) return bool\n    defaults [2]mut ?i16 := undefined\n    defaults[0] = null\n    defaults[1] = bias\n    Result :: struct_type!(.auto, fields, changed, defaults)\n    fields[0] = \"replaced\"\n    types[1] = bool\n    changed[0] = bool\n    defaults[1] = 0\n    return Result\n}\nOther proc() type {\n    return struct_type!(.auto, [\"value\", \"bias\"], [i16, i16], [null, 2])\n}\nSelected :: alias Generated(i16, 2)\nmain proc() i16 {\n    if (Selected != Generated(i16, 2)) return -1\n    if (Selected == Generated(i16, 3) or Selected == Other()) return -2\n    value Selected :: { value = 40 }\n    same Generated(i16, 2) :: value\n    return same.value + same.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+struct_type_tuple_helper_nested_aggregate_defaults_and_copy_isolation test {
+    context := try support.init("struct_type_tuple_helper_nested_aggregate_defaults_and_copy_isolation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "struct_type_tuple_helper_nested_aggregate_defaults_and_copy_isolation",
+        "Child :: struct { values [2]mut i8, maybe ?i8 = null }\nnames proc() struct { string, string } { return {\"rows\", \"bias\"} }\nGenerated proc() type {\n    return struct_type!(\n        .auto,\n        names(),\n        [[2]mut Child, i8],\n        [[{ values = [19, 0] }, { values = [0, 23], maybe = 2 }], 127],\n    )\n}\ncopy proc(value Generated()) Generated() { return value }\nmain proc() i16 {\n    first Generated() := {}\n    saved :: copy(first)\n    first.rows[0].values[0] = 0\n    first.rows[1].maybe = null\n    second Generated() :: {}\n    if (saved.rows[1].maybe? != 2 or second.bias != 127) return -1\n    return i16(saved.rows[0].values[0]) + i16(second.rows[1].values[1])\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}

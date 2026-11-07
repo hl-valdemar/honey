@@ -1,0 +1,544 @@
+import "@ffi/c"
+import "@std/mem"
+import "@std/arraylist"
+import "@std/io"
+import "@std/fs"
+import "@std/debug"
+import "@std/testing"
+import "@tests/support/native"
+
+Failure :: enum { system_failed, invalid_arguments, spawn_failed, wait_failed, timed_out, executable_not_found }
+Error :: alias (
+    mem.AllocError | fs.Error | fs.ReadFileError | io.WriteError | io.OpenError
+    | io.ReadError | io.CloseError | testing.Error | Failure
+)
+
+#! owns all returned paths, text, process output and its private fixture directory.
+#! release once with deinit; borrowed values expire then.
+Context :: struct {
+    allocator mem.Allocator
+    root [;0]u8 = ""
+    compiler [;0]u8 = ""
+    temporary [;0]u8 = ""
+    executable [;0]u8 = ""
+    environment_path ?[;0]u8 = null
+    name []u8
+    owned arraylist.ArrayList([]mut u8)
+}
+
+RunOptions :: struct {
+    input []u8 = &[]
+    path ?[;0]u8 = null
+    cwd ?[;0]u8 = null
+    timeout_seconds usize = 30
+}
+
+Result :: struct { status i32, stdout []u8, stderr []u8 }
+Expected :: struct { stdout ?[]u8 = null, diagnostic ?[]u8 = null }
+
+init proc(name []u8) Context ! Error {
+    context := Context{
+        allocator = mem.c_allocator, name = name,
+        owned = arraylist.init(mem.c_allocator),
+    }
+    errdefer deinit(&context)
+    context.root = try canonical(&context, ".")
+    context.compiler = try path(&context, context.root, "build/honey")
+    template :: try concat(&context, ["/tmp/honey ", name, " ' ; $-XXXXXX"])
+    if (c.mkdtemp(ptrcast!(constcast!(template).ptr)) == null) return .system_failed
+    context.temporary = template
+    context.temporary = try canonical(&context, template)
+    context.executable = try path(&context, context.temporary, "program ' ; $")
+    return context
+}
+
+deinit proc(context @mut Context) void {
+    if (context.temporary.len != 0) {
+        remove_tree(context, context.temporary) catch |_| {
+            debug.print("acceptance: cannot remove temporary directory {s}\n", {context.temporary})
+        }
+    }
+    for (context.owned.items) |bytes| mem.free(context.allocator, bytes)
+    arraylist.deinit(&context.owned)
+}
+
+@hide:file
+own proc(context @mut Context, bytes []mut u8) []mut u8 ! Error {
+    arraylist.append(&context.owned, bytes) catch |err| {
+        mem.free(context.allocator, bytes)
+        return err
+    }
+    return bytes
+}
+
+concat proc(context @mut Context, parts [][]u8) [;0]u8 ! Error {
+    length := usize(0)
+    for (parts) |part| {
+        if (part.len >= maxval!(usize) - length) return .out_of_memory
+        length += part.len
+    }
+    bytes :: try own(context, try mem.alloc(u8, context.allocator, length + 1))
+    offset := usize(0)
+    for (parts) |part| {
+        memcopy!(bytes[offset..offset + part.len], part)
+        offset += part.len
+    }
+    bytes[length] = 0
+    return bytes.ptr[..length;0]
+}
+
+path proc(context @mut Context, base, relative []u8) [;0]u8 ! Error {
+    if (relative.len != 0 and relative[0] == '/') return try concat(context, [relative])
+    if (base.len == 0) return try concat(context, [relative])
+    if (has_suffix(base, "/")) return try concat(context, [base, relative])
+    return try concat(context, [base, "/", relative])
+}
+
+number proc(context @mut Context, value usize) [;0]u8 ! Error {
+    digits [20]mut u8 := undefined
+    start := digits.len
+    remaining := value
+    while true {
+        start -= 1
+        digits[start] = '0' + u8(rem!(remaining, 10))
+        remaining = divtrunc!(remaining, 10)
+        if (remaining == 0) break
+    }
+    return try concat(context, [digits[start..]])
+}
+
+environment proc(context @mut Context, name []u8) [;0]u8 ! Error {
+    key :: try concat(context, [name])
+    value :: c.getenv(ptrcast!(key.ptr))
+    if (value == null) return ""
+    return try concat(context, [c_string(value?)])
+}
+
+@hide:file
+c_string proc(pointer *c_char) []u8 {
+    bytes *u8 :: ptrcast!(pointer)
+    length := usize(0)
+    while (bytes[length] != 0) length += 1
+    return bytes[..length]
+}
+
+canonical proc(context @mut Context, file_path [;0]u8) [;0]u8 ! Error {
+    resolved :: try fs.canonical(context.allocator, file_path)
+    defer mem.free(context.allocator, resolved)
+    return try concat(context, [resolved])
+}
+
+has_prefix proc(text, prefix []u8) bool {
+    return text.len >= prefix.len and mem.eql(text[..prefix.len], prefix)
+}
+
+has_suffix proc(text, suffix []u8) bool {
+    return text.len >= suffix.len and mem.eql(text[text.len - suffix.len..], suffix)
+}
+
+contains proc(text, needle []u8) bool {
+    if (needle.len > text.len) return false
+    for (0..(text.len - needle.len + 1)) |index| {
+        if (mem.eql(text[index..index + needle.len], needle)) return true
+    }
+    return false
+}
+
+count proc(text, needle []u8) usize {
+    if (needle.len == 0) return text.len + 1
+    matches := usize(0)
+    index := usize(0)
+    while (index <= text.len and needle.len <= text.len - index) {
+        if (mem.eql(text[index..index + needle.len], needle)) {
+            matches += 1
+            index += needle.len
+        } else index += 1
+    }
+    return matches
+}
+
+line_count proc(text []u8) usize {
+    lines := usize(0)
+    index := usize(0)
+    while (index < text.len) {
+        byte :: text[index]
+        index += 1
+        if (byte == '\r' or byte == '\n') {
+            lines += 1
+            if (byte == '\r' and index < text.len and text[index] == '\n') index += 1
+        }
+    }
+    if (text.len != 0 and text[text.len - 1] != '\r' and text[text.len - 1] != '\n') lines += 1
+    return lines
+}
+
+replace proc(context @mut Context, text, needle, replacement []u8) [;0]u8 ! Error {
+    if (needle.len == 0) return .invalid_arguments
+    matches :: count(text, needle)
+    if (replacement.len > needle.len and matches > divtrunc!(maxval!(usize) - text.len - 1, replacement.len - needle.len)) return .out_of_memory
+    length :: text.len - matches * needle.len + matches * replacement.len
+    bytes :: try own(context, try mem.alloc(u8, context.allocator, length + 1))
+    input := usize(0)
+    output := usize(0)
+    while (input < text.len) {
+        if (needle.len <= text.len - input and mem.eql(text[input..input + needle.len], needle)) {
+            memcopy!(bytes[output..output + replacement.len], replacement)
+            input += needle.len
+            output += replacement.len
+        } else {
+            bytes[output] = text[input]
+            input += 1
+            output += 1
+        }
+    }
+    bytes[length] = 0
+    return bytes.ptr[..length;0]
+}
+
+directory proc(context @mut Context, file_path [;0]u8) void ! Error {
+    for (1..file_path.len) |index| {
+        if (file_path[index] != '/') continue
+        prefix :: try concat(context, [file_path[..index]])
+        try make_directory(context, prefix)
+    }
+    try make_directory(context, file_path)
+}
+
+@hide:file
+make_directory proc(context @mut Context, file_path [;0]u8) void ! Error {
+    if (native.mkdir(ptrcast!(file_path.ptr), 448) == 0) return
+    if (c.__error()?^ == c.EEXIST and try fs.kind(context.allocator, file_path) == .directory) return
+    return .system_failed
+}
+
+write proc(_ @mut Context, file_path [;0]u8, bytes []u8) void ! Error {
+    descriptor := c.open(ptrcast!(file_path.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, c_int(384))
+    while (descriptor < 0 and c.__error()?^ == c.EINTR) {
+        descriptor = c.open(ptrcast!(file_path.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, c_int(384))
+    }
+    if (descriptor < 0) return .open_failed
+    closing := false
+    defer { if (!closing) _ = c.close(descriptor) }
+    try io.write_all(io.Writer{
+        context = null, handle = io.Handle{ file_desc = descriptor }, write = write_descriptor,
+    }, bytes)
+    closing = true
+    if (c.close(descriptor) != 0) return .close_failed
+}
+
+put proc(context @mut Context, base, relative, bytes []u8) [;0]u8 ! Error {
+    file_path :: try path(context, base, relative)
+    end := file_path.len
+    while (end != 0 and file_path[end - 1] != '/') end -= 1
+    if (end != 0) {
+        parent :: try concat(context, [file_path[..end]])
+        try directory(context, parent)
+    }
+    try write(context, file_path, bytes)
+    return file_path
+}
+
+@hide:file
+keep_bytes proc(context @mut Context, list arraylist.ArrayList(u8)) []u8 ! Error {
+    bytes :: try own(context, list.items.ptr[..list.capacity])
+    return bytes[..list.items.len]
+}
+
+read proc(context @mut Context, file_path [;0]u8) []u8 ! Error {
+    if (!try is_file(context, file_path)) return .open_failed
+    descriptor := c.open(ptrcast!(file_path.ptr), c.O_RDONLY)
+    while (descriptor < 0 and c.__error()?^ == c.EINTR) descriptor = c.open(ptrcast!(file_path.ptr), c.O_RDONLY)
+    if (descriptor < 0) return .open_failed
+    closing := false
+    defer { if (!closing) _ = c.close(descriptor) }
+    bytes :: try captured_bytes(context, descriptor)
+    closing = true
+    if (c.close(descriptor) != 0) return .close_failed
+    return bytes
+}
+
+symlink proc(_ @mut Context, target, link [;0]u8) void ! Error {
+    if (c.symlink(ptrcast!(target.ptr), ptrcast!(link.ptr)) != 0) return .system_failed
+}
+
+fifo proc(_ @mut Context, file_path [;0]u8) void ! Error {
+    if (native.mkfifo(ptrcast!(file_path.ptr), 384) != 0) return .system_failed
+}
+
+rename proc(_ @mut Context, source, destination [;0]u8) void ! Error {
+    if (c.rename(ptrcast!(source.ptr), ptrcast!(destination.ptr)) != 0) return .system_failed
+}
+
+remove proc(_ @mut Context, file_path [;0]u8) void ! Error {
+    if (c.unlink(ptrcast!(file_path.ptr)) != 0 and c.__error()?^ != c.ENOENT) return .system_failed
+}
+
+exists proc(context @mut Context, file_path [;0]u8) bool ! Error {
+    return try fs.exists(context.allocator, file_path)
+}
+
+is_file proc(context @mut Context, file_path [;0]u8) bool ! Error {
+    return try fs.kind(context.allocator, file_path) == .file
+}
+
+remove_tree proc(context @mut Context, file_path [;0]u8) void ! Error {
+    info [1]mut c.Stat := undefined
+    if (native.lstat(ptrcast!(file_path.ptr), info[..].ptr) != 0) {
+        if (c.__error()?^ == c.ENOENT) return
+        return .system_failed
+    }
+    if ((info[0].st_mode & 61440) != 16384) {
+        try remove(context, file_path)
+        return
+    }
+    handle := try fs.open_directory(context.allocator, file_path)
+    closing := false
+    defer { if (!closing) fs.close_directory(&handle) catch |_| {} }
+    while (try fs.next(&handle)) |entry| {
+        child :: try path(context, file_path, entry.name)
+        try remove_tree(context, child)
+    }
+    closing = true
+    try fs.close_directory(&handle)
+    if (c.rmdir(ptrcast!(file_path.ptr)) != 0) return .system_failed
+}
+
+copy_tree proc(context @mut Context, source, destination [;0]u8, production_only bool) void ! Error {
+    try directory(context, destination)
+    handle := try fs.open_directory(context.allocator, source)
+    closing := false
+    defer { if (!closing) fs.close_directory(&handle) catch |_| {} }
+    while (try fs.next(&handle)) |entry| {
+        if (production_only and (has_suffix(entry.name, ".test.hon") or has_suffix(entry.name, ".test.bro"))) continue
+        input :: try path(context, source, entry.name)
+        output :: try path(context, destination, entry.name)
+        kind :: try fs.kind(context.allocator, input)
+        if (kind == .directory) try copy_tree(context, input, output, production_only)
+        else if (kind == .file) try write(context, output, try read(context, input))
+        else return .system_failed
+    }
+    closing = true
+    try fs.close_directory(&handle)
+}
+
+has_entry_prefix proc(context @mut Context, directory_path [;0]u8, prefix []u8) bool ! Error {
+    handle := try fs.open_directory(context.allocator, directory_path)
+    defer fs.close_directory(&handle) catch |_| {}
+    while (try fs.next(&handle)) |entry| {
+        if (has_prefix(entry.name, prefix)) return true
+    }
+    return false
+}
+
+@hide:file
+locate proc(context @mut Context, name []u8, search_path []u8, cwd [;0]u8) [;0]u8 ! Error {
+    if (name.len == 0) return .invalid_arguments
+    if (contains(name, "/")) {
+        candidate :: try path(context, cwd, name)
+        if (c.access(ptrcast!(candidate.ptr), 1) == 0 and try is_file(context, candidate)) return candidate
+        return .executable_not_found
+    }
+    start := usize(0)
+    for (0..(search_path.len + 1)) |index| {
+        if (index != search_path.len and search_path[index] != ':') continue
+        folder :: try path(context, cwd, search_path[start..index])
+        candidate :: try path(context, folder, name)
+        if (c.access(ptrcast!(candidate.ptr), 1) == 0 and try is_file(context, candidate)) return candidate
+        start = index + 1
+    }
+    return .executable_not_found
+}
+
+find_executable proc(context @mut Context, name []u8) [;0]u8 ! Error {
+    search :: if (context.environment_path) |value| value else try environment(context, "PATH")
+    return try canonical(context, try locate(context, name, search, context.root))
+}
+
+@hide:file
+monotonic_seconds proc() u64 ! Error {
+    value [1]mut c.timespec := undefined
+    if (native.clock_gettime(6, value[..].ptr) != 0) return .system_failed
+    return u64(value[0].tv_sec)
+}
+
+@hide:file
+reap proc(pid c_int) void {
+    status [1]mut c_int := [0]
+    while (c.waitpid(pid, status[..].ptr, 0) < 0 and c.__error()?^ == c.EINTR) {}
+}
+
+@hide:file
+captured_bytes proc(context @mut Context, descriptor c_int) []u8 ! Error {
+    if (c.lseek(descriptor, 0, c.SEEK_SET) < 0) return .system_failed
+    input :: io.Reader{ context = null, handle = io.Handle{ file_desc = descriptor }, read = read_descriptor }
+    return try keep_bytes(context, try io.read_all(context.allocator, input, maxval!(u32)))
+}
+
+@hide:file
+read_descriptor proc(_ ?@mut anyopaque, handle io.Handle, buffer []mut u8) usize ! io.ReadError {
+    request := buffer.len
+    maximum :: usize(maxval!(c_long))
+    if (request > maximum) request = maximum
+    while true {
+        amount :: c.read(handle.file_desc, buffer.ptr, c_ulong(request))
+        if (amount >= 0) return usize(amount)
+        if (c.__error()?^ != c.EINTR) return .read_failed
+    }
+}
+
+@hide:file
+write_descriptor proc(_ ?@mut anyopaque, handle io.Handle, bytes []u8) usize ! io.WriteError {
+    request := bytes.len
+    maximum :: usize(maxval!(c_long))
+    if (request > maximum) request = maximum
+    while true {
+        amount :: c.write(handle.file_desc, bytes.ptr, c_ulong(request))
+        if (amount >= 0) return usize(amount)
+        if (c.__error()?^ != c.EINTR) return .write_failed
+    }
+}
+
+run proc(context @mut Context, arguments [][;0]u8, options RunOptions) Result ! Error {
+    if (arguments.len == 0 or arguments.len == maxval!(usize)) return .invalid_arguments
+    for (arguments) |argument| {
+        for (argument) |byte| { if (byte == 0) return .invalid_arguments }
+    }
+    cwd :: if (options.cwd) |value| try path(context, context.root, value) else context.root
+    search := if (context.environment_path) |value| value else try environment(context, "PATH")
+    if (options.path) |value| search = value
+    program :: try locate(context, arguments[0], search, cwd)
+    input :: c.tmpfile()
+    if (input == null) return .system_failed
+    defer _ = c.fclose(input)
+    output :: c.tmpfile()
+    if (output == null) return .system_failed
+    defer _ = c.fclose(output)
+    error_output :: c.tmpfile()
+    if (error_output == null) return .system_failed
+    defer _ = c.fclose(error_output)
+    descriptors [3]c_int :: [c.fileno(input), c.fileno(output), c.fileno(error_output)]
+    for (descriptors) |descriptor| {
+        if (descriptor < 0 or c.fcntl(descriptor, c.F_SETFD, c.FD_CLOEXEC) < 0) return .system_failed
+    }
+    try io.write_all(io.Writer{
+        context = null, handle = io.Handle{ file_desc = descriptors[0] }, write = write_descriptor,
+    }, options.input)
+    if (c.lseek(descriptors[0], 0, c.SEEK_SET) < 0) return .system_failed
+    actions c.posix_spawn_file_actions_t := null
+    if (native.posix_spawn_file_actions_init(&actions) != 0) return .system_failed
+    defer _ = native.posix_spawn_file_actions_destroy(&actions)
+    if (native.posix_spawn_file_actions_addchdir_np(&actions, ptrcast!(cwd.ptr)) != 0) return .system_failed
+    for (descriptors) |descriptor, index| {
+        if (native.posix_spawn_file_actions_adddup2(&actions, descriptor, c_int(index)) != 0) return .system_failed
+        if (native.posix_spawn_file_actions_addclose(&actions, descriptor) != 0) return .system_failed
+    }
+    attributes c.posix_spawnattr_t := null
+    if (native.posix_spawnattr_init(&attributes) != 0) return .system_failed
+    defer _ = native.posix_spawnattr_destroy(&attributes)
+    # give timeout cleanup a process group, including a compiler's Clang child.
+    if (native.posix_spawnattr_setflags(&attributes, 2) != 0
+        or native.posix_spawnattr_setpgroup(&attributes, 0) != 0) return .system_failed
+    argv :: try mem.alloc(?*mut c_char, context.allocator, arguments.len + 1)
+    defer mem.free(context.allocator, argv)
+    for (arguments) |argument, index| argv[index] = ptrcast!(constcast!(argument).ptr)
+    argv[arguments.len] = null
+    inherited :: c._NSGetEnviron()?^
+    if (inherited == null) return .system_failed
+    environment_values := arraylist.init(?*mut c_char, context.allocator)
+    defer arraylist.deinit(&environment_values)
+    index := usize(0)
+    while (inherited?[index]) |value| {
+        if (!has_prefix(c_string(value), "PATH=")) try arraylist.append(?*mut c_char, &environment_values, value)
+        index += 1
+    }
+    path_value :: try concat(context, ["PATH=", search])
+    try arraylist.append(?*mut c_char, &environment_values, ptrcast!(constcast!(path_value).ptr))
+    try arraylist.append(?*mut c_char, &environment_values, null)
+    pid [1]mut c_int := [0]
+    started :: try monotonic_seconds()
+    if (native.posix_spawn(pid[..].ptr, ptrcast!(program.ptr), &actions, &attributes, argv.ptr, environment_values.items.ptr) != 0) return .spawn_failed
+    active := true
+    defer {
+        if (active) {
+            _ = native.kill(-pid[0], 9)
+            reap(pid[0])
+        }
+    }
+    status [1]mut c_int := [0]
+    while true {
+        waited :: c.waitpid(pid[0], status[..].ptr, 1)
+        if (waited < 0) {
+            if (c.__error()?^ == c.EINTR) continue
+            return .wait_failed
+        }
+        if (waited > 0) break
+        if (options.timeout_seconds != 0 and try monotonic_seconds() - started >= u64(options.timeout_seconds)) {
+            debug.print("{s}: child timed out: {s}\n", {context.name, arguments[0]})
+            return .timed_out
+        }
+        # ponytail: 1 ms wait polling; use kqueue if wait overhead becomes material.
+        _ = c.usleep(1000)
+    }
+    active = false
+    signal :: status[0] & 127
+    exit_status :: if (signal == 0) i32(divtrunc!(status[0], 256) & 255) else -i32(signal)
+    return Result{
+        status = exit_status,
+        stdout = try captured_bytes(context, descriptors[1]),
+        stderr = try captured_bytes(context, descriptors[2]),
+    }
+}
+
+expect proc(context @Context, condition bool, message []u8) void ! Error {
+    if (condition) return
+    debug.print("{s}: {s}\n", {context.name, message})
+    return .expectation_failed
+}
+
+@hide:file
+report_result proc(label []u8, result Result) void {
+    debug.print("{s}: status={}\nstdout:\n{s}\nstderr:\n{s}\n", {label, result.status, result.stdout, result.stderr})
+}
+
+expect_result proc(context @Context, result Result, status i32, stdout, stderr []u8) void ! Error {
+    if (result.status == status and mem.eql(result.stdout, stdout) and mem.eql(result.stderr, stderr)) return
+    report_result("actual", result)
+    report_result("expected", Result{ status = status, stdout = stdout, stderr = stderr })
+    try expect(context, false, "subprocess outcome differs")
+}
+
+expect_same proc(context @Context, actual, expected Result) void ! Error {
+    try expect_result(context, actual, expected.status, expected.stdout, expected.stderr)
+}
+
+check proc(context @mut Context, source [;0]u8, expected Expected) void ! Error {
+    interpreted :: try run(context, [context.compiler, "run", source], RunOptions{})
+    if (interpreted.status != 0 and interpreted.status != 1) report_result("interpreter", interpreted)
+    try expect(context, interpreted.status == 0 or interpreted.status == 1, "unexpected interpreter status")
+    if (expected.stdout) |stdout| {
+        status :: if (expected.diagnostic != null) i32(1) else i32(0)
+        if (interpreted.status != status or !mem.eql(interpreted.stdout, stdout)) report_result("interpreter", interpreted)
+        try expect(context, interpreted.status == status and mem.eql(interpreted.stdout, stdout), "interpreter expectation differs")
+        if (expected.diagnostic) |diagnostic| {
+            if (!contains(interpreted.stderr, diagnostic)) report_result("interpreter", interpreted)
+            try expect(context, contains(interpreted.stderr, diagnostic), "missing expected diagnostic")
+        }
+    }
+    optimizations [2][;0]u8 :: ["-O0", "-O2"]
+    for (optimizations) |optimization| {
+        try remove(context, context.executable)
+        built :: try run(context, [context.compiler, "build", source, "-o", context.executable, optimization], RunOptions{})
+        if (built.status != 0 and built.status != 1) report_result("build", built)
+        try expect(context, (built.status == 0 or built.status == 1) and built.stdout.len == 0, "native build failed")
+        try expect(context, try is_file(context, context.executable), "native executable was not created")
+        compiled :: try run(context, [context.executable], RunOptions{})
+        try expect_same(context, compiled, interpreted)
+        try remove(context, context.executable)
+    }
+}
+
+check_text proc(context @mut Context, name, source []u8, expected Expected) void ! Error {
+    filename :: try concat(context, [name, ".hon"])
+    file_path :: try put(context, context.temporary, filename, source)
+    try check(context, file_path, expected)
+}

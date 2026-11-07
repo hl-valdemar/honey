@@ -15,7 +15,7 @@ the bootstrap must support contextual `&[]` literals for mutable slices and pref
 after bootstrapping, verify production self-hosting:
 
 ```sh
-python3 tests/self_host.py
+./build/honey test tests/self_host
 ```
 
 the check copies production sources without test-only imports or the testing package, builds `build/honey-stage1`, then uses it to build `build/honey-stage2`. both generations run with only Clang on `PATH`, without Bro. the second generation runs interpreter/native examples, package/provenance and formatted-IO checks, Honey test-framework acceptance, standalone LLVM assembly and CLI/error scenarios.
@@ -73,6 +73,8 @@ run the Honey-owned suite after bootstrapping:
 
 ```sh
 ./build/honey test
+./build/honey test tests/native
+./build/honey test tests/framework
 ```
 
 `test` defaults to `source`; an explicit file or directory selects another entry package. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
@@ -81,7 +83,7 @@ assertions use `@std/testing`: `try testing.expect(condition)`, `try testing.exp
 
 Honey compiles one private native runner with Clang at `-O0`, then runs each test in a separate child process. assertion errors and runtime traps fail that test without suppressing later tests. each test starts with fresh globals; scoped cleanup runs on ordinary success/error returns, not process-ending traps. results and the passed/failed summary go to stderr. statuses are `0` for success (including no tests), `1` for source diagnostics or failed tests, and `2` for usage/infrastructure failure. temporary runner and LLVM files are removed on success and failure.
 
-`bro test` remains the bootstrap compatibility check. `python3 tests/testing.py` checks Honey's discovery, assertion locations, error propagation, cleanup, trap isolation and production exclusion. run `python3 tests/native.py` for executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling.
+`bro test` remains the bootstrap compatibility check. `tests/framework` checks Honey's discovery, assertion locations, error propagation, cleanup, trap isolation and production exclusion. `tests/native` checks executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling. the acceptance suites use shared Honey fixture/process helpers in `tests/support`; Python is not required.
 
 the scalar-function package acceptance gate is verified by the native suite: root and dependency sibling files, transitive/shared imports, same-spelled declarations with distinct signatures, file-local aliases and conflicts, missing packages/members, argument errors and dependency-file diagnostics. file-command checks cover `run`, `emit-llvm` and `build`, loading dependency siblings while excluding root siblings.
 
@@ -91,7 +93,7 @@ Honey-generated executables accept either a no-argument `main` or `main proc(ini
 
 native startup supplies `init.io` through the unchanged `std/io.system()` backend and `init.args` from `argc`/`argv`. startup scans each argument once into a heap-allocated array of borrowed zero-terminated slices (`process.Args.values: [][;0]u8`), without copying strings. descriptors and borrowed strings remain valid until `main` returns; startup frees the descriptors on successful and fallible returns. allocation failure exits with status `2`. `init.args.values.len` includes the executable name. callers can supply their own `process.Args { values = slices[..] }` for testing.
 
-the native-driver acceptance check runs generated executables at `-O0`/`-O2` with empty/Unicode/metacharacter arguments, binary stdin and separate stdout/stderr. unchanged filesystem and process libraries resolve symlinks, enumerate directories, read files, write private temporary LLVM files and spawn Clang through `PATH` without a shell. child exit/signal statuses and missing executables are checked; temporary files are removed on success and spawn failure. `tests/self_host.py` verifies the production compiler's two-generation rebuild separately.
+the native-driver acceptance check runs generated executables at `-O0`/`-O2` with empty/Unicode/metacharacter arguments, binary stdin and separate stdout/stderr. unchanged filesystem and process libraries resolve symlinks, enumerate directories, read files, write private temporary LLVM files and spawn Clang through `PATH` without a shell. child exit/signal statuses and missing executables are checked; temporary files are removed on success and spawn failure. `tests/self_host` verifies the production compiler's two-generation rebuild separately.
 
 `process.run(allocator, arguments)` starts a child synchronously using Darwin `posix_spawnp`, searches `PATH`, and inherits the environment and standard streams. argument strings are borrowed zero-terminated slices; no shell parsing occurs. it releases temporary argument descriptors on every return, retries interrupted waits, and returns the exit code or `128 + signal` for signal termination.
 

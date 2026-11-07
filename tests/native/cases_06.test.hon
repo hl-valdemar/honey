@@ -1,0 +1,1541 @@
+import "@tests/support"
+
+comptime_calls_preserve_checked_narrow_intermediates test {
+    context := try support.init("comptime_calls_preserve_checked_narrow_intermediates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_calls_preserve_checked_narrow_intermediates",
+        "overflow proc(seed i8) i8 {\n    result := seed\n    result = result + 1\n    return result - 1\n}\nanswer proc($N i8) i16 { return 42 }\nmain proc() i16 { return answer(overflow(127)) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+comptime_calls_preserve_unsigned_and_signed_boundaries test {
+    context := try support.init("comptime_calls_preserve_unsigned_and_signed_boundaries")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_calls_preserve_unsigned_and_signed_boundaries",
+        "unsigned proc(value u64) u64 { return value }\nsigned proc(value i64) i64 { return value }\nanswer proc($high u64, $low i64) i16 {\n    if (high == 18446744073709551615 and low == -9223372036854775808) return 42\n    return 0\n}\nmain proc() i16 {\n    return answer(unsigned(18446744073709551615), signed(-9223372036854775808))\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_call_cannot_promote_runtime_parameter test {
+    context := try support.init("comptime_call_cannot_promote_runtime_parameter")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_cannot_promote_runtime_parameter",
+        "identity proc(value usize) usize { return value }\nanswer proc($N usize) i16 { return 42 }\nruntime proc(value usize) i16 { return answer(identity(value)) }\nmain proc() i16 { return runtime(2) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_call_cannot_read_mutable_global test {
+    context := try support.init("comptime_call_cannot_read_mutable_global")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_cannot_read_mutable_global",
+        "state usize := 2\nread proc() usize { return state }\nanswer proc($N usize) i16 { return 42 }\nmain proc() i16 { return answer(read()) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_call_cannot_mutate_runtime_storage test {
+    context := try support.init("comptime_call_cannot_mutate_runtime_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_cannot_mutate_runtime_storage",
+        "state usize := 0\nwrite proc() usize {\n    state = 2\n    return state\n}\nanswer proc($N usize) i16 { return 42 }\nmain proc() i16 { return answer(write()) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_call_keeps_uninitialized_local_traps test {
+    context := try support.init("comptime_call_keeps_uninitialized_local_traps")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_keeps_uninitialized_local_traps",
+        "premature proc() usize {\n    before :: after\n    after :: 2\n    return before\n}\nanswer proc($N usize) i16 { return 42 }\nmain proc() i16 { return answer(premature()) }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+comptime_call_bounds_empty_loops test {
+    context := try support.init("comptime_call_bounds_empty_loops")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_bounds_empty_loops",
+        "forever proc() usize {\n    while true {}\n    return 2\n}\nanswer proc($N usize) i16 { return 42 }\nmain proc() i16 { return answer(forever()) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds" },
+    )
+}
+
+comptime_call_bounds_recursive_frames test {
+    context := try support.init("comptime_call_bounds_recursive_frames")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_bounds_recursive_frames",
+        "forever proc(value usize) usize { return forever(value) }\nanswer proc($N usize) i16 { return 42 }\nmain proc() i16 { return answer(forever(2)) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds" },
+    )
+}
+
+comptime_call_foreign_execution_remains_a_source_trap test {
+    context := try support.init("comptime_call_foreign_execution_remains_a_source_trap")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_foreign_execution_remains_a_source_trap",
+        "getpid c_func() c_int\nanswer proc($N c_int) i16 { return 42 }\nmain proc() i16 { return answer(getpid()) }\n",
+        support.Expected{ stdout = "", diagnostic = "foreign function calls are unsupported" },
+    )
+}
+
+specialization_parameterless_type_producer_is_cached test {
+    context := try support.init("specialization_parameterless_type_producer_is_cached")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_parameterless_type_producer_is_cached",
+        "Token proc() type { return struct { value i16 } }\nmain proc() i16 {\n    first Token() :: { value = 42 }\n    second Token() :: first\n    return second.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_explicit_identity_independent_widths test {
+    context := try support.init("specialization_explicit_identity_independent_widths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_explicit_identity_independent_widths",
+        "identity proc($T type, value T) T { return value }\nmain proc() i16 {\n    narrow u8 :: identity(u8, 40)\n    wide i16 :: identity(i16, 2)\n    return i16(narrow) + wide\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_inferred_identity_independent_widths test {
+    context := try support.init("specialization_inferred_identity_independent_widths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_inferred_identity_independent_widths",
+        "identity proc($T type, value T) T { return value }\nmain proc() i16 {\n    narrow u8 :: 40\n    wide i16 :: 2\n    first u8 :: identity(narrow)\n    second i16 :: identity(wide)\n    return i16(first) + second\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_cached_nominal_type_through_aliases test {
+    context := try support.init("specialization_cached_nominal_type_through_aliases")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_cached_nominal_type_through_aliases",
+        "Box proc($T type) type { return struct { value T } }\nElement :: alias i16\nFirst :: Box(Element)\nSecond :: alias Box(i16)\nread proc(value Box(i16)) i16 { return value.value }\nmain proc() i16 {\n    first First :: { value = 40 }\n    second Second :: first\n    repeated Box(i16) :: second\n    return read(repeated) + 2\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_different_type_arguments_remain_nominally_distinct test {
+    context := try support.init("specialization_different_type_arguments_remain_nominally_distinct")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_different_type_arguments_remain_nominally_distinct",
+        "Box proc($T type) type { return struct { value T } }\nmain proc() i16 {\n    signed Box(i16) :: { value = 42 }\n    unsigned Box(u16) :: signed\n    return i16(unsigned.value)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+specialization_generated_record_and_mutable_array_storage test {
+    context := try support.init("specialization_generated_record_and_mutable_array_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_generated_record_and_mutable_array_storage",
+        "Fixed proc($T type, $N usize) type {\n    return struct { values [N]mut T }\n}\nmain proc() i16 {\n    fixed Fixed(i16, 2) := { values = [40, 0] }\n    fixed.values[1] = 2\n    copy Fixed(i16, 2) :: fixed\n    return copy.values[0] + copy.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_infers_generated_record_type_and_length test {
+    context := try support.init("specialization_infers_generated_record_type_and_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_infers_generated_record_type_and_length",
+        "Fixed proc($T type, $N usize) type {\n    return struct { values [N]mut T }\n}\nfirst proc($T type, $N usize, value @Fixed(T, N)) T {\n    return value.values[0]\n}\nlength proc($T type, $N usize, value @Fixed(T, N)) usize {\n    return N\n}\nmain proc() i16 {\n    fixed Fixed(i16, 2) :: { values = [40, 1] }\n    return first(&fixed) + i16(length(&fixed))\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_infers_pointer_array_element_and_length test {
+    context := try support.init("specialization_infers_pointer_array_element_and_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_infers_pointer_array_element_and_length",
+        "endpoints proc($T type, $N usize, values @[N]T) T {\n    return values[0] + values[N - 1]\n}\nmain proc() i16 {\n    values [2]i16 :: [40, 2]\n    return endpoints(&values)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_nested_runtime_calls test {
+    context := try support.init("specialization_nested_runtime_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_nested_runtime_calls",
+        "identity proc($T type, value T) T { return value }\nforward proc($T type, value T) T { return identity(value) }\nmain proc() i16 { return forward(i16, 42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_nested_generated_types test {
+    context := try support.init("specialization_nested_generated_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_nested_generated_types",
+        "Box proc($T type) type { return struct { value T } }\nWrapped proc($T type) type { return struct { box Box(T) } }\nmain proc() i16 {\n    wrapped Wrapped(i16) :: { box = Box(i16){ value = 42 } }\n    return wrapped.box.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_recursive_runtime_call_reuses_instance test {
+    context := try support.init("specialization_recursive_runtime_call_reuses_instance")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_recursive_runtime_call_reuses_instance",
+        "repeat proc($T type, value T, remaining usize) T {\n    if (remaining == 0) return value\n    return repeat(value, remaining - 1)\n}\nmain proc() i16 { return repeat(i16, 42, 3) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_immutable_scalar_arguments_and_expressions test {
+    context := try support.init("specialization_immutable_scalar_arguments_and_expressions")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_immutable_scalar_arguments_and_expressions",
+        "base usize :: 1\nFixed proc($T type, $N usize) type {\n    return struct { values [N]mut T }\n}\nmain proc() i16 {\n    count usize :: base + 1\n    fixed Fixed(i16, count) :: { values = [40, 2] }\n    same Fixed(i16, 2) :: fixed\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_rejects_mutable_compile_time_argument test {
+    context := try support.init("specialization_rejects_mutable_compile_time_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_rejects_mutable_compile_time_argument",
+        "value proc($N usize, result i16) i16 { return result }\nmain proc() i16 {\n    count usize := 2\n    return value(count, 42)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+specialization_rejects_runtime_compile_time_argument test {
+    context := try support.init("specialization_rejects_runtime_compile_time_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_rejects_runtime_compile_time_argument",
+        "value proc($N usize, result i16) i16 { return result }\nruntime proc(count usize) i16 { return value(count, 42) }\nmain proc() i16 { return runtime(2) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+specialization_boolean_value_parameters test {
+    context := try support.init("specialization_boolean_value_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_boolean_value_parameters",
+        "choose proc($enabled bool, value i16) i16 {\n    if (enabled) return value\n    return value + 2\n}\nmain proc() i16 {\n    enabled :: true\n    if (choose(enabled, 40) != 40) return 0\n    return choose(false, 40)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_string_value_parameters test {
+    context := try support.init("specialization_string_value_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_string_value_parameters",
+        "offset proc($text string, value i16) i16 {\n    return value + i16(text.len)\n}\nmain proc() i16 { return offset(\"ab\", 40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_callback_value_parameters test {
+    context := try support.init("specialization_callback_value_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_callback_value_parameters",
+        "increment proc(value i16) i16 { return value + 2 }\napply proc($T type, $callback proc(value T) T, value T) T {\n    return callback(value)\n}\nmain proc() i16 { return apply(i16, increment, 40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_type_producer_conditional_returns test {
+    context := try support.init("specialization_type_producer_conditional_returns")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_type_producer_conditional_returns",
+        "Choose proc($wide bool) type {\n    if (wide) return struct { value i64 }\n    return struct { value i16 }\n}\nmain proc() i16 {\n    narrow Choose(false) :: { value = 40 }\n    wide Choose(true) :: { value = 2 }\n    return narrow.value + i16(wide.value)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_type_producer_local_computed_storage_count test {
+    context := try support.init("specialization_type_producer_local_computed_storage_count")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_type_producer_local_computed_storage_count",
+        "Fixed proc($T type, $N usize) type {\n    count usize :: N + 1\n    return struct { values [count]mut T }\n}\nmain proc() i16 {\n    fixed Fixed(i16, 1) := { values = [40, 0] }\n    fixed.values[1] = 2\n    return fixed.values[0] + fixed.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_rejects_out_of_range_unused_value_argument test {
+    context := try support.init("specialization_rejects_out_of_range_unused_value_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_rejects_out_of_range_unused_value_argument",
+        "ignore proc($N u8) i16 { return 42 }\nmain proc() i16 { return ignore(256) }\n",
+        support.Expected{ stdout = "", diagnostic = "numeric literal is outside" },
+    )
+}
+
+specialization_rejects_inconsistent_inferred_type test {
+    context := try support.init("specialization_rejects_inconsistent_inferred_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_rejects_inconsistent_inferred_type",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    left i16 :: 40\n    right u8 :: 2\n    return first(left, right)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "cannot infer consistent compile-time arguments" },
+    )
+}
+
+specialization_recursive_generated_record_pointer test {
+    context := try support.init("specialization_recursive_generated_record_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_recursive_generated_record_pointer",
+        "Node proc($T type) type {\n    return struct { value T, next ?@Node(T) }\n}\nmain proc() i16 {\n    tail Node(i16) :: { value = 2, next = null }\n    head Node(i16) :: { value = 40, next = &tail }\n    if head.next |next| return head.value + next.value\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_phantom_type_arguments_remain_nominally_distinct test {
+    context := try support.init("specialization_phantom_type_arguments_remain_nominally_distinct")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_phantom_type_arguments_remain_nominally_distinct",
+        "Phantom proc($T type) type { return struct { value i16 } }\nmain proc() i16 {\n    first Phantom(i16) :: { value = 42 }\n    second Phantom(u8) :: first\n    return second.value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+specialization_phantom_value_arguments_remain_nominally_distinct test {
+    context := try support.init("specialization_phantom_value_arguments_remain_nominally_distinct")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_phantom_value_arguments_remain_nominally_distinct",
+        "Tagged proc($N usize) type { return struct { value i16 } }\nmain proc() i16 {\n    first Tagged(1) :: { value = 42 }\n    second Tagged(2) :: first\n    return second.value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+specialization_direct_array_type_return test {
+    context := try support.init("specialization_direct_array_type_return")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_direct_array_type_return",
+        "Array proc($T type, $N usize) type { return [N]T }\nRow :: alias Array(i16, 2)\nmain proc() i16 {\n    row Row :: [40, 2]\n    same Array(i16, 2) :: row\n    return same[0] + same[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_value_parameter_preserves_narrow_arithmetic test {
+    context := try support.init("specialization_value_parameter_preserves_narrow_arithmetic")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_value_parameter_preserves_narrow_arithmetic",
+        "add proc($N u8) i64 { return i64(N + 1) }\nmain proc() i64 { return add(255) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+specialization_optional_value_null_capture_is_safe test {
+    context := try support.init("specialization_optional_value_null_capture_is_safe")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_optional_value_null_capture_is_safe",
+        "read proc($value ?i16) i16 {\n    if value |present| return present\n    return 42\n}\nmain proc() i16 { return read(null) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_optional_value_null_unwrap_traps test {
+    context := try support.init("specialization_optional_value_null_unwrap_traps")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_optional_value_null_unwrap_traps",
+        "read proc($value ?i16) i16 { return value? }\nmain proc() i16 { return read(null) }\n",
+        support.Expected{ stdout = "", diagnostic = "null" },
+    )
+}
+
+specialization_optional_value_present_literal_capture test {
+    context := try support.init("specialization_optional_value_present_literal_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_optional_value_present_literal_capture",
+        "read proc($value ?i16) i16 {\n    if value |present| return present\n    return 0\n}\nmain proc() i16 { return read(42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_optional_callback_unwrap_and_call test {
+    context := try support.init("specialization_optional_callback_unwrap_and_call")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_optional_callback_unwrap_and_call",
+        "increment proc(value i16) i16 { return value + 2 }\ninvoke proc($callback ?proc(value i16) i16, value i16) i16 {\n    return callback?(value)\n}\nmain proc() i16 { return invoke(increment, 40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_optional_callback_capture_and_null_comparison test {
+    context := try support.init("specialization_optional_callback_capture_and_null_comparison")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_optional_callback_capture_and_null_comparison",
+        "increment proc(value i16) i16 { return value + 2 }\ninvoke proc($callback ?proc(value i16) i16, value i16) i16 {\n    if callback |present| return present(value)\n    if (callback == null) return value + 2\n    return 0\n}\nmain proc() i16 {\n    if (invoke(increment, 40) != 42) return 0\n    return invoke(null, 40)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_string_argument_preserves_slice_annotation test {
+    context := try support.init("specialization_string_argument_preserves_slice_annotation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_string_argument_preserves_slice_annotation",
+        "length proc($text []u8) usize { return text.len }\nmain proc() i16 { return 40 + i16(length(\"ab\")) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_cached_phantom_type_canonical_builtin_alias test {
+    context := try support.init("specialization_cached_phantom_type_canonical_builtin_alias")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_cached_phantom_type_canonical_builtin_alias",
+        "Phantom proc($T type) type { return struct { value i16 } }\nElement :: alias i64\nmain proc() i16 {\n    first Phantom(int) :: { value = 42 }\n    second Phantom(i64) :: first\n    third Phantom(Element) :: second\n    return third.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_infers_type_through_type_producer_wrapper test {
+    context := try support.init("specialization_infers_type_through_type_producer_wrapper")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_infers_type_through_type_producer_wrapper",
+        "Box proc($T type) type { return struct { value T } }\nWrapped proc($T type) type { return Box(T) }\nread proc($T type, value @Wrapped(T)) T { return value.value }\nmain proc() i16 {\n    value Wrapped(i16) :: { value = 42 }\n    return read(&value)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_string_cache_uses_decoded_value test {
+    context := try support.init("specialization_string_cache_uses_decoded_value")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_string_cache_uses_decoded_value",
+        "Tag proc($text string) type { return struct { value i16 } }\nmain proc() i16 {\n    first Tag(\"a\") :: { value = 42 }\n    second Tag(\"\\x61\") :: first\n    return second.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_rejects_invalid_compile_time_comparison test {
+    context := try support.init("specialization_rejects_invalid_compile_time_comparison")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_rejects_invalid_compile_time_comparison",
+        "ignore proc($flag bool) i16 { return 42 }\nmain proc() i16 { return ignore(1 == true) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+specialization_contextual_literal_after_typed_argument test {
+    context := try support.init("specialization_contextual_literal_after_typed_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_contextual_literal_after_typed_argument",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(value, 0)\n    return result\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_contextual_literal_before_typed_argument test {
+    context := try support.init("specialization_contextual_literal_before_typed_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_contextual_literal_before_typed_argument",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(0, value)\n    return result + 42\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_contextual_nested_integer_literal_expressions test {
+    context := try support.init("specialization_contextual_nested_integer_literal_expressions")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_contextual_nested_integer_literal_expressions",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 40\n    left i16 :: first(-(1 + 1), value)\n    right i16 :: first(value, (3 * 4) + 2)\n    return left + right + 4\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialization_contextual_literal_right_out_of_range test {
+    context := try support.init("specialization_contextual_literal_right_out_of_range")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_contextual_literal_right_out_of_range",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() u8 {\n    value u8 :: 42\n    return first(value, 256)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "numeric literal is outside" },
+    )
+}
+
+specialization_contextual_literal_left_out_of_range test {
+    context := try support.init("specialization_contextual_literal_left_out_of_range")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialization_contextual_literal_left_out_of_range",
+        "first proc($T type, left T, right T) T { return left }\nmain proc() u8 {\n    value u8 :: 42\n    return first(256, value)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "numeric literal is outside" },
+    )
+}
+
+fallible_success_and_catch_short_circuit test {
+    context := try support.init("fallible_success_and_catch_short_circuit")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_success_and_catch_short_circuit",
+        "Error :: enum { failed }\ngood proc() i16 ! Error { return 42 }\nbad_fallback proc() i16 { value i16 :: 32767\nreturn value + 1 }\nmain proc() i16 { return good() catch bad_fallback() }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_try_composed_errors_and_capture test {
+    context := try support.init("fallible_try_composed_errors_and_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_try_composed_errors_and_capture",
+        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() i16 ! Second { return .second }\nmiddle proc() i16 ! (First | Second) { return try leaf() }\nmain proc() i16 {\n    return middle() catch |err| match err {\n        .first: 0,\n        .second: 42,\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_matched_error_residual_return test {
+    context := try support.init("fallible_matched_error_residual_return")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_matched_error_residual_return",
+        "First :: enum { first }\nSecond :: enum { second }\nbroad proc() i16 ! (First | Second) { return .second }\nnarrow proc() i16 ! Second {\n    broad() catch |err| {\n        match err {\n            .first: return 0,\n            else: return err,\n        }\n    }\n    return 0\n}\nmain proc() i16 { return narrow() catch 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_matched_tagged_error_residual_return test {
+    context := try support.init("fallible_matched_tagged_error_residual_return")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_matched_tagged_error_residual_return",
+        "Missing :: enum { missing }\nDetail :: union(enum) { failed i16 }\nbroad proc() i16 ! (Missing | Detail) { return .failed{42} }\nnarrow proc() i16 ! Detail {\n    broad() catch |err| {\n        match err {\n            .missing: return 0,\n            else: return err,\n        }\n    }\n    return 0\n}\nmain proc() i16 {\n    return narrow() catch |err| match err { .failed |code|: code }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_storage_arrays_and_callbacks test {
+    context := try support.init("fallible_storage_arrays_and_callbacks")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_storage_arrays_and_callbacks",
+        "Error :: enum { failed }\nCallback :: alias @proc(value i16) i16 ! Error\nBox :: struct { callback Callback, result i16 ! Error }\nmaybe proc(value i16) i16 ! Error {\n    if (value == 0) return .failed\n    return value\n}\nmain proc() i16 {\n    box Box :: { callback = maybe, result = 40 }\n    values [2](i16 ! Error) :: [box.result, .failed]\n    first :: values[0] catch 0\n    second :: values[1] catch 2\n    return box.callback(first + second) catch 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_struct_error_payload test {
+    context := try support.init("fallible_struct_error_payload")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_struct_error_payload",
+        "Failure :: struct { code i16 }\nfail proc() i16 ! Failure { return Failure { code = 42 } }\nmain proc() i16 { return fail() catch |err| err.code }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_tagged_error_payload test {
+    context := try support.init("fallible_tagged_error_payload")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_tagged_error_payload",
+        "Error :: union(enum) { failed i16, empty void }\nfail proc() i16 ! Error { return .failed{42} }\nmain proc() i16 {\n    return fail() catch |err| match err {\n        .failed |code|: code,\n        .empty: 0,\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_composed_tagged_payload_propagation test {
+    context := try support.init("fallible_composed_tagged_payload_propagation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_composed_tagged_payload_propagation",
+        "Missing :: enum { missing }\nDetail :: union(enum) { failed i16, empty void }\nleaf proc() i16 ! Detail { return .failed{42} }\nforward proc() i16 ! (Missing | Detail) { return try leaf() }\nmain proc() i16 {\n    return forward() catch |err| match err {\n        .missing: 0,\n        .failed |code|: code,\n        .empty: 0,\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_terminal_catch_block test {
+    context := try support.init("fallible_terminal_catch_block")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_terminal_catch_block",
+        "Error :: enum { failed }\nfail proc() i16 ! Error { return .failed }\nmain proc() i16 {\n    return fail() catch |err| {\n        if (err == Error.failed) return 42\n        return 0\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_void_catch_and_fallthrough test {
+    context := try support.init("fallible_void_catch_and_fallthrough")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_void_catch_and_fallthrough",
+        "Error :: enum { failed }\ngood proc(value @mut i16) void ! Error { value^ = 40 }\nfail proc() void ! Error { return .failed }\nmain proc() i16 {\n    value i16 := 0\n    good(&value) catch { value = 0 }\n    fail() catch { value = value + 2 }\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_scope_lifo_and_live_values test {
+    context := try support.init("cleanup_scope_lifo_and_live_values")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_scope_lifo_and_live_values",
+        "main proc() int {\n    value := 0\n    {\n        defer value = value * 10 + 2\n        defer value = value * 10 + 4\n    }\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_return_payload_before_mutation test {
+    context := try support.init("cleanup_return_payload_before_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_return_payload_before_mutation",
+        "Pair :: struct { a i16, b i16 }\nget proc() Pair {\n    value Pair := { a = 40, b = 2 }\n    defer value.a = 0\n    return value\n}\nmain proc() i16 { value :: get()\nreturn value.a + value.b }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_loop_exited_scopes test {
+    context := try support.init("cleanup_loop_exited_scopes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_loop_exited_scopes",
+        "main proc() int {\n    value := 0\n    for 0..4 |i| {\n        defer value = value + 1\n        if (i == 0) continue\n        {\n            defer value = value + 10\n            break\n        }\n    }\n    return value\n}\n",
+        support.Expected{ stdout = "12\n", diagnostic = null },
+    )
+}
+
+cleanup_only_reached_registrations test {
+    context := try support.init("cleanup_only_reached_registrations")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_only_reached_registrations",
+        "write proc(value @mut i64) void {\n    defer value^ = value^ + 40\n    if (true) return\n    defer value^ = 0\n}\nmain proc() int { value := 2\nwrite(&value)\nreturn value }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_errdefer_capture_and_order test {
+    context := try support.init("cleanup_errdefer_capture_and_order")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_errdefer_capture_and_order",
+        "Error :: enum { failed }\nfail proc(value @mut i64) int ! Error {\n    defer value^ = value^ * 10 + 2\n    errdefer |err| if (err == Error.failed) value^ = value^ * 10 + 4\n    return .failed\n}\nmain proc() int { value := 0\nignored :: fail(&value) catch 0\nreturn value + ignored }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_errdefer_skip_on_success_and_scope_exit test {
+    context := try support.init("cleanup_errdefer_skip_on_success_and_scope_exit")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_errdefer_skip_on_success_and_scope_exit",
+        "Error :: enum { failed }\ngood proc(value @mut i64) int ! Error {\n    errdefer value^ = 0\n    { errdefer value^ = 0 }\n    defer value^ = value^ + 2\n    return 1\n}\nmain proc() int { value := 40\nignored :: good(&value) catch 0\nreturn value }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_try_propagation test {
+    context := try support.init("cleanup_try_propagation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_try_propagation",
+        "Error :: enum { failed }\nleaf proc() void ! Error { return .failed }\nouter proc(value @mut i64) void ! Error {\n    defer value^ = value^ + 2\n    errdefer value^ = value^ + 40\n    try leaf()\n    value^ = 0\n}\nmain proc() int { value := 0\nouter(&value) catch {}\nreturn value }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+cleanup_direct_fallible_return_and_expired_scope test {
+    context := try support.init("cleanup_direct_fallible_return_and_expired_scope")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_direct_fallible_return_and_expired_scope",
+        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() i16 ! Second { return .second }\nforward proc(value @mut i64) i16 ! (First | Second) {\n    { errdefer value^ = 0 }\n    errdefer value^ = value^ + 40\n    defer value^ = value^ + 2\n    return leaf()\n}\nmain proc() int { value := 0\nignored :: forward(&value) catch 0\nreturn value }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_aggregate_success_copy test {
+    context := try support.init("fallible_aggregate_success_copy")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_aggregate_success_copy",
+        "Error :: enum { failed }\nPair :: struct { left i16, right i16 }\nread proc() Pair ! Error {\n    value Pair := { left = 40, right = 2 }\n    defer value.left = 0\n    return value\n}\nmain proc() i16 {\n    value :: read() catch Pair { left = 0, right = 0 }\n    return value.left + value.right\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_borrowed_slice_success test {
+    context := try support.init("fallible_borrowed_slice_success")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_borrowed_slice_success",
+        "Error :: enum { failed }\nborrow proc(values []mut i16) []mut i16 ! Error { return values }\nmain proc() i16 {\n    values [2]mut i16 := [40, 2]\n    view :: borrow(values[..]) catch &[]\n    view[0] = view[0] + view[1]\n    return values[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_optional_pointer_success test {
+    context := try support.init("fallible_optional_pointer_success")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_optional_pointer_success",
+        "Error :: enum { failed }\nborrow proc(value @mut i16) ?@mut i16 ! Error { return value }\nmain proc() i16 {\n    value i16 := 40\n    pointer :: borrow(&value) catch null\n    if pointer |present| present^ = present^ + 2\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+fallible_trap_is_not_caught test {
+    context := try support.init("fallible_trap_is_not_caught")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_trap_is_not_caught",
+        "Error :: enum { failed }\nbad proc() int ! Error { value :: [1]\nreturn value[2] }\nmain proc() int { return bad() catch 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+fallible_try_requires_channel test {
+    context := try support.init("fallible_try_requires_channel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_try_requires_channel",
+        "main proc() int { return try 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "" },
+    )
+}
+
+fallible_incompatible_propagation test {
+    context := try support.init("fallible_incompatible_propagation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "fallible_incompatible_propagation",
+        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() int ! First { return .first }\nbad proc() int ! Second { return try leaf() }\nmain proc() int { return bad() catch 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "" },
+    )
+}
+
+cleanup_return_rejected test {
+    context := try support.init("cleanup_return_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_return_rejected",
+        "main proc() int { defer return 0\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "" },
+    )
+}
+
+cleanup_errdefer_requires_fallible_function test {
+    context := try support.init("cleanup_errdefer_requires_fallible_function")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "cleanup_errdefer_requires_fallible_function",
+        "main proc() int { errdefer main()\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "" },
+    )
+}
+
+slice_mutation_alias_calls test {
+    context := try support.init("slice_mutation_alias_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_mutation_alias_calls",
+        "update proc(values []mut i16) []mut i16 {\n    values[1] = values[0] + 2\n    return values[1..]\n}\nmain proc() i16 {\n    values [4]mut i16 := [0, 40, 0, 0]\n    view :: update(values[1..3])\n    copy :: view\n    copy[0] = copy[0] + 1\n    return values[2] - i16(view.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_empty_one_past_and_pointer_identity test {
+    context := try support.init("slice_empty_one_past_and_pointer_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_empty_one_past_and_pointer_identity",
+        "main proc() bool {\n    values [2]mut i16 := [40, 2]\n    all :: values[..]\n    empty :: all[2..2]\n    return empty.len == 0 and empty.ptr == all.ptr + 2\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+slice_nested_record_storage test {
+    context := try support.init("slice_nested_record_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_nested_record_storage",
+        "Row :: struct { values []mut i16 }\nidentity proc(row Row) Row { return row }\nmain proc() i16 {\n    values [2]mut i16 := [40, 2]\n    rows [1]Row :: [{ values = values[..] }]\n    selected :: identity(rows[0])\n    selected.values[0] = selected.values[0] + selected.values[1]\n    return values[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_empty_mutable_literal test {
+    context := try support.init("slice_empty_mutable_literal")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_empty_mutable_literal",
+        "main proc() usize { values []mut i16 :: &[]\nreturn values.len }\n",
+        support.Expected{ stdout = "0\n", diagnostic = null },
+    )
+}
+
+slice_string_sentinel test {
+    context := try support.init("slice_string_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_string_sentinel",
+        "read proc(text [;0]u8) u8 {\n    suffix :: text[1..;0]\n    return suffix.ptr[suffix.len] + suffix[0]\n}\nmain proc() u8 { return read(\"!*\") }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_checked_sentinel test {
+    context := try support.init("slice_checked_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_checked_sentinel",
+        "main proc() u8 {\n    values [3]mut u8 := [40, 2, 0]\n    pointer *mut u8 :: &values[0]\n    text [;0]mut u8 :: pointer[..2;0]\n    text[0] = text[0] + text[1]\n    plain []u8 :: text\n    return plain[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_reversed_bounds test {
+    context := try support.init("slice_reversed_bounds")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_reversed_bounds",
+        "main proc() usize { a :: [1, 2]\nreturn a[2..1].len }\n",
+        support.Expected{ stdout = "", diagnostic = "slice" },
+    )
+}
+
+slice_excessive_bounds test {
+    context := try support.init("slice_excessive_bounds")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_excessive_bounds",
+        "main proc() usize { a :: [1, 2]\nreturn a[..3].len }\n",
+        support.Expected{ stdout = "", diagnostic = "slice" },
+    )
+}
+
+slice_index_at_length test {
+    context := try support.init("slice_index_at_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_index_at_length",
+        "main proc() i64 { a :: [40, 2]\ns :: a[..]\nreturn s[s.len] }\n",
+        support.Expected{ stdout = "", diagnostic = "slice" },
+    )
+}
+
+slice_sentinel_mismatch test {
+    context := try support.init("slice_sentinel_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_sentinel_mismatch",
+        "main proc() usize { a :: [1, 2, 3]\nreturn a[..2;0].len }\n",
+        support.Expected{ stdout = "", diagnostic = "sentinel" },
+    )
+}
+
+slice_readonly_write_rejected test {
+    context := try support.init("slice_readonly_write_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_readonly_write_rejected",
+        "main proc() int { a :: [40, 2]\ns :: a[..]\ns[0] = 42\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "writable" },
+    )
+}
+
+optional_values_storage_calls test {
+    context := try support.init("optional_values_storage_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_values_storage_calls",
+        "Box :: struct { value ?i16 }\nchoose proc(value ?i16) ?i16 { return value }\nmain proc() i16 {\n    box Box := { value = 40 }\n    options [2]mut ?i16 := [null, 2]\n    options[0] = choose(box.value)\n    return options[0]? + options[1]?\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_capture_and_null_transition test {
+    context := try support.init("optional_capture_and_null_transition")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_capture_and_null_transition",
+        "main proc() i16 {\n    value ?i16 := 40\n    total i16 := 0\n    while value |payload| {\n        total = total + payload\n        value = null\n        continue\n    }\n    if value |unused| return unused\n    if (value != null) return 0\n    value = 2\n    if value |payload| return total + payload\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_pointer_identity_and_mutation test {
+    context := try support.init("optional_pointer_identity_and_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_pointer_identity_and_mutation",
+        "main proc() i16 {\n    value i16 := 40\n    pointer ?@mut i16 := &value\n    if pointer |present| present^ = present^ + 2\n    readonly ?@i16 :: pointer\n    if (readonly == null) return 0\n    return readonly?^\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_null_unwrap test {
+    context := try support.init("optional_null_unwrap")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_null_unwrap",
+        "main proc() i16 { value ?i16 :: null\nreturn value? }\n",
+        support.Expected{ stdout = "", diagnostic = "null" },
+    )
+}
+
+optional_untaken_unwrap test {
+    context := try support.init("optional_untaken_unwrap")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_untaken_unwrap",
+        "main proc() i16 { value ?i16 :: null\nif (false) return value?\nreturn 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+memory_layout_padded_aggregates test {
+    context := try support.init("memory_layout_padded_aggregates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_layout_padded_aggregates",
+        "Padded :: struct { tag u8, value u64 }\nEmpty :: struct {}\nmain proc() bool {\n    return (\n        sizeof!(Padded) == 16 and alignof!(Padded) == 8\n        and sizeof!([3]Padded) == 48 and sizeof!([]u8) == 16\n        and sizeof!(?@i16) == 8 and sizeof!(Empty) == 0\n    )\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+memory_pointer_cast_byte_alias test {
+    context := try support.init("memory_pointer_cast_byte_alias")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_pointer_cast_byte_alias",
+        "main proc() u16 {\n    value u16 := 40\n    bytes *mut u8 :: ptrcast!(&value)\n    bytes[0] = bytes[0] + 2\n    whole @mut u16 :: ptrcast!(bytes)\n    return whole^\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+memory_constcast_slice test {
+    context := try support.init("memory_constcast_slice")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_constcast_slice",
+        "main proc() i16 {\n    values [2]mut i16 := [40, 2]\n    readonly []i16 :: values[..]\n    writable []mut i16 :: constcast!(readonly)\n    writable[0] = writable[0] + writable[1]\n    return values[0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+memory_typed_copy_and_set test {
+    context := try support.init("memory_typed_copy_and_set")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_typed_copy_and_set",
+        "Pair :: struct { number i16, ready bool }\nmain proc() i16 {\n    source [2]Pair :: [{ number = 40, ready = true }, { number = 2, ready = false }]\n    target [2]mut Pair := [{ number = 0, ready = false }, { number = 0, ready = false }]\n    memcopy!(target[..], source[..])\n    saved :: target[0]\n    memset!(target[..], { number = 21, ready = true })\n    if (!saved.ready or !target[1].ready) return 0\n    return target[0].number + target[1].number\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+memory_copy_overlap test {
+    context := try support.init("memory_copy_overlap")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_copy_overlap",
+        "main proc() int { a [3]mut i16 := [1, 2, 3]\nmemcopy!(a[1..], a[..2])\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "overlap" },
+    )
+}
+
+memory_copy_length_mismatch test {
+    context := try support.init("memory_copy_length_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_copy_length_mismatch",
+        "main proc() int { a [3]mut i16 := [1, 2, 3]\nmemcopy!(a[..1], a[1..])\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "slice" },
+    )
+}
+
+memory_empty_copy_and_set test {
+    context := try support.init("memory_empty_copy_and_set")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_empty_copy_and_set",
+        "main proc() int { a [0]mut i16 := []\nmemcopy!(a[..], a[..])\nmemset!(a[..], 42)\nreturn 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_nested_presence test {
+    context := try support.init("optional_nested_presence")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_nested_presence",
+        "main proc() i16 { value ??i16 :: 42\nreturn value?? }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+optional_callback_capture_from_call test {
+    context := try support.init("optional_callback_capture_from_call")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_callback_capture_from_call",
+        "increment proc(value i16) i16 { return value + 2 }\nfactory proc() ?@proc(value i16) i16 { return increment }\nmain proc() i16 {\n    if factory() |callback| return callback(40)\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_recursive_record test {
+    context := try support.init("slice_recursive_record")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_recursive_record",
+        "Node :: struct { value i16, children []Node }\nmain proc() i16 {\n    children [0]Node :: []\n    node Node :: { value = 42, children = children[..] }\n    return node.value + i16(node.children.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+slice_full_width_sentinel test {
+    context := try support.init("slice_full_width_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_full_width_sentinel",
+        "main proc() usize {\n    values [2]u64 :: [42, 18446744073709551615]\n    sentinel [;18446744073709551615]u64 :: values[..1;18446744073709551615]\n    return sentinel.len\n}\n",
+        support.Expected{ stdout = "1\n", diagnostic = null },
+    )
+}
+
+memory_pointer_cast_preserves_readonly test {
+    context := try support.init("memory_pointer_cast_preserves_readonly")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_pointer_cast_preserves_readonly",
+        "main proc() int { value i16 :: 40\npointer *mut u8 :: ptrcast!(&value)\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires" },
+    )
+}
+
+slice_sentinel_strengthening_rejected test {
+    context := try support.init("slice_sentinel_strengthening_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_sentinel_strengthening_rejected",
+        "main proc() int { a :: [1, 0]\ns []i64 :: a[..1]\nt [;0]i64 :: s\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible" },
+    )
+}
+
+slice_fixed_signed_index_rejected test {
+    context := try support.init("slice_fixed_signed_index_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_fixed_signed_index_rejected",
+        "main proc() i64 { a :: [42]\ns :: a[..]\ni i16 :: 0\nreturn s[i] }\n",
+        support.Expected{ stdout = "", diagnostic = "index" },
+    )
+}
+
+optional_nonoptional_capture_rejected test {
+    context := try support.init("optional_nonoptional_capture_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "optional_nonoptional_capture_rejected",
+        "main proc() int { if true |payload| return 1\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "condition" },
+    )
+}
+
+memory_foreign_main_rejected test {
+    context := try support.init("memory_foreign_main_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_foreign_main_rejected",
+        "main c_func() i16\n",
+        support.Expected{ stdout = "", diagnostic = "main must" },
+    )
+}
+
+memory_opaque_dereference_rejected test {
+    context := try support.init("memory_opaque_dereference_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_opaque_dereference_rejected",
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer^\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "dereference" },
+    )
+}
+
+memory_opaque_index_rejected test {
+    context := try support.init("memory_opaque_index_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_opaque_index_rejected",
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer[0]\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexing" },
+    )
+}
+
+memory_opaque_slice_rejected test {
+    context := try support.init("memory_opaque_slice_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_opaque_slice_rejected",
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer[..1]\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires" },
+    )
+}
+
+memory_opaque_arithmetic_rejected test {
+    context := try support.init("memory_opaque_arithmetic_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "memory_opaque_arithmetic_rejected",
+        "main proc() int { value i16 := 42\npointer *mut anyopaque :: ptrcast!(&value)\ndiscard :: pointer + 1\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires" },
+    )
+}
+
+slice_contextual_borrow_preserves_readonly test {
+    context := try support.init("slice_contextual_borrow_preserves_readonly")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_contextual_borrow_preserves_readonly",
+        "main proc() i16 { values [1]i16 :: [40]\nview []mut i16 :: &values\nview[0] = 42\nreturn values[0] }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible" },
+    )
+}
+
+slice_contextual_scalar_borrow_rejected test {
+    context := try support.init("slice_contextual_scalar_borrow_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_contextual_scalar_borrow_rejected",
+        "main proc() i16 { value i16 := 42\nview []mut i16 :: &value\nreturn view[0] }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible" },
+    )
+}
+
+slice_implicit_borrow_preserves_binding_mutability test {
+    context := try support.init("slice_implicit_borrow_preserves_binding_mutability")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "slice_implicit_borrow_preserves_binding_mutability",
+        "main proc() i16 { values [1]mut i16 :: [40]\nview []mut i16 :: values\nview[0] = 42\nreturn values[0] }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible" },
+    )
+}
+
+callback_concrete_vtable test {
+    context := try support.init("callback_concrete_vtable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_concrete_vtable",
+        "VTable :: struct { run @proc(context @mut State, amount i16) i16 }\nState :: struct { value i16, vtable @VTable }\nadd proc(context @mut State, amount i16) i16 {\n    context.value = context.value + amount\n    return context.value\n}\ntable VTable :: { run = add }\nmain proc() i16 {\n    state State := { value = 40, vtable = &table }\n    return state.vtable.run(&state, 2)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+callback_pass_return_store_replace test {
+    context := try support.init("callback_pass_return_store_replace")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_pass_return_store_replace",
+        "Callback :: alias @proc(value i16) i16\nHolder :: struct { run Callback }\nincrement proc(value i16) i16 { return value + 1 }\ntwice proc(value i16) i16 { return value + value }\nchoose proc(first Callback, second Callback, flag bool) Callback {\n    if (flag) return first\n    return second\n}\napply proc(callback Callback, value i16) i16 { return callback(value) }\nmain proc() i16 {\n    callback @proc(n i16) i16 := increment\n    callback = twice\n    holder Holder := { run = increment }\n    holder.run = callback\n    callbacks [2]mut Callback := [increment, twice]\n    callbacks[0] = choose(holder.run, increment, true)\n    return apply(callbacks[0], 21)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+callback_nested_aggregate_arguments_and_result test {
+    context := try support.init("callback_nested_aggregate_arguments_and_result")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_nested_aggregate_arguments_and_result",
+        "Payload :: struct { values [2]i16, pointer @mut i16 }\nCallback :: alias @proc(input Payload, rows [2][2]i16) Payload\ntransform proc(input Payload, rows [2][2]i16) Payload {\n    input.pointer^ = input.pointer^ + rows[1][0]\n    return { values = [input.values[0] + rows[0][1], rows[1][1]], pointer = input.pointer }\n}\nselect proc(callback Callback) Callback { return callback }\nmain proc() [3]i16 {\n    value i16 := 40\n    callback Callback :: select(transform)\n    result :: callback({ values = [40, 0], pointer = &value }, [[0, 2], [2, 42]])\n    return [result.values[0], result.values[1], result.pointer^]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+callback_storage_address_is_data_pointer test {
+    context := try support.init("callback_storage_address_is_data_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_storage_address_is_data_pointer",
+        "Callback :: alias @proc(value i16) i16\nincrement proc(value i16) i16 { return value + 1 }\ntwice proc(value i16) i16 { return value + value }\nreplace proc(slot @mut Callback, callback Callback) void { slot^ = callback }\nmain proc() i16 {\n    callback Callback := increment\n    replace(&callback, twice)\n    return (&callback)^(21)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+callback_structural_inline_aggregate_signature test {
+    context := try support.init("callback_structural_inline_aggregate_signature")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_structural_inline_aggregate_signature",
+        "identity proc(value struct { values [2]i16, pointer @i16 }) struct { values [2]i16, pointer @i16 } {\n    return value\n}\nmain proc() i16 {\n    number i16 :: 2\n    callback @proc(input struct { values [2]i16, pointer @i16 }) struct { values [2]i16, pointer @i16 } :: identity\n    result :: callback({ values = [40, 0], pointer = &number })\n    return result.values[0] + result.pointer^\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+callback_parameter_signature_mismatch test {
+    context := try support.init("callback_parameter_signature_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_parameter_signature_mismatch",
+        "wrong proc(value u16) i16 { return 42 }\nmain proc() i16 { callback @proc(value i16) i16 :: wrong\nreturn callback(1) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+callback_result_signature_mismatch test {
+    context := try support.init("callback_result_signature_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_result_signature_mismatch",
+        "wrong proc(value i16) u16 { return 42 }\nmain proc() i16 { callback @proc(value i16) i16 :: wrong\nreturn callback(1) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+callback_nested_signature_mismatch test {
+    context := try support.init("callback_nested_signature_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_nested_signature_mismatch",
+        "wrong proc(value struct { rows [2][2]u16 }) i16 { return 42 }\nmain proc() i16 {\n    callback @proc(value struct { rows [2][2]i16 }) i16 :: wrong\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+callback_pointer_mutability_signature_mismatch test {
+    context := try support.init("callback_pointer_mutability_signature_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_pointer_mutability_signature_mismatch",
+        "wrong proc(value @mut i16) i16 { return value^ }\nmain proc() i16 { callback @proc(value @i16) i16 :: wrong\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+callback_wrong_argument_type test {
+    context := try support.init("callback_wrong_argument_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_wrong_argument_type",
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callback @proc(value i16) i16 :: identity\nreturn callback(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+callback_wrong_argument_count test {
+    context := try support.init("callback_wrong_argument_count")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_wrong_argument_count",
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callback @proc(value i16) i16 :: identity\nreturn callback() }\n",
+        support.Expected{ stdout = "", diagnostic = "argument count does not match" },
+    )
+}
+
+callback_readonly_vtable_assignment test {
+    context := try support.init("callback_readonly_vtable_assignment")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_readonly_vtable_assignment",
+        "VTable :: struct { run @proc(value i16) i16 }\nidentity proc(value i16) i16 { return value }\nreplace proc(table @VTable) void { table.run = identity }\nmain proc() i16 {\n    table VTable := { run = identity }\n    replace(&table)\n    return 42\n}\n",
+        support.Expected{ stdout = "", diagnostic = "pointer assignment requires a mutable pointee" },
+    )
+}
+
+callback_readonly_array_assignment test {
+    context := try support.init("callback_readonly_array_assignment")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_readonly_array_assignment",
+        "identity proc(value i16) i16 { return value }\nmain proc() i16 { callbacks [1]@proc(value i16) i16 := [identity]\ncallbacks[0] = identity\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+callback_invalid_annotation_recovery test {
+    context := try support.init("callback_invalid_annotation_recovery")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_invalid_annotation_recovery",
+        "bad proc(callback @proc(value void) i16) void {}\nmain proc() i16 { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "void cannot be stored" },
+    )
+}
+
+callback_mutable_signature_rejected test {
+    context := try support.init("callback_mutable_signature_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_mutable_signature_rejected",
+        "bad proc(callback @mut proc(value i16) i16) void {}\nmain proc() i16 { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "pointer requires a supported concrete pointee type" },
+    )
+}
+
+callback_many_signature_rejected test {
+    context := try support.init("callback_many_signature_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "callback_many_signature_rejected",
+        "bad proc(callback *proc(value i16) i16) void {}\nmain proc() i16 { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "pointer requires a supported concrete pointee type" },
+    )
+}
+
+pointer_assignment_evaluates_rhs_first_once test {
+    context := try support.init("pointer_assignment_evaluates_rhs_first_once")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_assignment_evaluates_rhs_first_once",
+        "Box :: struct { value i16, count i16 }\ntarget proc(p @mut Box) @mut Box {\n    p.count = p.count + 1\n    return p\n}\ninput proc(p @mut Box) i16 {\n    p.count = p.count + 10\n    return p.count\n}\nmain proc() [2]i16 {\n    box Box := { value = 0, count = 0 }\n    target(&box).value = input(&box)\n    return [box.value, box.count]\n}\n",
+        support.Expected{ stdout = "[10, 11]\n", diagnostic = null },
+    )
+}
+
+pointer_recursive_record_type test {
+    context := try support.init("pointer_recursive_record_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_recursive_record_type",
+        "Node :: struct { value i16, next @Node }\nread_next proc(p @Node) i16 { return p.next.value }\nmain proc() i16 { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_many_dereference test {
+    context := try support.init("pointer_many_dereference")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_many_dereference",
+        "read proc(p *i16) i16 { return p^ }\nmain proc() i16 {\n    values [1]mut i16 := [42]\n    return read((&values).ptr)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_many_from_array_element test {
+    context := try support.init("pointer_many_from_array_element")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_many_from_array_element",
+        "main proc() i16 {\n    values [3]mut i16 := [1, 2, 3]\n    pointer *mut i16 :: &values[0]\n    pointer[2] = 42\n    return values[2]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_readonly_child_type_rejected test {
+    context := try support.init("pointer_readonly_child_type_rejected")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_readonly_child_type_rejected",
+        "read proc(p @u16) u16 { return p^ }\nmain proc() u16 { value i16 := 42\nreturn read(&value) }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+pointer_scalar_alias_across_calls test {
+    context := try support.init("pointer_scalar_alias_across_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_scalar_alias_across_calls",
+        "identity proc(p @mut i16) @mut i16 { return p }\nupdate proc(p @mut i16) void { p^ = p^ + 2 }\nmain proc() i16 {\n    value i16 := 40\n    pointer :: identity(&value)\n    update(pointer)\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_readonly_parameter test {
+    context := try support.init("pointer_readonly_parameter")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_readonly_parameter",
+        "read proc(p @i16) i16 { return p^ }\nmain proc() i16 {\n    value i16 := 42\n    return read(&value)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_record_alias_and_value_copy test {
+    context := try support.init("pointer_record_alias_and_value_copy")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_record_alias_and_value_copy",
+        "Point :: struct { x i16, y i16 }\nset proc(p @mut Point) void { p.x = 40 }\nmain proc() i16 {\n    point Point := { x = 1, y = 2 }\n    pointer :: &point\n    copy :: pointer^\n    set(pointer)\n    if (copy.x != 1) return -1\n    return point.x + pointer.y\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+pointer_array_and_many_index test {
+    context := try support.init("pointer_array_and_many_index")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "pointer_array_and_many_index",
+        "update proc(p @mut [3]mut i16) void {\n    p[1] = p[0] + 2\n    values :: p.ptr\n    values[2] = values[1]\n}\nmain proc() i16 {\n    values [3]mut i16 := [40, 0, 0]\n    update(&values)\n    if ((&values).len != 3) return -1\n    return values[2]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}

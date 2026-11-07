@@ -1,0 +1,1541 @@
+import "@tests/support"
+
+type_arrays_whole_assignment_requires_mutable_binding test {
+    context := try support.init("type_arrays_whole_assignment_requires_mutable_binding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_whole_assignment_requires_mutable_binding",
+        "Bad proc() type {\n    types :: [i16]\n    types = [bool]\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+type_arrays_whole_assignment_checks_shape test {
+    context := try support.init("type_arrays_whole_assignment_checks_shape")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_whole_assignment_checks_shape",
+        "Bad proc() type {\n    types := [[i16]]\n    types = [[i16, bool]]\n    return types[0][0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array literal length does not match its type" },
+    )
+}
+
+type_arrays_indexed_assignment_checks_shape test {
+    context := try support.init("type_arrays_indexed_assignment_checks_shape")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_indexed_assignment_checks_shape",
+        "Bad proc() type {\n    types [1]mut [1]mut type := [[i16]]\n    types[0] = [i16, bool]\n    return types[0][0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array literal length does not match its type" },
+    )
+}
+
+type_arrays_indexed_assignment_checks_value test {
+    context := try support.init("type_arrays_indexed_assignment_checks_value")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_indexed_assignment_checks_value",
+        "Bad proc() type {\n    types [1]mut type := [i16]\n    types[0] = 42\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_arrays_inferred_nested_counts_reject_ragged_initialization test {
+    context := try support.init("type_arrays_inferred_nested_counts_reject_ragged_initialization")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_inferred_nested_counts_reject_ragged_initialization",
+        "Bad proc() type {\n    types [2]mut [_]mut type := [[i8], [i16, bool]]\n    return types[1][0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array literal length does not match its type" },
+    )
+}
+
+type_arrays_preserve_anonymous_nominal_identity_across_reads_and_copies test {
+    context := try support.init("type_arrays_preserve_anonymous_nominal_identity_across_reads_and_copies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_preserve_anonymous_nominal_identity_across_reads_and_copies",
+        "Selected proc() type {\n    types :: [struct { value i16 }, struct { value i16 }]\n    copied :: types\n    if (types[0] != copied[0] or types[0] == types[1]) return bool\n    return struct { first types[0], second copied[0] }\n}\nmain proc() i16 {\n    value Selected() :: { first = { value = 19 }, second = { value = 23 } }\n    copied := value.first\n    copied = value.second\n    return value.first.value + copied.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_empty_shapes_validate_child_lengths test {
+    context := try support.init("type_arrays_empty_shapes_validate_child_lengths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_empty_shapes_validate_child_lengths",
+        "Bad proc() type {\n    types [0][-1]type :: []\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array length must be a nonnegative supported compile-time integer" },
+    )
+}
+
+type_array_procedure_nested_results_in_signatures_storage_and_defaults test {
+    context := try support.init("type_array_procedure_nested_results_in_signatures_storage_and_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_nested_results_in_signatures_storage_and_defaults",
+        "Row :: alias [2]type\nrow proc(wide bool) Row {\n    if (wide) return [i16, [2]i16]\n    return [i8, [2]i8]\n}\nrows proc() [2]Row { return [row(true), row(false)] }\nStorage :: struct { values rows()[0][1], bias rows()[0][0] = 2 }\nread proc(value rows()[0][0]) rows()[0][0] { return value }\nmain proc() i16 {\n    value Storage :: { values = [19, 21] }\n    small rows()[1][1] :: [0, 0]\n    return read(value.values[0]) + value.values[1] + value.bias + i16(small[0])\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_dependent_lengths_and_ordinary_array_inputs test {
+    context := try support.init("type_array_procedure_dependent_lengths_and_ordinary_array_inputs")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_dependent_lengths_and_ordinary_array_inputs",
+        "identity proc($N usize, types [N]type) [N]type { return types }\nrow proc() [2]type { return identity(2, identity(1 + 1, [i16, bool])) }\nBox proc($N usize, types [N]type) type {\n    return struct { value types[0], enabled types[1] = true }\n}\nmain proc() i16 {\n    value Box(2, row()) :: { value = 42 }\n    same Box(1 + 1, [i16, bool]) :: value\n    if (same.enabled) return same.value\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_erased_runtime_generic_parameters test {
+    context := try support.init("type_array_procedure_erased_runtime_generic_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_erased_runtime_generic_parameters",
+        "row proc() [2]type { return [i16, bool] }\nadd proc($types [2]type, left types[0], right types[0]) types[0] {\n    enabled types[1] :: true\n    if (enabled) return left + right\n    return 0\n}\nforward proc(value i16) i16 { return add(row(), value, 2) }\nmain proc() i16 { return forward(40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_inputs_results_and_cache_are_by_value test {
+    context := try support.init("type_array_procedure_inputs_results_and_cache_are_by_value")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_inputs_results_and_cache_are_by_value",
+        "change proc(types [1]mut [2]mut type) [1]mut [2]mut type {\n    copied := types\n    (copied[0])[0] = bool\n    return copied\n}\nseed proc() [1]mut [2]mut type { return [[i16, i8]] }\nSelected proc() type {\n    original [1]mut [2]mut type := $(seed())\n    changed := change(original)\n    (changed[0])[1] = u8\n    cached := change(seed())\n    fresh := seed()\n    if (original[0][0] != i16 or fresh[0][0] != i16) return bool\n    if (cached[0][0] != bool or cached[0][1] != i8) return bool\n    if (changed[0][1] != u8) return bool\n    return original[0][0]\n}\nmain proc() Selected() { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_cache_canonical_leaves_and_nominal_identity test {
+    context := try support.init("type_array_procedure_cache_canonical_leaves_and_nominal_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_cache_canonical_leaves_and_nominal_identity",
+        "Original :: struct { value i16 }\nSame :: alias Original\nleaf proc() type { return Original }\nidentity proc(types [2]type) [2]type { return types }\nBox proc(types [2]type) type { return struct { first types[0], second types[1] } }\nSelected proc() type {\n    leaves :: identity([struct { value i16 }, struct { value i16 }])\n    copied :: identity(leaves)\n    if (leaves[0] == leaves[1] or leaves[0] != copied[0]) return bool\n    if (Box([leaves[0], leaves[0]]) == Box([leaves[1], leaves[1]])) return bool\n    return Box([copied[0], leaves[0]])\n}\nmain proc() i16 {\n    canonical Box(identity([Same, leaf()])) :: {\n        first = { value = 19 }, second = { value = 21 },\n    }\n    cached Box([Original, Original]) :: canonical\n    nominal Selected() :: { first = { value = 1 }, second = { value = 1 } }\n    copy := nominal.first\n    copy = nominal.second\n    return cached.first.value + cached.second.value + nominal.first.value + copy.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_empty_nested_shapes test {
+    context := try support.init("type_array_procedure_empty_nested_shapes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_empty_nested_shapes",
+        "empty proc() [0]type { return [] }\nrows proc(types [0]type) [2][0]type { return [types, empty()] }\nouter proc() [0][2]type { return [] }\nSelected proc(types [2][0]type, absent [0][2]type) type {\n    if (types.len != 2 or types[0].len != 0 or absent.len != 0) return bool\n    for types |row| { for row |_| { return bool } }\n    return i16\n}\nmain proc() Selected(rows(empty()), outer()) { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_array_procedure_rejects_input_shape test {
+    context := try support.init("type_array_procedure_rejects_input_shape")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_input_shape",
+        "first proc(types [2]type) type { return types[0] }\nmain proc() first([i16]) { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array literal length does not match its type" },
+    )
+}
+
+type_array_procedure_rejects_input_leaf test {
+    context := try support.init("type_array_procedure_rejects_input_leaf")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_input_leaf",
+        "first proc(types [1]type) type { return types[0] }\nmain proc() first([42]) { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_array_procedure_rejects_parameter_mutability_mismatch test {
+    context := try support.init("type_array_procedure_rejects_parameter_mutability_mismatch")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_parameter_mutability_mismatch",
+        "row proc() [1]mut type { return [i16] }\nfirst proc(types [1]type) type { return types[0] }\nmain proc() first(row()) { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_array_procedure_rejects_result_shape test {
+    context := try support.init("type_array_procedure_rejects_result_shape")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_result_shape",
+        "bad proc() [1][2]type { return [[i16]] }\nmain proc() bad()[0][0] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array literal length does not match its type" },
+    )
+}
+
+type_array_procedure_rejects_result_leaf test {
+    context := try support.init("type_array_procedure_rejects_result_leaf")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_result_leaf",
+        "bad proc() [1]type { return [42] }\nmain proc() bad()[0] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_array_procedure_result_index_checks_bounds test {
+    context := try support.init("type_array_procedure_result_index_checks_bounds")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_result_index_checks_bounds",
+        "row proc() [1]type { return [i16] }\nmain proc() row()[1] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+type_array_procedure_result_index_requires_usize test {
+    context := try support.init("type_array_procedure_result_index_requires_usize")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_result_index_requires_usize",
+        "row proc() [1]type { return [i16] }\nmain proc() row()[u8(0)] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
+    )
+}
+
+type_array_procedure_rejects_runtime_dependency test {
+    context := try support.init("type_array_procedure_rejects_runtime_dependency")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_rejects_runtime_dependency",
+        "row proc(wide bool) [1]type {\n    if (wide) return [i16]\n    return [i8]\n}\nread proc(wide bool) i16 {\n    value row(wide)[0] :: 42\n    return i16(value)\n}\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+type_array_procedure_requires_all_ordinary_arguments test {
+    context := try support.init("type_array_procedure_requires_all_ordinary_arguments")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_requires_all_ordinary_arguments",
+        "row proc(ignored usize) [1]type { return [i16] }\nmain proc() row()[0] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "argument count does not match" },
+    )
+}
+
+type_array_procedure_nested_execution_shares_step_limit test {
+    context := try support.init("type_array_procedure_nested_execution_shares_step_limit")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_array_procedure_nested_execution_shares_step_limit",
+        "row proc(count usize) [1]type {\n    for (0..count) |_| { }\n    return [i16]\n}\nSelected proc() type {\n    for (0..maxval!(usize)) |index| { types :: row(index + 100) }\n    return i16\n}\nmain proc() Selected() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+type_execution_mutable_types_and_nested_producers test {
+    context := try support.init("type_execution_mutable_types_and_nested_producers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_mutable_types_and_nested_producers",
+        "Nest proc(T type, depth usize) type {\n    Result type := T\n    count usize := 0\n    while (count < depth) {\n        Result = [2]Result\n        count = count + 1\n    }\n    return Result\n}\nBox proc(T type) type { return struct { value T } }\nmain proc() i16 {\n    value Box(Nest(i16, 2)) :: { value = [[20, 20], [1, 1]] }\n    same Box(Nest(i16, 1 + 1)) :: value\n    return same.value[0][0] + same.value[0][1] + same.value[1][0] + same.value[1][1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_range_captures_scope_and_transfers test {
+    context := try support.init("type_execution_range_captures_scope_and_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_range_captures_scope_and_transfers",
+        "Storage proc() type {\n    Result := i8\n    size usize := 0\n    for (0..usize(5)) |index| {\n        if (index == 0) continue\n        if (index == 3) break\n        next :: [index]Result\n        Result = next\n        size = size + 1\n    }\n    while (size < 3) {\n        size = size + 1\n        if (size == 3) continue\n        Result = bool\n    }\n    return struct { values Result, bias i16 = i16(size) }\n}\nmain proc() i16 {\n    value Storage() :: { values = [[19], [20]] }\n    return i16(value.values[0][0]) + i16(value.values[1][0]) + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_early_return_and_recursive_calls test {
+    context := try support.init("type_execution_early_return_and_recursive_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_early_return_and_recursive_calls",
+        "Nest proc(T type, depth usize) type {\n    if (depth == 0) return T\n    return [2]Nest(T, depth - 1)\n}\nSelect proc(wide bool) type {\n    Result := i8\n    if (wide) {\n        Result = Nest(i16, 1)\n        return Result\n    } else { Result = [2]Result }\n    return Result\n}\nmain proc() i16 {\n    wide Select(true) :: [40, 2]\n    narrow Select(false) :: [1, 1]\n    return wide[0] + wide[1] + i16(narrow[0] - narrow[1])\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_inclusive_narrow_range_does_not_overflow test {
+    context := try support.init("type_execution_inclusive_narrow_range_does_not_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_inclusive_narrow_range_does_not_overflow",
+        "Storage proc() type {\n    count usize := 0\n    for (u8(254)..=u8(255)) |_| count = count + 1\n    for (i8(2)..i8(-2)) |_| count = 99\n    return [count]i16\n}\nmain proc() i16 {\n    values Storage() :: [40, 2]\n    return values[0] + values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_rejects_constant_assignment test {
+    context := try support.init("type_execution_rejects_constant_assignment")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_rejects_constant_assignment",
+        "Bad proc() type {\n    T :: i16\n    T = bool\n    return T\n}\nmain proc() i16 {\n    value Bad() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+type_execution_rejects_value_in_type_local test {
+    context := try support.init("type_execution_rejects_value_in_type_local")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_rejects_value_in_type_local",
+        "Bad proc() type {\n    T := i16\n    T = 42\n    return T\n}\nmain proc() i16 {\n    value Bad() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_execution_preserves_scalar_type_and_overflow test {
+    context := try support.init("type_execution_preserves_scalar_type_and_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_preserves_scalar_type_and_overflow",
+        "Bad proc() type {\n    count u8 := 255\n    count = count + 1\n    return [count]i16\n}\nmain proc() i16 {\n    value Bad() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_execution_checks_guard_operands test {
+    context := try support.init("type_execution_checks_guard_operands")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_checks_guard_operands",
+        "Bad proc() type {\n    T := i16\n    while (false and 1) T = bool\n    return T\n}\nmain proc() i16 {\n    value Bad() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+type_execution_is_bounded test {
+    context := try support.init("type_execution_is_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_is_bounded",
+        "Bad proc() type {\n    counter usize := 0\n    while (counter >= 0) counter = counter + 1\n    return i16\n}\nmain proc() i16 {\n    value Bad() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+type_producer_ordinary_inputs_generate_storage_and_cache_identity test {
+    context := try support.init("type_producer_ordinary_inputs_generate_storage_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_ordinary_inputs_generate_storage_and_cache_identity",
+        "Fixed proc(T type, count usize) type { return struct { values [count]T } }\nmain proc() i16 {\n    value Fixed(i16, 2) :: { values = [40, 2] }\n    same Fixed(i16, 1 + 1) :: value\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_producer_mixes_explicit_and_ordinary_constant_inputs test {
+    context := try support.init("type_producer_mixes_explicit_and_ordinary_constant_inputs")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_mixes_explicit_and_ordinary_constant_inputs",
+        "Fixed proc($T type, count usize) type { return [count]T }\nChoose proc(wide bool) type {\n    if (wide) return Fixed(i16, 2)\n    return Fixed(i8, 2)\n}\nmain proc() i16 {\n    wide Choose(true) :: [40, 2]\n    narrow Choose(false) :: [1, 1]\n    return wide[0] + wide[1] + i16(narrow[0] - narrow[1])\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_producer_computed_ordinary_inputs_reuse_typed_execution test {
+    context := try support.init("type_producer_computed_ordinary_inputs_reuse_typed_execution")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_computed_ordinary_inputs_reuse_typed_execution",
+        "count proc(seed usize) usize {\n    result := seed\n    while (result < 2) result = result + 1\n    return result\n}\nFixed proc(size usize) type { return struct { values [size]i16 } }\nmain proc() i16 {\n    first Fixed(count(0)) :: { values = [40, 2] }\n    same Fixed(2) :: first\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_producer_ordinary_inputs_preserve_nominal_separation test {
+    context := try support.init("type_producer_ordinary_inputs_preserve_nominal_separation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_ordinary_inputs_preserve_nominal_separation",
+        "Tag proc(value usize) type { return struct { value i16 } }\nmain proc() bool { return $(Tag(1) != Tag(2)) }\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+type_producer_dependent_contextual_ordinary_input test {
+    context := try support.init("type_producer_dependent_contextual_ordinary_input")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_dependent_contextual_ordinary_input",
+        "Fixed proc($T type, $N usize, data [N]T) type {\n    return struct { values [N]T = data }\n}\nmain proc() i16 {\n    value Fixed(i16, 2, [40, 2]) :: {}\n    same Fixed(i16, 2, [20 + 20, 2]) :: value\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_producer_rejects_runtime_dependency test {
+    context := try support.init("type_producer_rejects_runtime_dependency")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_rejects_runtime_dependency",
+        "Fixed proc(size usize) type { return [size]i16 }\nread proc(size usize) i16 {\n    data Fixed(size) :: [40, 2]\n    return data[0] + data[1]\n}\nmain proc() i16 { return read(2) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+type_producer_checks_unused_ordinary_input_range test {
+    context := try support.init("type_producer_checks_unused_ordinary_input_range")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_checks_unused_ordinary_input_range",
+        "Tag proc(ignored u8) type { return struct { value i16 } }\nmain proc() i16 {\n    value Tag(256) :: { value = 42 }\n    return value.value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "numeric literal is outside" },
+    )
+}
+
+type_producer_checks_erased_ordinary_input_exact_type test {
+    context := try support.init("type_producer_checks_erased_ordinary_input_exact_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_checks_erased_ordinary_input_exact_type",
+        "Tag proc(ignored i16) type { return struct { value i16 } }\nmain proc() i16 {\n    wrong u16 :: 1\n    first Tag(1) :: { value = 42 }\n    same Tag(wrong) :: first\n    return same.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = "incompatible value type" },
+    )
+}
+
+type_producer_requires_all_ordinary_inputs test {
+    context := try support.init("type_producer_requires_all_ordinary_inputs")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_requires_all_ordinary_inputs",
+        "Tag proc(ignored i16) type { return struct { value i16 } }\nmain proc() i16 {\n    value Tag() :: { value = 42 }\n    return value.value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "argument count does not match" },
+    )
+}
+
+type_producer_ordinary_input_trap_keeps_original_diagnostic test {
+    context := try support.init("type_producer_ordinary_input_trap_keeps_original_diagnostic")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_producer_ordinary_input_trap_keeps_original_diagnostic",
+        "count proc() usize {\n    high usize :: 18446744073709551615\n    return high + 1\n}\nFixed proc(size usize) type { return [size]i16 }\nmain proc() i16 {\n    value Fixed(count()) :: [40, 2]\n    return value[0] + value[1]\n}\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+comptime_composed_type_identity_is_order_independent_and_cached test {
+    context := try support.init("comptime_composed_type_identity_is_order_independent_and_cached")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_composed_type_identity_is_order_independent_and_cached",
+        "Left :: enum { left }\nRight :: enum { right }\nBox proc($T type) type { return struct { value T } }\nidentical proc($A, $B type) bool { return A == B }\nmain proc() bool {\n    first Box(Left | Right) :: { value = .left }\n    same Box(Right | Left | Left) :: first\n    return (\n        identical(Left | Right, Right | Left | Left)\n        and identical(Left, Left | Left) and same.value == .left\n    )\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+comptime_callback_branch_uses_optional_function_identity test {
+    context := try support.init("comptime_callback_branch_uses_optional_function_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_callback_branch_uses_optional_function_identity",
+        "Callback :: alias @proc(value i16) i16\nincrement proc(value i16) i16 { return value + 1 }\napply proc($callback ?Callback, value i16) i16 {\n    if $(callback == null) { return value }\n    else { return callback?(value) }\n}\nmain proc() i16 { return apply(null, 40) + apply(increment, 1) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_computed_callbacks_preserve_optional_presence_and_calls test {
+    context := try support.init("comptime_computed_callbacks_preserve_optional_presence_and_calls")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_computed_callbacks_preserve_optional_presence_and_calls",
+        "Callback :: alias @proc(value i16) i16\nincrement proc(value i16) i16 { return value + 1 }\ndecrement proc(value i16) i16 { return value - 1 }\nchoose proc(up bool) Callback {\n    callback Callback := decrement\n    if (up) callback = increment\n    return callback\n}\nmaybe proc(present bool) ?Callback {\n    if (present) return choose(true)\n    return null\n}\nnested proc(present bool) ??Callback {\n    if (present) return some!(maybe(true))\n    return some!(null)\n}\nmain proc() [6]i16 {\n    up :: $(choose(true))\n    down :: $(choose(false))\n    optional :: $(maybe(true))\n    absent :: $(maybe(false))\n    outer :: $(nested(false))\n    inner :: $(nested(true))\n    return [up(41), down(43), (optional?)(41), ((inner?)?)(41),\n        (if (absent == null) i16(42) else i16(0)),\n        (if (outer != null and outer? == null) i16(42) else i16(0))]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42, 42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_callback_aggregates_cache_source_identity_and_generate_defaults test {
+    context := try support.init("comptime_callback_aggregates_cache_source_identity_and_generate_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_callback_aggregates_cache_source_identity_and_generate_defaults",
+        "Callback :: alias @proc(value i16) i16\nincrement proc(value i16) i16 { return value + 1 }\ndecrement proc(value i16) i16 { return value - 1 }\nCallbacks :: struct { items [2]Callback, optional ?Callback }\nChoice :: union(enum) { callback Callback, empty void }\nFailure :: union(enum) { callback Callback }\nmake proc(reverse bool) Callbacks {\n    if (reverse) return { items = [decrement, increment], optional = null }\n    return { items = [increment, decrement], optional = increment }\n}\nchoice proc() Choice { return .callback{increment} }\nresult proc(fail bool) Callback ! Failure {\n    if (fail) return .callback{decrement}\n    return increment\n}\nBox proc($callbacks Callbacks) type {\n    return struct { callbacks Callbacks = callbacks }\n}\nmain proc() [6]i16 {\n    first Box(make(false)) :: {}\n    same Box(Callbacks { items = [increment, decrement], optional = increment }) :: first\n    other Box(make(true)) :: {}\n    selected :: $(choice())\n    success :: $(result(false)) catch increment\n    failure :: $(result(true)) catch |err| err.callback\n    return [same.callbacks.items[0](41), same.callbacks.optional?(41),\n        other.callbacks.items[0](43), selected.callback(41),\n        success(41), failure(43)]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42, 42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_computed_callback_signatures_remain_checked test {
+    context := try support.init("comptime_computed_callback_signatures_remain_checked")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_computed_callback_signatures_remain_checked",
+        "Callback :: alias @proc(value i16) i16\nwrong proc(value u8) u8 { return value }\nchoose proc() Callback { return wrong }\nmain proc() i16 { return $(choose())(42) }\n",
+        support.Expected{ stdout = "", diagnostic = "return does not match the function result type" },
+    )
+}
+
+comptime_computed_callback_traps_keep_declaration_provenance test {
+    context := try support.init("comptime_computed_callback_traps_keep_declaration_provenance")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_computed_callback_traps_keep_declaration_provenance",
+        "Callback :: alias @proc(value i8) i8\nincrement proc(value i8) i8 { return value + 1 }\nchoose proc() Callback { return increment }\nmain proc() i8 { return $(choose())(127) }\n",
+        support.Expected{ stdout = "", diagnostic = ":2:38: runtime trap: integer arithmetic overflow" },
+    )
+}
+
+comptime_branch_rejects_runtime_guard_dependencies test {
+    context := try support.init("comptime_branch_rejects_runtime_guard_dependencies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_branch_rejects_runtime_guard_dependencies",
+        "answer proc(take bool) i16 {\n    if $(take) { return 42 } else { return 0 }\n}\nmain proc() i16 { return answer(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_branch_checks_short_circuited_guard_operands test {
+    context := try support.init("comptime_branch_checks_short_circuited_guard_operands")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_branch_checks_short_circuited_guard_operands",
+        "main proc() i16 {\n    if $(true or 1) { return 42 } else { return 0 }\n}\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+specialized_type_branches_check_only_selected_storage test {
+    context := try support.init("specialized_type_branches_check_only_selected_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_type_branches_check_only_selected_storage",
+        "count proc($T type, value T) i16 {\n    if (T == i16) return value else return value.count\n}\nBox :: struct { count i16 }\nmain proc() i16 { return count(i16, 40) + count(Box, Box { count = 2 }) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_branch_without_templates test {
+    context := try support.init("explicit_comptime_branch_without_templates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_branch_without_templates",
+        "enabled proc() bool { return true }\nmain proc() i16 {\n    if $(enabled()) { return 42 } else { return false }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialized_branches_skip_recursive_instantiation_and_traps test {
+    context := try support.init("specialized_branches_skip_recursive_instantiation_and_traps")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branches_skip_recursive_instantiation_and_traps",
+        "answer proc($stop bool) i16 {\n    if (stop) return 42 else return answer(false)\n}\nmain proc() i16 {\n    if $(false) { return $(i8(128)) }\n    return answer(true)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialized_branches_preserve_runtime_conditions test {
+    context := try support.init("specialized_branches_preserve_runtime_conditions")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branches_preserve_runtime_conditions",
+        "answer proc($T type, value T, take bool) i16 {\n    if (T != i16) return value.count\n    if (take) return value else return 2\n}\nmain proc() i16 { return answer(i16, 40, true) + answer(i16, 99, false) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+specialized_branch_keeps_scope_and_cleanup test {
+    context := try support.init("specialized_branch_keeps_scope_and_cleanup")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branch_keeps_scope_and_cleanup",
+        "change proc($take bool, value @mut i16) void {\n    if (take) {\n        defer value^ = value^ + 2\n        value^ = 40\n    }\n    else value^ = 0\n}\nmain proc() i16 {\n    value i16 := 0\n    change(true, &value)\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_type_equality_preserves_aliases_and_nominal_identity test {
+    context := try support.init("comptime_type_equality_preserves_aliases_and_nominal_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_type_equality_preserves_aliases_and_nominal_identity",
+        "First :: struct { value i16 }\nSecond :: struct { value i16 }\nSame :: alias First\nidentical proc($A, $B type) bool { return A == B }\nmain proc() bool {\n    return (\n        identical(First, Same) and !identical(First, Second)\n        and $(@mut i16 == @mut i16) and $(@mut i16 != @i16)\n        and $([2]i16 == [1 + 1]i16) and $([2]i16 != [2]u16)\n    )\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+specialized_branch_retains_guard_type_errors test {
+    context := try support.init("specialized_branch_retains_guard_type_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branch_retains_guard_type_errors",
+        "answer proc($take bool) i16 {\n    if (take or 1) return 42 else return false\n}\nmain proc() i16 { return answer(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
+    )
+}
+
+specialized_branch_retains_selected_body_errors test {
+    context := try support.init("specialized_branch_retains_selected_body_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branch_retains_selected_body_errors",
+        "answer proc($T type, value T) i16 {\n    if (T == i16) return value.missing\n    return 42\n}\nmain proc() i16 { return answer(i16, 0) }\n",
+        support.Expected{ stdout = "", diagnostic = "field selection requires a record or tuple" },
+    )
+}
+
+ordinary_constant_branch_still_checks_both_arms test {
+    context := try support.init("ordinary_constant_branch_still_checks_both_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_constant_branch_still_checks_both_arms",
+        "main proc() i16 {\n    if (true) return 42 else return false\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+specialized_branch_runtime_call_remains_reachable test {
+    context := try support.init("specialized_branch_runtime_call_remains_reachable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "specialized_branch_runtime_call_remains_reachable",
+        "fail proc(value i8) bool { return value + 1 == 0 }\nanswer proc($T type) i16 {\n    if (fail(127)) return 0\n    return 42\n}\nmain proc() i16 { return answer(i16) }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+comptime_contextual_aggregate_arguments_keep_dependent_types test {
+    context := try support.init("comptime_contextual_aggregate_arguments_keep_dependent_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_contextual_aggregate_arguments_keep_dependent_types",
+        "sum proc(items [2]i16) i16 { return items[0] + items[1] }\nanswer proc($T type, $N usize, $items [N]T) T { return items[0] + items[1] }\nmain proc() i16 { return answer(i16, 2, [20, 20]) + $(sum([1, 1])) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_zero_cell_aggregates_keep_logical_lengths test {
+    context := try support.init("comptime_zero_cell_aggregates_keep_logical_lengths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_zero_cell_aggregates_keep_logical_lengths",
+        "Empty :: struct {}\nStorage :: struct { items [3]Empty, empty [0]i16 }\nmake proc() Storage { return Storage { items = [{}, {}, {}], empty = [] } }\nmain proc() usize {\n    value :: $(make())\n    return value.items.len + value.empty.len\n}\n",
+        support.Expected{ stdout = "3\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_float_arithmetic_keeps_ieee_equality test {
+    context := try support.init("explicit_comptime_float_arithmetic_keeps_ieee_equality")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_float_arithmetic_keeps_ieee_equality",
+        "main proc() bool { return $(1.5 + 2.5) == 4.0 and $(-0.0 == 0.0) and $(4 / 2) == 2.0 }\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+comptime_aggregate_specialization_uses_normalized_values test {
+    context := try support.init("comptime_aggregate_specialization_uses_normalized_values")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_specialization_uses_normalized_values",
+        "Config :: struct { count usize, bias i16 = 2 }\nconfig proc() Config {\n    result Config := { count = 0 }\n    while (result.count < 2) result.count = result.count + 1\n    return result\n}\nFixed proc($settings Config) type {\n    return struct { values [settings.count]i16 }\n}\nmain proc() i16 {\n    first Fixed(config()) :: { values = [40, 2] }\n    same Fixed({ bias = 2, count = 2 }) :: first\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_array_arguments_and_explicit_copy_isolation test {
+    context := try support.init("comptime_array_arguments_and_explicit_copy_isolation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_array_arguments_and_explicit_copy_isolation",
+        "values proc() [2]mut i16 {\n    result [2]mut i16 := [0, 2]\n    for (0..usize(2)) |index| result[index] = result[index] + 20\n    return result\n}\nsum proc($items [2]mut i16) i16 { return items[0] + items[1] }\nmain proc() i16 {\n    first := $(values())\n    copy := first\n    first[0] = 99\n    return sum(values()) + copy[0] - 20\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_without_templates_preserves_nested_values test {
+    context := try support.init("explicit_comptime_without_templates_preserves_nested_values")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_without_templates_preserves_nested_values",
+        "Kind :: enum { ready, empty }\nInner :: struct { text string, count ?i16 }\nPacket :: struct { rows [2]mut Inner, kind Kind, weight f64 }\nmake proc() Packet {\n    result Packet := {\n        rows = [{ text = \"a\\\"\\\\\\x00\xc3\xa9\", count = 20 }, { text = \"ok\", count = null }],\n        kind = .ready, weight = 2.5,\n    }\n    result.rows[0].count = 40\n    return result\n}\nmain proc() i16 {\n    packet := $(make())\n    copy :: packet\n    packet.rows[0].text = \"changed\"\n    if (copy.kind != .ready or copy.weight != 2.5 or copy.rows[1].count != null) return 0\n    return copy.rows[0].count? + i16(copy.rows[1].text.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_composes_and_supplies_array_lengths test {
+    context := try support.init("explicit_comptime_composes_and_supplies_array_lengths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_composes_and_supplies_array_lengths",
+        "size proc() usize { return 2 }\nmain proc() i16 {\n    amount :: 40\n    values [$(size())]i16 :: [$(amount + 1), $(1)]\n    return values[$(usize(0))] + values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_cannot_read_runtime_parameters test {
+    context := try support.init("explicit_comptime_cannot_read_runtime_parameters")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_cannot_read_runtime_parameters",
+        "select proc(value i16) i16 { return $(value + 1) }\nmain proc() i16 { return select(41) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_aggregate_cannot_read_mutable_globals test {
+    context := try support.init("comptime_aggregate_cannot_read_mutable_globals")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_cannot_read_mutable_globals",
+        "state i16 := 42\nmake proc() [1]i16 { return [state] }\nmain proc() i16 { return $(make())[0] }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+comptime_aggregate_keeps_narrow_overflow test {
+    context := try support.init("comptime_aggregate_keeps_narrow_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_keeps_narrow_overflow",
+        "Counter :: struct { value i8 }\nmake proc() Counter {\n    result Counter := { value = 127 }\n    result.value = result.value + 1\n    return result\n}\nmain proc() i8 { return $(make()).value }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+comptime_aggregate_materializes_nonnull_pointer test {
+    context := try support.init("comptime_aggregate_materializes_nonnull_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_materializes_nonnull_pointer",
+        "Borrow :: struct { pointer @i16 }\nmake proc() Borrow {\n    value i16 :: 42\n    return Borrow { pointer = &value }\n}\nmain proc() i16 { return $(make()).pointer^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_aggregate_materializes_readonly_byte_slices test {
+    context := try support.init("comptime_aggregate_materializes_readonly_byte_slices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_materializes_readonly_byte_slices",
+        "make proc() [1][]u8 { return [\"borrowed\"] }\nmain proc() usize { return $(make())[0].len }\n",
+        support.Expected{ stdout = "8\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_preserve_subviews_and_zero_sentinel test {
+    context := try support.init("comptime_byte_slices_preserve_subviews_and_zero_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_preserve_subviews_and_zero_sentinel",
+        "subview proc() []u8 { return \"unused42ignored\"[6..8] }\nterminated proc() [;0]u8 { return \"unused42\"[6..;0] }\nmain proc() [5]u8 {\n    plain :: $(subview())\n    zero [;0]u8 :: $(terminated())\n    return [plain[0], plain[1], zero[0], zero[1], zero.ptr[zero.len]]\n}\n",
+        support.Expected{ stdout = "[52, 50, 52, 50, 0]\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_own_filled_local_arrays test {
+    context := try support.init("comptime_byte_slices_own_filled_local_arrays")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_own_filled_local_arrays",
+        "make proc(seed u8) []u8 {\n    values [3]mut u8 := undefined\n    for (0..usize(3)) |index| values[index] = seed + u8(index)\n    copy := values\n    values[0] = 99\n    return copy[1..]\n}\nmain proc() [4]u8 {\n    first :: $(make(40))\n    second :: $(make(10))\n    return [first[0], first[1], second[0], second[1]]\n}\n",
+        support.Expected{ stdout = "[41, 42, 11, 12]\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_materialize_immutable_globals_and_raw_fields test {
+    context := try support.init("comptime_byte_slices_materialize_immutable_globals_and_raw_fields")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_materialize_immutable_globals_and_raw_fields",
+        "bytes [4]u8 :: [9, 40, 2, 8]\nViews :: struct { rows [2][]u8 }\nmake proc() Views { return { rows = [bytes[1..3], bytes[2..3]] } }\nmain proc() [3]u8 {\n    views :: $(make())\n    return [views.rows[0][0], views.rows[0][1], views.rows[1][0]]\n}\n",
+        support.Expected{ stdout = "[40, 2, 2]\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_preserve_nested_optional_tagged_and_fallible_channels test {
+    context := try support.init("comptime_byte_slices_preserve_nested_optional_tagged_and_fallible_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_preserve_nested_optional_tagged_and_fallible_channels",
+        "Failure :: struct { text []u8 }\nChoice :: union(enum) { data struct { rows [2]?[]u8 }, empty void }\nPacket :: struct { choice ?Choice, result []u8 ! Failure }\nmake proc(fail bool) Packet {\n    values [2]mut u8 := [40, 2]\n    result []u8 ! Failure := values[..]\n    if (fail) result = Failure { text = values[1..] }\n    return {\n        choice = Choice { data = { rows = [values[..1], null] } },\n        result = result,\n    }\n}\nmain proc() [4]u8 {\n    good :: $(make(false))\n    bad :: $(make(true))\n    choice :: good.choice?\n    if (choice.data.rows[1] != null) return [0, 0, 0, 0]\n    success :: good.result catch \"\"\n    failure :: bad.result catch |err| err.text\n    return [choice.data.rows[0]?[0], success[0], success[1], failure[0]]\n}\n",
+        support.Expected{ stdout = "[40, 40, 2, 2]\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_normalize_generic_cache_content test {
+    context := try support.init("comptime_byte_slices_normalize_generic_cache_content")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_normalize_generic_cache_content",
+        "make proc() []u8 {\n    values [2]mut u8 := [40, 2]\n    return values[..]\n}\nsame proc() []u8 { return \"(\\x28\\x02)\"[1..3] }\nother proc() []u8 { return \"\\x28\\x03\" }\nToken proc($bytes []u8) type { return struct {} }\nscore proc($bytes []u8) u8 { return bytes[0] + bytes[1] }\nmain proc() u8 {\n    if (Token(make()) != Token(same())) return 0\n    if (Token(make()) != Token(\"\\x28\\x02\")) return 0\n    if (Token(make()) == Token(other())) return 0\n    return score(make())\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_supply_generated_defaults test {
+    context := try support.init("comptime_byte_slices_supply_generated_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_supply_generated_defaults",
+        "make proc() []u8 {\n    values [2]mut u8 := [40, 2]\n    return values[..]\n}\nGenerated proc() type {\n    return struct_type!(.auto, [\"bytes\"], [[]u8], [make()])\n}\nmain proc() u8 {\n    value Generated() :: {}\n    return value.bytes[0] + value.bytes[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_preserve_nul_high_bytes_and_empty_views test {
+    context := try support.init("comptime_byte_slices_preserve_nul_high_bytes_and_empty_views")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_preserve_nul_high_bytes_and_empty_views",
+        "make proc() []u8 { return \"!\\x00\\x80\\xff?\"[1..4] }\nempty proc() []u8 { return \"ignored\"[3..3] }\nzero proc() [;0]u8 { return \"\"[..;0] }\nmain proc() [6]usize {\n    bytes :: $(make())\n    plain :: $(empty())\n    terminated :: $(zero())\n    return [usize(bytes[0]), usize(bytes[1]), usize(bytes[2]),\n        plain.len, terminated.len, usize(terminated.ptr[0])]\n}\n",
+        support.Expected{ stdout = "[0, 128, 255, 0, 0, 0]\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_reject_uninitialized_source_bytes test {
+    context := try support.init("comptime_byte_slices_reject_uninitialized_source_bytes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_reject_uninitialized_source_bytes",
+        "make proc() []u8 {\n    values [2]mut u8 := undefined\n    values[0] = 42\n    return values[..]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+comptime_byte_slices_ignore_unobserved_uninitialized_bytes test {
+    context := try support.init("comptime_byte_slices_ignore_unobserved_uninitialized_bytes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_ignore_unobserved_uninitialized_bytes",
+        "make proc() []u8 {\n    values [3]mut u8 := undefined\n    values[1] = 42\n    return values[1..2]\n}\nmain proc() u8 { return $(make())[0] }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_byte_slices_reject_invalid_ranges test {
+    context := try support.init("comptime_byte_slices_reject_invalid_ranges")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_reject_invalid_ranges",
+        "make proc() []u8 {\n    values [1]u8 :: [42]\n    return values[..2]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "slice" },
+    )
+}
+
+comptime_byte_slices_recheck_zero_sentinel_after_mutation test {
+    context := try support.init("comptime_byte_slices_recheck_zero_sentinel_after_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_byte_slices_recheck_zero_sentinel_after_mutation",
+        "make proc() [;0]u8 {\n    values [2]mut u8 := [42, 0]\n    view [;0]u8 :: values[..1;0]\n    values[1] = 7\n    return view\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "sentinel" },
+    )
+}
+
+comptime_aggregate_materializes_mutable_byte_slice test {
+    context := try support.init("comptime_aggregate_materializes_mutable_byte_slice")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_materializes_mutable_byte_slice",
+        "make proc() [1][]mut u8 {\n    values [1]mut u8 := [42]\n    return [values[..]]\n}\nmain proc() u8 { view :: $(make())[0]\n    view[0] += 1\n    return view[0] }\n",
+        support.Expected{ stdout = "43\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_materialize_callback_elements test {
+    context := try support.init("comptime_nonbyte_slices_materialize_callback_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_materialize_callback_elements",
+        "Callback :: alias @proc(value i16) i16\nincrement proc(value i16) i16 { return value + 1 }\ndecrement proc(value i16) i16 { return value - 1 }\nmake proc() []Callback {\n    callbacks [2]Callback :: [increment, decrement]\n    return callbacks[..]\n}\nmain proc() [3]i16 {\n    callbacks :: $(make())\n    return [callbacks[0](41), callbacks[1](43), i16(callbacks.len)]\n}\n",
+        support.Expected{ stdout = "[42, 42, 2]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_preserve_full_width_sentinels test {
+    context := try support.init("comptime_nonbyte_slices_preserve_full_width_sentinels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_preserve_full_width_sentinels",
+        "make proc() [;18446744073709551615]u64 {\n    values [3]u64 :: [9, 4294967298, 18446744073709551615]\n    return values[1..2;18446744073709551615]\n}\nmain proc() [3]u64 {\n    values :: $(make())\n    return [u64(values.len), values[0], values.ptr[1]]\n}\n",
+        support.Expected{ stdout = "[1, 4294967298, 18446744073709551615]\n", diagnostic = null },
+    )
+}
+
+comptime_aggregate_materializes_readonly_nonbyte_slices test {
+    context := try support.init("comptime_aggregate_materializes_readonly_nonbyte_slices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_materializes_readonly_nonbyte_slices",
+        "make proc() []i16 {\n    values [2]mut i16 := [-300, 1024]\n    return values[..]\n}\nmain proc() [3]i16 {\n    values :: $(make())\n    return [values[0], values[1], i16(values.len)]\n}\n",
+        support.Expected{ stdout = "[-300, 1024, 2]\n", diagnostic = null },
+    )
+}
+
+comptime_aggregate_materializes_nominal_byte_slices test {
+    context := try support.init("comptime_aggregate_materializes_nominal_byte_slices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_aggregate_materializes_nominal_byte_slices",
+        "Byte :: distinct u8\nexact proc(value Byte) usize { return usize(value) }\nmake proc() []Byte {\n    values [3]Byte :: [0, 128, 255]\n    return values[..]\n}\nmain proc() [4]usize {\n    values :: $(make())\n    return [exact(values[0]), exact(values[1]), exact(values[2]), values.len]\n}\n",
+        support.Expected{ stdout = "[0, 128, 255, 3]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_preserve_subviews_and_full_element_stride test {
+    context := try support.init("comptime_nonbyte_slices_preserve_subviews_and_full_element_stride")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_preserve_subviews_and_full_element_stride",
+        "make proc() []i64 {\n    values [4]i64 :: [9, -4294967297, 4294967298, 8]\n    return values[1..3]\n}\nmain proc() [3]i64 {\n    values :: $(make())\n    return [i64(values.len), values[0], values[1]]\n}\n",
+        support.Expected{ stdout = "[2, -4294967297, 4294967298]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_own_array_elements test {
+    context := try support.init("comptime_nonbyte_slices_own_array_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_own_array_elements",
+        "make proc() [][2]i16 {\n    rows [3][2]i16 :: [[9, 8], [-300, 1024], [40, 2]]\n    return rows[1..]\n}\nmain proc() [5]i16 {\n    rows :: $(make())\n    return [i16(rows.len), rows[0][0], rows[0][1], rows[1][0], rows[1][1]]\n}\n",
+        support.Expected{ stdout = "[2, -300, 1024, 40, 2]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_own_records_callbacks_and_nested_slices test {
+    context := try support.init("comptime_nonbyte_slices_own_records_callbacks_and_nested_slices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_own_records_callbacks_and_nested_slices",
+        "Callback :: alias @proc(value i16) i16\nEntry :: struct { children [][]i16, run Callback, values [2]i16 }\nincrement proc(value i16) i16 { return value + 1 }\ndecrement proc(value i16) i16 { return value - 1 }\nmake proc() []Entry {\n    first [2]i16 :: [11, 12]\n    second [2]i16 :: [21, 22]\n    rows [2][]i16 :: [first[..], second[..]]\n    entries [2]Entry :: [\n        { children = rows[..], run = increment, values = [40, 2] },\n        { children = rows[1..], run = decrement, values = [44, 3] },\n    ]\n    return entries[..]\n}\nmain proc() [8]i16 {\n    entries :: $(make())\n    if (\n        entries.len != 2 or entries[0].children.len != 2\n        or entries[1].children.len != 1 or entries[0].children[0].len != 2\n    ) {\n        return [0, 0, 0, 0, 0, 0, 0, 0]\n    }\n    return [entries[0].children[0][0], entries[0].children[0][1],\n        entries[0].children[1][0], entries[1].children[0][1],\n        entries[0].run(41), entries[1].run(43),\n        entries[0].values[0], entries[1].values[1]]\n}\n",
+        support.Expected{ stdout = "[11, 12, 21, 22, 42, 42, 40, 3]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_own_raw_record_views test {
+    context := try support.init("comptime_nonbyte_slices_own_raw_record_views")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_own_raw_record_views",
+        "Entry :: struct { children []i16, run @proc(value i16) i16, tail i16 }\nBacking :: union { entry Entry }\nincrement proc(value i16) i16 { return value + 1 }\nmake proc() []Entry {\n    children [2]i16 :: [40, 2]\n    backing Backing :: { entry = { children = children[..], run = increment, tail = 7 } }\n    pointer *Entry :: &backing.entry\n    return pointer[..1]\n}\nmain proc() [4]i16 {\n    entries :: $(make())\n    return [entries[0].children[0], entries[0].children[1],\n        entries[0].run(41), entries[0].tail]\n}\n",
+        support.Expected{ stdout = "[40, 2, 42, 7]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_preserve_distinct_slice_identity test {
+    context := try support.init("comptime_nonbyte_slices_preserve_distinct_slice_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_preserve_distinct_slice_identity",
+        "Slice :: alias []i16\nView :: distinct Slice\nmake proc() View {\n    values [2]i16 :: [40, 2]\n    return View(values[..])\n}\nexact proc(value View) i16 {\n    values :: Slice(value)\n    return values[0] + values[1]\n}\nmain proc() i16 { return exact($(make())) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_preserve_empty_and_zero_sized_shapes test {
+    context := try support.init("comptime_nonbyte_slices_preserve_empty_and_zero_sized_shapes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_preserve_empty_and_zero_sized_shapes",
+        "Empty :: struct {}\nempty proc() []i16 {\n    values [0]i16 :: []\n    return values[..]\n}\ncells proc() []Empty {\n    values [3]Empty :: [{}, {}, {}]\n    return values[..]\n}\nrows proc() [][0]i16 {\n    values [2][0]i16 :: [[], []]\n    return values[..]\n}\nmain proc() [5]usize {\n    none :: $(empty())\n    items :: $(cells())\n    arrays :: $(rows())\n    saved Empty :: items[2]\n    return [none.len, items.len, arrays.len, arrays[0].len, arrays[1].len]\n}\n",
+        support.Expected{ stdout = "[0, 3, 2, 0, 0]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_cross_nested_optional_tagged_and_fallible_channels test {
+    context := try support.init("comptime_nonbyte_slices_cross_nested_optional_tagged_and_fallible_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_cross_nested_optional_tagged_and_fallible_channels",
+        "Failure :: struct { values []i16 }\nChoice :: union(enum) { data struct { rows [2]?[]i16 }, empty void }\nPacket :: struct { choice ??Choice, result []i16 ! Failure }\nmake proc(fail bool) Packet {\n    values [2]i16 :: [-300, 1024]\n    result []i16 ! Failure := values[..]\n    if (fail) result = Failure { values = values[1..] }\n    return {\n        choice = some!(some!(Choice { data = { rows = [values[..1], null] } })),\n        result = result,\n    }\n}\nmain proc() [5]i16 {\n    good :: $(make(false))\n    bad :: $(make(true))\n    choice :: good.choice??\n    if (choice.data.rows[1] != null) return [0, 0, 0, 0, 0]\n    success :: good.result catch { return [1, 1, 1, 1, 1] }\n    failure :: bad.result catch |err| err.values\n    return [choice.data.rows[0]?[0], success[0], success[1],\n        failure[0], i16(failure.len)]\n}\n",
+        support.Expected{ stdout = "[-300, -300, 1024, 1024, 1]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_normalize_cache_identity_and_generated_defaults test {
+    context := try support.init("comptime_nonbyte_slices_normalize_cache_identity_and_generated_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_normalize_cache_identity_and_generated_defaults",
+        "direct [2]i16 :: [40, 2]\nmake proc(padded bool) []i16 {\n    if (padded) {\n        prefixed [4]i16 :: [9, 40, 2, 8]\n        return prefixed[1..3]\n    }\n    values [2]mut i16 := [40, 2]\n    return values[..]\n}\nother proc() []i16 {\n    values [2]i16 :: [40, 3]\n    return values[..]\n}\nBox proc($values []i16) type { return struct { values []i16 = values } }\nGenerated proc() type {\n    return struct_type!(.auto, [\"values\"], [[]i16], [make(false)])\n}\nmain proc() [4]i16 {\n    first Box(make(false)) :: {}\n    same Box(make(true)) :: first\n    literal Box(direct[..]) :: same\n    generated Generated() :: {}\n    if (Box(make(false)) == Box(other())) return [0, 0, 0, 0]\n    return [literal.values[0], literal.values[1],\n        i16(literal.values.len), generated.values[0] + generated.values[1]]\n}\n",
+        support.Expected{ stdout = "[40, 2, 2, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slice_backing_outlives_runtime_helper_returns test {
+    context := try support.init("comptime_nonbyte_slice_backing_outlives_runtime_helper_returns")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slice_backing_outlives_runtime_helper_returns",
+        "make proc(seed i16) []i16 {\n    values [2]i16 :: [seed, seed + 1]\n    return values[..]\n}\nfirst proc() []i16 { return $(make(40)) }\nsecond proc() []i16 { return $(make(100)) }\ndisturb proc(seed i16) i16 {\n    values [8]i16 :: [seed, 2, 3, 4, 5, 6, 7, 8]\n    return values[0] + values[7]\n}\nmain proc() [5]i16 {\n    left :: first()\n    right :: second()\n    noise :: disturb(200)\n    return [left[0], left[1], right[0], right[1], noise]\n}\n",
+        support.Expected{ stdout = "[40, 41, 100, 101, 208]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_reject_uninitialized_elements test {
+    context := try support.init("comptime_nonbyte_slices_reject_uninitialized_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_reject_uninitialized_elements",
+        "make proc() []i16 {\n    values [2]mut i16 := undefined\n    values[0] = 42\n    return values[..]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+comptime_nonbyte_slices_reject_oversized_pointer_lengths test {
+    context := try support.init("comptime_nonbyte_slices_reject_oversized_pointer_lengths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_reject_oversized_pointer_lengths",
+        "make proc() []i16 {\n    values [1]i16 :: [42]\n    return values.ptr[..maxval!(usize)]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+comptime_zero_sized_slices_reject_oversized_pointer_lengths test {
+    context := try support.init("comptime_zero_sized_slices_reject_oversized_pointer_lengths")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_zero_sized_slices_reject_oversized_pointer_lengths",
+        "Empty :: struct {}\nmake proc() []Empty {\n    values [1]Empty :: [{}]\n    return values.ptr[..maxval!(usize)]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+comptime_nonbyte_slices_bound_cyclic_retained_storage test {
+    context := try support.init("comptime_nonbyte_slices_bound_cyclic_retained_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_bound_cyclic_retained_storage",
+        "Node :: struct { children []Node }\nmake proc() []Node {\n    values [1]mut Node := undefined\n    values[0] = { children = values[..] }\n    return values[..]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+comptime_nonbyte_slices_reject_pointer_lengths_beyond_backing test {
+    context := try support.init("comptime_nonbyte_slices_reject_pointer_lengths_beyond_backing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_reject_pointer_lengths_beyond_backing",
+        "make proc() []i16 {\n    values [1]i16 :: [42]\n    return values.ptr[..2]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time result cannot escape evaluation" },
+    )
+}
+
+comptime_nonbyte_slices_materialize_mutable_backing test {
+    context := try support.init("comptime_nonbyte_slices_materialize_mutable_backing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_materialize_mutable_backing",
+        "make proc() []mut i16 {\n    values [1]mut i16 := [42]\n    return values[..]\n}\nmain proc() i16 { view :: $(make())\n    view[0] += 1\n    return view[0] }\n",
+        support.Expected{ stdout = "43\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_slices_materialize_nonnull_pointer_elements test {
+    context := try support.init("comptime_nonbyte_slices_materialize_nonnull_pointer_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_slices_materialize_nonnull_pointer_elements",
+        "make proc() []@i16 {\n    value i16 :: 42\n    pointers [1]@i16 :: [&value]\n    return pointers[..]\n}\nmain proc() i16 { return $(make())[0]^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_sentinel_slices_own_subviews_and_empty_backing test {
+    context := try support.init("comptime_nonbyte_sentinel_slices_own_subviews_and_empty_backing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_sentinel_slices_own_subviews_and_empty_backing",
+        "make proc() [;-7]i16 {\n    values [4]i16 :: [9, -300, 1024, -7]\n    return values[1..3;-7]\n}\nempty proc() [;1024]i16 {\n    values [1]i16 :: [1024]\n    return values[..0;1024]\n}\nmain proc() [6]i16 {\n    values :: $(make())\n    none :: $(empty())\n    return [i16(values.len), values[0], values[1], values.ptr[2],\n        i16(none.len), none.ptr[0]]\n}\n",
+        support.Expected{ stdout = "[2, -300, 1024, -7, 0, 1024]\n", diagnostic = null },
+    )
+}
+
+comptime_nonbyte_sentinel_slices_recheck_mutated_sentinel test {
+    context := try support.init("comptime_nonbyte_sentinel_slices_recheck_mutated_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonbyte_sentinel_slices_recheck_mutated_sentinel",
+        "make proc() [;1024]i16 {\n    values [2]mut i16 := [42, 1024]\n    view [;1024]i16 :: values[..1;1024]\n    values[1] = 7\n    return view\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "sentinel" },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_own_subviews test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_own_subviews")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_own_subviews",
+        "make proc() [;255]u8 {\n    values [5]mut u8 := [9, 40, 0, 2, 255]\n    return values[1..4;255]\n}\nempty proc() [;128]u8 {\n    values [1]u8 :: [128]\n    return values[..0;128]\n}\nmain proc() usize {\n    value :: $(make())\n    zero :: $(empty())\n    if (value.len != 3 or value[1] != 0 or value.ptr[3] != 255) return 1\n    if (zero.len != 0 or zero.ptr[0] != 128) return 2\n    return usize(value[0]) + usize(value[2])\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_normalize_cache_and_defaults test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_normalize_cache_and_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_normalize_cache_and_defaults",
+        "make proc(padded bool) [;7]u8 {\n    if (padded) {\n        prefixed [4]u8 :: [9, 40, 2, 7]\n        return prefixed[1..3;7]\n    }\n    values [3]u8 :: [40, 2, 7]\n    return values[..2;7]\n}\nBox proc($bytes [;7]u8) type { return struct { bytes [;7]u8 = bytes } }\nmain proc() u8 {\n    a Box(make(false)) :: {}\n    b Box(make(true)) :: a\n    direct Box(\"!(\\x02\\x07\"[1..3;7]) :: b\n    if (direct.bytes.len != 2 or direct.bytes.ptr[2] != 7) return 0\n    return direct.bytes[0] + direct.bytes[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_cross_nested_channels test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_cross_nested_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_cross_nested_channels",
+        "View :: struct { rows [1]??[;9]u8 }\nChoice :: union(enum) { view View, empty void }\nFailure :: struct { bytes [;9]u8 }\nmake proc() [;9]u8 {\n    values [3]u8 :: [40, 2, 9]\n    return values[..2;9]\n}\nchoice proc() Choice { return .view { rows = [some!(some!(make()))] } }\nsuccess proc() View ! Failure { return { rows = [some!(some!(make()))] } }\nfailure proc() View ! Failure { return Failure { bytes = make() } }\nmain proc() usize {\n    value :: $(choice())\n    good :: $(success()) catch { return 1 }\n    bad :: $(failure()) catch |err| {\n        match value {\n            .view |view|: {\n                bytes :: view.rows[0]??\n                if (bytes.ptr[2] != 9 or good.rows[0]??.ptr[2] != 9) return 2\n                return usize(bytes[0]) + usize(err.bytes[1])\n            }\n            .empty: return 3\n        }\n    }\n    return bad.rows.len\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+inline_for_materializes_nonzero_sentinel_byte_slices test {
+    context := try support.init("inline_for_materializes_nonzero_sentinel_byte_slices")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "inline_for_materializes_nonzero_sentinel_byte_slices",
+        "make proc() [1][;1]u8 {\n    bytes [2]u8 :: [42, 1]\n    return [bytes[..1;1]]\n}\nmain proc() u8 {\n    inline for make() |bytes| {\n        if (bytes.ptr[1] != 1) return 0\n        return bytes[0]\n    }\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_recheck_mutated_sentinel test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_recheck_mutated_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_recheck_mutated_sentinel",
+        "make proc() [;255]u8 {\n    values [2]mut u8 := [42, 255]\n    view [;255]u8 :: values[..1;255]\n    values[1] = 0\n    return view\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "sentinel" },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_reject_uninitialized_sentinel test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_reject_uninitialized_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_reject_uninitialized_sentinel",
+        "make proc() [;7]u8 {\n    values [2]mut u8 := [42, 7]\n    view [;7]u8 :: values[..1;7]\n    other [2]mut u8 := undefined\n    other[0] = 42\n    values = other\n    return view\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "before initialization" },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_reject_out_of_bounds_sentinel test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_reject_out_of_bounds_sentinel")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_reject_out_of_bounds_sentinel",
+        "make proc() [;7]u8 {\n    values [1]u8 :: [42]\n    return values.ptr[..1;7]\n}\nmain proc() usize { return $(make()).len }\n",
+        support.Expected{ stdout = "", diagnostic = "bounds" },
+    )
+}
+
+comptime_nonzero_sentinel_byte_slices_materialize_mutable_backing test {
+    context := try support.init("comptime_nonzero_sentinel_byte_slices_materialize_mutable_backing")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_nonzero_sentinel_byte_slices_materialize_mutable_backing",
+        "make proc() [;7]mut u8 {\n    values [2]mut u8 := [42, 7]\n    return values[..1;7]\n}\nmain proc() [3]u8 { view :: $(make())\n    view[0] += 1\n    return [view[0], view.ptr[view.len], u8(view.len)] }\n",
+        support.Expected{ stdout = "[43, 7, 1]\n", diagnostic = null },
+    )
+}
+
+comptime_tagged_union_preserves_tags_and_nested_raw_payloads test {
+    context := try support.init("comptime_tagged_union_preserves_tags_and_nested_raw_payloads")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_tagged_union_preserves_tags_and_nested_raw_payloads",
+        "Tag :: enum(i16) { number = -7, empty = 12, zero = 41, payload = 90 }\nEmpty :: struct {}\nPayload :: struct { rows [2]struct { values [2]i16 }, text string }\nChoice :: union(Tag) { payload Payload, empty void, zero Empty, number i16 }\nmake proc() Choice {\n    return .payload { rows = [{ values = [10, 20] }, { values = [4, 6] }], text = \"ok\" }\n}\nnumeric proc() Choice { return .number{42} }\nempty proc() Choice { return .empty }\nzero proc() Choice { return .zero{} }\nscore proc(value Choice) i16 {\n    return match value {\n        .number |number|: number,\n        .payload |payload|: (\n            payload.rows[0].values[0] + payload.rows[0].values[1]\n            + payload.rows[1].values[0] + payload.rows[1].values[1] + i16(payload.text.len)\n        ),\n        .empty: 3,\n        .zero: 5,\n    }\n}\nmain proc() [5]i16 {\n    value :: $(make())\n    return [score(value), value.payload.rows[1].values[1], score($(numeric())),\n        score($(empty())), score($(zero()))]\n}\n",
+        support.Expected{ stdout = "[42, 6, 42, 3, 5]\n", diagnostic = null },
+    )
+}
+
+comptime_tagged_union_value_parameters_and_cache_identity test {
+    context := try support.init("comptime_tagged_union_value_parameters_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_tagged_union_value_parameters_and_cache_identity",
+        "Choice :: union(enum) { left i16, right i16 }\nmake proc() Choice { return .left{2} }\nFixed proc($choice Choice) type {\n    return struct { values [usize(choice.left)]i16 }\n}\nToken proc($choice Choice) type { return struct {} }\nscore proc($choice Choice) i16 {\n    return match choice { .left |value|: value, .right |value|: value + 1 }\n}\nmain proc() i16 {\n    first Fixed(make()) :: { values = [20, 20] }\n    same Fixed(Choice { left = 2 }) :: first\n    if (Token(make()) != Token(Choice { left = 2 })) return 0\n    if (Token(make()) == Token(Choice { right = 2 })) return 0\n    if (Token(make()) == Token(Choice { left = 3 })) return 0\n    return same.values[0] + same.values[1] + score(make())\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_nested_storage_preserves_both_channels test {
+    context := try support.init("comptime_fallible_nested_storage_preserves_both_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_nested_storage_preserves_both_channels",
+        "Error :: enum { failed }\nStorage :: struct { values [2](i16 ! Error), text string ! Error }\nmake proc() Storage { return { values = [40, .failed], text = \"ok\" } }\nmain proc() i16 {\n    storage :: $(make())\n    text :: storage.text catch \"\"\n    return (storage.values[0] catch 0) + (storage.values[1] catch i16(text.len))\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_materializes_composed_and_payload_errors test {
+    context := try support.init("comptime_fallible_materializes_composed_and_payload_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_materializes_composed_and_payload_errors",
+        "Missing :: enum { missing }\nDetail :: union(enum) { failed struct { rows [2]i16, text string }, empty void }\nFailure :: struct { code i16 }\nmissing proc() i16 ! (Missing | Detail) { return .missing }\ndetail proc() i16 ! (Missing | Detail) {\n    return .failed { rows = [20, 20], text = \"ok\" }\n}\nrecord proc() i16 ! Failure { return Failure { code = 42 } }\nread proc(value i16 ! (Missing | Detail)) i16 {\n    return value catch |err| match err {\n        .missing: 7,\n        .failed |payload|: payload.rows[0] + payload.rows[1] + i16(payload.text.len),\n        .empty: 0,\n    }\n}\nmain proc() [3]i16 {\n    return [read($(missing())), read($(detail())), $(record()) catch |err| err.code]\n}\n",
+        support.Expected{ stdout = "[7, 42, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_value_parameters_type_inputs_and_cache_identity test {
+    context := try support.init("comptime_fallible_value_parameters_type_inputs_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_value_parameters_type_inputs_and_cache_identity",
+        "Error :: enum { failed, other }\ngood proc() i16 ! Error { return 2 }\nbad proc() i16 ! Error { return .failed }\nFixed proc($result i16 ! Error) type {\n    return struct { values [usize(result catch 1)]i16 }\n}\nToken proc($result i16 ! Error) type { return struct {} }\nscore proc($result i16 ! Error) i16 { return result catch 40 }\nmain proc() i16 {\n    first Fixed(good()) :: { values = [20, 20] }\n    same Fixed(2) :: first\n    if (Token(good()) != Token(2) or Token(bad()) != Token(Error.failed)) return 0\n    if (Token(good()) == Token(3) or Token(bad()) == Token(Error.other)) return 0\n    if (Token(good()) == Token(bad())) return 0\n    return same.values[0] + same.values[1] + score(good())\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_void_success_and_error_channels test {
+    context := try support.init("comptime_fallible_void_success_and_error_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_void_success_and_error_channels",
+        "Error :: enum { failed }\ngood proc() void ! Error {}\nbad proc() void ! Error { return .failed }\nscore proc($result void ! Error) i16 {\n    result catch { return 2 }\n    return 40\n}\nmain proc() i16 {\n    value i16 := 0\n    $(good()) catch { value = 100 }\n    $(bad()) catch { value = 2 }\n    return value + score(good()) + score(bad()) - 2\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_preserves_overlapping_channel_types test {
+    context := try support.init("comptime_fallible_preserves_overlapping_channel_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_preserves_overlapping_channel_types",
+        "Success :: enum { failed }\nError :: enum { failed }\nValue :: struct { code i16 }\nFailure :: struct { code i16 }\ngood proc() Success ! Error { return Success.failed }\nbad proc() Success ! Error { return Error.failed }\ngood_record proc() Value ! Failure { return Value { code = 40 } }\nbad_record proc() Value ! Failure { return Failure { code = 2 } }\nenum_score proc() i16 {\n    value :: $(good()) catch { return -1 }\n    if (value != Success.failed) return -2\n    $(bad()) catch { return 42 }\n    return 0\n}\nmain proc() [2]i16 {\n    left :: $(good_record()) catch Value { code = 0 }\n    right :: $(bad_record()) catch |err| Value { code = err.code }\n    return [enum_score(), left.code + right.code]\n}\n",
+        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_tagged_union_projects_raw_nested_channels test {
+    context := try support.init("comptime_tagged_union_projects_raw_nested_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_tagged_union_projects_raw_nested_channels",
+        "Error :: enum { failed }\nChoice :: union(enum) {\n    data struct { maybe ?i16, result i16 ! Error }\n    pointer @i16\n    empty void\n}\nmake proc() Choice { return .data { maybe = 40, result = .failed } }\nabsent proc() Choice { return .empty }\nmain proc() i16 {\n    value :: $(make())\n    empty :: $(absent())\n    match empty { .empty: {}, else: return 0 }\n    return value.data.maybe? + (value.data.result catch 2)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_tagged_union_materializes_nonnull_pointer_payload test {
+    context := try support.init("comptime_tagged_union_materializes_nonnull_pointer_payload")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_tagged_union_materializes_nonnull_pointer_payload",
+        "Choice :: union(enum) { pointer @i16, empty void }\nmake proc() Choice {\n    value i16 :: 42\n    return .pointer{&value}\n}\nmain proc() i16 { return $(make()).pointer^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_materializes_nonnull_success_pointer test {
+    context := try support.init("comptime_fallible_materializes_nonnull_success_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_materializes_nonnull_success_pointer",
+        "Error :: enum { failed }\nmake proc() @i16 ! Error {\n    value i16 :: 42\n    return &value\n}\nmain proc() i16 { return ($(make()) catch { return -1 })^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_fallible_materializes_nonnull_error_pointer test {
+    context := try support.init("comptime_fallible_materializes_nonnull_error_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_fallible_materializes_nonnull_error_pointer",
+        "Failure :: struct { pointer @i16 }\nmake proc() i16 ! Failure {\n    value i16 :: 42\n    return Failure { pointer = &value }\n}\nmain proc() i16 { return $(make()) catch |err| err.pointer^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_scalar_and_ieee_bits test {
+    context := try support.init("comptime_untagged_union_preserves_scalar_and_ieee_bits")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_scalar_and_ieee_bits",
+        "Storage :: union { real f64, bits u64 }\nmake proc(bits u64) Storage { return Storage { bits = bits } }\nmain proc() bool {\n    one :: $(make(4607182418800017408))\n    zero :: $(make(9223372036854775808))\n    nan :: $(make(9221120237041090626))\n    return (\n        one.real == 1.0 and zero.bits == 9223372036854775808\n        and nan.bits == 9221120237041090626\n    )\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_owns_padding_tail_bytes_and_copies test {
+    context := try support.init("comptime_untagged_union_owns_padding_tail_bytes_and_copies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_owns_padding_tail_bytes_and_copies",
+        "Pair :: struct { small u8, large u64 }\nStorage :: union { small u8, rows [2]mut Pair, words [4]mut u64, bytes [32]u8 }\nmake proc(prefix u64) Storage {\n    value := Storage { words = [prefix, 40, maxval!(u64), 2] }\n    value.small = 9\n    return value\n}\nToken proc($value Storage) type { return struct {} }\nmain proc() [8]u64 {\n    if (Token(make(maxval!(u64))) == Token(make(9))) return [0, 0, 0, 0, 0, 0, 0, 0]\n    value := $(make(maxval!(u64)))\n    saved :: value\n    value.small = 0\n    value.rows[0].large = 99\n    other :: $(make(maxval!(u64)))\n    return [u64(saved.small), u64(saved.bytes[1]), u64(saved.bytes[7]),\n        saved.rows[0].large, u64(saved.bytes[17]), u64(saved.bytes[23]),\n        other.rows[1].large, value.rows[0].large]\n}\n",
+        support.Expected{ stdout = "[9, 255, 255, 40, 255, 255, 2, 99]\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_cache_identity_and_generated_defaults test {
+    context := try support.init("comptime_untagged_union_cache_identity_and_generated_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_cache_identity_and_generated_defaults",
+        "Produced proc() type { return union { small u16, words [2]mut u16, bits u32 } }\nStorage :: alias Produced()\nmake proc(tail u16) Storage {\n    value := Storage { words = [0, tail] }\n    value.small = 40\n    return value\n}\nToken proc($value Storage) type { return struct {} }\nFixed proc($value Storage) type { return struct { values [usize(value.words[1])]i16 } }\nscore proc($value Storage) u16 { return value.small + value.words[1] }\nGenerated proc() type {\n    return struct_type!(.auto, [\"value\"], [Storage], [make(2)])\n}\nmain proc() u16 {\n    if (Token(make(2)) != Token(Storage { bits = 131112 })) return 0\n    if (Token(make(2)) != Token(Storage { words = [40, 2] })) return 0\n    if (Token(make(2)) == Token(make(3))) return 0\n    first Fixed(make(2)) :: { values = [20, 20] }\n    same Fixed(Storage { words = [40, 2] }) :: first\n    generated Generated() :: {}\n    if (generated.value.words[1] != 2 or same.values[1] != 20) return 0\n    return score(make(2))\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_zero_size_and_nominal_members test {
+    context := try support.init("comptime_untagged_union_preserves_zero_size_and_nominal_members")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_zero_size_and_nominal_members",
+        "Number :: distinct u16\nKind :: enum(u16) { answer = 42 }\nStorage :: union { number Number, kind Kind }\nEmpty :: union { bytes [0]u8, record struct {} }\nmake proc() Storage { return Storage { kind = .answer } }\nempty proc() Empty { return Empty { bytes = [] } }\nexact proc(value Storage) Number { return value.number }\nmain proc() u16 {\n    zero :: $(empty())\n    if (sizeof!(Empty) != 0 or zero.bytes.len != 0) return 0\n    return u16(exact($(make())))\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_nested_optional_tagged_and_fallible_channels test {
+    context := try support.init("comptime_untagged_union_nested_optional_tagged_and_fallible_channels")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_nested_optional_tagged_and_fallible_channels",
+        "Storage :: union { small u16, words [2]u16 }\nChoice :: union(enum) { data Storage, empty void }\nFailure :: struct { value Storage }\nPacket :: struct {\n    maybe [2]?Storage\n    choice Choice\n    success Storage ! Failure\n    failure Storage ! Failure\n}\nmake proc() Packet {\n    value Storage :: { words = [40, 2] }\n    return {\n        maybe = [value, null], choice = .data{value},\n        success = value, failure = Failure { value = value },\n    }\n}\nscore proc(value Storage) u16 { return value.words[0] + value.words[1] }\nmain proc() [4]u16 {\n    packet :: $(make())\n    if (packet.maybe[1] != null) return [0, 0, 0, 0]\n    good :: packet.success catch Storage { small = 0 }\n    bad :: packet.failure catch |err| err.value\n    return [score(packet.maybe[0]?), score(packet.choice.data), score(good), score(bad)]\n}\n",
+        support.Expected{ stdout = "[42, 42, 42, 42]\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_materializes_source_pointer test {
+    context := try support.init("comptime_untagged_union_materializes_source_pointer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_materializes_source_pointer",
+        "Storage :: union { bits u64, pointer @i16 }\nmake proc() Storage {\n    value i16 :: 42\n    return Storage { pointer = &value }\n}\nmain proc() i16 { return $(make()).pointer^ }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_integer_bits_with_inactive_pointer_layout test {
+    context := try support.init("comptime_untagged_union_preserves_integer_bits_with_inactive_pointer_layout")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_integer_bits_with_inactive_pointer_layout",
+        "Storage :: union { bits u64, pointer ?@i16 }\nmake proc() Storage { return Storage { bits = 0 } }\nmain proc() u64 { return $(make()).bits }\n",
+        support.Expected{ stdout = "0\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_integer_bits_with_inactive_callback_layout test {
+    context := try support.init("comptime_untagged_union_preserves_integer_bits_with_inactive_callback_layout")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_integer_bits_with_inactive_callback_layout",
+        "Storage :: union { bits u64, callback @proc(value i16) i16 }\nmake proc() Storage { return Storage { bits = 42 } }\nmain proc() u64 { return $(make()).bits }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_integer_bits_with_inactive_string_layout test {
+    context := try support.init("comptime_untagged_union_preserves_integer_bits_with_inactive_string_layout")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_integer_bits_with_inactive_string_layout",
+        "Storage :: union { bits [2]u64, text string }\nmake proc() Storage { return Storage { bits = [0, 0] } }\nmain proc() u64 { return $(make()).bits[0] }\n",
+        support.Expected{ stdout = "0\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_preserves_integer_bits_with_inactive_slice_layout test {
+    context := try support.init("comptime_untagged_union_preserves_integer_bits_with_inactive_slice_layout")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_preserves_integer_bits_with_inactive_slice_layout",
+        "Storage :: union { bits [2]u64, rows [1]struct { bytes []u8 } }\nmake proc() Storage { return Storage { bits = [0, 0] } }\nmain proc() u64 { return $(make()).bits[0] }\n",
+        support.Expected{ stdout = "0\n", diagnostic = null },
+    )
+}
+
+comptime_untagged_union_rejects_uninitialized_tail_bytes test {
+    context := try support.init("comptime_untagged_union_rejects_uninitialized_tail_bytes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_rejects_uninitialized_tail_bytes",
+        "Storage :: union { small u8, words [2]mut u64 }\nmake proc() Storage {\n    value Storage := undefined\n    value.small = 42\n    return value\n}\nmain proc() u8 { return $(make()).small }\n",
+        support.Expected{ stdout = "", diagnostic = "read before initialization" },
+    )
+}
+
+comptime_untagged_union_rejects_uninitialized_padding_bytes test {
+    context := try support.init("comptime_untagged_union_rejects_uninitialized_padding_bytes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_untagged_union_rejects_uninitialized_padding_bytes",
+        "Pair :: struct { small u8, large u64 }\nStorage :: union { pair Pair, words [2]u64 }\nmake proc() Storage {\n    value Storage := undefined\n    value.pair.small = 1\n    value.pair.large = 42\n    return value\n}\nmain proc() u64 { return $(make()).pair.large }\n",
+        support.Expected{ stdout = "", diagnostic = "read before initialization" },
+    )
+}
+
+comptime_float_bits_survive_aggregate_materialization test {
+    context := try support.init("comptime_float_bits_survive_aggregate_materialization")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_float_bits_survive_aggregate_materialization",
+        "Floats :: struct { zero f64, nan f64 }\nmake proc() Floats {\n    bits u64 :: 9221120237041090626\n    return Floats { zero = -0.0, nan = ptrcast!(@f64, &bits)^ }\n}\nmain proc() bool {\n    values :: $(make())\n    return (\n        ptrcast!(@u64, &values.zero)^ == 9223372036854775808\n        and ptrcast!(@u64, &values.nan)^ == 9221120237041090626\n    )\n}\n",
+        support.Expected{ stdout = "true\n", diagnostic = null },
+    )
+}
+
+comptime_calls_share_runtime_inference_loops_and_recursion test {
+    context := try support.init("comptime_calls_share_runtime_inference_loops_and_recursion")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_calls_share_runtime_inference_loops_and_recursion",
+        "length proc() usize {\n    result := 0\n    while (result < 2) result = result + 1\n    return result\n}\nfactorial proc(count usize) usize {\n    if (count == 0) return 1\n    return count * factorial(count - 1)\n}\nsum proc(count usize) usize {\n    result := 0\n    for (0..count) |index| {\n        if (index == 1) continue\n        if (index == 4) break\n        result = result + index\n    }\n    return result\n}\nidentity proc($T type, value T) T { return value }\nFixed proc($N usize) type { return struct { values [N]i16 } }\nmain proc() i16 {\n    first Fixed(identity(usize, length())) :: { values = [40, 2] }\n    same Fixed(factorial(3) - sum(6) + 1) :: first\n    return same.values[0] + same.values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+comptime_call_string_result_owns_escaped_bytes test {
+    context := try support.init("comptime_call_string_result_owns_escaped_bytes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "comptime_call_string_result_owns_escaped_bytes",
+        "choose proc(take bool, text string) string {\n    if (take) return text\n    return \"unused\"\n}\noffset proc($text string, value i16) i16 { return value + i16(text.len) }\nmain proc() i16 { return offset(choose(true, \"a\\\"\\\\\\x00\xc3\xa9\"), 36) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}

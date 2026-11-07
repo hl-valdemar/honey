@@ -1,0 +1,27 @@
+import "@tests/support"
+import "@std/fs"
+
+program_examples_match_interpreter test {
+    context := try support.init("honey examples ' ; $")
+    defer support.deinit(&context)
+    directory_path :: try support.path(&context, context.root, "programs")
+    entries := try fs.open_directory(context.allocator, directory_path)
+    defer fs.close_directory(&entries) catch |_| {}
+    while (try fs.next(&entries)) |entry| {
+        if (!support.has_suffix(entry.name, ".hon")) continue
+        file_path :: try support.path(&context, directory_path, entry.name)
+        try support.check(&context, file_path, support.Expected{})
+    }
+}
+
+standalone_llvm_assembly test {
+    context := try support.init("honey llvm ' ; $")
+    defer support.deinit(&context)
+    try check_standalone_llvm(&context)
+}
+
+native_compiler_and_invalid_flag_errors test {
+    context := try support.init("honey cli ' ; $")
+    defer support.deinit(&context)
+    try check_cli_errors(&context, false)
+}

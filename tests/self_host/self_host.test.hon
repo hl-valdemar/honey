@@ -1,0 +1,57 @@
+import "@tests/support"
+import "@tests/native"
+import "@tests/framework"
+import "@std/debug"
+
+@hide:file
+check_self_host proc() void ! support.Error {
+    context := try support.init("honey self host ' ; $")
+    defer support.deinit(&context)
+    clang :: try support.find_executable(&context, "clang")
+    binaries :: try support.path(&context, context.temporary, "bin")
+    try support.directory(&context, binaries)
+    try support.symlink(&context, clang, try support.path(&context, binaries, "clang"))
+    context.environment_path = binaries
+    project :: try support.path(&context, context.temporary, "project")
+    _ = try support.put(&context, project, "build.hon", "# project root\n")
+    for ["source", "std", "ffi"] |package| {
+        try support.copy_tree(&context,
+            try support.path(&context, context.root, package),
+            try support.path(&context, project, package), true)
+    }
+    try support.remove_tree(&context, try support.path(&context, project, "std/testing"))
+    source :: try support.path(&context, project, "source")
+    for (usize(1)..usize(3)) |generation| {
+        relative :: try support.concat(&context, &["build/honey-stage", try support.number(&context, generation)])
+        output :: try support.path(&context, context.root, relative)
+        built :: try support.run(&context,
+            &[context.compiler, "build", source, "-o", output, "-O2"],
+            support.RunOptions{ cwd = project, timeout_seconds = 3600 })
+        try support.expect_result(&context, built, 0, "", "")
+        context.compiler = output
+    }
+    names [7][]u8 :: [
+        "factorial", "iterative_factorial", "array_sum", "range_loop",
+        "loop_control", "boolean_conditions", "temperature",
+    ]
+    outputs [7][]u8 :: ["120\n", "120\n", "17\n", "40\n", "12\n", "true\n", "68\n"]
+    for (names) |name, index| {
+        relative :: try support.concat(&context, &["programs/", name, ".hon"])
+        try support.check(&context,
+            try support.path(&context, context.root, relative),
+            support.Expected{ stdout = outputs[index] })
+    }
+    try native.check_packages(&context)
+    try native.check_dependency_provenance(&context)
+    try native.check_io_packages(&context)
+    try framework.check_framework(&context)
+    try native.check_standalone_llvm(&context)
+    try native.check_cli_errors(&context, true)
+}
+
+compiler_self_hosts_twice_without_bro test {
+    check_self_host() catch |err| {
+        debug.print("self-host acceptance failed: {}\n", {err})
+        return .expectation_failed
+    }
+}

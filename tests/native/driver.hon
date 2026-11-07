@@ -1,0 +1,277 @@
+import "@tests/support"
+import "@std/arraylist"
+
+check_native_driver proc(context @mut support.Context) void ! support.Error {
+    project :: try support.path(context, context.temporary, "native driver ' ; $")
+    _ = try support.put(context, project, "build.hon", "# project root\n")
+    for ["std", "ffi"] |package| {
+        try support.symlink(context,
+            try support.path(context, context.root, package),
+            try support.path(context, project, package))
+    }
+    app :: try support.path(context, project, "app")
+    library :: try support.path(context, project, "library")
+    binaries :: try support.path(context, project, "bin ' ; $")
+    try support.directory(context, app)
+    try support.directory(context, binaries)
+    value :: try support.put(context, library, "value.hon", "result proc() i32 { return 37 }\n")
+    _ = try support.put(context, library, "ignored.test.hon", "not production Honey\n")
+    try support.symlink(context, library, try support.path(context, project, "library-link"))
+    source :: try support.put(context, app, "main.hon",
+        `import "@std/process"
+        `import "@std/io"
+        `import "@std/mem"
+        `import "@std/fs"
+        `import "@std/arraylist"
+        `import "@ffi/c"
+        `import "../library"
+        `Error :: alias (fs.ReadFileError | io.WriteError | process.RunError)
+        `
+        `main proc(init process.Init) i32 ! Error {
+        `    arguments :: init.args.values
+        `    if (arguments.len < 7) return 80
+        `    for arguments |argument| {
+        `        if (argument.ptr[argument.len] != 0) return 81
+        `        try io.print("{}:{}\n", io.stdout(init.io), {argument.len, argument})
+        `    }
+        `    input := try io.read_all(mem.c_allocator, io.stdin(init.io), 16384)
+        `    defer arraylist.deinit(&input)
+        `    try io.print("stdin:{}\n", io.stdout(init.io), {input.items.len})
+        `    try io.write_all(io.stdout(init.io), input.items)
+        `    try io.write_all(io.stderr(init.io), "stderr: separate\n")
+        `
+        `    canonical :: try fs.canonical(mem.c_allocator, arguments[1])
+        `    defer mem.free(mem.c_allocator, canonical)
+        `    if (!mem.eql(u8, canonical, arguments[2])) return 82
+        `    if (try fs.kind(mem.c_allocator, canonical) != .directory) return 83
+        `    directory := try fs.open_directory(mem.c_allocator, canonical)
+        `    defer fs.close_directory(&directory) catch |_| {}
+        `    found usize := 0
+        `    while true {
+        `        entry :: try fs.next(&directory)
+        `        if entry |item| {
+        `            if (mem.eql(u8, item.name, "value.hon")) found += 1
+        `            if (mem.eql(u8, item.name, "ignored.test.hon")) found += 2
+        `        } else { break }
+        `    }
+        `    if (found != 3) return 84
+        `    bytes := try fs.read_file(mem.c_allocator, init.io, arguments[3], 4096)
+        `    defer arraylist.deinit(&bytes)
+        `    if (!mem.eql(u8, bytes.items, "result proc() i32 { return 37 }\n")) return 85
+        `
+        `    template :: try mem.alloc(u8, mem.c_allocator, arguments[4].len + 1)
+        `    defer mem.free(mem.c_allocator, template)
+        `    memcopy!(template[..arguments[4].len], arguments[4])
+        `    template[arguments[4].len] = 0
+        `    descriptor :: c.mkstemp(ptrcast!(template.ptr))
+        `    if (descriptor < 0) return 86
+        `    defer { _ = c.unlink(ptrcast!(template.ptr)) }
+        `    if (c.close(descriptor) != 0) return 87
+        `    path [;0]u8 :: template.ptr[..arguments[4].len;0]
+        `    {
+        `        file :: try io.open(init.io, path, .write_only)
+        `        defer io.close(file) catch |_| {}
+        `        try io.write_all(io.writer(file),
+        `            `declare i32 @raise(i32)
+        `            `define i32 @main(i32 %argc, ptr %argv) {
+        `            `entry:
+        `            `  %signal = icmp eq i32 %argc, 2
+        `            `  br i1 %signal, label %terminate, label %result
+        `            `terminate:
+        `            `  %ignored = call i32 @raise(i32 15)
+        `            `  ret i32 99
+        `            `result:
+        `            `
+        `        )
+        `        try io.print("  ret i32 {}\n}}\n", io.writer(file), {library.result()})
+        `    }
+        `    defer { _ = c.unlink(ptrcast!(arguments[5].ptr)) }
+        `    compiler [8][;0]u8 :: [
+        `        "clang", "-Wno-override-module", "-x", "ir",
+        `        path, "-o", arguments[5], arguments[6],
+        `    ]
+        `    if (try process.run(mem.c_allocator, compiler[..]) != 0) return 88
+        `    if (try fs.kind(mem.c_allocator, arguments[5]) != .file) return 89
+        `    child [1][;0]u8 :: ["native child ' ; $"]
+        `    if (try process.run(mem.c_allocator, child[..]) != 37) return 90
+        `    signal [2][;0]u8 :: ["native child ' ; $", "signal"]
+        `    if (try process.run(mem.c_allocator, signal[..]) != 143) return 91
+        `    missing [1][;0]u8 :: ["honey-no-such-driver-child-74d4a2"]
+        `    absent := false
+        `    _ = process.run(mem.c_allocator, missing[..]) catch |err| {
+        `        if (err != .spawn_failed) return 92
+        `        absent = true
+        `        yield i32(0)
+        `    }
+        `    if (!absent) return 93
+        `    try io.write_all(io.stdout(init.io), "files, clang, exit, signal, missing: ok\n")
+        `    return 23
+        `}
+        `
+    )
+    interpreted :: try support.run(context, &[context.compiler, "run", app], support.RunOptions{})
+    try support.expect(context, interpreted.status == 1 and interpreted.stdout.len == 0, "process.Init requires native execution")
+    try support.expect(context, support.contains(interpreted.stderr, "process.Init entry points require native execution"), "process.Init interpreter diagnostic")
+    try support.expect(context, support.line_count(interpreted.stderr) == 1, "process.Init emits one diagnostic")
+    child :: try support.path(context, binaries, "native child ' ; $")
+    template :: try support.path(context, project, "emitted ' ; $.XXXXXX")
+    inherited := try support.environment(context, "PATH")
+    if (context.environment_path) |override| inherited = override
+    environment :: try support.concat(context, &[binaries, ":", inherited])
+    input [8971]mut u8 := undefined
+    for (0..usize(8960)) |index| input[index] = u8(rem!(index, 256))
+    memcopy!(input[8960..], "\nstdin end\n")
+    for ["-O0", "-O2"] |optimization| {
+        built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, optimization], support.RunOptions{})
+        try support.expect_result(context, built, 0, "", "")
+        defer support.remove(context, context.executable) catch |_| {}
+        arguments [107]mut [;0]u8 := undefined
+        arguments[0] = context.executable
+        arguments[1] = try support.path(context, project, "library-link/../library-link")
+        arguments[2] = try support.canonical(context, library)
+        arguments[3] = value
+        arguments[4] = template
+        arguments[5] = child
+        arguments[6] = optimization
+        arguments[7] = ""
+        arguments[8] = "héllø 世界"
+        arguments[9] = " \t\n"
+        arguments[10] = "'\";$()&|<>*?"
+        for (0..usize(96)) |index| arguments[index + 11] = try support.concat(context, &["argument-", try support.number(context, index)])
+        expected := arraylist.init(u8, context.allocator)
+        defer arraylist.deinit(&expected)
+        for (arguments) |argument| {
+            try append_driver_bytes(&expected, try support.number(context, argument.len))
+            try append_driver_bytes(&expected, ":")
+            try append_driver_bytes(&expected, argument)
+            try append_driver_bytes(&expected, "\n")
+        }
+        try append_driver_bytes(&expected, "stdin:")
+        try append_driver_bytes(&expected, try support.number(context, input.len))
+        try append_driver_bytes(&expected, "\n")
+        try append_driver_bytes(&expected, input[..])
+        prefix_length :: expected.items.len
+        try append_driver_bytes(&expected, "files, clang, exit, signal, missing: ok\n")
+        native :: try support.run(context, arguments[..], support.RunOptions{ path = environment, input = input[..] })
+        try support.expect_result(context, native, 23, expected.items, "stderr: separate\n")
+        try support.expect(context, !try support.exists(context, child), "native driver removes child executable")
+        try support.expect(context, !try support.has_entry_prefix(context, project, "emitted "), "native driver removes emitted IR")
+        missing_compiler :: try support.run(context, arguments[..], support.RunOptions{ path = binaries, input = input[..] })
+        try support.expect_result(context, missing_compiler, 1, expected.items[..prefix_length], "stderr: separate\n")
+        try support.expect(context, !try support.exists(context, child), "failed driver removes child executable")
+        try support.expect(context, !try support.has_entry_prefix(context, project, "emitted "), "failed driver removes emitted IR")
+        try support.remove(context, context.executable)
+    }
+    statuses [7]DriverStatus :: [
+        DriverStatus{ result = "i32", body = "return 23", status = 23 },
+        DriverStatus{ result = "void", body = "return", status = 0 },
+        DriverStatus{ result = "void", body = "", status = 0 },
+        DriverStatus{ result = "i32 ! Error", body = "return 23", status = 23 },
+        DriverStatus{ result = "void ! Error", body = "return", status = 0 },
+        DriverStatus{ result = "i32 ! Error", body = "return .failed", status = 1 },
+        DriverStatus{ result = "void ! Error", body = "return .failed", status = 1 },
+    ]
+    for (statuses) |entry| {
+        try support.write(context, source, try support.concat(context, &[
+            "import \"@std/process\"\nError :: enum { failed }\nmain proc(init process.Init) ", entry.result, " { ", entry.body, " }\n",
+        ]))
+        for ["-O0", "-O2"] |optimization| {
+            built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, optimization], support.RunOptions{})
+            try support.expect_result(context, built, 0, "", "")
+            defer support.remove(context, context.executable) catch |_| {}
+            native :: try support.run(context, &[context.executable], support.RunOptions{})
+            try support.expect_result(context, native, entry.status, "", "")
+            try support.remove(context, context.executable)
+        }
+    }
+    invalid [6]DriverEntry :: [
+        DriverEntry{ parameters = "init i32" },
+        DriverEntry{ parameters = "init @process.Init" },
+        DriverEntry{ parameters = "init process.Init, other i32" },
+        DriverEntry{ parameters = "$init process.Init" },
+        DriverEntry{ parameters = "init process.Init", result = "i16" },
+        DriverEntry{ declarations = "Init :: struct { io io.Io, args process.Args }\n", parameters = "init Init" },
+    ]
+    for (invalid) |entry| {
+        try support.write(context, source, try support.concat(context, &[
+            "import \"@std/process\"\nimport \"@std/io\"\n", entry.declarations,
+            "main proc(", entry.parameters, ") ", entry.result, " { return 0 }\n",
+        ]))
+        try support.check(context, app, support.Expected{
+            stdout = "", diagnostic = "main must be a runtime function with no parameters, or accept process.Init",
+        })
+    }
+}
+
+@hide:file
+DriverStatus :: struct { result []u8, body []u8, status i32 }
+
+@hide:file
+DriverEntry :: struct { declarations []u8 = "", parameters []u8, result []u8 = "i32" }
+
+@hide:file
+append_driver_bytes proc(bytes @mut arraylist.ArrayList(u8), text []u8) void ! support.Error {
+    for (text) |byte| try arraylist.append(bytes, byte)
+}
+
+check_variadic_libc proc(context @mut support.Context) void ! support.Error {
+    source :: try support.put(context, context.temporary, "variadic.hon",
+        `snprintf c_func(buffer ?*mut c_char, size c_ulong, format ?*c_char, ...) c_int
+        `main proc() i16 {
+        `    buffer [256]mut u8 := undefined
+        `    count :: snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len),
+        `        "%d %d %d %d %d %d %u %lld %llu %.2f %s",
+        `        true, i8(-128), u8(255), i16(-32768), u16(65535),
+        `        i32(-2147483648), maxval!(u32), minval!(i64), maxval!(u64),
+        `        f64(1.25), "ok".ptr)
+        `    expected :: "1 -128 255 -32768 65535 -2147483648 4294967295 -9223372036854775808 18446744073709551615 1.25 ok"
+        `    if (count < 0 or usize(count) != expected.len) return -1
+        `    for expected |byte, index| { if (buffer[index] != byte) return -2 }
+        `    if (buffer[expected.len] != 0) return -3
+        `    return 42
+        `}
+        `
+    )
+    interpreted :: try support.run(context, &[context.compiler, "run", source], support.RunOptions{})
+    try support.expect(context, interpreted.status == 1 and interpreted.stdout.len == 0, "variadic libc is native-only")
+    try support.expect(context, support.contains(interpreted.stderr, "foreign function calls are unsupported by the interpreter"), "variadic libc interpreter diagnostic")
+    try support.expect(context, support.line_count(interpreted.stderr) == 1, "variadic libc emits one diagnostic")
+    for ["-O0", "-O2"] |optimization| {
+        built :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, optimization], support.RunOptions{})
+        try support.expect_result(context, built, 0, "", "")
+        defer support.remove(context, context.executable) catch |_| {}
+        native :: try support.run(context, &[context.executable], support.RunOptions{})
+        try support.expect_result(context, native, 0, "42\n", "")
+        try support.remove(context, context.executable)
+    }
+}
+
+check_standalone_llvm proc(context @mut support.Context) void ! support.Error {
+    source :: try support.path(context, context.root, "programs/factorial.hon")
+    emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+    try support.expect(context, emitted.status == 0 and emitted.stderr.len == 0, "standalone LLVM emission succeeds without diagnostics")
+    llvm :: try support.put(context, context.temporary, "factorial.ll", emitted.stdout)
+    assembled :: try support.run(context, &["clang", llvm, "-o", context.executable], support.RunOptions{})
+    try support.expect(context, assembled.status == 0, "Clang assembles standalone LLVM")
+    defer support.remove(context, context.executable) catch |_| {}
+    native :: try support.run(context, &[context.executable], support.RunOptions{})
+    try support.expect_result(context, native, 0, "120\n", "")
+    try support.remove(context, context.executable)
+}
+
+check_cli_errors proc(context @mut support.Context, full bool) void ! support.Error {
+    source :: try support.path(context, context.root, "programs/factorial.hon")
+    if (full) {
+        no_arguments :: try support.run(context, &[context.compiler], support.RunOptions{})
+        try support.expect(context, no_arguments.status == 2 and support.contains(no_arguments.stderr, "usage:"), "CLI rejects absent command")
+        no_source :: try support.run(context, &[context.compiler, "build"], support.RunOptions{})
+        try support.expect(context, no_source.status == 2 and support.contains(no_source.stderr, "usage:"), "CLI rejects missing build source")
+        missing :: try support.run(context, &[context.compiler, "run", try support.path(context, context.temporary, "missing.hon")], support.RunOptions{})
+        try support.expect(context, missing.status == 2 and support.contains(missing.stderr, "infrastructure error:"), "CLI reports missing source infrastructure error")
+    }
+    failed :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable], support.RunOptions{ path = context.temporary })
+    try support.expect(context, failed.status == 2 and support.contains(failed.stderr, "cannot start native compiler"), "CLI reports missing native compiler")
+    try support.expect(context, !try support.exists(context, context.executable), "missing native compiler leaves no executable")
+    invalid :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, "-O3"], support.RunOptions{})
+    try support.expect(context, invalid.status == 2 and support.contains(invalid.stderr, "usage:"), "CLI rejects invalid optimization flag")
+}

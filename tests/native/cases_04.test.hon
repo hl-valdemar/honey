@@ -1,0 +1,1541 @@
+import "@tests/support"
+
+type_record_procedure_rejects_runtime_dependency test {
+    context := try support.init("type_record_procedure_rejects_runtime_dependency")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_record_procedure_rejects_runtime_dependency",
+        "config proc(wide bool) struct { child type } {\n    if (wide) return { child = i16 }\n    return { child = i8 }\n}\nread proc(wide bool) i16 {\n    value config(wide).child :: 42\n    return i16(value)\n}\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+type_record_procedure_nested_execution_shares_step_limit test {
+    context := try support.init("type_record_procedure_nested_execution_shares_step_limit")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_record_procedure_nested_execution_shares_step_limit",
+        "config proc(count usize) struct { child type } {\n    for (0..count) |_| { }\n    return { child = i16 }\n}\nSelected proc() type {\n    for (0..maxval!(usize)) |index| { input :: config(index + 100) }\n    return i16\n}\nmain proc() Selected() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+type_records_reject_unknown_initializer_field test {
+    context := try support.init("type_records_reject_unknown_initializer_field")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_unknown_initializer_field",
+        "Bad proc() type {\n    config struct { child type } :: { child = i16, missing = 1 }\n    return config.child\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+type_records_reject_duplicate_initializer_field test {
+    context := try support.init("type_records_reject_duplicate_initializer_field")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_duplicate_initializer_field",
+        "Bad proc() type {\n    config struct { child type } :: { child = i16, child = i8 }\n    return config.child\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "more than once" },
+    )
+}
+
+type_records_reject_missing_initializer_field test {
+    context := try support.init("type_records_reject_missing_initializer_field")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_missing_initializer_field",
+        "Bad proc() type {\n    config struct { child type, count usize } :: { child = i16 }\n    return config.child\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "missing a required field" },
+    )
+}
+
+type_records_reject_non_type_leaf test {
+    context := try support.init("type_records_reject_non_type_leaf")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_non_type_leaf",
+        "Bad proc() type {\n    config struct { child type } :: { child = 42 }\n    return config.child\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_records_preserve_value_leaf_overflow test {
+    context := try support.init("type_records_preserve_value_leaf_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_preserve_value_leaf_overflow",
+        "Bad proc() type {\n    config struct { child type, count i8 } := { child = i16, count = 127 }\n    config.count = config.count + 1\n    return config.child\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_records_reject_immutable_capture_updates test {
+    context := try support.init("type_records_reject_immutable_capture_updates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_immutable_capture_updates",
+        "Bad proc() type {\n    for [{ child = i16 }] |item| { item.child = i8 }\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "writable array element" },
+    )
+}
+
+type_records_reject_readonly_nested_array_updates test {
+    context := try support.init("type_records_reject_readonly_nested_array_updates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_readonly_nested_array_updates",
+        "Bad proc() type {\n    config struct { children [1]type } := { children = [i16] }\n    config.children[0] = i8\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "writable array element" },
+    )
+}
+
+type_records_reject_unknown_selected_field test {
+    context := try support.init("type_records_reject_unknown_selected_field")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_unknown_selected_field",
+        "Bad proc() type {\n    config :: { child = i16 }\n    return field!(config, \"missing\")\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+type_records_reject_unused_invalid_value_field test {
+    context := try support.init("type_records_reject_unused_invalid_value_field")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_unused_invalid_value_field",
+        "Bad proc() type {\n    Config :: struct { child type, invalid void }\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "void cannot be stored" },
+    )
+}
+
+type_records_reject_unused_invalid_default test {
+    context := try support.init("type_records_reject_unused_invalid_default")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_records_reject_unused_invalid_default",
+        "Bad proc() type {\n    Config :: struct { child type, count i8 = 128 }\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "outside its runtime type" },
+    )
+}
+
+field_reflection_runtime_places_callbacks_and_single_evaluation test {
+    context := try support.init("field_reflection_runtime_places_callbacks_and_single_evaluation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_runtime_places_callbacks_and_single_evaluation",
+        "Point :: struct { value i16, callback @proc(value i16) i16 }\nadd proc(value i16) i16 { return value + 2 }\nplace proc(point @mut Point, calls @mut i16) @mut Point {\n    calls^ = calls^ + 1\n    return point\n}\nname proc() string { return \"val\\x75e\" }\nmain proc() [3]i16 {\n    point Point := { value = 19, callback = add }\n    calls i16 := 0\n    field!(place(&point, &calls), name()) = 40\n    pointer @mut i16 :: &field!(point, \"value\")\n    pointer^ = pointer^ + 1\n    return [field!(point, \"callback\")(field!(point, \"value\")), calls, point.value]\n}\n",
+        support.Expected{ stdout = "[43, 1, 41]\n", diagnostic = null },
+    )
+}
+
+field_reflection_tuple_enum_union_and_sequence_members test {
+    context := try support.init("field_reflection_tuple_enum_union_and_sequence_members")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_tuple_enum_union_and_sequence_members",
+        "A :: enum { first, second }\nB :: enum { third }\nE :: alias A | B\nChoice :: union(enum) { payload i16, empty void }\nread proc($name string, value struct { count i16 }) i16 {\n    return field!(value, name)\n}\nmain proc() [4]i16 {\n    tuple :: {i16(19), i16(21)}\n    choice Choice :: { payload = 2 }\n    values [2]i16 :: [19, 21]\n    member E :: field!(E, \"third\")\n    if (member != E.third) return [0, 0, 0, 0]\n    return [\n        field!(tuple, \"0\") + field!(tuple, \"1\") + field!(choice, \"payload\"),\n        i16(field!(values, \"len\")),\n        field!(&values, \"ptr\")[1],\n        read(\"count\", { count = 42 }),\n    ]\n}\n",
+        support.Expected{ stdout = "[42, 2, 21, 42]\n", diagnostic = null },
+    )
+}
+
+field_reflection_type_control_and_constant_materialization test {
+    context := try support.init("field_reflection_type_control_and_constant_materialization")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_type_control_and_constant_materialization",
+        "Config :: struct { count usize, value i16 }\nconfig proc() Config { return { count = 2, value = 21 } }\nStorage proc(name string) type {\n    settings :: config()\n    types :: [i16, bool]\n    return struct {\n        values [field!(settings, name)]types[0]\n        bias i16 = i16(field!(types, \"len\"))\n    }\n}\nmain proc() i16 {\n    value Storage(\"count\") :: { values = [19, 21] }\n    constant :: $(field!(config(), \"value\"))\n    return value.values[0] + constant + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+field_reflection_type_control_updates_names_and_nested_places test {
+    context := try support.init("field_reflection_type_control_updates_names_and_nested_places")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_type_control_updates_names_and_nested_places",
+        "Selected proc() type {\n    config struct { left [1]mut usize, right [1]mut usize } := { left = [0], right = [0] }\n    original :: config\n    for [\"left\", \"right\"] |name| { field!(config, name)[0] = 2 }\n    if (original.left[0] != 0 or original.right[0] != 0) return bool\n    return [config.left[0] + config.right[0]]i16\n}\nmain proc() i16 {\n    values Selected() :: [10, 10, 10, 12]\n    return values[0] + values[1] + values[2] + values[3]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+field_reflection_preserves_readonly_pointer_assignment test {
+    context := try support.init("field_reflection_preserves_readonly_pointer_assignment")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_preserves_readonly_pointer_assignment",
+        "Point :: struct { value i16 }\nupdate proc(point @Point) void { field!(point, \"value\") = 0 }\nmain proc() i16 {\n    point Point :: { value = 42 }\n    update(&point)\n    return point.value\n}\n",
+        support.Expected{ stdout = "", diagnostic = "mutable pointee" },
+    )
+}
+
+field_reflection_rejects_nonstring_names test {
+    context := try support.init("field_reflection_rejects_nonstring_names")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_nonstring_names",
+        "main proc() i16 { return field!({ value = i16(42) }, 0) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time value" },
+    )
+}
+
+field_reflection_rejects_unknown_enum_members test {
+    context := try support.init("field_reflection_rejects_unknown_enum_members")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_unknown_enum_members",
+        "E :: enum { first }\nmain proc() E { return field!(E, \"missing\") }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+field_reflection_rejects_overflowing_tuple_ordinals test {
+    context := try support.init("field_reflection_rejects_overflowing_tuple_ordinals")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_overflowing_tuple_ordinals",
+        "main proc() i16 { return field!({i16(42)}, \"18446744073709551616\") }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+field_reflection_rejects_runtime_names test {
+    context := try support.init("field_reflection_rejects_runtime_names")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_runtime_names",
+        "read proc(name string, value struct { count i16 }) i16 {\n    return field!(value, name)\n}\nmain proc() i16 { return read(\"count\", { count = 42 }) }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time value" },
+    )
+}
+
+field_reflection_rejects_unknown_fields test {
+    context := try support.init("field_reflection_rejects_unknown_fields")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_unknown_fields",
+        "main proc() i16 { return field!({ count = i16(42) }, \"missing\") }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+field_reflection_rejects_noncanonical_tuple_names test {
+    context := try support.init("field_reflection_rejects_noncanonical_tuple_names")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_noncanonical_tuple_names",
+        "main proc() i16 { return field!({i16(42)}, \"00\") }\n",
+        support.Expected{ stdout = "", diagnostic = "no such field" },
+    )
+}
+
+field_reflection_rejects_wrong_arity test {
+    context := try support.init("field_reflection_rejects_wrong_arity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_rejects_wrong_arity",
+        "main proc() i16 { return field!(42) }\n",
+        support.Expected{ stdout = "", diagnostic = "argument count" },
+    )
+}
+
+field_reflection_preserves_union_active_field_checks test {
+    context := try support.init("field_reflection_preserves_union_active_field_checks")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "field_reflection_preserves_union_active_field_checks",
+        "Choice :: union(enum) { value i16, empty void }\nmain proc() i16 {\n    choice Choice :: .empty\n    return field!(choice, \"value\")\n}\n",
+        support.Expected{ stdout = "", diagnostic = "not active" },
+    )
+}
+
+collection_iteration_borrows_array_and_reads_each_element test {
+    context := try support.init("collection_iteration_borrows_array_and_reads_each_element")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_borrows_array_and_reads_each_element",
+        "main proc() [2]i16 {\n    values [3]mut i16 := [19, 1, 100]\n    total i16 := 0\n    for values |value, index| {\n        if (index == 0) values[1] = 22\n        if (index == 2) break\n        total = total + value + i16(index)\n        continue\n    }\n    return [total, values[1]]\n}\n",
+        support.Expected{ stdout = "[42, 22]\n", diagnostic = null },
+    )
+}
+
+collection_iteration_pointer_captures_slices_and_array_pointers test {
+    context := try support.init("collection_iteration_pointer_captures_slices_and_array_pointers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_pointer_captures_slices_and_array_pointers",
+        "main proc() [3]i16 {\n    values [2]mut i16 := [19, 21]\n    for (&values) |@value, index| { value^ = value^ + i16(index) }\n    view []mut i16 :: values[..]\n    for view |@value| { value^ = value^ + 1 }\n    total i16 := 0\n    for view |value| { total = total + value }\n    return [total - 1, values[0], values[1]]\n}\n",
+        support.Expected{ stdout = "[42, 20, 23]\n", diagnostic = null },
+    )
+}
+
+collection_iteration_evaluates_entry_once_and_retains_slice_bound test {
+    context := try support.init("collection_iteration_evaluates_entry_once_and_retains_slice_bound")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_evaluates_entry_once_and_retains_slice_bound",
+        "data proc(calls @mut i16) [2]i16 {\n    calls^ = calls^ + 1\n    return [19, 22]\n}\nmain proc() [3]i16 {\n    calls i16 := 0\n    total i16 := 0\n    for data(&calls) |value, index| { total = total + value + i16(index) }\n    values [2]mut i16 := [20, 22]\n    view []mut i16 := values[..]\n    sum i16 := 0\n    for view |value| {\n        view = values[0..0]\n        sum = sum + value\n    }\n    return [total, calls, sum]\n}\n",
+        support.Expected{ stdout = "[42, 1, 42]\n", diagnostic = null },
+    )
+}
+
+collection_iteration_aggregate_copies_nested_and_zero_cell_shapes test {
+    context := try support.init("collection_iteration_aggregate_copies_nested_and_zero_cell_shapes")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_aggregate_copies_nested_and_zero_cell_shapes",
+        "Empty :: struct {}\nItem :: struct { values [2]mut i16 }\nmain proc() [3]i16 {\n    items [2]mut Item := [{ values = [19, 21] }, { values = [0, 0] }]\n    total i16 := 0\n    for items |item, index| {\n        copied := item\n        copied.values[0] = copied.values[0] + 1\n        for copied.values |value| { total = total + value }\n        if (index == 0) items[1].values[1] = 0\n    }\n    empty [0]i16 :: []\n    for empty |_| { return [-1, -1, -1] }\n    cells [2]Empty :: [{}, {}]\n    count i16 := 0\n    for cells |cell, index| {\n        saved Empty :: cell\n        count = count + i16(index) + 1\n    }\n    return [total, items[0].values[0], count]\n}\n",
+        support.Expected{ stdout = "[42, 19, 3]\n", diagnostic = null },
+    )
+}
+
+collection_iteration_strings_and_cleanup_on_transfers test {
+    context := try support.init("collection_iteration_strings_and_cleanup_on_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_strings_and_cleanup_on_transfers",
+        "main proc() [2]i16 {\n    values [3]i16 :: [20, 22, 99]\n    total i16 := 0\n    cleanups i16 := 0\n    for values |value, index| {\n        defer cleanups = cleanups + 1\n        if (index == 2) break\n        total = total + value\n        continue\n    }\n    for \"a\\0b\" |byte, index| {\n        if (index == 1 and byte != 0) return [-1, -1]\n        if (index == 2 and byte != u8(98)) return [-2, -2]\n    }\n    return [total, cleanups]\n}\n",
+        support.Expected{ stdout = "[42, 3]\n", diagnostic = null },
+    )
+}
+
+collection_iteration_ordinary_constant_procedure test {
+    context := try support.init("collection_iteration_ordinary_constant_procedure")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_ordinary_constant_procedure",
+        "compute proc() i16 {\n    values [2]mut i16 := [19, 21]\n    view []mut i16 :: values[..]\n    for view |@value| { value^ = value^ + 1 }\n    total i16 := 0\n    for values |value| { total = total + value }\n    return total\n}\nmain proc() i16 { return $(compute()) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_collection_iteration_observes_updates_and_freezes_places test {
+    context := try support.init("type_execution_collection_iteration_observes_updates_and_freezes_places")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_collection_iteration_observes_updates_and_freezes_places",
+        "Storage proc() type {\n    rows [2]mut [2]mut usize := [[1, 1], [9, 9]]\n    selected usize := 0\n    length usize := 0\n    for rows[selected] |value, index| {\n        selected = 1\n        (rows[0])[1] = 2\n        length = length + value\n        if (index == 0) continue\n        break\n    }\n    Result := i8\n    for \"a\\0b\" |byte, index| {\n        if (byte == 0 and index == 1) Result = i16\n    }\n    return struct { values [length]Result }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 21, 2] }\n    same Storage() :: value\n    return same.values[0] + same.values[1] + same.values[2]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_collection_nested_aggregate_captures_and_empty_body test {
+    context := try support.init("type_execution_collection_nested_aggregate_captures_and_empty_body")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_collection_nested_aggregate_captures_and_empty_body",
+        "Storage proc() type {\n    items [2]struct { values [2]usize, text string } :: [\n        { values = [1, 0], text = \"a\" }, { values = [0, 1], text = \"b\" },\n    ]\n    length usize := 0\n    for items |item| {\n        for item.values |value| { length = length + value }\n    }\n    empty [0]i16 :: []\n    for empty |_| { return i8(128) }\n    for items |@_, index| { if (index == 1) break }\n    return [length]i16\n}\nmain proc() i16 {\n    values Storage() :: [20, 22]\n    return values[0] + values[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+collection_iteration_rejects_scalar_iterable test {
+    context := try support.init("collection_iteration_rejects_scalar_iterable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_rejects_scalar_iterable",
+        "main proc() i16 { for 1.5 |_| { return 0 }\nreturn 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "for-loop iteration requires" },
+    )
+}
+
+collection_iteration_rejects_capture_rebinding test {
+    context := try support.init("collection_iteration_rejects_capture_rebinding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_rejects_capture_rebinding",
+        "main proc() i16 { values [1]i16 :: [1]\nfor values |value| { value = 42 }\nreturn 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+collection_iteration_rejects_index_rebinding test {
+    context := try support.init("collection_iteration_rejects_index_rebinding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_rejects_index_rebinding",
+        "main proc() usize { values [1]i16 :: [1]\nfor values |_, index| { index = 42 }\nreturn 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+collection_iteration_rejects_readonly_array_pointer_mutation test {
+    context := try support.init("collection_iteration_rejects_readonly_array_pointer_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_rejects_readonly_array_pointer_mutation",
+        "main proc() i16 { values [1]mut i16 :: [1]\nfor values |@value| { value^ = 42 }\nreturn 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "mutable pointee" },
+    )
+}
+
+collection_iteration_rejects_readonly_slice_pointer_mutation test {
+    context := try support.init("collection_iteration_rejects_readonly_slice_pointer_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "collection_iteration_rejects_readonly_slice_pointer_mutation",
+        "main proc() i16 { values [1]mut i16 := [1]\nview []i16 :: values[..]\nfor view |@value| { value^ = 42 }\nreturn 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "mutable pointee" },
+    )
+}
+
+type_execution_collection_iteration_preserves_element_type test {
+    context := try support.init("type_execution_collection_iteration_preserves_element_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_collection_iteration_preserves_element_type",
+        "Bad proc() type {\n    values [1]i8 :: [127]\n    for values |value| { next :: value + 1 }\n    return i16\n}\nmain proc() Bad() { return 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_execution_collection_iteration_preserves_step_bound test {
+    context := try support.init("type_execution_collection_iteration_preserves_step_bound")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_collection_iteration_preserves_step_bound",
+        "Bad proc() type {\n    cells [1]i16 :: [0]\n    for cells |_| { while (true) {} }\n    return i16\n}\nmain proc() Bad() { return 0 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution" },
+    )
+}
+
+type_execution_aggregate_updates_preserve_copies_and_generate_defaults test {
+    context := try support.init("type_execution_aggregate_updates_preserve_copies_and_generate_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_aggregate_updates_preserve_copies_and_generate_defaults",
+        "Config :: struct { values [2]mut i16, count usize, text string }\nStorage proc() type {\n    config Config := { values = [17, 19], count = 0, text = \"old\" }\n    original :: config\n    for (usize(0)..2) |index| {\n        config.values[index] = config.values[index] + 1\n        config.count = config.count + 1\n    }\n    config.text = \"owned\"\n    config.values[config.count - 1] = match true {\n        true: config.values[0] + 4,\n        false: i8(128),\n    }\n    return struct {\n        values [config.count]mut i16 = config.values\n        bias i16 = original.values[0] - 17 + i16(config.text.len) - 3\n    }\n}\nmain proc() i16 {\n    value Storage() :: {}\n    same Storage() :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_nested_array_record_updates_and_loop_transfers test {
+    context := try support.init("type_execution_nested_array_record_updates_and_loop_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_nested_array_record_updates_and_loop_transfers",
+        "Item :: struct { length usize, value i16 }\nStorage proc() type {\n    items [2]mut Item := [{ length = 0, value = 0 }, { length = 0, value = 0 }]\n    index usize := 0\n    while (index < 3) {\n        if (index == 2) break\n        items[index].length = index + 1\n        items[index].value = i16(index) + 20\n        index = index + 1\n        continue\n    }\n    return struct {\n        values [items[1].length]i16\n        bias i16 = items[0].value + items[1].value + i16(items[0].length)\n    }\n}\nmain proc() i16 {\n    value Storage() :: { values = [0, 0] }\n    return value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_field_update_rejects_constant_root test {
+    context := try support.init("type_execution_field_update_rejects_constant_root")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_field_update_rejects_constant_root",
+        "Config :: struct { count usize }\nBad proc() type {\n    config Config :: { count = 1 }\n    config.count = 2\n    return [config.count]i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+type_execution_index_update_rejects_readonly_array test {
+    context := try support.init("type_execution_index_update_rejects_readonly_array")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_index_update_rejects_readonly_array",
+        "Bad proc() type {\n    counts [1]usize := [1]\n    counts[0] = 2\n    return [counts[0]]i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+type_execution_index_update_checks_bounds test {
+    context := try support.init("type_execution_index_update_checks_bounds")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_index_update_checks_bounds",
+        "Bad proc() type {\n    counts [1]mut usize := [1]\n    counts[1] = 2\n    return [counts[0]]i16\n}\nmain proc() Bad() { return [0] }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+type_execution_index_update_checks_index_type test {
+    context := try support.init("type_execution_index_update_checks_index_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_index_update_checks_index_type",
+        "Bad proc() type {\n    counts [1]mut usize := [1]\n    index u8 :: 0\n    counts[index] = 2\n    return [counts[0]]i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
+    )
+}
+
+type_execution_field_update_checks_exact_value_type test {
+    context := try support.init("type_execution_field_update_checks_exact_value_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_field_update_checks_exact_value_type",
+        "Config :: struct { count usize }\nBad proc() type {\n    config Config := { count = 1 }\n    value i64 :: 2\n    config.count = value\n    return [config.count]i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_execution_index_update_preserves_narrow_overflow test {
+    context := try support.init("type_execution_index_update_preserves_narrow_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_index_update_preserves_narrow_overflow",
+        "Bad proc() type {\n    values [1]mut i8 := [127]\n    values[0] = values[0] + 1\n    return [usize(values[0])]i16\n}\nmain proc() Bad() { return [0] }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_execution_field_update_rejects_payload_capture_mutation test {
+    context := try support.init("type_execution_field_update_rejects_payload_capture_mutation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_field_update_rejects_payload_capture_mutation",
+        "Config :: struct { count usize }\nBad proc() type {\n    input ?Config :: { count = 1 }\n    if input |config| {\n        config.count = 2\n        return [config.count]i16\n    }\n    return i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+type_execution_index_update_rejects_constant_array_root test {
+    context := try support.init("type_execution_index_update_rejects_constant_array_root")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_index_update_rejects_constant_array_root",
+        "Bad proc() type {\n    counts [1]mut usize :: [1]\n    counts[0] = 2\n    return [counts[0]]i16\n}\nmain proc() Bad() { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+type_execution_field_update_checks_member test {
+    context := try support.init("type_execution_field_update_checks_member")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_field_update_checks_member",
+        "Config :: struct { count usize }\nBad proc() type {\n    config Config := { count = 1 }\n    config.missing = 2\n    return [config.count]i16\n}\nmain proc() Bad() { return [0] }\n",
+        support.Expected{ stdout = "", diagnostic = "record has no such field" },
+    )
+}
+
+type_execution_optional_if_selects_storage_and_cache_identity test {
+    context := try support.init("type_execution_optional_if_selects_storage_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_if_selects_storage_and_cache_identity",
+        "Count :: alias ?usize\nStorage proc(count Count) type {\n    if count |length| { return struct { values [length]i16 } }\n    else { return struct { value i16 = 2 } }\n}\nmain proc() i16 {\n    value Storage(2) :: { values = [19, 21] }\n    same Storage(usize(2)) :: value\n    empty Storage(null) :: {}\n    return same.values[0] + same.values[1] + empty.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_optional_payload_owned_aggregate_and_nested_capture test {
+    context := try support.init("type_execution_optional_payload_owned_aggregate_and_nested_capture")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_payload_owned_aggregate_and_nested_capture",
+        "Detail :: struct { values [2]i16, text string, count ?usize }\ndetail proc() ?Detail { return { values = [19, 21], text = \"ok\", count = 2 } }\nStorage proc() type {\n    if detail() |payload| {\n        if payload.count |count| {\n            return struct {\n                values [count]i16\n                bias i16 = payload.values[0] + payload.values[1] + i16(payload.text.len)\n            }\n        }\n    }\n    return bool\n}\nmain proc() i16 {\n    value Storage() :: { values = [0, 0] }\n    return value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_optional_while_refreshes_capture_and_preserves_transfers test {
+    context := try support.init("type_execution_optional_while_refreshes_capture_and_preserves_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_while_refreshes_capture_and_preserves_transfers",
+        "next proc(count usize) ?usize {\n    if (count < 4) return count\n    return null\n}\nStorage proc() type {\n    count usize := 0\n    Result := i16\n    while next(count) |length| {\n        count = count + 1\n        if (length == 0) continue\n        if (length == 3) break\n        Result = [length]Result\n    }\n    pending ?usize := 2\n    while pending |length| {\n        pending = null\n        if (length != 2) return bool\n        count = count + length\n    }\n    return struct { values Result, bias i16 = i16(count) }\n}\nmain proc() i16 {\n    value Storage() :: { values = [[17], [19]] }\n    return value.values[0][0] + value.values[1][0] + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_optional_absence_skips_invalid_bodies test {
+    context := try support.init("type_execution_optional_absence_skips_invalid_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_absence_skips_invalid_bodies",
+        "absent proc() ?i16 { return null }\nnull_pointer proc() ?@i16 { return null }\nnull_callback proc() ?@proc() i16 { return null }\nStorage proc() type {\n    pointer ?@i16 :: null\n    while pointer |_| { return i8(128) }\n    if absent() |_| { return i8(128) }\n    else { return i16 }\n}\nmain proc() i16 {\n    absent_pointer :: $(null_pointer())\n    absent_callback :: $(null_callback())\n    if absent_pointer |_| { return -1 }\n    if absent_callback |_| { return -2 }\n    value Storage() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_execution_optional_capture_retains_exact_payload_type test {
+    context := try support.init("type_execution_optional_capture_retains_exact_payload_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_capture_retains_exact_payload_type",
+        "narrow proc() ?i8 { return 127 }\nBad proc() type {\n    if narrow() |value| {\n        copy :: value\n        overflow :: copy + 1\n        return [usize(overflow)]i16\n    }\n    return i16\n}\nmain proc() i16 { value Bad() :: 42\n    return value }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_execution_optional_capture_is_immutable test {
+    context := try support.init("type_execution_optional_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_capture_is_immutable",
+        "Bad proc(value ?usize) type {\n    if value |length| { length = 2 }\n    return i16\n}\nmain proc() i16 { value Bad(1) :: 42\n    return value }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+type_execution_optional_capture_requires_optional_guard test {
+    context := try support.init("type_execution_optional_capture_requires_optional_guard")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_capture_requires_optional_guard",
+        "Bad proc() type {\n    if true |_| { return i16 }\n    return bool\n}\nmain proc() i16 { value Bad() :: 42\n    return value }\n",
+        support.Expected{ stdout = "", diagnostic = "condition must have type bool" },
+    )
+}
+
+type_execution_optional_capture_preserves_resolution_errors test {
+    context := try support.init("type_execution_optional_capture_preserves_resolution_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_capture_preserves_resolution_errors",
+        "Bad proc(value ?usize) type {\n    if value |value| { return i16 }\n    return bool\n}\nmain proc() i16 { value Bad(null) :: 42\n    return value }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name" },
+    )
+}
+
+type_execution_optional_capture_loop_is_bounded test {
+    context := try support.init("type_execution_optional_capture_loop_is_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_optional_capture_loop_is_bounded",
+        "Bad proc(value ?usize) type {\n    while value |_| {}\n    return i16\n}\nmain proc() i16 { value Bad(1) :: 42\n    return value }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+generic_match_scalar_enum_and_range_selection test {
+    context := try support.init("generic_match_scalar_enum_and_range_selection")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_scalar_enum_and_range_selection",
+        "Mode :: enum { pair, other }\nanswer proc($mode Mode, $count u8, value i16) i16 {\n    match true {\n        true: {\n            selected :: count\n            match selected {\n                0..2: return value.missing,\n                2..=3: {\n                    return match mode {\n                        .pair: value + 2,\n                        .other: value.missing,\n                    }\n                }\n                else: return false,\n            }\n        }\n        false: return value.missing,\n    }\n}\nmain proc() i16 { return answer(.pair, 2, 40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_expression_selects_each_instance test {
+    context := try support.init("generic_match_expression_selects_each_instance")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_expression_selects_each_instance",
+        "read proc($take bool, value i16) i16 {\n    return match take {\n        true: match take { true: value, false: value.missing },\n        false: value + 2,\n    }\n}\nmain proc() i16 { return read(true, 20) + read(false, 20) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_tagged_capture_exact_scalar_type test {
+    context := try support.init("generic_match_tagged_capture_exact_scalar_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_tagged_capture_exact_scalar_type",
+        "Choice :: union(enum) { small i8, empty void }\nexact proc(value i8) i16 { return i16(value) }\nread proc($choice Choice, value i16) i16 {\n    return match choice {\n        .small |small|: exact(small) + value,\n        .empty: value.missing,\n    }\n}\nmain proc() i16 { return read(.small{2}, 40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_tagged_capture_nested_owned_values test {
+    context := try support.init("generic_match_tagged_capture_nested_owned_values")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_tagged_capture_nested_owned_values",
+        "Inner :: union(enum) { small i8, empty void }\nDetail :: struct { inner Inner, values [2]i16, text string }\nChoice :: union(enum) { detail Detail, unused void }\nexact proc(value i8) i16 { return i16(value) }\nread proc($choice Choice, value i16) i16 {\n    match choice {\n        .detail |detail|: {\n            copied Detail :: detail\n            if (copied.text.len != 5 or copied.text[0] != 111) return -1\n            return match detail.inner {\n                .small |small|: exact(small) + detail.values[0] + detail.values[1] + value,\n                .empty: value.missing,\n            }\n        }\n        .unused: return value.missing,\n    }\n}\nmain proc() i16 {\n    return read(.detail{ inner = .small{2}, values = [19, 20], text = \"owned\" }, 1)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_selected_return_runs_cleanup test {
+    context := try support.init("generic_match_selected_return_runs_cleanup")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_selected_return_runs_cleanup",
+        "read proc($take bool, total @mut i16, value i16) i16 {\n    defer total^ = total^ + 1\n    match take {\n        true: {\n            owned :: [\"owned\", \"copy\"]\n            defer total^ = total^ + i16(owned[1].len)\n            return value\n        }\n        false: return value.missing,\n    }\n}\nmain proc() i16 {\n    total i16 := 0\n    value :: read(true, &total, 37)\n    return value + total\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_selected_loop_transfers_run_cleanup test {
+    context := try support.init("generic_match_selected_loop_transfers_run_cleanup")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_selected_loop_transfers_run_cleanup",
+        "read proc($take bool) i16 {\n    total i16 := 0\n    for (0..3) |index| {\n        match take {\n            true: {\n                owned :: [\"owned\", \"copy\"]\n                defer total = total + i16(owned[1].len)\n                if (index == 0) continue\n                break\n            }\n            false: return total.missing,\n        }\n        total = -100\n    }\n    return total + 34\n}\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+explicit_comptime_match_ordinary_call_without_templates test {
+    context := try support.init("explicit_comptime_match_ordinary_call_without_templates")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_match_ordinary_call_without_templates",
+        "selected proc() bool { return true }\nmain proc() i16 {\n    bias :: match $(selected()) { true: 2, false: false.missing }\n    match $(selected()) {\n        true: return 40 + bias,\n        false: return false,\n    }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_ordinary_call_still_checks_both_arms test {
+    context := try support.init("generic_match_ordinary_call_still_checks_both_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_ordinary_call_still_checks_both_arms",
+        "selected proc() bool { return true }\nread proc($unused bool, value i16) i16 {\n    match selected() { true: return value, false: return false }\n}\nmain proc() i16 { return read(true, 42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+ordinary_literal_match_still_checks_both_arms test {
+    context := try support.init("ordinary_literal_match_still_checks_both_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "ordinary_literal_match_still_checks_both_arms",
+        "main proc() i16 {\n    match true { true: return 42, false: return false }\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+generic_match_record_default_call_stays_runtime test {
+    context := try support.init("generic_match_record_default_call_stays_runtime")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_record_default_call_stays_runtime",
+        "default_value proc() u8 { return 2 }\nChoice :: struct { count u8, bias u8 = default_value() }\nread proc($unused bool, value i16) i16 {\n    choice Choice :: { count = 2 }\n    match choice.bias { 2: return value, else: return false }\n}\nmain proc() i16 { return read(true, 42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+generic_match_runtime_subject_still_checks_both_arms test {
+    context := try support.init("generic_match_runtime_subject_still_checks_both_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_runtime_subject_still_checks_both_arms",
+        "read proc($unused bool, take bool, value i16) i16 {\n    match take { true: return value, false: return false }\n}\nmain proc() i16 { return read(true, true, 42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+generic_match_mutable_local_still_checks_both_arms test {
+    context := try support.init("generic_match_mutable_local_still_checks_both_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_mutable_local_still_checks_both_arms",
+        "read proc($take bool, value i16) i16 {\n    selected := take\n    match selected { true: return value, false: return false }\n}\nmain proc() i16 { return read(true, 42) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "return does not match" },
+    )
+}
+
+generic_match_runtime_subject_runs_once test {
+    context := try support.init("generic_match_runtime_subject_runs_once")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_runtime_subject_runs_once",
+        "selected proc(count @mut i16) bool {\n    count^ = count^ + 1\n    return true\n}\nread proc($unused bool, count @mut i16) i16 {\n    return match selected(count) { true: 41, false: 0 }\n}\nmain proc() i16 {\n    count i16 := 0\n    value :: read(true, &count)\n    return value + count\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+generic_match_checks_untaken_overlap test {
+    context := try support.init("generic_match_checks_untaken_overlap")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_checks_untaken_overlap",
+        "read proc($value u8) i16 {\n    return match value { 0: 42, 1..=3: 0, 3..5: 0, else: 0 }\n}\nmain proc() i16 { return read(0) }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate or overlapping match pattern" },
+    )
+}
+
+generic_match_checks_exhaustiveness test {
+    context := try support.init("generic_match_checks_exhaustiveness")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_checks_exhaustiveness",
+        "read proc($value bool) i16 { return match value { true: 42 } }\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "match is not exhaustive" },
+    )
+}
+
+generic_match_checks_untaken_capture_types test {
+    context := try support.init("generic_match_checks_untaken_capture_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_checks_untaken_capture_types",
+        "Choice :: union(enum) { count usize, small i8, empty void }\nread proc($choice Choice) i16 {\n    return match choice { .count, .small |value|: i16(value), .empty: 42 }\n}\nmain proc() i16 { return read(.empty) }\n",
+        support.Expected{ stdout = "", diagnostic = "payload capture requires compatible nonvoid tagged union variants" },
+    )
+}
+
+generic_match_preserves_untaken_resolution_errors test {
+    context := try support.init("generic_match_preserves_untaken_resolution_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "generic_match_preserves_untaken_resolution_errors",
+        "read proc($value bool) i16 {\n    return match value { true: 42, false: missing }\n}\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "unknown name" },
+    )
+}
+
+explicit_comptime_match_rejects_runtime_subject test {
+    context := try support.init("explicit_comptime_match_rejects_runtime_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "explicit_comptime_match_rejects_runtime_subject",
+        "read proc(take bool) i16 {\n    return match $(take) { true: 42, false: 0 }\n}\nmain proc() i16 { return read(true) }\n",
+        support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
+    )
+}
+
+type_match_tagged_capture_preserves_resolution_errors test {
+    context := try support.init("type_match_tagged_capture_preserves_resolution_errors")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_preserves_resolution_errors",
+        "data proc() [2]i16 { return [40, 2] }\nChoice :: union(enum) { payload struct { values [2]i16 }, empty void }\nStorage proc(input Choice) type {\n    return match input {\n        .payload |data|: struct { bias i16 = data.values[1] },\n        .empty: bool,\n    }\n}\nmain proc() Storage(.payload{ values = [40, 2] }) { return {} }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate name" },
+    )
+}
+
+type_match_tagged_capture_statements_and_cache_identity test {
+    context := try support.init("type_match_tagged_capture_statements_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_statements_and_cache_identity",
+        "Tag :: enum(i16) { empty = -7, second = 3, count = 90 }\nChoice :: union(Tag) { count usize, second usize, empty void }\nchoice proc() Choice { return .second{2} }\nStorage proc(input Choice) type {\n    Result := i8\n    match input {\n        .count, .second |length|: {\n            Result = struct { values [length]i16 }\n        }\n        .empty: return struct { values [0]i16 },\n    }\n    return Result\n}\nmain proc() i16 {\n    value Storage(choice()) :: { values = [40, 2] }\n    cached Storage(.second{2}) :: value\n    empty Storage(.empty) :: { values = [] }\n    return cached.values[0] + cached.values[1] + i16(empty.values.len)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_tagged_capture_nested_expressions_and_storage test {
+    context := try support.init("type_match_tagged_capture_nested_expressions_and_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_nested_expressions_and_storage",
+        "Inner :: union(enum) { count usize, empty void }\nDetail :: struct { inner Inner, wide bool, bias i16, text string }\nChoice :: union(enum) { detail Detail, unused i8 }\nBox proc(T type) type { return struct { value T } }\nStorage proc(input Choice) type {\n    Element :: match input {\n        .detail |detail|: match detail.wide { true: i16, false: i8 },\n        .unused |small|: [small]bool,\n    }\n    return struct {\n        values [match input {\n            .detail |detail|: match detail.inner { .count |n|: n, .empty: usize(0) },\n            .unused |small|: usize(small),\n        }]Element\n        boxed Box(match input { .detail |detail|: Element, .unused: bool })\n        bias i16 = match input { .detail |detail|: detail.bias, .unused: i8(128) }\n        label string = match input { .detail |detail|: detail.text, .unused: \"\" }\n    }\n}\nmain proc() i16 {\n    value Storage(.detail{ inner = .count{2}, wide = true, bias = 2, text = \"owned\" }) :: {\n        values = [19, 21], boxed = { value = 0 },\n    }\n    if (value.label.len != 5 or value.label[0] != 111) return -1\n    return value.values[0] + value.values[1] + value.boxed.value + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_tagged_capture_loop_snapshots_and_transfers test {
+    context := try support.init("type_match_tagged_capture_loop_snapshots_and_transfers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_loop_snapshots_and_transfers",
+        "Choice :: union(enum) { count usize, empty void }\nNest proc() type {\n    Result := i16\n    current Choice := .count{0}\n    for (0..usize(4)) |index| {\n        current = .count{index}\n        match current {\n            .count |length|: {\n                if (length == 0) continue\n                if (length == 3) break\n                Result = [length]Result\n            }\n            .empty: return bool,\n        }\n    }\n    return Result\n}\nmain proc() i16 {\n    value Nest() :: [[40], [2]]\n    return value[0][0] + value[1][0]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_tagged_capture_checks_unselected_capture_types test {
+    context := try support.init("type_match_tagged_capture_checks_unselected_capture_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_checks_unselected_capture_types",
+        "Choice :: union(enum) { count usize, small i8, empty void }\nBad proc(input Choice) type {\n    return match input { .count, .small |value|: [value]i16, .empty: bool }\n}\nmain proc() Bad(.empty) { return true }\n",
+        support.Expected{ stdout = "", diagnostic = "payload capture requires compatible nonvoid tagged union variants" },
+    )
+}
+
+type_match_tagged_capture_preserves_exact_payload_type test {
+    context := try support.init("type_match_tagged_capture_preserves_exact_payload_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_preserves_exact_payload_type",
+        "Choice :: union(enum) { small i8, empty void }\nBad proc(input Choice) type {\n    match input {\n        .small |value|: {\n            next :: value + 1\n            return [usize(next)]i16\n        }\n        .empty: return bool,\n    }\n}\nmain proc() Bad(.small{127}) { return [] }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_match_tagged_capture_is_immutable test {
+    context := try support.init("type_match_tagged_capture_is_immutable")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_tagged_capture_is_immutable",
+        "Choice :: union(enum) { count usize }\nBad proc(input Choice) type {\n    match input { .count |length|: {\n        length = 2\n        return [length]i16\n    } }\n}\nmain proc() Bad(.count{1}) { return [0, 0] }\n",
+        support.Expected{ stdout = "", diagnostic = "mutable local binding" },
+    )
+}
+
+nested_type_match_failure_preserves_shared_return_types test {
+    context := try support.init("nested_type_match_failure_preserves_shared_return_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_match_failure_preserves_shared_return_types",
+        "Original :: alias [2]i16\nBroken proc() type {\n    Unused :: struct { value match true { true: i16 } }\n    return Original\n}\nmain proc() i16 {\n    if (false) {\n        bad Broken() :: [0, 0]\n        return bad[0]\n    }\n    good Original :: [40, 2]\n    return good[0] + good[1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = "match is not exhaustive" },
+    )
+}
+
+nested_type_matches_in_storage_calls_and_defaults test {
+    context := try support.init("nested_type_matches_in_storage_calls_and_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_matches_in_storage_calls_and_defaults",
+        "Box proc(T type) type { return struct { value T } }\nincrement proc(value i16) i16 { return value + 2 }\nStorage proc(wide bool) type {\n    return struct {\n        values [match wide { true: usize(2), false: usize(1) }]mut (match wide { true: i16, false: i8 })\n        boxed Box(match wide { true: i16, false: i8 })\n        callback @proc(value match wide { true: i16, false: i8 }) match wide { true: i16, false: i8 }\n        bias i16 = match (match wide { true: true, false: false }) { true: 0, false: i8(128) }\n        enabled bool = match wide { true: true, false: false }\n        label []u8 = match wide { true: \"ok\", false: \"bad\" }\n        fraction f64 = match wide { true: 0.5, false: 0.0 }\n    }\n}\nmain proc() i16 {\n    value Storage(true) :: { values = [20, 20], boxed = { value = 0 }, callback = increment }\n    cached Storage(!false) :: value\n    if (!cached.enabled or cached.label[0] != 111 or cached.fraction != 0.5) return -1\n    return cached.callback(cached.values[0] + cached.values[1]) + cached.boxed.value + cached.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+nested_type_matches_preserve_recursive_nominal_identity test {
+    context := try support.init("nested_type_matches_preserve_recursive_nominal_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_matches_preserve_recursive_nominal_identity",
+        "Node proc(wide bool) type {\n    return struct {\n        value match wide { true: i16, false: i8 }\n        next ?@match wide { true: Node(wide), false: bool } = match wide { true: null, false: null }\n    }\n}\nmain proc() i16 {\n    leaf Node(true) :: { value = 40 }\n    head Node(!false) :: { value = 2, next = &leaf }\n    small Node(false) :: { value = 0 }\n    return head.value + head.next?.value + i16(small.value)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+nested_type_matches_retain_loop_snapshots test {
+    context := try support.init("nested_type_matches_retain_loop_snapshots")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_matches_retain_loop_snapshots",
+        "Nest proc(depth usize) type {\n    Result match true { true: type, false: i8 } := i16\n    count match true { true: usize, false: i8 } := depth\n    for (0..count) |index| {\n        Result = [match index { 0: usize(2), else: usize(1) }](match index {\n            0: Result,\n            else: match true { true: Result, false: i8(128) },\n        })\n    }\n    return Result\n}\nmain proc() i16 {\n    values Nest(2) :: [[40, 2]]\n    return values[0][0] + values[0][1]\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+nested_type_matches_check_patterns_before_selecting test {
+    context := try support.init("nested_type_matches_check_patterns_before_selecting")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_matches_check_patterns_before_selecting",
+        "Bad proc() type {\n    return struct { value [1](match true { true: i16 }) }\n}\nmain proc() Bad() { return {} }\n",
+        support.Expected{ stdout = "", diagnostic = "match is not exhaustive" },
+    )
+}
+
+nested_type_matches_check_selected_defaults test {
+    context := try support.init("nested_type_matches_check_selected_defaults")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "nested_type_matches_check_selected_defaults",
+        "Bad proc() type {\n    return struct { value i8 = match true { true: 128, false: 0 } }\n}\nmain proc() i16 {\n    value Bad() :: {}\n    return i16(value.value)\n}\n",
+        support.Expected{ stdout = "", diagnostic = "numeric literal is outside" },
+    )
+}
+
+type_match_enum_storage_and_cache_identity test {
+    context := try support.init("type_match_enum_storage_and_cache_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_enum_storage_and_cache_identity",
+        "Mode :: enum { tiny, pair, wide }\npair proc() Mode { return .pair }\nStorage proc(mode Mode) type {\n    Result := i8\n    match mode {\n        .tiny: Result = i8,\n        .pair, .wide: {\n            Element :: i16\n            Result = [2]Element\n        }\n    }\n    return struct { values Result }\n}\nmain proc() i16 {\n    value Storage(.pair) :: { values = [40, 2] }\n    cached Storage(pair()) :: value\n    tiny Storage(.tiny) :: { values = 1 }\n    return cached.values[0] + cached.values[1] + i16(tiny.values - 1)\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_ranges_transfers_and_mutable_subject test {
+    context := try support.init("type_match_ranges_transfers_and_mutable_subject")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_ranges_transfers_and_mutable_subject",
+        "Storage proc() type {\n    Result := i8\n    size usize := 0\n    for (0..usize(5)) |index| {\n        match index {\n            0: continue,\n            1..=2: {\n                Result = [1]Result\n                size = size + 1\n            }\n            else: break,\n        }\n    }\n    match size {\n        0..2: return bool,\n        else: return struct { values Result, bias i16 = i16(size) },\n    }\n}\nmain proc() i16 {\n    value Storage() :: { values = [[40]] }\n    return i16(value.values[0][0]) + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_type_expressions_and_untaken_bodies test {
+    context := try support.init("type_match_type_expressions_and_untaken_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_type_expressions_and_untaken_bodies",
+        "Select proc(wide bool) type {\n    Result := match wide {\n        true: match wide { true: i16, false: i8(128) },\n        false: i8,\n    }\n    Result = match wide { true: [2]Result, false: bool }\n    return match wide {\n        true: struct { values Result },\n        false: struct { value Result },\n    }\n}\nmain proc() i16 {\n    wide Select(true) :: { values = [40, 2] }\n    narrow Select(false) :: { value = true }\n    if (narrow.value) return wide.values[0] + wide.values[1]\n    return 0\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_float_and_unsigned_boundaries test {
+    context := try support.init("type_match_float_and_unsigned_boundaries")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_float_and_unsigned_boundaries",
+        "Select proc() type {\n    Result := i8\n    match u64(18446744073709551615) {\n        0..18446744073709551615: Result = bool,\n        18446744073709551615: Result = i16,\n        else: Result = i8,\n    }\n    match -1.5 {\n        (-2.0)..(-1.0): return Result,\n        else: return bool,\n    }\n}\nmain proc() Select() { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_match_checks_nonexhaustive_patterns test {
+    context := try support.init("type_match_checks_nonexhaustive_patterns")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_nonexhaustive_patterns",
+        "Bad proc() type {\n    match true { true: return i16 }\n    return i8\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "match is not exhaustive" },
+    )
+}
+
+type_match_checks_overlapping_patterns test {
+    context := try support.init("type_match_checks_overlapping_patterns")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_overlapping_patterns",
+        "Bad proc() type {\n    match u8(2) {\n        0..=2: return i16,\n        2..4: return i8,\n        else: return bool,\n    }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "duplicate or overlapping match pattern" },
+    )
+}
+
+type_match_checks_unreachable_arms test {
+    context := try support.init("type_match_checks_unreachable_arms")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_unreachable_arms",
+        "Bad proc() type {\n    return match true { else: i16, false: i8 }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "match arm is unreachable" },
+    )
+}
+
+type_match_checks_pattern_types test {
+    context := try support.init("type_match_checks_pattern_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_pattern_types",
+        "Bad proc() type {\n    match u8(2) { true: return i16, else: return i8 }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
+    )
+}
+
+type_match_checks_subject_types test {
+    context := try support.init("type_match_checks_subject_types")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_subject_types",
+        "Bad proc() type {\n    return match \"text\" { else: i16 }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "match subject" },
+    )
+}
+
+type_match_checks_selected_body test {
+    context := try support.init("type_match_checks_selected_body")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_checks_selected_body",
+        "Bad proc() type {\n    match false {\n        true: return i16,\n        false: {\n            count u8 := 255\n            count = count + 1\n            return [count]i16\n        }\n    }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+type_match_resolves_untaken_bodies test {
+    context := try support.init("type_match_resolves_untaken_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_resolves_untaken_bodies",
+        "Bad proc() type {\n    return struct { value match true { true: i16, false: missing } }\n}\nmain proc() i16 {\n    value Bad() :: { value = 42 }\n    return value.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = "unknown name" },
+    )
+}
+
+type_match_remains_bounded test {
+    context := try support.init("type_match_remains_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_match_remains_bounded",
+        "Bad proc() type {\n    while (true) {\n        match true { true: continue, false: return i16 }\n    }\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+type_execution_retains_existing_nominal_type_identity test {
+    context := try support.init("type_execution_retains_existing_nominal_type_identity")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_execution_retains_existing_nominal_type_identity",
+        "Original :: struct { value i16 }\nIdentity proc(T type) type {\n    Result := T\n    Same :: Result\n    return Same\n}\nBox proc(T type) type { return struct { value T } }\nmain proc() i16 {\n    first Original :: { value = 42 }\n    same Identity(Original) :: first\n    boxed Box(Identity(Original)) :: { value = same }\n    cached Box(Original) :: boxed\n    return cached.value.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_nested_copies_assignment_and_consumers test {
+    context := try support.init("type_arrays_nested_copies_assignment_and_consumers")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_nested_copies_assignment_and_consumers",
+        "Box proc(T type) type { return struct { value T } }\nSelected proc() type {\n    explicit [2]mut [_]mut type := [[i8, bool], [u8, i16]]\n    inferred := [[i8, bool], [u8, i16]]\n    original :: explicit\n    copied [2]mut [_]mut type := explicit\n    (copied[0])[0] = bool\n    explicit[0] = [i16, u8]\n    inferred = [[i16, u8], [bool, i8]]\n    if (original[0][0] != i8 or copied[0][0] != bool) return bool\n    if (explicit[0][0] != i16 or inferred[1][0] != bool) return bool\n    return Box(explicit[0][0])\n}\nStorage proc() type {\n    types :: [Selected(), [2]i16]\n    return struct { item types[0], values types[1], bias i16 = 2 }\n}\nread proc(value Selected()) i16 { return value.value }\nmain proc() i16 {\n    value Storage() :: { item = { value = 19 }, values = [20, 1] }\n    return read(value.item) + value.values[0] + value.values[1] + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_iteration_borrows_nested_places_and_copies_captures test {
+    context := try support.init("type_arrays_iteration_borrows_nested_places_and_copies_captures")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_iteration_borrows_nested_places_and_copies_captures",
+        "Selected proc() type {\n    types [2]mut type := [i8, bool]\n    Result := bool\n    for types |T, index| {\n        at usize :: index\n        if (at == 0) types[1] = i16\n        if (at == 1) Result = T\n    }\n    rows [2]mut [1]mut type := [[i8], [bool]]\n    for rows |row, index| {\n        copied := row\n        copied[0] = u8\n        if (row[0] == u8) return bool\n        if (index == 0) { (rows[1])[0] = Result }\n        if (index == 1 and row[0] != i16) return bool\n    }\n    empty [0]type :: []\n    for (empty) |_| return bool\n    if (empty.len != 0 or types.len != 2 or rows[0].len != 1) return bool\n    return rows[1][0]\n}\nmain proc() i16 { value Selected() :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_undefined_loop_initialization_generates_storage test {
+    context := try support.init("type_arrays_undefined_loop_initialization_generates_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_loop_initialization_generates_storage",
+        "Storage proc() type {\n    types [2]mut type := undefined\n    if (types.len != 2) return bool\n    for (usize(0)..types.len) |index| { types[index] = i16 }\n    return struct { values [types.len]types[0], bias types[1] = 2 }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 21] }\n    same Storage() :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_undefined_nested_updates_partial_copies_and_replacement test {
+    context := try support.init("type_arrays_undefined_nested_updates_partial_copies_and_replacement")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_nested_updates_partial_copies_and_replacement",
+        "Storage proc() type {\n    rows [2]mut [2]mut type := undefined\n    if (rows.len != 2 or rows[0].len != 2) return bool\n    (rows[0])[0] = i8\n    copied := rows\n    (rows[0])[1] = u8\n    rows[1] = [i8, bool]\n    (copied[0])[1] = i16\n    copied[1] = [bool, i16]\n    if (rows[0][0] != i8 or copied[0][0] != i8) return bool\n    if (rows[0][1] != u8 or rows[1][0] != i8 or rows[1][1] != bool) return bool\n    replacement [2]mut type := undefined\n    replacement = [i16, bool]\n    return struct { first copied[0][1], second copied[1][1], bias replacement[0] = 2 }\n}\nmain proc() i16 {\n    value Storage() :: { first = 19, second = 21 }\n    return value.first + value.second + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_undefined_empty_shapes_and_erased_generic_consumer test {
+    context := try support.init("type_arrays_undefined_empty_shapes_and_erased_generic_consumer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_empty_shapes_and_erased_generic_consumer",
+        "empty_rows proc() [2]mut [0]mut type {\n    rows [2]mut [0]mut type := undefined\n    return rows\n}\nempty_outer proc() [0]mut [2]mut type {\n    rows [0]mut [2]mut type := undefined\n    return rows\n}\nrow proc() [2]mut type {\n    types [2]mut type := undefined\n    rows :: empty_rows()\n    outer :: empty_outer()\n    if (rows.len != 2 or rows[0].len != 0 or rows[1].len != 0 or outer.len != 0) {\n        return [bool, bool]\n    }\n    for rows |empty| { for empty |_| { return [bool, bool] } }\n    types[0] = i16\n    types[1] = bool\n    return types\n}\nadd proc($types [2]mut type, left types[0], right types[0]) types[0] {\n    enabled types[1] :: true\n    if (enabled) return left + right\n    return 0\n}\nforward proc(value i16) i16 { return add(row(), value, 2) }\nmain proc() i16 { return forward(40) }\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_undefined_reject_premature_leaf_read test {
+    context := try support.init("type_arrays_undefined_reject_premature_leaf_read")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_premature_leaf_read",
+        "Bad proc() type {\n    types [2]mut type := undefined\n    types[0] = i16\n    return types[1]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+type_arrays_undefined_reject_partial_return test {
+    context := try support.init("type_arrays_undefined_reject_partial_return")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_partial_return",
+        "rows proc() [2]mut [1]mut type {\n    types [2]mut [1]mut type := undefined\n    (types[0])[0] = i16\n    return types\n}\nmain proc() rows()[0][0] { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+type_arrays_undefined_reject_partial_argument test {
+    context := try support.init("type_arrays_undefined_reject_partial_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_partial_argument",
+        "Selected proc(types [2]mut [1]mut type) type { return i16 }\nBad proc() type {\n    types [2]mut [1]mut type := undefined\n    (types[0])[0] = i16\n    return Selected(types)\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+type_arrays_undefined_reject_partial_erased_argument test {
+    context := try support.init("type_arrays_undefined_reject_partial_erased_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_partial_erased_argument",
+        "Selected proc($types [2]mut type) type { return i16 }\nBad proc() type {\n    types [2]mut type := undefined\n    types[0] = i16\n    return Selected(types)\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+type_arrays_undefined_copy_does_not_observe_later_initialization test {
+    context := try support.init("type_arrays_undefined_copy_does_not_observe_later_initialization")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_copy_does_not_observe_later_initialization",
+        "Bad proc() type {\n    types [2]mut type := undefined\n    types[0] = i16\n    copied :: types\n    types[1] = bool\n    return copied[1]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+type_arrays_undefined_reject_readonly_element_write test {
+    context := try support.init("type_arrays_undefined_reject_readonly_element_write")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_readonly_element_write",
+        "Bad proc() type {\n    types [1]type := undefined\n    types[0] = i16\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+type_arrays_undefined_reject_inferred_length test {
+    context := try support.init("type_arrays_undefined_reject_inferred_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_reject_inferred_length",
+        "Bad proc() type {\n    types [_]mut type := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array length must be a nonnegative supported compile-time integer" },
+    )
+}
+
+type_arrays_undefined_empty_outer_rejects_inferred_child_length test {
+    context := try support.init("type_arrays_undefined_empty_outer_rejects_inferred_child_length")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_empty_outer_rejects_inferred_child_length",
+        "Bad proc() type {\n    types [0]mut [_]mut type := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array length must be a nonnegative supported compile-time integer" },
+    )
+}
+
+type_arrays_undefined_construction_is_bounded test {
+    context := try support.init("type_arrays_undefined_construction_is_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_undefined_construction_is_bounded",
+        "Bad proc() type {\n    types [1000000000]mut type := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+value_arrays_undefined_loop_initialization_generates_storage test {
+    context := try support.init("value_arrays_undefined_loop_initialization_generates_storage")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_loop_initialization_generates_storage",
+        "Storage proc() type {\n    rows [2]mut [2]mut usize := undefined\n    for (usize(0)..rows.len) |row| {\n        for (usize(0)..rows[row].len) |column| { (rows[row])[column] = row + column + 1 }\n    }\n    return struct { values [rows[0][1]]i16, bias i16 = i16(rows[1][0]) }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 21] }\n    same Storage() :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+value_arrays_undefined_partial_copies_and_whole_replacement test {
+    context := try support.init("value_arrays_undefined_partial_copies_and_whole_replacement")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_partial_copies_and_whole_replacement",
+        "Storage proc() type {\n    rows [2]mut [2]mut i16 := undefined\n    (rows[0])[0] = 19\n    copied := rows\n    (rows[0])[1] = 1\n    rows[1] = [2, 3]\n    (copied[0])[1] = 21\n    copied[1] = [1, 1]\n    replacement [2]mut i16 := undefined\n    replacement = copied[1]\n    if (rows[0][1] != 1 or rows[1][0] != 2) return bool\n    return struct { value i16 = copied[0][0] + copied[0][1] + replacement[0] + replacement[1] }\n}\nmain proc() i16 { value Storage() :: {}\n    return value.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+value_arrays_undefined_strings_optionals_records_and_unions test {
+    context := try support.init("value_arrays_undefined_strings_optionals_records_and_unions")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_strings_optionals_records_and_unions",
+        "Item :: struct { text string, amount ?i16, values [1]mut i16 }\nChoice :: union(enum) { value i16, empty void }\nStorage proc() type {\n    words [2]mut string := undefined\n    words[0] = \"ok\"\n    words[1] = \"yes\"\n    options [2]mut ?i16 := undefined\n    options[0] = null\n    options[1] = 37\n    items [1]mut Item := undefined\n    items[0] = { text = words[0], amount = options[0], values = [0] }\n    items[0].amount = options[1]\n    items[0].values[0] = 37\n    choices [1]mut Choice := undefined\n    choices[0] = .empty\n    choices[0] = .value{items[0].values[0]}\n    amount :: match choices[0] { .value |value|: value, .empty: i16(0) }\n    return struct { value i16 = amount + items[0].amount? - 37 + i16(items[0].text.len + words[1].len) }\n}\nmain proc() i16 { value Storage() :: {}\n    return value.value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+value_arrays_undefined_empty_shapes_and_type_array_producer test {
+    context := try support.init("value_arrays_undefined_empty_shapes_and_type_array_producer")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_empty_shapes_and_type_array_producer",
+        "Rows proc() [1]mut type {\n    rows [2]mut [0]mut i16 := undefined\n    outer [0]mut [2]mut usize := undefined\n    copied :: rows\n    if (copied.len != 2 or copied[0].len != 0 or outer.len != 0) return [bool]\n    for rows |row| { for row |_| { return [bool] } }\n    counts [1]mut usize := undefined\n    counts[0] = rows.len\n    return [struct { values [counts[0]]i16, bias i16 = 2 }]\n}\nmain proc() i16 {\n    value Rows()[0] :: { values = [19, 21] }\n    return value.values[0] + value.values[1] + value.bias\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+value_arrays_undefined_reject_premature_leaf_read test {
+    context := try support.init("value_arrays_undefined_reject_premature_leaf_read")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_premature_leaf_read",
+        "Bad proc() type {\n    values [2]mut usize := undefined\n    values[0] = 2\n    return [values[1]]i16\n}\nmain proc() Bad() { return [] }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+value_arrays_undefined_reject_partial_argument test {
+    context := try support.init("value_arrays_undefined_reject_partial_argument")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_partial_argument",
+        "Selected proc(values [2]mut usize) type { return [values[0]]i16 }\nBad proc() type {\n    values [2]mut usize := undefined\n    values[0] = 2\n    return Selected(values)\n}\nmain proc() Bad() { return [19, 23] }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+value_arrays_undefined_copy_does_not_observe_later_initialization test {
+    context := try support.init("value_arrays_undefined_copy_does_not_observe_later_initialization")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_copy_does_not_observe_later_initialization",
+        "Bad proc() type {\n    values [2]mut usize := undefined\n    values[0] = 2\n    copied :: values\n    values[1] = 1\n    return [copied[1]]i16\n}\nmain proc() Bad() { return [] }\n",
+        support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
+    )
+}
+
+value_arrays_undefined_reject_readonly_binding test {
+    context := try support.init("value_arrays_undefined_reject_readonly_binding")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_readonly_binding",
+        "Bad proc() type {\n    values [1]mut usize :: undefined\n    values = [2]\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
+    )
+}
+
+value_arrays_undefined_reject_readonly_elements test {
+    context := try support.init("value_arrays_undefined_reject_readonly_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_readonly_elements",
+        "Bad proc() type {\n    values [1]usize := undefined\n    values[0] = 2\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+value_arrays_undefined_reject_wrong_leaf_type test {
+    context := try support.init("value_arrays_undefined_reject_wrong_leaf_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_wrong_leaf_type",
+        "Bad proc() type {\n    values [1]mut usize := undefined\n    wrong i64 :: 2\n    values[0] = wrong\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "" },
+    )
+}
+
+value_arrays_undefined_reject_wrong_index_type test {
+    context := try support.init("value_arrays_undefined_reject_wrong_index_type")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_wrong_index_type",
+        "Bad proc() type {\n    values [1]mut usize := undefined\n    index u8 :: 0\n    values[index] = 2\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
+    )
+}
+
+value_arrays_undefined_reject_out_of_bounds_write test {
+    context := try support.init("value_arrays_undefined_reject_out_of_bounds_write")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_out_of_bounds_write",
+        "Bad proc() type {\n    values [1]mut usize := undefined\n    values[1] = 2\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+value_arrays_undefined_preserve_narrow_overflow test {
+    context := try support.init("value_arrays_undefined_preserve_narrow_overflow")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_preserve_narrow_overflow",
+        "Bad proc() type {\n    values [1]mut i8 := undefined\n    values[0] = 127\n    values[0] = values[0] + 1\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
+    )
+}
+
+value_arrays_undefined_construction_is_bounded test {
+    context := try support.init("value_arrays_undefined_construction_is_bounded")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_construction_is_bounded",
+        "Bad proc() type {\n    values [1000000000]mut usize := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
+    )
+}
+
+value_arrays_undefined_reject_invalid_empty_element_annotation test {
+    context := try support.init("value_arrays_undefined_reject_invalid_empty_element_annotation")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "value_arrays_undefined_reject_invalid_empty_element_annotation",
+        "Storage proc() type {\n    values [0]mut void := undefined\n    return i16\n}\nmain proc() Storage() { return 42 }\n",
+        support.Expected{ stdout = "42\n", diagnostic = "array element annotations" },
+    )
+}
+
+type_arrays_only_execute_selected_bodies test {
+    context := try support.init("type_arrays_only_execute_selected_bodies")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_only_execute_selected_bodies",
+        "Selected proc(ok bool) type {\n    types :: [i16]\n    if (ok) return types[0]\n    return types[1]\n}\nmain proc() i16 { value Selected(true) :: 42\n    return value\n}\n",
+        support.Expected{ stdout = "42\n", diagnostic = null },
+    )
+}
+
+type_arrays_selected_invalid_body test {
+    context := try support.init("type_arrays_selected_invalid_body")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_selected_invalid_body",
+        "Selected proc(ok bool) type {\n    types :: [i16]\n    if (ok) return types[0]\n    return types[1]\n}\nmain proc() Selected(false) { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+type_arrays_read_requires_usize_index test {
+    context := try support.init("type_arrays_read_requires_usize_index")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_read_requires_usize_index",
+        "Bad proc() type {\n    types :: [i16]\n    index u8 :: 0\n    return types[index]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
+    )
+}
+
+type_arrays_write_checks_bounds test {
+    context := try support.init("type_arrays_write_checks_bounds")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_write_checks_bounds",
+        "Bad proc() type {\n    types [1]mut type := [i16]\n    types[1] = bool\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "index out of bounds" },
+    )
+}
+
+type_arrays_write_requires_usize_index test {
+    context := try support.init("type_arrays_write_requires_usize_index")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_write_requires_usize_index",
+        "Bad proc() type {\n    types [1]mut type := [i16]\n    index u8 :: 0\n    types[index] = bool\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
+    )
+}
+
+type_arrays_write_requires_mutable_elements test {
+    context := try support.init("type_arrays_write_requires_mutable_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_write_requires_mutable_elements",
+        "Bad proc() type {\n    types [1]type := [i16]\n    types[0] = bool\n    return types[0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}
+
+type_arrays_nested_write_requires_mutable_inner_elements test {
+    context := try support.init("type_arrays_nested_write_requires_mutable_inner_elements")
+    defer support.deinit(&context)
+    try support.check_text(
+        &context,
+        "type_arrays_nested_write_requires_mutable_inner_elements",
+        "Bad proc() type {\n    types [1]mut [1]type := [[i16]]\n    (types[0])[0] = bool\n    return types[0][0]\n}\nmain proc() Bad() { return 42 }\n",
+        support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
+    )
+}

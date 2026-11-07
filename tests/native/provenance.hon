@@ -1,0 +1,1084 @@
+import "@tests/support"
+import "@std/mem"
+
+check_dependency_provenance proc(context @mut support.Context) void ! support.Error {
+    project :: (try support.path(context, context.temporary, "provenance"))
+    app :: (try support.path(context, project, "app"))
+    dependency :: (try support.path(context, project, "dependency"))
+    (try support.directory(context, app))
+    (try support.directory(context, dependency))
+    main :: (try support.path(context, app, "main.hon"))
+    source :: (try support.path(context, dependency, "diagnostic.hon"))
+    bridge :: (try support.path(context, project, "bridge"))
+    (try support.directory(context, bridge))
+    (try support.write(context, (try support.path(context, bridge, "main.hon")), "import \"../dependency\"\nfail proc() int { return dependency.fail() }\n"))
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return {\n        yield 9223372036854775807 + 1\n    }\n}\n"))
+    location :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "5", ":", "15", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built, 0, "", "")
+    hidden :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden))
+    {
+        defer {
+        support.rename(context, hidden, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled, interpreted)
+    try support.rename(context, hidden, project)
+    try support.remove(context, context.executable)
+    }
+    built1 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built1, 0, "", "")
+    hidden1 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden1))
+    {
+        defer {
+        support.rename(context, hidden1, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled1 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled1, interpreted)
+    try support.rename(context, hidden1, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted1 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted1.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted1.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted1.stderr, (try support.concat(context, &[location, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted1.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted1 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted1.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted1.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built2 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built2, 0, "", "")
+    hidden2 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden2))
+    {
+        defer {
+        support.rename(context, hidden2, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled2 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled2, interpreted1)
+    try support.rename(context, hidden2, project)
+    try support.remove(context, context.executable)
+    }
+    built3 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built3, 0, "", "")
+    hidden3 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden3))
+    {
+        defer {
+        support.rename(context, hidden3, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled3 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled3, interpreted1)
+    try support.rename(context, hidden3, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return {\n        yield missing\n    }\n}\n"))
+    location1 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "5", ":", "15", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted2 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted2.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted2.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted2.stderr, (try support.concat(context, &[location1, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted2.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted2 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted2.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics :: (try support.replace(context, interpreted2.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted2.stderr, expected_diagnostics), "original assertion: emitted.stderr == expected_diagnostics")
+    built4 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built4, 1, "", expected_diagnostics)
+    hidden4 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden4))
+    {
+        defer {
+        support.rename(context, hidden4, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled4 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled4, interpreted2)
+    try support.rename(context, hidden4, project)
+    try support.remove(context, context.executable)
+    }
+    built5 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built5, 1, "", expected_diagnostics)
+    hidden5 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden5))
+    {
+        defer {
+        support.rename(context, hidden5, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled5 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled5, interpreted2)
+    try support.rename(context, hidden5, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted3 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted3.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted3.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted3.stderr, (try support.concat(context, &[location1, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted3.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted3 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted3.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics1 :: (try support.replace(context, interpreted3.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted3.stderr, expected_diagnostics1), "original assertion: emitted.stderr == expected_diagnostics")
+    built6 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built6, 1, "", expected_diagnostics1)
+    hidden6 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden6))
+    {
+        defer {
+        support.rename(context, hidden6, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled6 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled6, interpreted3)
+    try support.rename(context, hidden6, project)
+    try support.remove(context, context.executable)
+    }
+    built7 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built7, 1, "", expected_diagnostics1)
+    hidden7 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden7))
+    {
+        defer {
+        support.rename(context, hidden7, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled7 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled7, interpreted3)
+    try support.rename(context, hidden7, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return `\n}\n"))
+    location2 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "12", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted4 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted4.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted4.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted4.stderr, (try support.concat(context, &[location2, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted4.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted4 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted4.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics2 :: (try support.replace(context, interpreted4.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted4.stderr, expected_diagnostics2), "original assertion: emitted.stderr == expected_diagnostics")
+    built8 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built8, 1, "", expected_diagnostics2)
+    hidden8 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden8))
+    {
+        defer {
+        support.rename(context, hidden8, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled8 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled8, interpreted4)
+    try support.rename(context, hidden8, project)
+    try support.remove(context, context.executable)
+    }
+    built9 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built9, 1, "", expected_diagnostics2)
+    hidden9 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden9))
+    {
+        defer {
+        support.rename(context, hidden9, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled9 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled9, interpreted4)
+    try support.rename(context, hidden9, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted5 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted5.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted5.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted5.stderr, (try support.concat(context, &[location2, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted5.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted5 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted5.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics3 :: (try support.replace(context, interpreted5.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted5.stderr, expected_diagnostics3), "original assertion: emitted.stderr == expected_diagnostics")
+    built10 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built10, 1, "", expected_diagnostics3)
+    hidden10 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden10))
+    {
+        defer {
+        support.rename(context, hidden10, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled10 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled10, interpreted5)
+    try support.rename(context, hidden10, project)
+    try support.remove(context, context.executable)
+    }
+    built11 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built11, 1, "", expected_diagnostics3)
+    hidden11 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden11))
+    {
+        defer {
+        support.rename(context, hidden11, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled11 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled11, interpreted5)
+    try support.rename(context, hidden11, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return (1\n}\n"))
+    location3 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "14", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted6 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted6.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted6.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted6.stderr, (try support.concat(context, &[location3, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted6.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted6 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted6.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics4 :: (try support.replace(context, interpreted6.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted6.stderr, expected_diagnostics4), "original assertion: emitted.stderr == expected_diagnostics")
+    built12 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built12, 1, "", expected_diagnostics4)
+    hidden12 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden12))
+    {
+        defer {
+        support.rename(context, hidden12, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled12 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled12, interpreted6)
+    try support.rename(context, hidden12, project)
+    try support.remove(context, context.executable)
+    }
+    built13 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built13, 1, "", expected_diagnostics4)
+    hidden13 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden13))
+    {
+        defer {
+        support.rename(context, hidden13, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled13 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled13, interpreted6)
+    try support.rename(context, hidden13, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted7 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted7.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted7.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted7.stderr, (try support.concat(context, &[location3, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted7.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted7 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted7.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics5 :: (try support.replace(context, interpreted7.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted7.stderr, expected_diagnostics5), "original assertion: emitted.stderr == expected_diagnostics")
+    built14 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built14, 1, "", expected_diagnostics5)
+    hidden14 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden14))
+    {
+        defer {
+        support.rename(context, hidden14, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled14 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled14, interpreted7)
+    try support.rename(context, hidden14, project)
+    try support.remove(context, context.executable)
+    }
+    built15 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built15, 1, "", expected_diagnostics5)
+    hidden15 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden15))
+    {
+        defer {
+        support.rename(context, hidden15, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled15 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled15, interpreted7)
+    try support.rename(context, hidden15, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    text :: \"é\" return missing\n}\n"))
+    location4 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "25", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted8 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted8.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted8.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted8.stderr, (try support.concat(context, &[location4, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted8.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted8 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted8.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics6 :: (try support.replace(context, interpreted8.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted8.stderr, expected_diagnostics6), "original assertion: emitted.stderr == expected_diagnostics")
+    built16 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built16, 1, "", expected_diagnostics6)
+    hidden16 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden16))
+    {
+        defer {
+        support.rename(context, hidden16, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled16 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled16, interpreted8)
+    try support.rename(context, hidden16, project)
+    try support.remove(context, context.executable)
+    }
+    built17 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built17, 1, "", expected_diagnostics6)
+    hidden17 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden17))
+    {
+        defer {
+        support.rename(context, hidden17, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled17 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled17, interpreted8)
+    try support.rename(context, hidden17, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted9 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted9.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted9.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted9.stderr, (try support.concat(context, &[location4, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted9.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted9 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted9.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics7 :: (try support.replace(context, interpreted9.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted9.stderr, expected_diagnostics7), "original assertion: emitted.stderr == expected_diagnostics")
+    built18 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built18, 1, "", expected_diagnostics7)
+    hidden18 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden18))
+    {
+        defer {
+        support.rename(context, hidden18, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled18 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled18, interpreted9)
+    try support.rename(context, hidden18, project)
+    try support.remove(context, context.executable)
+    }
+    built19 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built19, 1, "", expected_diagnostics7)
+    hidden19 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden19))
+    {
+        defer {
+        support.rename(context, hidden19, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled19 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled19, interpreted9)
+    try support.rename(context, hidden19, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    if (1) return 0\n    return 42\n}\n"))
+    location5 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "9", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted10 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted10.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted10.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted10.stderr, (try support.concat(context, &[location5, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted10.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted10 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted10.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics8 :: (try support.replace(context, interpreted10.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted10.stderr, expected_diagnostics8), "original assertion: emitted.stderr == expected_diagnostics")
+    built20 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built20, 1, "", expected_diagnostics8)
+    hidden20 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden20))
+    {
+        defer {
+        support.rename(context, hidden20, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled20 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled20, interpreted10)
+    try support.rename(context, hidden20, project)
+    try support.remove(context, context.executable)
+    }
+    built21 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built21, 1, "", expected_diagnostics8)
+    hidden21 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden21))
+    {
+        defer {
+        support.rename(context, hidden21, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled21 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled21, interpreted10)
+    try support.rename(context, hidden21, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted11 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted11.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted11.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted11.stderr, (try support.concat(context, &[location5, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted11.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted11 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted11.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics9 :: (try support.replace(context, interpreted11.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted11.stderr, expected_diagnostics9), "original assertion: emitted.stderr == expected_diagnostics")
+    built22 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built22, 1, "", expected_diagnostics9)
+    hidden22 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden22))
+    {
+        defer {
+        support.rename(context, hidden22, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled22 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled22, interpreted11)
+    try support.rename(context, hidden22, project)
+    try support.remove(context, context.executable)
+    }
+    built23 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built23, 1, "", expected_diagnostics9)
+    hidden23 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden23))
+    {
+        defer {
+        support.rename(context, hidden23, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled23 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled23, interpreted11)
+    try support.rename(context, hidden23, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return 9223372036854775808\n}\n"))
+    location6 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "12", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted12 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted12.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted12.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted12.stderr, (try support.concat(context, &[location6, "error: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted12.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted12 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted12.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics10 :: (try support.replace(context, interpreted12.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted12.stderr, expected_diagnostics10), "original assertion: emitted.stderr == expected_diagnostics")
+    built24 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built24, 1, "", expected_diagnostics10)
+    hidden24 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden24))
+    {
+        defer {
+        support.rename(context, hidden24, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled24 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled24, interpreted12)
+    try support.rename(context, hidden24, project)
+    try support.remove(context, context.executable)
+    }
+    built25 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built25, 1, "", expected_diagnostics10)
+    hidden25 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden25))
+    {
+        defer {
+        support.rename(context, hidden25, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled25 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled25, interpreted12)
+    try support.rename(context, hidden25, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted13 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted13.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted13.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted13.stderr, (try support.concat(context, &[location6, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted13.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted13 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted13.status == 1), "original assertion: emitted.returncode == int(static)")
+    expected_diagnostics11 :: (try support.replace(context, interpreted13.stderr, "runtime trap: ", "error: "))
+    try support.expect(context, mem.eql(u8, emitted13.stderr, expected_diagnostics11), "original assertion: emitted.stderr == expected_diagnostics")
+    built26 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built26, 1, "", expected_diagnostics11)
+    hidden26 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden26))
+    {
+        defer {
+        support.rename(context, hidden26, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled26 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled26, interpreted13)
+    try support.rename(context, hidden26, project)
+    try support.remove(context, context.executable)
+    }
+    built27 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built27, 1, "", expected_diagnostics11)
+    hidden27 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden27))
+    {
+        defer {
+        support.rename(context, hidden27, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled27 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled27, interpreted13)
+    try support.rename(context, hidden27, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    return 9223372036854775807 + 1\n}\n"))
+    location7 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "12", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted14 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted14.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted14.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted14.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted14 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted14.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted14.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built28 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built28, 0, "", "")
+    hidden28 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden28))
+    {
+        defer {
+        support.rename(context, hidden28, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled28 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled28, interpreted14)
+    try support.rename(context, hidden28, project)
+    try support.remove(context, context.executable)
+    }
+    built29 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built29, 0, "", "")
+    hidden29 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden29))
+    {
+        defer {
+        support.rename(context, hidden29, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled29 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled29, interpreted14)
+    try support.rename(context, hidden29, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted15 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted15.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted15.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted15.stderr, (try support.concat(context, &[location7, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted15.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted15 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted15.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted15.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built30 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built30, 0, "", "")
+    hidden30 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden30))
+    {
+        defer {
+        support.rename(context, hidden30, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled30 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled30, interpreted15)
+    try support.rename(context, hidden30, project)
+    try support.remove(context, context.executable)
+    }
+    built31 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built31, 0, "", "")
+    hidden31 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden31))
+    {
+        defer {
+        support.rename(context, hidden31, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled31 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled31, interpreted15)
+    try support.rename(context, hidden31, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    inline for [int(9223372036854775807)] |value| {\n        return value + 1\n    }\n    return 42\n}\n"))
+    location8 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "5", ":", "16", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted16 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted16.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted16.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted16.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted16 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted16.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted16.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built32 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built32, 0, "", "")
+    hidden32 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden32))
+    {
+        defer {
+        support.rename(context, hidden32, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled32 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled32, interpreted16)
+    try support.rename(context, hidden32, project)
+    try support.remove(context, context.executable)
+    }
+    built33 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built33, 0, "", "")
+    hidden33 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden33))
+    {
+        defer {
+        support.rename(context, hidden33, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled33 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled33, interpreted16)
+    try support.rename(context, hidden33, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted17 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted17.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted17.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted17.stderr, (try support.concat(context, &[location8, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted17.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted17 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted17.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted17.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built34 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built34, 0, "", "")
+    hidden34 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden34))
+    {
+        defer {
+        support.rename(context, hidden34, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled34 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled34, interpreted17)
+    try support.rename(context, hidden34, project)
+    try support.remove(context, context.executable)
+    }
+    built35 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built35, 0, "", "")
+    hidden35 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden35))
+    {
+        defer {
+        support.rename(context, hidden35, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled35 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled35, interpreted17)
+    try support.rename(context, hidden35, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nChoice :: union(enum) { number int, empty void }\nfail proc() int {\n    input Choice :: .number{9223372036854775807}\n    return match input {\n        inline |payload, tag|: match tag {\n            .number: payload + 1,\n            .empty: 0,\n        },\n    }\n}\n"))
+    location9 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "8", ":", "22", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted18 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted18.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted18.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted18.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted18 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted18.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted18.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built36 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built36, 0, "", "")
+    hidden36 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden36))
+    {
+        defer {
+        support.rename(context, hidden36, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled36 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled36, interpreted18)
+    try support.rename(context, hidden36, project)
+    try support.remove(context, context.executable)
+    }
+    built37 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built37, 0, "", "")
+    hidden37 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden37))
+    {
+        defer {
+        support.rename(context, hidden37, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled37 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled37, interpreted18)
+    try support.rename(context, hidden37, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted19 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted19.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted19.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted19.stderr, (try support.concat(context, &[location9, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted19.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted19 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted19.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted19.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built38 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built38, 0, "", "")
+    hidden38 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden38))
+    {
+        defer {
+        support.rename(context, hidden38, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled38 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled38, interpreted19)
+    try support.rename(context, hidden38, project)
+    try support.remove(context, context.executable)
+    }
+    built39 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built39, 0, "", "")
+    hidden39 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden39))
+    {
+        defer {
+        support.rename(context, hidden39, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled39 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled39, interpreted19)
+    try support.rename(context, hidden39, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    a :: [42]\n    return a[1]\n}\n"))
+    location10 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "5", ":", "12", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted20 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted20.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted20.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted20.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted20 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted20.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted20.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built40 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built40, 0, "", "")
+    hidden40 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden40))
+    {
+        defer {
+        support.rename(context, hidden40, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled40 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled40, interpreted20)
+    try support.rename(context, hidden40, project)
+    try support.remove(context, context.executable)
+    }
+    built41 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built41, 0, "", "")
+    hidden41 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden41))
+    {
+        defer {
+        support.rename(context, hidden41, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled41 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled41, interpreted20)
+    try support.rename(context, hidden41, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted21 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted21.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted21.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted21.stderr, (try support.concat(context, &[location10, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted21.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted21 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted21.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted21.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built42 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built42, 0, "", "")
+    hidden42 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden42))
+    {
+        defer {
+        support.rename(context, hidden42, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled42 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled42, interpreted21)
+    try support.rename(context, hidden42, project)
+    try support.remove(context, context.executable)
+    }
+    built43 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built43, 0, "", "")
+    hidden43 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden43))
+    {
+        defer {
+        support.rename(context, hidden43, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled43 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled43, interpreted21)
+    try support.rename(context, hidden43, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    a :: [42]\n    pointer :: &a\n    return pointer[1]\n}\n"))
+    location11 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "6", ":", "12", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted22 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted22.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted22.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted22.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted22 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted22.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted22.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built44 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built44, 0, "", "")
+    hidden44 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden44))
+    {
+        defer {
+        support.rename(context, hidden44, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled44 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled44, interpreted22)
+    try support.rename(context, hidden44, project)
+    try support.remove(context, context.executable)
+    }
+    built45 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built45, 0, "", "")
+    hidden45 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden45))
+    {
+        defer {
+        support.rename(context, hidden45, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled45 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled45, interpreted22)
+    try support.rename(context, hidden45, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted23 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted23.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted23.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted23.stderr, (try support.concat(context, &[location11, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted23.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted23 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted23.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted23.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built46 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built46, 0, "", "")
+    hidden46 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden46))
+    {
+        defer {
+        support.rename(context, hidden46, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled46 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled46, interpreted23)
+    try support.rename(context, hidden46, project)
+    try support.remove(context, context.executable)
+    }
+    built47 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built47, 0, "", "")
+    hidden47 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden47))
+    {
+        defer {
+        support.rename(context, hidden47, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled47 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled47, interpreted23)
+    try support.rename(context, hidden47, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    before :: after\n    after :: 42\n    return before\n}\n"))
+    location12 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "15", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted24 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted24.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted24.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted24.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted24 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted24.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted24.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built48 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built48, 0, "", "")
+    hidden48 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden48))
+    {
+        defer {
+        support.rename(context, hidden48, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled48 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled48, interpreted24)
+    try support.rename(context, hidden48, project)
+    try support.remove(context, context.executable)
+    }
+    built49 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built49, 0, "", "")
+    hidden49 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden49))
+    {
+        defer {
+        support.rename(context, hidden49, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled49 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled49, interpreted24)
+    try support.rename(context, hidden49, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted25 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted25.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted25.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted25.stderr, (try support.concat(context, &[location12, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted25.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted25 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted25.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted25.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built50 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built50, 0, "", "")
+    hidden50 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden50))
+    {
+        defer {
+        support.rename(context, hidden50, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled50 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled50, interpreted25)
+    try support.rename(context, hidden50, project)
+    try support.remove(context, context.executable)
+    }
+    built51 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built51, 0, "", "")
+    hidden51 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden51))
+    {
+        defer {
+        support.rename(context, hidden51, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled51 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled51, interpreted25)
+    try support.rename(context, hidden51, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, source, "\n# utf8: é\na int :: b\nb int :: a\nfail proc() int { return a }\n"))
+    location13 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "10", ": "]))
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
+    interpreted26 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted26.status == 0), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted26.stdout, "42\n"), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, mem.eql(u8, interpreted26.stderr, ""), "original assertion: interpreted.stderr == b''")
+    emitted26 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted26.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted26.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built52 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built52, 0, "", "")
+    hidden52 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden52))
+    {
+        defer {
+        support.rename(context, hidden52, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled52 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled52, interpreted26)
+    try support.rename(context, hidden52, project)
+    try support.remove(context, context.executable)
+    }
+    built53 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built53, 0, "", "")
+    hidden53 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden53))
+    {
+        defer {
+        support.rename(context, hidden53, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled53 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled53, interpreted26)
+    try support.rename(context, hidden53, project)
+    try support.remove(context, context.executable)
+    }
+    (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (true) return bridge.fail()\n    return 42\n}\n"))
+    interpreted27 :: (try support.run(context, &[context.compiler, "run", app], {}))
+    try support.expect(context, (interpreted27.status == 1), "original assertion: interpreted.returncode == int(static or reached)")
+    try support.expect(context, mem.eql(u8, interpreted27.stdout, ""), "original assertion: interpreted.stdout == (b'' if reached else b'42\\n')")
+    try support.expect(context, support.has_prefix(interpreted27.stderr, (try support.concat(context, &[location13, "runtime trap: "]))), "original assertion: interpreted.stderr.startswith(location + label)")
+    try support.expect(context, (support.line_count(interpreted27.stderr) == 1), "original assertion: len(interpreted.stderr.splitlines()) == 1")
+    emitted27 :: (try support.run(context, &[context.compiler, "emit-llvm", app], {}))
+    try support.expect(context, (emitted27.status == 0), "original assertion: emitted.returncode == int(static)")
+    try support.expect(context, mem.eql(u8, emitted27.stderr, ""), "original assertion: emitted.stderr == expected_diagnostics")
+    built54 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O0"], {}))
+    try support.expect_result(context, built54, 0, "", "")
+    hidden54 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden54))
+    {
+        defer {
+        support.rename(context, hidden54, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled54 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled54, interpreted27)
+    try support.rename(context, hidden54, project)
+    try support.remove(context, context.executable)
+    }
+    built55 :: (try support.run(context, &[context.compiler, "build", app, "-o", context.executable, "-O2"], {}))
+    try support.expect_result(context, built55, 0, "", "")
+    hidden55 :: (try support.path(context, context.temporary, "hidden-provenance"))
+    (try support.rename(context, project, hidden55))
+    {
+        defer {
+        support.rename(context, hidden55, project) catch |_| {}
+        support.remove(context, context.executable) catch |_| {}
+        }
+    compiled55 :: (try support.run(context, &[context.executable], {}))
+    try support.expect_same(context, compiled55, interpreted27)
+    try support.rename(context, hidden55, project)
+    try support.remove(context, context.executable)
+    }
+}
+
