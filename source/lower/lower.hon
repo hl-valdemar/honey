@@ -248,6 +248,7 @@ base_types :: $enummap.init_default(
         record = .record,
         pointer = .pointer,
         float = .float,
+        float32 = .float32,
         bool = .bool,
         string = .string,
         void = .void,
@@ -658,7 +659,8 @@ lower_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | di
     }
     if (ast.function_external(tree, id)) {
         if (trap_binding(state, id) or trap_type(state, id)) return
-        name :: ast.source_text(tree, declaration.name)
+        spelling :: ast.source_text(tree, declaration.name)
+        name :: if (spelling.len >= 3 and spelling[0] == '@' and spelling[1] == '"') spelling[2..spelling.len - 1] else spelling
         owned :: try mem.alloc(u8, state.module.allocator, name.len)
         memcopy!(owned, name)
         state.module.functions.items[state.function].external_name = owned
@@ -1770,7 +1772,8 @@ lower_as proc(state @mut State, id ast.NodeId, expected typecheck.Type) ir.Value
 
 @hide:file
 convert_value proc(state @mut State, value ir.ValueId, actual, expected typecheck.Type, span diagnostics.Span) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
-    if (actual.kind != expected.kind and typecheck.integer_widens(actual, expected))
+    if (actual.kind != expected.kind and (typecheck.integer_widens(actual, expected)
+        or (actual.kind == .float32 and expected.kind == .float)))
         return try emit(state, ir.Instruction{ op = .convert, type = lower_type(state, expected), left = value, span = span })
     if (actual.kind == .fallible and expected.kind == .fallible) {
         if (actual.array_type == expected.array_type) return value
@@ -2651,6 +2654,9 @@ lower_expression proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocEr
             for (0..count) |i| {
                 expected := typecheck.Type{}
                 if (signature != ast.NodeId(maxval!(u32)) and i < ast.function_param_count(tree, signature)) expected = typecheck.type_of(state.checked, ast.param(tree, ast.function_param(tree, signature, i)).type)
+                if (signature != ast.NodeId(maxval!(u32)) and ast.callable_variadic(tree, signature)
+                    and i >= fixed_arguments and typecheck.type_of(state.checked, ast.call_arg(tree, id, i)).kind == .float32)
+                    expected = typecheck.Type{ kind = .float }
                 argument :: try lower_as(state, ast.call_arg(tree, id, i), expected)
                 if (state.terminated) return ir.no_value
                 state.arguments.items[scratch_start + i] = argument
@@ -2696,19 +2702,20 @@ exact_float_integer proc(text []u8, value f64) bool {
 @hide:file
 lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError | diagnostics.CapacityError) {
     span :: ast.node_span(state.tree, id)
+    type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ast.float_value(state.tree, id)) |value| {
+        rounded :: if (type == .float32) ir.round_float32(value) else value
         return try constant(state, ir.Value{
-            type = .float,
-            data = ir.ValueData{ real = value },
+            type = type,
+            data = ir.ValueData{ real = rounded },
         }, span)
     }
     text :: ast.literal_text(state.tree, id)
-    type :: lower_type(state, typecheck.type_of(state.checked, id))
     if (ir.integer_bits(type) != 0 and !ir.unsigned_integer(type)) {
         if (strconv.parse_unsigned(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ integer = i64(magnitude) } }, span)
     } else if (ir.unsigned_integer(type)) {
         if (strconv.parse_unsigned(text, enummap.get(&ir.integer_maxima, type)?)) |magnitude| return try constant(state, ir.Value{ type = type, data = ir.ValueData{ unsigned = magnitude } }, span)
-    } else {
+    } else if (ir.real_type(type)) {
         if (text.len > 2 and text[0] == '0' and (text[1] < '0' or text[1] > '9') and ast.expr_kind(state.tree, id) == .literal_int) {
             base :: if (text[1] == 'b' or text[1] == 'B') f64(2)
                 else if (text[1] == 'o' or text[1] == 'O') f64(8) else f64(16)
@@ -2725,11 +2732,17 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
                 trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
                 return ir.no_value
             }
+            rounded :: if (type == .float32) ir.round_float32(value) else value
+            if (ptrcast!(@u64, &rounded)^ >= u64(9218868437227405312)) {
+                trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
+                return ir.no_value
+            }
+            if (rounded != value) exact = false
             if (!exact) {
                 trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
                 return ir.no_value
             }
-            return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
+            return try constant(state, ir.Value{ type = type, data = ir.ValueData{ real = rounded } }, span)
         }
         value :: strconv.parse_float(state.module.allocator, text) catch |err| {
             match err {
@@ -2740,11 +2753,16 @@ lower_number proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError 
                 }
             }
         }
-        if (ast.expr_kind(state.tree, id) == .literal_int and !exact_float_integer(text, value)) {
+        rounded :: if (type == .float32) ir.round_decimal_float32(text, value) else value
+        if (ptrcast!(@u64, &rounded)^ >= u64(9218868437227405312)) {
+            trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
+            return ir.no_value
+        }
+        if (ast.expr_kind(state.tree, id) == .literal_int and !exact_float_integer(text, rounded)) {
             trap(state, try diagnostics.add(state.diagnostics, .inexact_integer_literal, span), span)
             return ir.no_value
         }
-        return try constant(state, ir.Value{ type = .float, data = ir.ValueData{ real = value } }, span)
+        return try constant(state, ir.Value{ type = type, data = ir.ValueData{ real = rounded } }, span)
     }
     trap(state, try diagnostics.add(state.diagnostics, .literal_out_of_range, span), span)
     return ir.no_value

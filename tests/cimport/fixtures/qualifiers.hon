@@ -1,0 +1,25 @@
+binding :: import "@ffi/qualified"
+
+Bits :: union { real f64, bits u64 }
+
+main proc() i32 {
+    if (binding.readonly_text("immutable") != 9) return -1
+    mutable_bytes [2]mut c_char := [109, 0]
+    readonly_pointers [1]mut ?*c_char := [ptrcast!("immutable".ptr)]
+    frozen_mutable_pointers [1]?*mut c_char :: [mutable_bytes[..].ptr]
+    frozen_readonly_pointers [1]?*c_char :: [ptrcast!("immutable".ptr)]
+    result :: binding.pointer_levels(
+        "immutable", mutable_bytes[..].ptr, readonly_pointers[..].ptr,
+        frozen_mutable_pointers[..].ptr, frozen_readonly_pointers[..].ptr,
+        "immutable", frozen_mutable_pointers[..].ptr, frozen_mutable_pointers[..].ptr,
+    )
+    if (result != 42 or mutable_bytes[0] != 120) return -2
+    small f32 :: binding.SMALL_VALUE
+    large f32 :: binding.LARGE_VALUE
+    if (small != binding.get_small_value() or large != binding.get_large_value()) return -3
+    if (binding.FRACTION_VALUE != binding.get_fraction_value()) return -4
+    generated_zero Bits :: { real = binding.NEGATIVE_ZERO }
+    native_zero Bits :: { real = binding.get_negative_zero() }
+    if (generated_zero.bits != native_zero.bits) return -5
+    return 42
+}

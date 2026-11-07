@@ -388,7 +388,10 @@ execute proc(
             }
         }
         match instruction.op {
-            .constant: value = instruction.constant
+            .constant: {
+                value = instruction.constant
+                if (value.type == .float32) value.data = ir.ValueData{ real = ir.round_float32(value.data.real) }
+            }
             .undefined_value: {
                 destination :: &frames.items[frame_index].values[usize(instruction.destination)]
                 if (ir.aggregate(instruction.type)) {
@@ -763,8 +766,8 @@ execute proc(
             }
             .negate: {
                 operand :: frames.items[frame_index].values[usize(instruction.left)]
-                if instruction.type == .float {
-                    value = ir.Value{ type = .float, data = ir.ValueData{ real = -operand.data.real } }
+                if ir.real_type(instruction.type) {
+                    value = ir.Value{ type = instruction.type, data = ir.ValueData{ real = -operand.data.real } }
                 } else {
                     if (operand.data.integer == enummap.get(&ir.integer_minima, instruction.type)?) return try runtime_trap(diagnostic_store, .integer_overflow, instruction.span)
                     value = ir.Value{ type = instruction.type, data = ir.ValueData{ integer = -operand.data.integer } }
@@ -800,9 +803,9 @@ execute proc(
             .add, .subtract, .multiply, .divide, .remainder: {
                 left :: frames.items[frame_index].values[usize(instruction.left)]
                 right :: frames.items[frame_index].values[usize(instruction.right)]
-                if ((instruction.op == .divide or instruction.op == .remainder) and instruction.type != .float and right.data.unsigned == 0)
+                if ((instruction.op == .divide or instruction.op == .remainder) and !ir.real_type(instruction.type) and right.data.unsigned == 0)
                     return try runtime_trap(diagnostic_store, .division_by_zero, instruction.span)
-                if instruction.type == .float {
+                if ir.real_type(instruction.type) {
                     if (instruction.op == .remainder and right.data.real == 0)
                         return try runtime_trap(diagnostic_store, .division_by_zero, instruction.span)
                     result f64 := 0
@@ -814,7 +817,8 @@ execute proc(
                         .remainder: result = rem!(left.data.real, right.data.real)
                         else: unreachable
                     }
-                    value = ir.Value{ type = .float, data = ir.ValueData{ real = result } }
+                    if (instruction.type == .float32) result = ir.round_float32(result)
+                    value = ir.Value{ type = instruction.type, data = ir.ValueData{ real = result } }
                 } else if ir.unsigned_integer(instruction.type) {
                     result :: checked_unsigned(instruction.op, left.data.unsigned, right.data.unsigned)
                     if result |unsigned| {
@@ -866,7 +870,7 @@ execute proc(
                         .greater_equal: left.data.unsigned >= right.data.unsigned
                         else: unreachable
                     }
-                    .float: result = match instruction.op {
+                    .float, .float32: result = match instruction.op {
                         .equal: left.data.real == right.data.real
                         .not_equal: left.data.real != right.data.real
                         .less: left.data.real < right.data.real
@@ -1003,7 +1007,7 @@ equal_value proc(module @ir.Module, left, right ir.Value) bool {
         return true
     }
     return match left.type {
-        .float: left.data.real == right.data.real
+        .float, .float32: left.data.real == right.data.real
         .bool: left.data.boolean == right.data.boolean
         .function: left.data.function == right.data.function
         .string: left.data.string == right.data.string
@@ -1256,15 +1260,32 @@ checked_unsigned proc(op ir.Op, left u64, right u64) ?u64 {
 }
 
 @hide:file
+integer_float32 proc(source ir.Value) f64 {
+    negative :: !ir.unsigned_integer(source.type) and source.data.integer < 0
+    magnitude := source.data.unsigned
+    if (negative) magnitude = u64(-(source.data.integer + 1)) + 1
+    # retain a sticky low bit before binary64 conversion to avoid double rounding.
+    if (magnitude > 9007199254740992) {
+        sticky :: if ((magnitude & 2047) != 0) u64(1) else u64(0)
+        magnitude = ((magnitude >> 11) | sticky) << 11
+    }
+    real :: ir.round_float32(f64(magnitude))
+    if (negative) return -real
+    return real
+}
+
+@hide:file
 convert proc(source ir.Value, target ir.Type) ?ir.Value {
     result := ir.Value{ type = target }
-    if (target == .float) {
-        if (source.type == .float) result.data = source.data
+    if (ir.real_type(target)) {
+        if (ir.real_type(source.type)) result.data = source.data
+        else if (target == .float32) result.data = ir.ValueData{ real = integer_float32(source) }
         else if (ir.unsigned_integer(source.type)) result.data = ir.ValueData{ real = f64(source.data.unsigned) }
         else result.data = ir.ValueData{ real = f64(source.data.integer) }
+        if (target == .float32 and ir.real_type(source.type)) result.data = ir.ValueData{ real = ir.round_float32(source.data.real) }
         return result
     }
-    if (source.type == .float) {
+    if (ir.real_type(source.type)) {
         real :: source.data.real
         # Guard the conversion itself before testing narrower bounds; NaN fails
         # ordered comparisons, and the upper 64-bit bound is exclusive.

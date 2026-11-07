@@ -1,0 +1,106 @@
+import "@tests/support"
+
+check_float_semantics proc(context @mut support.Context) void ! support.Error {
+    source :: try support.path(context, context.root, "tests/abi/fixtures/float.hon")
+    try support.check(context, source, support.Expected{ stdout = "42\n" })
+}
+
+check_c_conformance proc(context @mut support.Context) void ! support.Error {
+    source :: try support.path(context, context.root, "tests/abi/fixtures/calls.hon")
+    c_source :: try support.path(context, context.root, "tests/abi/fixtures/abi.c")
+    emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+    try support.expect(context, emitted.status == 0 and emitted.stderr.len == 0, "ABI LLVM emission succeeds without diagnostics")
+    llvm :: try support.put(context, context.temporary, "conformance.ll", emitted.stdout)
+    object :: try support.path(context, context.temporary, "foreign.o")
+    library :: try support.path(context, context.temporary, "libforeign.a")
+    # independent optimization settings catch caller/callee ABI disagreements in all four combinations.
+    for ["-O0", "-O2"] |c_optimization| {
+        compiled :: try support.run(context, &[
+            "clang", "-target", "arm64-apple-macosx11.0.0", "-std=c11",
+            c_optimization, "-c", c_source, "-o", object,
+        ], support.RunOptions{})
+        try support.expect_result(context, compiled, 0, "", "")
+        archived :: try support.run(context, &["ar", "rcs", library, object], support.RunOptions{})
+        try support.expect_result(context, archived, 0, "", "")
+        for ["-O0", "-O2"] |honey_optimization| {
+            linked :: try support.run(context, &[
+                "clang", "-target", "arm64-apple-macosx11.0.0", honey_optimization,
+                llvm, library, "-o", context.executable,
+            ], support.RunOptions{})
+            try support.expect_result(context, linked, 0, "", "")
+            result :: try support.run(context, &[context.executable], support.RunOptions{})
+            try support.expect_result(context, result, 0, "42\n", "")
+            try support.remove(context, context.executable)
+        }
+    }
+}
+
+check_external_symbols proc(context @mut support.Context) void ! support.Error {
+    project :: try support.path(context, context.temporary, "external-symbols")
+    left :: try support.put(context, project, "left/foreign.hon",
+        "Signed :: alias c_int\nabs c_func(value Signed) Signed\n")
+    right :: try support.put(context, project, "right/foreign.hon",
+        "abs c_func(value i32) i32\n")
+    source :: try support.put(context, project, "app/main.hon",
+        `import "../left"
+        `import "../right"
+        `main proc() c_int {
+        `    if (left.abs(-42) != 42 or right.abs(-42) != 42) return -1
+        `    return 42
+        `}
+    )
+    for ["-O0", "-O2"] |optimization| {
+        built :: try support.run(context, &[context.compiler, "build", source,
+            "-o", context.executable, optimization], support.RunOptions{})
+        try support.expect_result(context, built, 0, "", "")
+        result :: try support.run(context, &[context.executable], support.RunOptions{})
+        try support.expect_result(context, result, 0, "42\n", "")
+        try support.remove(context, context.executable)
+    }
+    # one demanded spelling validates all its declarations in independently loaded packages.
+    try support.write(context, source,
+        "import \"../left\"\nimport \"../right\"\nmain proc() c_int { return left.abs(-42) }\n")
+    for [
+        "abs c_func(value f32) c_int\n",
+        "abs c_func(value c_int) f64\n",
+        "abs c_func(value c_int, ...) c_int\n",
+        "abs c_func(value c_int, other c_int) c_int\n",
+    ] |declaration| {
+        try support.write(context, right, declaration)
+        emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+        try support.expect(context, emitted.status == 1, "incompatible external declaration is rejected")
+        try support.expect(context, support.contains(emitted.stderr,
+            "incompatible C declarations for the same external symbol"), "external symbol diagnostic")
+    }
+    # reverse collection order cannot make either conflicting declaration authoritative.
+    try support.write(context, left, "abs c_func(value f64) c_int\n")
+    try support.write(context, right, "abs c_func(value c_int) c_int\n")
+    try support.write(context, source,
+        "import \"../left\"\nimport \"../right\"\nmain proc() c_int { return right.abs(-42) }\n")
+    emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+    try support.expect(context, emitted.status == 1 and support.contains(emitted.stderr,
+        "incompatible C declarations for the same external symbol"), "external conflicts are order-independent")
+}
+
+check_opaque_aliases proc(context @mut support.Context) void ! support.Error {
+    project :: try support.path(context, context.temporary, "opaque-aliases")
+    _ = try support.put(context, project, "common/types.hon", "Resource :: opaque\n")
+    _ = try support.put(context, project, "binding/types.hon",
+        `import "../common"
+        `Handle :: alias common.Resource
+        `HandleAlias :: alias Handle
+        `retain proc(value ?*HandleAlias) ?*common.Resource { return value }
+    )
+    source :: try support.put(context, project, "app/main.hon",
+        `import "../common"
+        `import "../binding"
+        `main proc() i16 {
+        `    handle ?*binding.Handle :: null
+        `    resource ?*common.Resource :: binding.retain(handle)
+        `    round_trip ?*binding.HandleAlias :: resource
+        `    if (round_trip != null) return -1
+        `    return 42
+        `}
+    )
+    try support.check(context, source, support.Expected{ stdout = "42\n" })
+}

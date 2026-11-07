@@ -22,6 +22,34 @@ the check copies production sources without test-only imports or the testing pac
 
 bootstrap compatibility: compiler feature adoption and releases MUST follow the [required two-release policy](AGENTS.md#bootstrap-compatibility-required).
 
+create a standalone sibling project, with editable vendored libraries:
+
+```sh
+./build/honey new ../my-game
+./build/honey build ../my-game -O2
+```
+
+`honey init` initializes the current directory instead. both commands place `std/` and core `ffi/c/` beside `source/`, preserving existing files and existing library trees. `@std` and `@ffi/c` resolve from the project. `.honey-origin` records the originating distribution, not an integrity lock; local edits are allowed, and builds never refresh vendored code. preserve compiler-required contracts such as `process.Init` and metadata declarations when modifying those libraries.
+
+the distribution must include matching `std/` and `ffi/c/` templates beside the executable, in its parent directory (the development `build/honey` layout), or under `../share/honey`. missing templates fail explicitly rather than falling back to another checkout in the current directory.
+
+`build.hon` supplies a `config :: build.BuildConfig{ ... }` with `name` and `source`. native dependencies use `libraries`, `lib_paths`, `links` (C sources, objects, archives or native linker options), `includes`, `defines`, `frameworks` and `rpaths`. paths are project-relative unless absolute; dyld `@loader_path`/`@executable_path` runtime paths remain unchanged. `linkage = .automatic`, `.static` or `.shared` selects the dependency library form, not the program's output kind. explicit `build <source> -o <output>` and `test <source>` also use project link settings when a config exists; marker-only `build.hon` files remain valid for those commands.
+
+generate only the C declarations a project needs, using the installed Clang frontend:
+
+```sh
+./build/honey translate-c raylib --project ../my-game \
+    --header /opt/homebrew/opt/raylib/include/raylib.h \
+    --target arm64-apple-macos11 \
+    --symbol InitWindow --symbol CloseWindow --symbol DrawCircle
+```
+
+repeat `--header`/`--symbol` for additional inputs; `-I`, `-D`, `--sysroot` and `--clang` select preprocessing settings and the frontend executable. the project must contain `source/` and a `build.hon`/`build.bro` root marker. generation creates `ffi/raylib/bindings.hon`, transitive shared nominal types under `ffi/__c_types/`, and ownership/recipe snapshots. import the result with `import "@ffi/raylib"`. generation does not link raylib, install libraries or generate C bridges; configure the actual native library separately.
+
+binding packages isolate unrelated C names, while shared declarations retain one nominal identity. unsupported requested constructs are diagnosed rather than silently skipped. regeneration is deterministic and refuses to overwrite modified generated files or unrelated outputs; keep handwritten helpers in separate files. regenerate deliberately when headers, target or preprocessor settings change. C declarations do not establish ownership, callback lifetime, thread affinity or initialization contracts.
+
+raylib window execution requires an active macOS display; a hidden window is not a headless renderer. a displayless host cannot verify the graphical loop. Honey currently targets macOS 11.0; check dependency deployment requirements before distributing a program (the tested Homebrew raylib 5.5 library requires macOS 15.0 and emits a linker warning).
+
 run a source file with the interpreter:
 
 ```sh
@@ -75,6 +103,9 @@ run the Honey-owned suite after bootstrapping:
 ./build/honey test
 ./build/honey test tests/native
 ./build/honey test tests/framework
+./build/honey test tests/abi
+./build/honey test tests/project
+./build/honey test tests/cimport
 ```
 
 `test` defaults to `source`; an explicit file or directory selects another entry package. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
@@ -275,7 +306,13 @@ fallible values use explicit `T ! E` channels, where `E` is an enum, record or t
 
 `memcopy!(destination, source)` copies matching typed slices or pointers to arrays, checking equal lengths and rejecting nonempty overlap. `memset!(destination, value)` repeats complete typed values, including aggregate fields, rather than repeating a byte. destinations require writable elements; empty and zero-sized copies/sets do not access storage. interpreter byte views synchronize with the original typed storage so casts and memory operations preserve aliases.
 
-native external declarations use `malloc c_func(size c_ulong) ?*mut anyopaque`, without a body. supported signatures contain concrete integer/float/boolean scalars, data/function pointers, nullable pointers and `void` results. `c_func` declarations and callbacks may end their parameter list with `...`; calls require the fixed prefix and promote trailing booleans and 8/16-bit integers to `c_int`. supported floating arguments are already `f64`; trailing aggregates and Honey string descriptors are not C ABI values. strings may initialize immutable byte pointers, including nullable C format parameters; pass `.ptr` explicitly for variadic strings. generated bindings may declare `c_struct` records, nominal pointer-only `opaque` types and `*c_func(...) Result` callback signatures. unused foreign declarations do not force ABI validation or native symbol emission; aggregate-by-value signatures remain unsupported. Darwin `c_char`/`c_uchar`, `c_short`/`c_ushort`, `c_int`/`c_uint`, `c_long`/`c_ulong` and `c_longlong`/`c_ulonglong` map to the corresponding 8/16/32/64-bit integer representations; `c_double` maps to `f64`, while demanded `c_float` and `c_longdouble` types remain unsupported. foreign calls trap only when reached in the interpreter; arbitrary interpreter FFI is not supported.
+native external declarations use `malloc c_func(size c_ulong) ?*mut anyopaque`, without a body. supported scalar signatures contain concrete integers, `f32`/`f64`, booleans, data/function pointers, nullable pointers and `void` results. `c_func` declarations and callbacks may end with `...`; trailing booleans and 8/16-bit integers promote to `c_int`, and trailing `f32` promotes to `f64`. trailing aggregates and Honey string descriptors are not C ABI values. strings may initialize immutable byte pointers; pass `.ptr` explicitly for variadic strings.
+
+Darwin arm64 C calls and callbacks support complete `c_struct` records and untagged unions by value, including nested fixed arrays, homogeneous float aggregates, mixed records and indirect large values. ordinary Honey procedures with compatible concrete signatures can be passed as C callbacks. Honey records, tagged unions and unsupported field types are rejected in C signatures rather than assigned a guessed layout. `tests/abi` checks actual Clang/Honey calls in both directions at independent `-O0`/`-O2` settings, including long-running aggregate-call loops.
+
+bindings may declare nominal pointer-only `opaque` types and `*c_func(...) Result` callbacks. quoted ASCII identifiers such as `@"proc"` escape Honey keywords without changing the external C symbol. used foreign symbols require compatible declarations across packages; compiler-private LLVM symbols occupy a separate namespace. unused declarations do not force ABI validation or native symbol emission.
+
+Darwin `c_char`/`c_uchar`, `c_short`/`c_ushort`, `c_int`/`c_uint`, `c_long`/`c_ulong` and `c_longlong`/`c_ulonglong` retain their target integer representations. `c_float` maps to `f32` and `c_double` to `f64`; demanded `c_longdouble` remains unsupported. foreign calls trap only when reached in the interpreter; arbitrary interpreter FFI is not supported.
 
 the existing `std/arraylist` and `std/mem` work without replacement bindings or library code. interpreter/native checks cover initialization, reserve/growth, append/pop/clear, allocation failure without losing the original list, zero-sized elements and deferred cleanup on error. native checks use the real `mem.c_allocator` and imported `ffi/c` declarations for aggregate element storage and over-aligned allocation/reallocation; interpreter allocation checks use a fixed-capacity test allocator, not foreign calls. broader metadata operations remain a later acceptance gate.
 
@@ -376,7 +413,9 @@ integer literals also accept binary `0b`, octal `0o` and hexadecimal `0x` prefix
 
 implicit integer widening preserves every value of the source type, not merely the value observed at one use: same-signedness values may widen to an equal or larger width, and unsigned values may widen to a strictly larger signed width. value boundaries, indices and slice bounds use these conversions without changing the source's type. comparisons select a lossless common integer type, never a floating intermediate. nominal boundaries and borrowed pointer/slice element representations remain unchanged. narrowing, potentially inexact integer-to-float conversion, float-to-integer conversion, and signedness changes that cannot preserve the full source range require an explicit operation. integer arithmetic remains checked rather than wrapping; floating arithmetic retains IEEE rounding.
 
-explicit numeric conversion uses `T(value)`, such as `u8(index)`, `usize(byte)` or `f64(count)`, with exactly one numeric argument. integer conversions trap with `integer arithmetic overflow` if the value is outside the destination range; float-to-integer conversion truncates toward zero, then checks bounds, rejecting NaN and infinity. integer-to-float conversion permits rounding, including `f64(9007199254740993)`. operands retain their independent types rather than being narrowed by the result context; a positive constant integer conversion operand above `i64`'s maximum defaults to `u64`. boolean conversions, arbitrary-width integers and `f32` are not implemented. native storage uses LLVM `i8`/`i16`/`i32`/`i64`, including array elements and function parameters/results.
+explicit numeric conversion uses `T(value)`, such as `u8(index)`, `usize(byte)`, `f32(count)` or `f64(count)`, with exactly one numeric argument. integer conversions trap with `integer arithmetic overflow` outside the destination range; float-to-integer conversion truncates toward zero, checks bounds, and rejects NaN/infinity. integer-to-float conversion permits rounding. operands retain their independent types rather than being narrowed by the result context; a positive constant integer conversion operand above `i64`'s maximum defaults to `u64`. boolean conversions and arbitrary-width integers are not implemented.
+
+`f32` uses four-byte IEEE binary32 storage and rounds each arithmetic result at runtime and compile time. contextual decimal literals round directly to their selected width; explicitly converting a default `f64` literal to `f32` instead narrows that already-rounded value. integer-to-`f32` conversion preserves sticky bits rather than losing them through a binary64 intermediate. `f32` widens implicitly to `f64`; narrowing requires an explicit conversion. native scalar storage uses LLVM `i8`/`i16`/`i32`/`i64`, `float` and `double`, including array elements and function parameters/results.
 
 `minval!(T)` and `maxval!(T)` return exact concrete integer bounds, including distinct integer types. `divtrunc!(left, right)` requires matching integer types and truncates toward zero, with ordinary contextual literal inference and single left-to-right operand evaluation. integer division by zero and signed minimum divided by `-1` trap before executing host/LLVM division; `/` remains floating-point division. these builtins also work in checked compile-time execution.
 

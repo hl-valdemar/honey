@@ -133,3 +133,112 @@ sentinel_array_storage_preserves_nested_and_raw_trailing_cells test {
     }
     try testing.expect(rejected)
 }
+
+@hide:file
+Case :: struct {
+    source u64
+    packed u64
+    widened u64
+}
+
+float32_rounding_and_byte_storage_follow_ieee_ties_to_even test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    cases [21]Case :: [
+        Case{ source = 0, packed = 0, widened = 0 },
+        Case{ source = 0x8000000000000000, packed = 0x80000000, widened = 0x8000000000000000 },
+        Case{ source = 0x3ff0000000000000, packed = 0x3f800000, widened = 0x3ff0000000000000 },
+        Case{ source = 0x3ff000000fffffff, packed = 0x3f800000, widened = 0x3ff0000000000000 },
+        Case{ source = 0x3ff0000010000000, packed = 0x3f800000, widened = 0x3ff0000000000000 },
+        Case{ source = 0x3ff0000010000001, packed = 0x3f800001, widened = 0x3ff0000020000000 },
+        Case{ source = 0x3ff0000030000000, packed = 0x3f800002, widened = 0x3ff0000040000000 },
+        Case{ source = 0x3690000000000000, packed = 0, widened = 0 },
+        Case{ source = 0x3690000000000001, packed = 1, widened = 0x36a0000000000000 },
+        Case{ source = 0xb690000000000000, packed = 0x80000000, widened = 0x8000000000000000 },
+        Case{ source = 0x36a0000000000000, packed = 1, widened = 0x36a0000000000000 },
+        Case{ source = 0x36a8000000000000, packed = 2, widened = 0x36b0000000000000 },
+        Case{ source = 0x380fffffc0000000, packed = 0x007fffff, widened = 0x380fffffc0000000 },
+        Case{ source = 0x380fffffe0000000, packed = 0x00800000, widened = 0x3810000000000000 },
+        Case{ source = 0x3810000000000000, packed = 0x00800000, widened = 0x3810000000000000 },
+        Case{ source = 0x47efffffefffffff, packed = 0x7f7fffff, widened = 0x47efffffe0000000 },
+        Case{ source = 0x47effffff0000000, packed = 0x7f800000, widened = 0x7ff0000000000000 },
+        Case{ source = 0x7ff0000000000000, packed = 0x7f800000, widened = 0x7ff0000000000000 },
+        Case{ source = 0xfff0000000000000, packed = 0xff800000, widened = 0xfff0000000000000 },
+        Case{ source = 0x7ff8000000000001, packed = 0x7fc00000, widened = 0x7ff8000000000000 },
+        Case{ source = 0xfff0000000000001, packed = 0xffc00000, widened = 0xfff8000000000000 },
+    ]
+    for (cases) |item| {
+        source :: ptrcast!(@f64, &item.source)^
+        rounded :: round_float32(source)
+        try testing.expect_equal(item.widened, ptrcast!(@u64, &rounded)^)
+        bytes [5]mut Value := undefined
+        mem.set(bytes[..], Value{ type = .u8, data = ValueData{ unsigned = 165 } })
+        write_storage(&module, bytes[..], Value{ type = .float32, data = ValueData{ real = source } })
+        try testing.expect_equal(item.packed, read_storage(&module, .u32, no_array, bytes[..], true).data.unsigned)
+        try testing.expect_equal(u64(165), bytes[4].data.unsigned)
+        restored :: read_storage(&module, .float32, no_array, bytes[..], true)
+        try testing.expect_equal(item.widened, ptrcast!(@u64, &restored.data.real)^)
+    }
+}
+
+float32_aggregates_and_untagged_unions_use_native_field_alignment test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    try testing.expect(real_type(.float32) and real_type(.float) and !real_type(.u32))
+    try testing.expect_equal(usize(4), storage_size(&module, .float32, no_array))
+    try testing.expect_equal(usize(4), storage_alignment(&module, .float32, no_array))
+    array :: try add_array(&module, .float32, no_array, 3, false, null)
+    try testing.expect_equal(usize(12), storage_size(&module, .array, array))
+    fields [3]RecordField :: [RecordField{ type = .u8 }, RecordField{ type = .float32 }, RecordField{ type = .u8 }]
+    record :: try add_record(&module, fields[..])
+    shape :: module.arrays.items[usize(record)]
+    try testing.expect_equal(usize(12), shape.byte_size)
+    try testing.expect_equal(usize(4), shape.alignment)
+    try testing.expect_equal(usize(4), shape.fields[1].byte_offset)
+    try testing.expect_equal(usize(8), shape.fields[2].byte_offset)
+    variants [2]RecordField :: [RecordField{ type = .float32 }, RecordField{ type = .u8 }]
+    plain :: try add_union(&module, variants[..], false)
+    try testing.expect_equal(usize(4), module.arrays.items[usize(plain)].byte_size)
+    try testing.expect_equal(usize(4), module.arrays.items[usize(plain)].alignment)
+    tagged :: try add_union(&module, variants[..], true)
+    try testing.expect_equal(usize(16), module.arrays.items[usize(tagged)].byte_size)
+    try testing.expect_equal(usize(8), module.arrays.items[usize(tagged)].payload_offset)
+    try testing.expect_equal(usize(8), module.arrays.items[usize(tagged)].alignment)
+    narrow [1]RecordField :: [RecordField{ type = .u8 }]
+    byte_union :: try add_union(&module, narrow[..], false)
+    try testing.expect_equal(usize(1), module.arrays.items[usize(byte_union)].byte_size)
+    try testing.expect_equal(usize(1), module.arrays.items[usize(byte_union)].alignment)
+    padded [2]RecordField :: [RecordField{ type = .array, array_type = array }, RecordField{ type = .float }]
+    padded_union :: try add_union(&module, padded[..], false)
+    try testing.expect_equal(usize(16), module.arrays.items[usize(padded_union)].byte_size)
+    try testing.expect_equal(usize(8), module.arrays.items[usize(padded_union)].alignment)
+}
+
+@hide:file
+Float32DecimalCase :: struct {
+    text []u8
+    parsed u64
+    expected u64
+}
+
+float32_decimal_midpoints_retain_the_original_decimal_tail test {
+    cases [13]Float32DecimalCase :: [
+        Float32DecimalCase{ text = "1.000000059604644775390624999999", parsed = 0x3ff0000010000000, expected = 0x3ff0000000000000 },
+        Float32DecimalCase{ text = "1.000000059604644775390625", parsed = 0x3ff0000010000000, expected = 0x3ff0000000000000 },
+        Float32DecimalCase{ text = "1.000000059604644775390625000001", parsed = 0x3ff0000010000000, expected = 0x3ff0000020000000 },
+        Float32DecimalCase{ text = "1.000000178813934326171874999999", parsed = 0x3ff0000030000000, expected = 0x3ff0000020000000 },
+        Float32DecimalCase{ text = "1.000000178813934326171875", parsed = 0x3ff0000030000000, expected = 0x3ff0000040000000 },
+        Float32DecimalCase{ text = "-1.000000059604644775390625000001", parsed = 0xbff0000010000000, expected = 0xbff0000020000000 },
+        Float32DecimalCase{ text = "+0001.000000059604644775390624999999", parsed = 0x3ff0000010000000, expected = 0x3ff0000000000000 },
+        Float32DecimalCase{ text = "1000000059604644775390625000001e-30", parsed = 0x3ff0000010000000, expected = 0x3ff0000020000000 },
+        Float32DecimalCase{ text = "7.00649232162408535461864791644958e-46", parsed = 0x3690000000000000, expected = 0 },
+        Float32DecimalCase{ text = "7.00649232162408535461864791644959e-46", parsed = 0x3690000000000000, expected = 0x36a0000000000000 },
+        Float32DecimalCase{ text = "340282356779733661637539395458142568447.0", parsed = 0x47effffff0000000, expected = 0x47efffffe0000000 },
+        Float32DecimalCase{ text = "340282356779733661637539395458142568448.0", parsed = 0x47effffff0000000, expected = 0x7ff0000000000000 },
+        Float32DecimalCase{ text = "340282356779733661637539395458142568449.0", parsed = 0x47effffff0000000, expected = 0x7ff0000000000000 },
+    ]
+    for (cases) |item| {
+        rounded :: round_decimal_float32(item.text, ptrcast!(@f64, &item.parsed)^)
+        try testing.expect_equal(item.expected, ptrcast!(@u64, &rounded)^)
+    }
+}

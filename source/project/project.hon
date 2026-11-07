@@ -1,0 +1,235 @@
+import "@ffi/c"
+import "@std/mem"
+import "@std/io"
+import "@std/fs"
+import "@std/process"
+import "@std/arraylist"
+import "@source/compilation"
+import "@source/loader"
+
+version :: "0.0.0-dev"
+
+Failure :: enum { template_not_found, directory_conflict, copy_failed, invalid_config, missing_library, project_not_found }
+Error :: alias (fs.ReadFileError | io.WriteError | compilation.Error | Failure)
+
+@hide:file
+_NSGetExecutablePath c_func(path ?*mut c_char, size ?*mut c_uint) c_int
+
+#! handles new/init, reports failures locally, and returns a process exit status.
+command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 {
+    destination []u8 := "."
+    if (args.values.len == 3 and mem.eql(args.values[1], "new")) destination = args.values[2]
+    else if (args.values.len != 2 or !mem.eql(args.values[1], "init")) {
+        io.write_all(io.stderr(runtime), "usage: honey new <project-path> | honey init\n") catch |_| {}
+        return 2
+    }
+    initialize(allocator, runtime, destination) catch |err| {
+        text []u8 :: match err {
+            .template_not_found: "matching std/ and ffi/c/ templates not found; install them beside honey or under ../share/honey"
+            .directory_conflict: "a required project directory conflicts with an existing file"
+            .invalid_path: "invalid project path"
+            .out_of_memory: "out of memory"
+            else: "cannot initialize project; check destination permissions and template files"
+        }
+        io.print("honey: {s}: {s}\n", io.stderr(runtime), {destination, text}) catch |_| {}
+        return 2
+    }
+    return 0
+}
+
+#! creates only missing files; an existing std/ or ffi/c/ tree is never refreshed.
+#! provenance records the originating distribution, not a build-time integrity lock.
+initialize proc(allocator mem.Allocator, runtime io.Io, destination []u8) void ! Error {
+    root :: try terminated(allocator, destination)
+    defer free_text(allocator, root)
+    std_path :: try join(allocator, root, "std")
+    defer free_text(allocator, std_path)
+    ffi_path :: try join(allocator, root, "ffi/c")
+    defer free_text(allocator, ffi_path)
+    need_std :: try fs.kind(allocator, std_path) == .missing
+    need_ffi :: try fs.kind(allocator, ffi_path) == .missing
+    template []mut u8 := &[]
+    defer { if (template.len != 0) free_text(allocator, template) }
+    if (need_std or need_ffi) template = try find_templates(allocator)
+    try ensure_directory(allocator, root)
+    if (need_std) {
+        source :: try join(allocator, template, "std")
+        defer free_text(allocator, source)
+        try copy_tree(allocator, runtime, source, std_path)
+    } else if (try fs.kind(allocator, std_path) != .directory) return .directory_conflict
+    if (need_ffi) {
+        parent :: try join(allocator, root, "ffi")
+        defer free_text(allocator, parent)
+        try ensure_directory(allocator, parent)
+        source :: try join(allocator, template, "ffi/c")
+        defer free_text(allocator, source)
+        try copy_tree(allocator, runtime, source, ffi_path)
+    } else if (try fs.kind(allocator, ffi_path) != .directory) return .directory_conflict
+    source_path :: try join(allocator, root, "source")
+    defer free_text(allocator, source_path)
+    try ensure_directory(allocator, source_path)
+    sources := try loader.files(allocator, source_path)
+    defer {
+        for (sources.items) |path| mem.free(allocator, path)
+        arraylist.deinit(&sources)
+    }
+    if (sources.items.len == 0) {
+        main_path :: try join(allocator, source_path, "main.hon")
+        defer free_text(allocator, main_path)
+        try write_missing(main_path, "main proc() i32 {\n    return 0\n}\n")
+    }
+    build_path :: try join(allocator, root, "build.hon")
+    defer free_text(allocator, build_path)
+    # a fixed valid name avoids injecting arbitrary filesystem bytes into Honey source.
+    try write_missing(build_path, "import \"@std/build\"\n\nconfig :: build.BuildConfig{\n    name = \"app\",\n    source = \"source\",\n}\n")
+    provenance :: try join(allocator, root, ".honey-origin")
+    defer free_text(allocator, provenance)
+    if (need_std) {
+        try write_missing(provenance, "compiler = honey 0.0.0-dev\nstdlib = honey 0.0.0-dev\n# provenance only; local edits are allowed; builds never update vendored sources\n")
+    } else {
+        try write_missing(provenance, "compiler = honey 0.0.0-dev\nstdlib = existing project tree (preserved; origin unknown)\n# provenance only; local edits are allowed; builds never update vendored sources\n")
+    }
+}
+
+@hide:file
+valid_templates proc(allocator mem.Allocator, root []u8) bool ! Error {
+    required [3][]u8 :: ["std/build/build.hon", "std/mem/mem.hon", "ffi/c/stdio.hon"]
+    for (required) |relative| {
+        path :: try join(allocator, root, relative)
+        defer free_text(allocator, path)
+        if (try fs.kind(allocator, path) != .file) return false
+    }
+    return true
+}
+
+#! returns caller-owned template root; release with free_text using the same allocator.
+find_templates proc(allocator mem.Allocator) []mut u8 ! Error {
+    size [1]mut c_uint := [0]
+    _ = _NSGetExecutablePath(null, size[..].ptr)
+    if (size[0] != 0) {
+        executable :: try mem.alloc(u8, allocator, usize(size[0]))
+        defer mem.free(allocator, executable)
+        if (_NSGetExecutablePath(ptrcast!(executable.ptr), size[..].ptr) == 0) {
+            length := usize(0)
+            while (length < executable.len and executable[length] != 0) length += 1
+            if (length < executable.len) {
+                canonical :: try fs.canonical(allocator, executable[..length])
+                defer mem.free(allocator, canonical)
+                directory :: parent_path(canonical)
+                if (try valid_templates(allocator, directory)) return try terminated(allocator, directory)
+                parent :: parent_path(directory)
+                if (try valid_templates(allocator, parent)) return try terminated(allocator, parent)
+                installed :: try join(allocator, parent, "share/honey")
+                defer free_text(allocator, installed)
+                if (try valid_templates(allocator, installed)) return try terminated(allocator, installed)
+            }
+        }
+    }
+    return .template_not_found
+}
+
+@hide
+parent_path proc(path []u8) []u8 {
+    end := path.len
+    while (end > 1 and path[end - 1] == '/') end -= 1
+    while (end > 1 and path[end - 1] != '/') end -= 1
+    if (end > 1) end -= 1
+    return path[..end]
+}
+
+@hide
+terminated proc(allocator mem.Allocator, text []u8) []mut u8 ! Error {
+    if (text.len == maxval!(usize)) return .out_of_memory
+    for (text) |byte| { if (byte == 0) return .invalid_path }
+    bytes :: try mem.alloc(u8, allocator, text.len + 1)
+    memcopy!(bytes[..text.len], text)
+    bytes[text.len] = 0
+    return bytes[..text.len]
+}
+
+@hide
+join proc(allocator mem.Allocator, base, relative []u8) []mut u8 ! Error {
+    if (relative.len != 0 and relative[0] == '/') return try terminated(allocator, relative)
+    separator :: if (base.len == 0 or base[base.len - 1] == '/') usize(0) else usize(1)
+    if (relative.len >= maxval!(usize) - separator or base.len >= maxval!(usize) - separator - relative.len) return .out_of_memory
+    bytes :: try mem.alloc(u8, allocator, base.len + separator + relative.len + 1)
+    memcopy!(bytes[..base.len], base)
+    if (separator != 0) bytes[base.len] = '/'
+    memcopy!(bytes[base.len + separator..bytes.len - 1], relative)
+    bytes[bytes.len - 1] = 0
+    return bytes[..bytes.len - 1]
+}
+
+@hide
+ensure_directory proc(allocator mem.Allocator, path []u8) void ! Error {
+    if (path.len == 0) return .invalid_path
+    input :: try terminated(allocator, path)
+    defer free_text(allocator, input)
+    for (1..(input.len + 1)) |index| {
+        if (input.ptr[index] != '/' and index != input.len) continue
+        saved :: input.ptr[index]
+        input.ptr[index] = 0
+        status :: c.mkdir(ptrcast!(input.ptr), 493)
+        input.ptr[index] = saved
+        if (status == 0) continue
+        if (c.__error()?^ != c.EEXIST) return .directory_conflict
+        if (try fs.kind(allocator, input[..index]) != .directory) return .directory_conflict
+    }
+}
+
+@hide:file
+write_missing proc(path []u8, bytes []u8) void ! Error {
+    # O_EXCL preserves existing files, including symlinks, even across concurrent init calls.
+    descriptor :: c.open(ptrcast!(path.ptr), c.O_WRONLY | c.O_CREAT | c.O_EXCL, c_int(420))
+    if (descriptor < 0) {
+        if (c.__error()?^ == c.EEXIST) {
+            result [1]mut c.Stat := undefined
+            if (c.stat(ptrcast!(path.ptr), result[..].ptr) != 0) return .directory_conflict
+            if (result[0].st_mode & c_ushort(61440) != 32768) return .directory_conflict
+            return
+        }
+        return .open_failed
+    }
+    completed := false
+    closed := false
+    defer {
+        if (!closed) _ = c.close(descriptor)
+        if (!completed) _ = c.unlink(ptrcast!(path.ptr))
+    }
+    try io.write_all(io.Writer{ context = null, handle = io.Handle{ file_desc = descriptor }, write = write_descriptor }, bytes)
+    closed = true
+    if (c.close(descriptor) != 0) return .close_failed
+    completed = true
+}
+
+@hide:file
+write_descriptor proc(_ ?@mut anyopaque, handle io.Handle, bytes []u8) usize ! io.WriteError {
+    count := c.write(handle.file_desc, bytes.ptr, c_ulong(bytes.len))
+    while (count < 0 and c.__error()?^ == c.EINTR) count = c.write(handle.file_desc, bytes.ptr, c_ulong(bytes.len))
+    if (count < 0) return .write_failed
+    return usize(count)
+}
+
+@hide:file
+copy_tree proc(allocator mem.Allocator, runtime io.Io, source, destination []u8) void ! Error {
+    try ensure_directory(allocator, destination)
+    directory := try fs.open_directory(allocator, source)
+    defer fs.close_directory(&directory) catch |_| {}
+    while (try fs.next(&directory)) |entry| {
+        input :: try join(allocator, source, entry.name)
+        defer free_text(allocator, input)
+        output :: try join(allocator, destination, entry.name)
+        defer free_text(allocator, output)
+        if (entry.kind == .directory) try copy_tree(allocator, runtime, input, output)
+        else if (entry.kind == .file) {
+            bytes := try fs.read_file(allocator, runtime, input, usize(maxval!(u32)))
+            defer arraylist.deinit(&bytes)
+            try write_missing(output, bytes.items)
+        } else return .copy_failed
+    }
+}
+
+#! releases path storage returned by find_templates.
+free_text proc(allocator mem.Allocator, text []u8) void {
+    mem.free(allocator, text.ptr[..text.len + 1])
+}

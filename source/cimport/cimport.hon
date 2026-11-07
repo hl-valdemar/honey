@@ -1,0 +1,1821 @@
+import "@ffi/c"
+import "@std/mem"
+import "@std/arraylist"
+import "@std/fs"
+import "@std/io"
+import "@std/process"
+import "@std/strconv"
+
+Failure :: enum { invalid_options, clang_failed, invalid_clang_output, unsupported_declaration, conflicting_declaration, unsafe_output, filesystem_failed }
+Error :: alias (Failure | mem.AllocError | fs.ReadFileError | io.WriteError | io.OpenError | io.CloseError | process.RunError)
+
+@hide:file
+Storage :: struct { allocator mem.Allocator, owned arraylist.ArrayList([]mut u8) }
+@hide:file
+storage_init proc(allocator mem.Allocator) Storage { return Storage{ allocator = allocator, owned = arraylist.init(allocator) } }
+@hide:file
+storage_deinit proc(storage @mut Storage) void {
+    for (storage.owned.items) |bytes| mem.free(storage.allocator, bytes)
+    arraylist.deinit(&storage.owned)
+}
+@hide:file
+keep proc(storage @mut Storage, bytes []mut u8) []mut u8 ! Error {
+    arraylist.append(&storage.owned, bytes) catch |err| {
+        mem.free(storage.allocator, bytes)
+        return err
+    }
+    return bytes
+}
+@hide:file
+retain_list proc(storage @mut Storage, list @mut arraylist.ArrayList(u8)) []u8 ! Error {
+    allocation :: list.items.ptr[..list.capacity]
+    length :: list.items.len
+    list.items = &[]
+    list.capacity = 0
+    return (try keep(storage, allocation))[..length]
+}
+@hide:file
+append_parts proc(list @mut arraylist.ArrayList(u8), parts [][]u8) void ! Error {
+    length := list.items.len
+    for (parts) |part| {
+        if (part.len > maxval!(usize) - length) return .out_of_memory
+        length += part.len
+    }
+    start := list.items.len
+    try arraylist.reserve(list, length)
+    list.items = list.items.ptr[..length]
+    for (parts) |part| {
+        memcopy!(list.items[start..start + part.len], part)
+        start += part.len
+    }
+}
+@hide:file
+join proc(storage @mut Storage, parts [][]u8) [;0]u8 ! Error {
+    length := usize(0)
+    for (parts) |part| {
+        if (part.len >= maxval!(usize) - length) return .out_of_memory
+        length += part.len
+    }
+    bytes :: try keep(storage, try mem.alloc(u8, storage.allocator, length + 1))
+    offset := usize(0)
+    for (parts) |part| {
+        memcopy!(bytes[offset..offset + part.len], part)
+        offset += part.len
+    }
+    bytes[length] = 0
+    return bytes.ptr[..length;0]
+}
+@hide:file
+number proc(storage @mut Storage, value u64) [;0]u8 ! Error {
+    buffer [20]mut u8 := undefined
+    start := buffer.len
+    remaining := value
+    while true {
+        start -= 1
+        buffer[start] = '0' + u8(rem!(remaining, 10))
+        remaining = divtrunc!(remaining, 10)
+        if (remaining == 0) break
+    }
+    parts [1][]u8 :: [buffer[start..]]
+    return try join(storage, parts[..])
+}
+@hide:file
+prefix proc(text, part []u8) bool { return text.len >= part.len and mem.eql(text[..part.len], part) }
+@hide:file
+suffix proc(text, part []u8) bool { return text.len >= part.len and mem.eql(text[text.len - part.len..], part) }
+@hide:file
+find proc(text, part []u8) ?usize {
+    if (part.len > text.len) return null
+    for (0..(text.len - part.len + 1)) |i| { if (mem.eql(text[i..i + part.len], part)) return i }
+    return null
+}
+@hide:file
+trim proc(text []u8) []u8 {
+    first := usize(0)
+    last := text.len
+    while (first < last and (text[first] == ' ' or text[first] == '\n' or text[first] == '\r' or text[first] == '\t')) first += 1
+    while (last > first and (text[last - 1] == ' ' or text[last - 1] == '\n' or text[last - 1] == '\r' or text[last - 1] == '\t')) last -= 1
+    return text[first..last]
+}
+@hide:file
+identifier proc(text []u8) bool {
+    if (text.len == 0) return false
+    for (text) |byte, i| {
+        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_') continue
+        if (i != 0 and byte >= '0' and byte <= '9') continue
+        return false
+    }
+    return true
+}
+@hide:file
+escaped proc(storage @mut Storage, name []u8) []u8 ! Error {
+    if (!identifier(name)) return .unsupported_declaration
+    keywords [70][]u8 :: ["proc", "c_func", "null", "undefined", "return", "yield", "break", "continue", "unreachable", "try", "catch", "orelse", "defer", "errdefer", "if", "for", "inline", "else", "while", "true", "false", "and", "or", "xor", "mut", "struct", "c_struct", "opaque", "enum", "union", "distinct", "alias", "match", "import", "test", "int", "float", "bool", "string", "void", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "uint", "isize", "usize", "anyopaque", "c_char", "c_schar", "c_uchar", "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong", "c_longlong", "c_ulonglong", "c_float", "c_double", "c_longdouble", "type", "noreturn"]
+    for (keywords) |word| {
+        if (mem.eql(name, word)) {
+            parts [3][]u8 :: ["@\"", name, "\""]
+            return try join(storage, parts[..])
+        }
+    }
+    return name
+}
+@hide:file
+hash proc(text []u8) u64 {
+    value := u64(5381)
+    # wrapping arithmetic expressed without overflow, for bootstrap compatibility.
+    for (text) |byte| value = ((value & u64(72057594037927935)) * 33) xor u64(byte)
+    return value
+}
+@hide:file
+read_text proc(storage @mut Storage, runtime io.Io, path []u8) []u8 ! Error {
+    bytes := try fs.read_file(storage.allocator, runtime, path, 268435456)
+    defer arraylist.deinit(&bytes)
+    return try retain_list(storage, &bytes)
+}
+@hide:file
+write_text proc(runtime io.Io, path [;0]u8, text []u8) void ! Error {
+    file :: try io.open(runtime, path, .write_only)
+    closing := false
+    defer { if (!closing) io.close(file) catch |_| {} }
+    try io.write_all(io.writer(file), text)
+    closing = true
+    try io.close(file)
+}
+@hide:file
+make_directory proc(storage @mut Storage, path []u8) void ! Error {
+    parts [1][]u8 :: [path]
+    terminated :: try join(storage, parts[..])
+    if (c.mkdir(ptrcast!(terminated.ptr), 493) == 0) return
+    if (c.__error()?^ == c.EEXIST and try fs.kind(storage.allocator, path) == .directory) return
+    return .filesystem_failed
+}
+@hide:file
+posix_spawn_file_actions_init c_func(actions ?*mut c.posix_spawn_file_actions_t) c_int
+@hide:file
+posix_spawn_file_actions_destroy c_func(actions ?*mut c.posix_spawn_file_actions_t) c_int
+@hide:file
+posix_spawn_file_actions_adddup2 c_func(actions ?*mut c.posix_spawn_file_actions_t, source, destination c_int) c_int
+@hide:file
+posix_spawn_file_actions_addclose c_func(actions ?*mut c.posix_spawn_file_actions_t, descriptor c_int) c_int
+
+@hide:file
+Temporary :: struct { descriptor c_int, path [;0]u8 }
+@hide:file
+temporary proc(storage @mut Storage) Temporary ! Error {
+    path :: try join(storage, &["/tmp/honey-cimport-XXXXXX"])
+    descriptor :: c.mkstemp(ptrcast!(constcast!(path).ptr))
+    if (descriptor < 0) return .filesystem_failed
+    return Temporary{ descriptor = descriptor, path = path }
+}
+@hide:file
+remove_temporary proc(file Temporary) void {
+    _ = c.close(file.descriptor)
+    _ = c.unlink(ptrcast!(file.path.ptr))
+}
+
+@hide:file
+capture proc(storage @mut Storage, runtime io.Io, arguments [][;0]u8) []u8 ! Error {
+    if (arguments.len == 0 or arguments[0].len == 0) return .invalid_options
+    if (arguments.len == maxval!(usize)) return .out_of_memory
+    for (arguments) |argument| {
+        for (argument) |byte| { if (byte == 0) return .invalid_options }
+    }
+    output :: try temporary(storage)
+    defer remove_temporary(output)
+    actions [1]mut c.posix_spawn_file_actions_t := [null]
+    if (posix_spawn_file_actions_init(actions[..].ptr) != 0) return .filesystem_failed
+    defer _ = posix_spawn_file_actions_destroy(actions[..].ptr)
+    if (posix_spawn_file_actions_adddup2(actions[..].ptr, output.descriptor, 1) != 0) return .filesystem_failed
+    if (posix_spawn_file_actions_addclose(actions[..].ptr, output.descriptor) != 0) return .filesystem_failed
+    argv :: try mem.alloc(?*mut c_char, storage.allocator, arguments.len + 1)
+    defer mem.free(storage.allocator, argv)
+    for (arguments) |argument, i| argv[i] = ptrcast!(constcast!(argument).ptr)
+    argv[arguments.len] = null
+    pid [1]mut c_int := [0]
+    if (c.posix_spawnp(pid[..].ptr, ptrcast!(arguments[0].ptr), actions[..].ptr, null, argv.ptr, c._NSGetEnviron()?^) != 0) return .spawn_failed
+    status [1]mut c_int := [0]
+    while (c.waitpid(pid[0], status[..].ptr, 0) < 0) { if (c.__error()?^ != c.EINTR) return .wait_failed }
+    if (status[0] != 0) return .clang_failed
+    return try read_text(storage, runtime, output.path)
+}
+
+@hide:file
+JsonNode :: struct {
+    key []u8 = ""
+    text []u8 = ""
+    first usize = 0
+    next usize = 0
+}
+@hide:file
+Json :: struct { nodes arraylist.ArrayList(JsonNode), source []u8, cursor usize = 0, storage @mut Storage }
+@hide:file
+json_space proc(json @mut Json) void {
+    while (json.cursor < json.source.len and (json.source[json.cursor] == ' ' or json.source[json.cursor] == '\n' or json.source[json.cursor] == '\r' or json.source[json.cursor] == '\t')) json.cursor += 1
+}
+@hide:file
+json_string proc(json @mut Json) []u8 ! Error {
+    if (json.cursor >= json.source.len or json.source[json.cursor] != '"') return .invalid_clang_output
+    json.cursor += 1
+    bytes := arraylist.init(u8, json.storage.allocator)
+    defer arraylist.deinit(&bytes)
+    while (json.cursor < json.source.len) {
+        byte := json.source[json.cursor]
+        json.cursor += 1
+        if (byte == '"') return try retain_list(json.storage, &bytes)
+        if (byte == '\\') {
+            if (json.cursor == json.source.len) return .invalid_clang_output
+            byte = json.source[json.cursor]
+            json.cursor += 1
+            match byte {
+                'n': byte = '\n'
+                'r': byte = '\r'
+                't': byte = '\t'
+                'b': byte = 8
+                'f': byte = 12
+                '"', '\\', '/': {}
+                'u': {
+                    if (json.cursor + 4 > json.source.len) return .invalid_clang_output
+                    code := u32(0)
+                    for (json.source[json.cursor..json.cursor + 4]) |digit| {
+                        value := u32(16)
+                        if (digit >= '0' and digit <= '9') value = u32(digit - '0')
+                        else if (digit >= 'a' and digit <= 'f') value = u32(digit - 'a') + 10
+                        else if (digit >= 'A' and digit <= 'F') value = u32(digit - 'A') + 10
+                        if (value == 16) return .invalid_clang_output
+                        code = code * 16 + value
+                    }
+                    json.cursor += 4
+                    if (code >= 55296 and code <= 57343) return .invalid_clang_output
+                    if (code < 128) byte = u8(code)
+                    else {
+                        if (code >= 2048) try arraylist.append(&bytes, u8(224 + divtrunc!(code, 4096)))
+                        leading :: if (code < 2048) u32(192) else u32(128)
+                        try arraylist.append(&bytes, u8(leading + (divtrunc!(code, 64) & 63)))
+                        byte = u8(128 + (code & 63))
+                    }
+                }
+                else: return .invalid_clang_output
+            }
+        } else if (byte < 32) return .invalid_clang_output
+        try arraylist.append(&bytes, byte)
+    }
+    return .invalid_clang_output
+}
+@hide:file
+json_value proc(json @mut Json, key []u8, depth usize) usize ! Error {
+    if (depth > 256) return .invalid_clang_output
+    json_space(json)
+    if (json.cursor >= json.source.len) return .invalid_clang_output
+    index :: json.nodes.items.len
+    try arraylist.append(&json.nodes, JsonNode{ key = key })
+    byte :: json.source[json.cursor]
+    if (byte == '{' or byte == '[') {
+        json.cursor += 1
+        end :: if (byte == '{') u8('}') else u8(']')
+        previous := usize(0)
+        json_space(json)
+        while (json.cursor < json.source.len and json.source[json.cursor] != end) {
+            child_key []u8 := ""
+            if (byte == '{') {
+                child_key = try json_string(json)
+                json_space(json)
+                if (json.cursor >= json.source.len or json.source[json.cursor] != ':') return .invalid_clang_output
+                json.cursor += 1
+            }
+            child :: try json_value(json, child_key, depth + 1)
+            if (previous == 0) json.nodes.items[index].first = child
+            else json.nodes.items[previous].next = child
+            previous = child
+            json_space(json)
+            if (json.cursor >= json.source.len) return .invalid_clang_output
+            if (json.source[json.cursor] == end) break
+            if (json.source[json.cursor] != ',') return .invalid_clang_output
+            json.cursor += 1
+            json_space(json)
+        }
+        if (json.cursor >= json.source.len) return .invalid_clang_output
+        json.cursor += 1
+    } else if (byte == '"') json.nodes.items[index].text = try json_string(json)
+    else {
+        start :: json.cursor
+        while (json.cursor < json.source.len and json.source[json.cursor] != ',' and json.source[json.cursor] != '}' and json.source[json.cursor] != ']' and json.source[json.cursor] != '\n' and json.source[json.cursor] != '\r' and json.source[json.cursor] != ' ' and json.source[json.cursor] != '\t') json.cursor += 1
+        if (start == json.cursor) return .invalid_clang_output
+        json.nodes.items[index].text = json.source[start..json.cursor]
+    }
+    return index
+}
+@hide:file
+json_parse proc(storage @mut Storage, text []u8) Json ! Error {
+    json := Json{ nodes = arraylist.init(storage.allocator), source = text, storage = storage }
+    errdefer arraylist.deinit(&json.nodes)
+    try arraylist.append(&json.nodes, JsonNode{})
+    _ = try json_value(&json, "", 0)
+    json_space(&json)
+    if (json.cursor != text.len) return .invalid_clang_output
+    return json
+}
+@hide:file
+property proc(json @Json, node usize, key []u8) usize {
+    if (node == 0) return 0
+    child := json.nodes.items[node].first
+    while (child != 0) {
+        if (mem.eql(json.nodes.items[child].key, key)) return child
+        child = json.nodes.items[child].next
+    }
+    return 0
+}
+@hide:file
+json_text proc(json @Json, node usize, key []u8) []u8 { return json.nodes.items[property(json, node, key)].text }
+@hide:file
+inner proc(json @Json, node usize) usize { return json.nodes.items[property(json, node, "inner")].first }
+@hide:file
+kind proc(json @Json, node usize, expected []u8) bool { return mem.eql(json_text(json, node, "kind"), expected) }
+@hide:file
+qual_type proc(json @Json, node usize) []u8 { return json_text(json, property(json, node, "type"), "qualType") }
+
+#! borrows strings for the duration of generate. target is required; initially Darwin arm64 only.
+Options :: struct {
+    name []u8 = ""
+    project []u8 = "."
+    target []u8 = ""
+    clang [;0]u8 = "clang"
+    sysroot []u8 = ""
+    headers [][]u8 = &[]
+    symbols [][]u8 = &[]
+    includes [][]u8 = &[]
+    defines [][]u8 = &[]
+}
+
+#! CLI entry point; accepts the complete process argument vector, including translate-c.
+#! prints actionable errors, returns 0 on success, 1 on translation failure, 2 on invalid options.
+#! all temporary and generated text is released before returning.
+command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 {
+    storage := storage_init(allocator)
+    defer storage_deinit(&storage)
+    return command_inner(&storage, runtime, args) catch |err| {
+        message []u8 :: match err {
+            .invalid_options: "invalid options; use: honey translate-c <name> --header <header> --symbol <declaration> --target arm64-apple-macos11 [--project <directory>] [-I <directory>] [-D <definition>] [--sysroot <directory>] [--clang <executable>] (repeat header/symbol/-I/-D)"
+            .clang_failed: "Clang rejected the headers or selected constant; see its diagnostic above"
+            .invalid_clang_output: "cannot decode Clang output; use a Clang installation supporting -ast-dump=json"
+            .unsupported_declaration: "selected declaration or required type is unsupported; see diagnostic above"
+            .conflicting_declaration: "incompatible C declarations across binding packages; see diagnostic above"
+            .unsafe_output: "refusing to overwrite an unowned or modified generated file; restore its exact generated contents or choose a fresh package/project"
+            .spawn_failed: "cannot start Clang; install Clang or specify --clang"
+            .wait_failed: "cannot wait for Clang"
+            .out_of_memory: "out of memory"
+            else: "cannot access binding inputs or outputs (check paths and permissions)"
+        }
+        io.print("translate-c: {s}\n", io.stderr(runtime), {message}) catch |_| {}
+        return if (err == .invalid_options) 2 else 1
+    }
+}
+
+@hide:file
+command_inner proc(storage @mut Storage, runtime io.Io, args process.Args) i32 ! Error {
+    if (args.values.len < 3) return .invalid_options
+    options := Options{ name = args.values[2] }
+    headers := arraylist.init([]u8, storage.allocator)
+    defer arraylist.deinit(&headers)
+    symbols := arraylist.init([]u8, storage.allocator)
+    defer arraylist.deinit(&symbols)
+    includes := arraylist.init([]u8, storage.allocator)
+    defer arraylist.deinit(&includes)
+    defines := arraylist.init([]u8, storage.allocator)
+    defer arraylist.deinit(&defines)
+    cursor := usize(3)
+    while (cursor < args.values.len) {
+        flag :: args.values[cursor]
+        cursor += 1
+        if (cursor == args.values.len) return .invalid_options
+        argument :: args.values[cursor]
+        cursor += 1
+        if (mem.eql(flag, "--header")) try arraylist.append(&headers, argument)
+        else if (mem.eql(flag, "--symbol")) try arraylist.append(&symbols, argument)
+        else if (mem.eql(flag, "-I")) try arraylist.append(&includes, argument)
+        else if (mem.eql(flag, "-D")) try arraylist.append(&defines, argument)
+        else if (mem.eql(flag, "--project")) options.project = argument
+        else if (mem.eql(flag, "--target")) options.target = argument
+        else if (mem.eql(flag, "--clang")) options.clang = argument
+        else if (mem.eql(flag, "--sysroot")) options.sysroot = argument
+        else return .invalid_options
+    }
+    options.headers = headers.items
+    options.symbols = symbols.items
+    options.includes = includes.items
+    options.defines = defines.items
+    try generate_inner(storage, runtime, options)
+    return 0
+}
+
+#! generate ffi/<name>/bindings.hon and the shared ffi/__c_types module beside source/.
+#! `options.project` must contain source/ and a build.hon/build.bro project-root marker.
+#! errors never authorize replacing handwritten or edited output. inputs are borrowed until return.
+#! generated declarations do not imply ownership, lifetime, callback threading or library initialization contracts.
+generate proc(allocator mem.Allocator, runtime io.Io, options Options) void ! Error {
+    storage := storage_init(allocator)
+    defer storage_deinit(&storage)
+    try generate_inner(&storage, runtime, options)
+}
+
+@hide:file
+clang_arguments proc(storage @mut Storage, options Options, input []u8) arraylist.ArrayList([;0]u8) ! Error {
+    args := arraylist.init([;0]u8, storage.allocator)
+    errdefer arraylist.deinit(&args)
+    base_arguments [7][]u8 :: [options.clang, "-target", options.target, "-x", "c", "-std=c11", "-Werror=implicit-function-declaration"]
+    for (base_arguments) |arg| {
+        parts [1][]u8 :: [arg]
+        try arraylist.append(&args, try join(storage, parts[..]))
+    }
+    if (options.sysroot.len != 0) {
+        try arraylist.append(&args, "-isysroot")
+        sysroot_parts [1][]u8 :: [options.sysroot]
+        try arraylist.append(&args, try join(storage, sysroot_parts[..]))
+    }
+    for (options.includes) |path| {
+        try arraylist.append(&args, "-I")
+        include_parts [1][]u8 :: [path]
+        try arraylist.append(&args, try join(storage, include_parts[..]))
+    }
+    for (options.defines) |definition| {
+        try arraylist.append(&args, "-D")
+        define_parts [1][]u8 :: [definition]
+        try arraylist.append(&args, try join(storage, define_parts[..]))
+    }
+    input_parts [1][]u8 :: [input]
+    try arraylist.append(&args, try join(storage, input_parts[..]))
+    return args
+}
+
+@hide:file
+c_string_literal proc(storage @mut Storage, text []u8) []u8 ! Error {
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    try arraylist.append(&result, '"')
+    for (text) |byte| {
+        if (byte == 0 or byte == '\n' or byte == '\r') return .invalid_options
+        if (byte == '\\' or byte == '"') try arraylist.append(&result, '\\')
+        try arraylist.append(&result, byte)
+    }
+    try arraylist.append(&result, '"')
+    parts [1][]u8 :: [result.items]
+    return try join(storage, parts[..])
+}
+
+@hide:file
+generate_inner proc(storage @mut Storage, runtime io.Io, options Options) void ! Error {
+    if (!identifier(options.name) or mem.eql(options.name, "c") or mem.eql(options.name, "__c_types")) return .invalid_options
+    if (options.headers.len == 0 or options.symbols.len == 0 or options.target.len == 0) return .invalid_options
+    if (!(prefix(options.target, "arm64-apple-") or prefix(options.target, "aarch64-apple-")) or (find(options.target, "macos") == null and find(options.target, "darwin") == null)) {
+        try io.write_all(io.stderr(runtime), "translate-c: only explicit Darwin arm64 targets are supported\n")
+        return .invalid_options
+    }
+    source_parts [2][]u8 :: [options.project, "/source"]
+    if (try fs.kind(storage.allocator, try join(storage, source_parts[..])) != .directory) {
+        try io.write_all(io.stderr(runtime), "translate-c: --project must contain source/ (run honey init first)\n")
+        return .invalid_options
+    }
+    honey_marker_parts [2][]u8 :: [options.project, "/build.hon"]
+    bro_marker_parts [2][]u8 :: [options.project, "/build.bro"]
+    if (
+        try fs.kind(storage.allocator, try join(storage, honey_marker_parts[..])) != .file
+        and try fs.kind(storage.allocator, try join(storage, bro_marker_parts[..])) != .file
+    ) {
+        try io.write_all(io.stderr(runtime), "translate-c: --project must contain a build.hon/build.bro project-root marker (run honey init first)\n")
+        return .invalid_options
+    }
+    unit :: try temporary(storage)
+    defer remove_temporary(unit)
+    unit_source []u8 := ""
+    for (options.headers) |header| {
+        absolute :: try fs.canonical(storage.allocator, header)
+        defer mem.free(storage.allocator, absolute)
+        include_parts [4][]u8 :: [unit_source, "#include ", try c_string_literal(storage, absolute), "\n"]
+        unit_source = try join(storage, include_parts[..])
+    }
+    try write_text(runtime, unit.path, unit_source)
+    args := try clang_arguments(storage, options, unit.path)
+    defer arraylist.deinit(&args)
+    try arraylist.append(&args, "-fsyntax-only")
+    try arraylist.append(&args, "-Xclang")
+    try arraylist.append(&args, "-ast-dump=json")
+    ast_text :: try capture(storage, runtime, args.items)
+    json := try json_parse(storage, ast_text)
+    defer arraylist.deinit(&json.nodes)
+    # Clang owns all parsing, preprocessing, name lookup and C semantic checking.
+    # We consume only its declarations and canonical type spellings, never C source.
+    context := try context_init(storage, runtime, &json, options)
+    defer context_deinit(&context)
+    context.input = unit.path
+    context.unit_source = unit_source
+    for (options.symbols) |selection| {
+        if (!identifier(selection)) return .invalid_options
+        try select_symbol(&context, selection)
+    }
+    try emit_pending(&context)
+    version_arguments [2][;0]u8 :: [options.clang, "--version"]
+    version :: try capture(storage, runtime, version_arguments[..])
+    args.items = args.items[..args.items.len - 3]
+    dependency_arguments [3][;0]u8 :: ["-M", "-MT", "honey-translation-unit"]
+    for (dependency_arguments) |argument| try arraylist.append(&args, argument)
+    dependencies :: try capture(storage, runtime, args.items)
+    found_unit :: find(dependencies, unit.path)
+    if (found_unit == null) return .invalid_clang_output
+    unit_position :: found_unit?
+    dependency_parts [3][]u8 :: [dependencies[..unit_position], "honey-translation-unit.c", dependencies[unit_position + unit.path.len..]]
+    stable_dependencies :: try join(storage, dependency_parts[..])
+    context.recipe = try recipe(storage, options, unit_source, version, stable_dependencies)
+    try install(&context)
+}
+
+@hide:file
+Declaration :: struct {
+    node usize
+    file []u8
+    name []u8
+    identity []u8 = ""
+    enum_type []u8 = ""
+    required bool = false
+    emitted bool = false
+}
+@hide:file
+Entry :: struct { key []u8, text []u8 }
+@hide:file
+Context :: struct {
+    storage @mut Storage
+    runtime io.Io
+    json @Json
+    options Options
+    declarations arraylist.ArrayList(Declaration)
+    bindings arraylist.ArrayList(Entry)
+    common arraylist.ArrayList(Entry)
+    symbols arraylist.ArrayList(Entry)
+    shared bool = false
+    namespace []u8 = "c_types"
+    input []u8 = ""
+    unit_source []u8 = ""
+    macros []u8 = ""
+    recipe []u8 = ""
+}
+@hide:file
+context_init proc(storage @mut Storage, runtime io.Io, json @Json, options Options) Context ! Error {
+    context := Context{
+        storage = storage, runtime = runtime, json = json, options = options,
+        declarations = arraylist.init(storage.allocator), bindings = arraylist.init(storage.allocator),
+        common = arraylist.init(storage.allocator), symbols = arraylist.init(storage.allocator),
+    }
+    errdefer context_deinit(&context)
+    file []u8 := ""
+    node := inner(json, 1)
+    while (node != 0) {
+        location :: property(json, node, "loc")
+        actual_file :: json_text(json, location, "file")
+        if (actual_file.len != 0) file = actual_file
+        try collect_declaration(&context, node, file)
+        node = json.nodes.items[node].next
+    }
+    while true {
+        collision := false
+        for (context.declarations.items) |declaration| {
+            if (mem.eql(declaration.name, context.namespace)) collision = true
+        }
+        for (options.symbols) |selection| {
+            if (mem.eql(selection, context.namespace)) collision = true
+        }
+        if (!collision) break
+        namespace_parts [2][]u8 :: [context.namespace, "_"]
+        context.namespace = try join(storage, namespace_parts[..])
+    }
+    return context
+}
+@hide:file
+context_deinit proc(context @mut Context) void {
+    arraylist.deinit(&context.declarations)
+    arraylist.deinit(&context.bindings)
+    arraylist.deinit(&context.common)
+    arraylist.deinit(&context.symbols)
+}
+@hide:file
+collect_declaration proc(context @mut Context, node usize, file []u8) void ! Error {
+    json :: context.json
+    if (kind(json, node, "RecordDecl") or kind(json, node, "TypedefDecl") or kind(json, node, "EnumDecl") or kind(json, node, "FunctionDecl") or kind(json, node, "VarDecl") or kind(json, node, "EnumConstantDecl")) {
+        name :: json_text(json, node, "name")
+        identity []u8 := ""
+        if (kind(json, node, "RecordDecl")) {
+            location := property(json, node, "loc")
+            if (property(json, location, "expansionLoc") != 0) location = property(json, location, "expansionLoc")
+            else if (property(json, location, "spellingLoc") != 0) location = property(json, location, "spellingLoc")
+            own_file :: json_text(json, location, "file")
+            origin :: if (own_file.len == 0) file else own_file
+            canonical []u8 := origin
+            if (origin.len != 0 and origin[0] != '<') {
+                owned :: try fs.canonical(context.storage.allocator, origin)
+                defer mem.free(context.storage.allocator, owned)
+                canonical_parts [1][]u8 :: [owned]
+                canonical = try join(context.storage, canonical_parts[..])
+            }
+            identity_parts [5][]u8 :: [canonical, ":", json_text(json, location, "offset"), ":", json_text(json, node, "tagUsed")]
+            identity = try join(context.storage, identity_parts[..])
+            # redeclarations share the first declaration's identity, including forward declarations.
+            previous :: json_text(json, node, "previousDecl")
+            if (previous.len != 0) {
+                for (context.declarations.items) |declaration| {
+                    if (mem.eql(json_text(json, declaration.node, "id"), previous)) identity = declaration.identity
+                }
+            }
+        }
+        try arraylist.append(&context.declarations, Declaration{ node = node, name = name, file = file, identity = identity })
+    }
+    if (kind(json, node, "RecordDecl") or kind(json, node, "EnumDecl")) {
+        child := inner(json, node)
+        while (child != 0) {
+            try collect_declaration(context, child, file)
+            child = json.nodes.items[child].next
+        }
+    }
+}
+@hide:file
+report proc(context @Context, name, reason []u8) void ! Error {
+    try io.print("translate-c: {s}: {s}\n", io.stderr(context.runtime), {name, reason})
+}
+@hide:file
+entry_put proc(context @Context, entries @mut arraylist.ArrayList(Entry), key, text []u8) void ! Error {
+    for (entries.items) |entry, index| {
+        if (!mem.eql(entry.key, key)) continue
+        if (mem.eql(entry.text, text)) return
+        if (prefix(key, "R_")) {
+            previous_end :: find(entry.text, "\n") orelse usize(0)
+            current_end :: find(text, "\n") orelse usize(0)
+            if (previous_end != 0 and mem.eql(entry.text[..previous_end], text[..current_end])) {
+                if (suffix(entry.text, " :: opaque\n")) {
+                    entries.items[index].text = text
+                    return
+                }
+                if (suffix(text, " :: opaque\n")) return
+            }
+        }
+        try report(context, key, "incompatible C declaration (including external linker symbols across packages)")
+        return .conflicting_declaration
+    }
+    try arraylist.append(entries, Entry{ key = key, text = text })
+}
+@hide:file
+lookup_type proc(context @Context, name []u8, expected []u8) ?usize {
+    result ?usize := null
+    for (context.declarations.items) |declaration, i| {
+        if (!mem.eql(declaration.name, name) or !kind(context.json, declaration.node, expected)) continue
+        result = i
+        if (kind(context.json, declaration.node, "RecordDecl") and mem.eql(json_text(context.json, declaration.node, "completeDefinition"), "true")) return i
+    }
+    return result
+}
+@hide:file
+record_name proc(context @Context, index usize) []u8 ! Error {
+    parts [2][]u8 :: ["R_", try number(context.storage, hash(context.declarations.items[index].identity))]
+    return try join(context.storage, parts[..])
+}
+@hide:file
+require_record proc(context @mut Context, index usize) []u8 ! Error {
+    context.declarations.items[index].required = true
+    name :: try record_name(context, index)
+    namespace_parts [2][]u8 :: [context.namespace, "."]
+    namespace_prefix []u8 :: if (context.shared) "" else try join(context.storage, namespace_parts[..])
+    reference_parts [2][]u8 :: [namespace_prefix, name]
+    return try join(context.storage, reference_parts[..])
+}
+@hide:file
+qualifier_word proc(text []u8) bool {
+    words [9][]u8 :: ["const", "volatile", "restrict", "_Nonnull", "_Nullable", "_Null_unspecified", "__restrict", "__restrict__", "__const"]
+    for (words) |word| { if (mem.eql(text, word)) return true }
+    return false
+}
+@hide:file
+strip_trailing_qualifiers proc(text []u8) []u8 {
+    result := trim(text)
+    while (result.len != 0) {
+        start := result.len
+        while (start > 0 and ((result[start - 1] >= 'a' and result[start - 1] <= 'z') or (result[start - 1] >= 'A' and result[start - 1] <= 'Z') or result[start - 1] == '_')) start -= 1
+        if (!qualifier_word(result[start..])) break
+        result = trim(result[..start])
+    }
+    return result
+}
+@hide:file
+strip_qualifiers proc(text []u8) []u8 {
+    result := strip_trailing_qualifiers(text)
+    while (result.len != 0) {
+        end := usize(0)
+        while (end < result.len and ((result[end] >= 'a' and result[end] <= 'z') or (result[end] >= 'A' and result[end] <= 'Z') or result[end] == '_')) end += 1
+        if (!qualifier_word(result[..end])) break
+        result = trim(result[end..])
+    }
+    return result
+}
+@hide:file
+strip_type_qualifiers proc(text []u8) []u8 {
+    # leading qualifiers in a declarator with pointers belong to the ultimate
+    # pointee, not the outer pointer. only discard qualifiers at the current level.
+    if (find(text, "*") != null or find(text, "(") != null) return strip_trailing_qualifiers(text)
+    return strip_qualifiers(text)
+}
+@hide:file
+contains_const proc(text []u8) bool {
+    cursor := usize(0)
+    while (cursor < text.len) {
+        start :: cursor
+        while (cursor < text.len and ((text[cursor] >= 'a' and text[cursor] <= 'z') or (text[cursor] >= 'A' and text[cursor] <= 'Z') or (text[cursor] >= '0' and text[cursor] <= '9') or text[cursor] == '_')) cursor += 1
+        word :: text[start..cursor]
+        if (mem.eql(word, "const") or mem.eql(word, "__const")) return true
+        if (start == cursor) cursor += 1
+    }
+    return false
+}
+@hide:file
+top_const proc(context @Context, spelling []u8, depth usize) bool ! Error {
+    if (depth > 64) return .unsupported_declaration
+    text :: trim(spelling)
+    if (find(text, "(*")) |opening| {
+        closing :: find(text[opening + 2..], ")")
+        if (closing == null) return .unsupported_declaration
+        return contains_const(text[opening + 2..opening + 2 + closing?])
+    }
+    if (find(text, "(") != null) return false
+    last_pointer ?usize := null
+    for (text) |byte, index| { if (byte == '*') last_pointer = index }
+    if (last_pointer) |pointer| return contains_const(text[pointer + 1..])
+    if (contains_const(text)) return true
+    name :: strip_qualifiers(text)
+    if (lookup_type(context, name, "TypedefDecl")) |index| {
+        return try top_const(context, qual_type(context.json, context.declarations.items[index].node), depth + 1)
+    }
+    return false
+}
+@hide:file
+render_type proc(context @mut Context, spelling []u8, depth usize) []u8 ! Error {
+    return try render_type_inner(context, spelling, depth, false)
+}
+@hide:file
+render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirect bool) []u8 ! Error {
+    if (depth > 64) return .unsupported_declaration
+    text :: strip_type_qualifiers(spelling)
+    # Clang has already resolved the declarator. These are its canonical type spellings.
+    if (find(text, "__attribute__") != null or find(text, "_Atomic") != null or find(text, "_Complex") != null) {
+        try report(context, spelling, "unsupported C type attribute, atomic, complex or vector type")
+        return .unsupported_declaration
+    }
+    if (suffix(text, "]") and find(text, "(") == null) {
+        found_opening :: find(text, "[")
+        if (found_opening == null) return .invalid_clang_output
+        opening :: found_opening?
+        found_closing :: find(text[opening..], "]")
+        if (found_closing == null) return .invalid_clang_output
+        closing_relative :: found_closing?
+        closing :: opening + closing_relative
+        count :: trim(text[opening + 1..closing])
+        if (strconv.parse_unsigned(count, maxval!(u64)) == null or mem.eql(count, "0")) {
+            try report(context, spelling, "zero-length, flexible, variable-length and incomplete arrays are unsupported")
+            return .unsupported_declaration
+        }
+        element_parts [2][]u8 :: [text[..opening], text[closing + 1..]]
+        element :: try join(context.storage, element_parts[..])
+        array_parts [4][]u8 :: ["[", count, "]", try render_type(context, element, depth + 1)]
+        return try join(context.storage, array_parts[..])
+    }
+    if (suffix(text, "*")) {
+        child :: trim(text[..text.len - 1])
+        pointee_const :: try top_const(context, child, depth + 1)
+        pointee []u8 :: if (mem.eql(strip_qualifiers(child), "void")) "anyopaque" else try render_type_inner(context, child, depth + 1, true)
+        pointer_prefix []u8 :: if (pointee_const or prefix(pointee, "c_func(")) "?*" else "?*mut "
+        pointer_parts [2][]u8 :: [pointer_prefix, pointee]
+        return try join(context.storage, pointer_parts[..])
+    }
+    if (find(text, "(*")) |opening| {
+        found_closing :: find(text[opening + 2..], ")")
+        if (found_closing == null) return .unsupported_declaration
+        closing_relative :: found_closing?
+        closing :: opening + 2 + closing_relative
+        qualifiers :: strip_qualifiers(text[opening + 2..closing])
+        if (qualifiers.len != 0 or closing + 1 >= text.len or text[closing + 1] != '(' or !suffix(text, ")")) return .unsupported_declaration
+        signature :: try render_signature(context, text[..opening], text[closing + 2..text.len - 1], depth + 1)
+        callback_parts [2][]u8 :: ["?*", signature]
+        return try join(context.storage, callback_parts[..])
+    }
+    if (find(text, "(")) |opening| {
+        if (!suffix(text, ")")) return .unsupported_declaration
+        return try render_signature(context, text[..opening], text[opening + 1..text.len - 1], depth + 1)
+    }
+    builtins [15]Entry :: [
+        { key = "void", text = "void" }, { key = "_Bool", text = "bool" },
+        { key = "char", text = "c_char" }, { key = "signed char", text = "c_schar" }, { key = "unsigned char", text = "c_uchar" },
+        { key = "short", text = "c_short" }, { key = "unsigned short", text = "c_ushort" },
+        { key = "int", text = "c_int" }, { key = "unsigned int", text = "c_uint" },
+        { key = "long", text = "c_long" }, { key = "unsigned long", text = "c_ulong" },
+        { key = "long long", text = "c_longlong" }, { key = "unsigned long long", text = "c_ulonglong" },
+        { key = "float", text = "c_float" }, { key = "double", text = "c_double" },
+    ]
+    for (builtins) |builtin| { if (mem.eql(text, builtin.key)) return builtin.text }
+    if (prefix(text, "struct ") or prefix(text, "union ")) {
+        start :: if (prefix(text, "struct ")) usize(7) else usize(6)
+        if (lookup_type(context, text[start..], "RecordDecl")) |index| return try render_record_reference(context, index, indirect)
+    } else if (prefix(text, "enum ")) {
+        if (lookup_type(context, text[5..], "EnumDecl")) |index| {
+            context.declarations.items[index].required = true
+            return try enum_underlying(context, context.declarations.items[index].node)
+        }
+    } else if (lookup_type(context, text, "TypedefDecl")) |index| {
+        context.declarations.items[index].required = true
+        node :: context.declarations.items[index].node
+        tag :: owned_record(context, node)
+        if (tag) |record| return try render_record_reference(context, record, indirect)
+        type_node :: inner(context.json, node)
+        enum_tag :: property(context.json, type_node, "ownedTagDecl")
+        if (kind(context.json, enum_tag, "EnumDecl")) {
+            for (context.declarations.items) |declaration, enum_index| {
+                if (mem.eql(json_text(context.json, declaration.node, "id"), json_text(context.json, enum_tag, "id"))) {
+                    context.declarations.items[enum_index].required = true
+                    return try enum_underlying(context, declaration.node)
+                }
+            }
+        }
+        return try render_type_inner(context, qual_type(context.json, node), depth + 1, indirect)
+    }
+    try report(context, spelling, "unsupported or unresolved C type (long double, vectors and platform extensions are not guessed)")
+    return .unsupported_declaration
+}
+@hide:file
+render_record_reference proc(context @mut Context, index usize, indirect bool) []u8 ! Error {
+    if (!indirect and !mem.eql(json_text(context.json, context.declarations.items[index].node, "completeDefinition"), "true")) {
+        try report(context, context.declarations.items[index].name, "incomplete C record cannot be passed or returned by value; use its pointer type")
+        return .unsupported_declaration
+    }
+    return try require_record(context, index)
+}
+@hide:file
+owned_record proc(context @Context, node usize) ?usize {
+    json :: context.json
+    type_node :: inner(json, node)
+    tag :: property(json, type_node, "ownedTagDecl")
+    if (!kind(json, tag, "RecordDecl")) return null
+    id :: json_text(json, tag, "id")
+    for (context.declarations.items) |declaration, index| {
+        if (mem.eql(json_text(json, declaration.node, "id"), id)) {
+            if (declaration.name.len != 0) return lookup_type(context, declaration.name, "RecordDecl")
+            return index
+        }
+    }
+    return null
+}
+@hide:file
+render_signature proc(context @mut Context, result, arguments []u8, depth usize) []u8 ! Error {
+    text []u8 := "c_func("
+    remaining :: trim(arguments)
+    if (remaining.len == 0) {
+        try report(context, result, "C function without a prototype is unsupported; declare an explicit (void) parameter list")
+        return .unsupported_declaration
+    }
+    if (!mem.eql(remaining, "void")) {
+        start := usize(0)
+        nesting := usize(0)
+        count := usize(0)
+        for (0..(remaining.len + 1)) |i| {
+            if (i < remaining.len) {
+                if (remaining[i] == '(' or remaining[i] == '[') nesting += 1
+                else if (remaining[i] == ')' or remaining[i] == ']') {
+                    if (nesting == 0) return .invalid_clang_output
+                    nesting -= 1
+                }
+            }
+            if (i != remaining.len and (remaining[i] != ',' or nesting != 0)) continue
+            argument :: trim(remaining[start..i])
+            separator []u8 :: if (count == 0) "" else ", "
+            rendered_argument []u8 := "..."
+            if (!mem.eql(argument, "...")) {
+                argument_parts [2][]u8 :: ["_ ", try render_type(context, argument, depth + 1)]
+                rendered_argument = try join(context.storage, argument_parts[..])
+            }
+            signature_parts [3][]u8 :: [text, separator, rendered_argument]
+            text = try join(context.storage, signature_parts[..])
+            count += 1
+            start = i + 1
+        }
+    }
+    result_parts [3][]u8 :: [text, ") ", try render_type(context, result, depth + 1)]
+    return try join(context.storage, result_parts[..])
+}
+@hide:file
+enum_underlying proc(context @mut Context, node usize) []u8 ! Error {
+    json :: context.json
+    fixed :: json_text(json, property(json, node, "fixedUnderlyingType"), "qualType")
+    if (fixed.len != 0) return try render_type(context, fixed, 0)
+    declaration_index := usize(0)
+    for (context.declarations.items) |declaration, index| {
+        if (declaration.node == node) {
+            if (declaration.enum_type.len != 0) return declaration.enum_type
+            declaration_index = index
+        }
+    }
+    tag :: json_text(json, node, "name")
+    spelling []u8 := ""
+    if (tag.len != 0) {
+        tag_parts [2][]u8 :: ["enum ", tag]
+        spelling = try join(context.storage, tag_parts[..])
+    }
+    else {
+        for (context.declarations.items) |declaration| {
+            if (!kind(json, declaration.node, "TypedefDecl")) continue
+            owned :: property(json, inner(json, declaration.node), "ownedTagDecl")
+            if (mem.eql(json_text(json, owned, "id"), json_text(json, node, "id"))) spelling = declaration.name
+        }
+    }
+    if (spelling.len == 0) return .unsupported_declaration
+    # JSON's EnumDecl omits the implementation-chosen compatible integer type.
+    # Ask the same Clang frontend through C11 generic selection instead of guessing.
+    probe :: try temporary(context.storage)
+    defer remove_temporary(probe)
+    probe_parts [4][]u8 :: [context.unit_source,
+        "\nenum { __honey_enum_type = _Generic((", spelling, ")0, signed char:1, unsigned char:2, short:3, unsigned short:4, int:5, unsigned int:6, long:7, unsigned long:8, long long:9, unsigned long long:10, default:0) };\n",
+    ]
+    text :: try join(context.storage, probe_parts[..])
+    try write_text(context.runtime, probe.path, text)
+    args := try clang_arguments(context.storage, context.options, probe.path)
+    defer arraylist.deinit(&args)
+    probe_arguments [3][;0]u8 :: ["-fsyntax-only", "-Xclang", "-ast-dump=json"]
+    for (probe_arguments) |argument| try arraylist.append(&args, argument)
+    parsed := try json_parse(context.storage, try capture(context.storage, context.runtime, args.items))
+    defer arraylist.deinit(&parsed.nodes)
+    result []u8 := ""
+    for (parsed.nodes.items) |_, parent| {
+        if (!kind(&parsed, parent, "EnumConstantDecl") or !mem.eql(json_text(&parsed, parent, "name"), "__honey_enum_type")) continue
+        parsed_code :: strconv.parse_unsigned(constant_value(&parsed, parent), 10)
+        if (parsed_code == null) return .invalid_clang_output
+        code :: parsed_code?
+        names [11][]u8 :: ["", "c_schar", "c_uchar", "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong", "c_longlong", "c_ulonglong"]
+        result = names[usize(code)]
+    }
+    if (result.len == 0) return .unsupported_declaration
+    context.declarations.items[declaration_index].enum_type = result
+    return result
+}
+@hide:file
+select_symbol proc(context @mut Context, name []u8) void ! Error {
+    if (try macro_definition(context, name)) |definition| {
+        try select_macro(context, name, definition)
+        return
+    }
+    found := false
+    for (context.declarations.items) |declaration, i| {
+        if (!mem.eql(declaration.name, name)) continue
+        context.declarations.items[i].required = true
+        found = true
+    }
+    if (!found) {
+        try report(context, name, "requested declaration or final preprocessor macro was not found")
+        return .unsupported_declaration
+    }
+}
+@hide:file
+emit_pending proc(context @mut Context) void ! Error {
+    while true {
+        pending := false
+        for (0..(context.declarations.items.len)) |index| {
+            if (!context.declarations.items[index].required or context.declarations.items[index].emitted) continue
+            context.declarations.items[index].emitted = true
+            pending = true
+            try emit_declaration(context, index)
+        }
+        if (!pending) break
+    }
+}
+@hide:file
+emit_declaration proc(context @mut Context, index usize) void ! Error {
+    declaration :: context.declarations.items[index]
+    json :: context.json
+    node :: declaration.node
+    name :: declaration.name
+    if (kind(json, node, "RecordDecl")) {
+        chosen := index
+        if (name.len != 0) chosen = lookup_type(context, name, "RecordDecl")?
+        if (chosen != index) {
+            context.declarations.items[chosen].required = true
+            return
+        }
+        canonical :: try record_name(context, index)
+        context.shared = true
+        defer context.shared = false
+        record_parts [4][]u8 :: ["# C record identity: ", try json_quote(context.storage, declaration.identity), "\n", try render_record(context, node, canonical)]
+        text :: try join(context.storage, record_parts[..])
+        try entry_put(context, &context.common, canonical, text)
+        if (name.len != 0) {
+            public_name :: try record_public_name(context, index)
+            explanation_parts [5][]u8 :: ["# C tag ", name, " is exported as ", public_name, " to avoid its ordinary C namespace.\n"]
+            explanation []u8 :: if (mem.eql(public_name, name)) "" else try join(context.storage, explanation_parts[..])
+            alias_parts [7][]u8 :: [explanation, try escaped(context.storage, public_name), " :: alias ", context.namespace, ".", canonical, "\n"]
+            try entry_put(context, &context.bindings, public_name, try join(context.storage, alias_parts[..]))
+        }
+        return
+    }
+    if (kind(json, node, "TypedefDecl")) {
+        rendered :: try render_type_inner(context, name, 0, true)
+        typedef_parts [4][]u8 :: [try escaped(context.storage, name), " :: alias ", rendered, "\n"]
+        try entry_put(context, &context.bindings, name, try join(context.storage, typedef_parts[..]))
+        return
+    }
+    if (kind(json, node, "EnumDecl")) {
+        if (name.len != 0) {
+            alias_parts [4][]u8 :: [try escaped(context.storage, name), " :: alias ", try enum_underlying(context, node), "\n"]
+            try entry_put(context, &context.bindings, name, try join(context.storage, alias_parts[..]))
+        }
+        child := inner(json, node)
+        while (child != 0) {
+            if (kind(json, child, "EnumConstantDecl")) try emit_enum_constant(context, node, child)
+            child = json.nodes.items[child].next
+        }
+        return
+    }
+    if (kind(json, node, "EnumConstantDecl")) {
+        for (context.declarations.items) |parent| {
+            if (!kind(json, parent.node, "EnumDecl")) continue
+            child := inner(json, parent.node)
+            while (child != 0) {
+                if (child == node) {
+                    try emit_enum_constant(context, parent.node, node)
+                    return
+                }
+                child = json.nodes.items[child].next
+            }
+        }
+        return .invalid_clang_output
+    }
+    if (kind(json, node, "FunctionDecl")) {
+        if (mem.eql(json_text(json, node, "storageClass"), "static") or mem.eql(json_text(json, node, "inline"), "true")) {
+            try report(context, name, "inline-only or internal-linkage function has no callable external symbol; no C bridge is generated")
+            return .unsupported_declaration
+        }
+        child := inner(json, node)
+        while (child != 0) {
+            if (kind(json, child, "AsmLabelAttr") or kind(json, child, "MSABIAttr") or kind(json, child, "SysVABIAttr")) {
+                try report(context, name, "custom symbol labels or calling conventions are unsupported")
+                return .unsupported_declaration
+            }
+            child = json.nodes.items[child].next
+        }
+        signature :: try render_type(context, qual_type(json, node), 0)
+        context.shared = true
+        canonical_signature :: render_type(context, qual_type(json, node), 0) catch |err| {
+            context.shared = false
+            return err
+        }
+        context.shared = false
+        try entry_put(context, &context.symbols, name, canonical_signature)
+        function_parts [4][]u8 :: [try escaped(context.storage, name), " ", signature, "\n"]
+        try entry_put(context, &context.bindings, name, try join(context.storage, function_parts[..]))
+        return
+    }
+    try report(context, name, "C globals are unsupported; select a callable external function or a constant instead")
+    return .unsupported_declaration
+}
+
+@hide:file
+record_public_name proc(context @Context, index usize) []u8 ! Error {
+    record :: context.declarations.items[index]
+    for (context.declarations.items) |declaration| {
+        if (!mem.eql(declaration.name, record.name) or kind(context.json, declaration.node, "RecordDecl")) continue
+        if (kind(context.json, declaration.node, "TypedefDecl")) {
+            if (owned_record(context, declaration.node)) |other| {
+                if (mem.eql(context.declarations.items[other].identity, record.identity)) continue
+            }
+            spelling_parts [3][]u8 :: [json_text(context.json, record.node, "tagUsed"), " ", record.name]
+            if (mem.eql(qual_type(context.json, declaration.node), try join(context.storage, spelling_parts[..]))) continue
+        }
+        tag_parts [2][]u8 :: ["__c_tag_", record.name]
+        return try join(context.storage, tag_parts[..])
+    }
+    return record.name
+}
+@hide:file
+render_record proc(context @mut Context, node usize, name []u8) []u8 ! Error {
+    json :: context.json
+    original_name :: json_text(json, node, "name")
+    display :: if (original_name.len == 0) name else original_name
+    if (!mem.eql(json_text(json, node, "completeDefinition"), "true")) {
+        opaque_parts [2][]u8 :: [name, " :: opaque\n"]
+        return try join(context.storage, opaque_parts[..])
+    }
+    record_kind []u8 :: if (mem.eql(json_text(json, node, "tagUsed"), "union")) "union" else "c_struct"
+    header_parts [4][]u8 :: [name, " :: ", record_kind, " {\n"]
+    text := try join(context.storage, header_parts[..])
+    fields := usize(0)
+    child := inner(json, node)
+    while (child != 0) {
+        if (kind(json, child, "FieldDecl")) {
+            field_name :: json_text(json, child, "name")
+            if (field_name.len == 0 or mem.eql(json_text(json, child, "isBitfield"), "true")) {
+                try report(context, display, "anonymous members and bitfields have unsupported layouts")
+                return .unsupported_declaration
+            }
+            field_parts [6][]u8 :: [text, "    ", try escaped(context.storage, field_name), " ", try render_type(context, qual_type(json, child), 0), "\n"]
+            text = try join(context.storage, field_parts[..])
+            fields += 1
+            attribute := inner(json, child)
+            while (attribute != 0) {
+                if (suffix(json_text(json, attribute, "kind"), "Attr")) {
+                    try report(context, display, "field layout attributes are unsupported")
+                    return .unsupported_declaration
+                }
+                attribute = json.nodes.items[attribute].next
+            }
+        } else if (suffix(json_text(json, child, "kind"), "Attr") or kind(json, child, "IndirectFieldDecl")) {
+            try report(context, display, "record layout attributes and anonymous members are unsupported")
+            return .unsupported_declaration
+        }
+        child = json.nodes.items[child].next
+    }
+    if (fields == 0) {
+        try report(context, display, "complete empty C records are unsupported")
+        return .unsupported_declaration
+    }
+    closing_parts [2][]u8 :: [text, "}\n"]
+    return try join(context.storage, closing_parts[..])
+}
+@hide:file
+constant_value proc(json @Json, node usize) []u8 {
+    if (kind(json, node, "ConstantExpr")) return json_text(json, node, "value")
+    child := inner(json, node)
+    while (child != 0) {
+        result :: constant_value(json, child)
+        if (result.len != 0) return result
+        child = json.nodes.items[child].next
+    }
+    return ""
+}
+@hide:file
+increment_decimal proc(storage @mut Storage, text []u8) []u8 ! Error {
+    negative :: prefix(text, "-")
+    digits :: if (negative) text[1..] else text
+    parsed_magnitude :: strconv.parse_unsigned(digits, maxval!(u64))
+    if (parsed_magnitude == null) return .invalid_clang_output
+    magnitude :: parsed_magnitude?
+    if (negative) {
+        sign []u8 :: if (magnitude > 1) "-" else ""
+        parts [2][]u8 :: [sign, try number(storage, magnitude - 1)]
+        return try join(storage, parts[..])
+    }
+    if (magnitude == maxval!(u64)) return .unsupported_declaration
+    return try number(storage, magnitude + 1)
+}
+@hide:file
+emit_enum_constant proc(context @mut Context, parent, node usize) void ! Error {
+    json :: context.json
+    current []u8 := "0"
+    child := inner(json, parent)
+    while (child != 0) {
+        if (kind(json, child, "EnumConstantDecl")) {
+            explicit :: constant_value(json, child)
+            if (explicit.len != 0) current = explicit
+            if (child == node) {
+                name :: json_text(json, node, "name")
+                parts [6][]u8 :: [try escaped(context.storage, name), " ", try render_type(context, qual_type(json, node), 0), " :: ", current, "\n"]
+                try entry_put(context, &context.bindings, name, try join(context.storage, parts[..]))
+                return
+            }
+            current = try increment_decimal(context.storage, current)
+        }
+        child = json.nodes.items[child].next
+    }
+    return .invalid_clang_output
+}
+
+@hide:file
+Buffer :: struct { bytes arraylist.ArrayList(u8) }
+@hide:file
+buffer_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    buffer @mut Buffer :: ptrcast!(context?)
+    for (bytes) |byte| arraylist.append(&buffer.bytes, byte) catch |_| { return .write_failed }
+    return bytes.len
+}
+@hide:file
+decimal_float_literal proc(storage @mut Storage, text []u8) []u8 ! Error {
+    exponent_at := find(text, "e")
+    if (exponent_at == null) exponent_at = find(text, "E")
+    if (exponent_at == null) {
+        if (find(text, ".") != null) return text
+        parts [2][]u8 :: [text, ".0"]
+        return try join(storage, parts[..])
+    }
+    at :: exponent_at?
+    mantissa :: text[..at]
+    exponent_text := text[at + 1..]
+    negative_exponent :: prefix(exponent_text, "-")
+    if (negative_exponent or prefix(exponent_text, "+")) exponent_text = exponent_text[1..]
+    magnitude :: strconv.parse_unsigned(exponent_text, 4096)
+    if (magnitude == null) return .invalid_clang_output
+    exponent := i64(magnitude?)
+    if (negative_exponent) exponent = -exponent
+    digits := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&digits)
+    decimal_position := i64(0)
+    after_point := false
+    negative :: prefix(mantissa, "-")
+    first :: if (negative or prefix(mantissa, "+")) usize(1) else usize(0)
+    for (mantissa[first..]) |byte| {
+        if (byte == '.' and !after_point) {
+            after_point = true
+            continue
+        }
+        if (byte < '0' or byte > '9') return .invalid_clang_output
+        try arraylist.append(&digits, byte)
+        if (!after_point) decimal_position += 1
+    }
+    if (digits.items.len == 0) return .invalid_clang_output
+    decimal_position += exponent
+    output := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&output)
+    if (negative) try arraylist.append(&output, '-')
+    # Honey decimal literals have no exponent spelling. Move the decimal point
+    # without rounding the Clang/frontend-provided significant digits.
+    if (decimal_position <= 0) {
+        try arraylist.append(&output, '0')
+        try arraylist.append(&output, '.')
+        for (0..usize(-decimal_position)) |_| try arraylist.append(&output, '0')
+        parts [1][]u8 :: [digits.items]
+        try append_parts(&output, parts[..])
+    } else {
+        for (digits.items) |byte, index| {
+            if (i64(index) == decimal_position) try arraylist.append(&output, '.')
+            try arraylist.append(&output, byte)
+        }
+        if (decimal_position >= i64(digits.items.len)) {
+            for (0..usize(decimal_position - i64(digits.items.len))) |_| try arraylist.append(&output, '0')
+            try arraylist.append(&output, '.')
+            try arraylist.append(&output, '0')
+        }
+    }
+    return try retain_list(storage, &output)
+}
+@hide:file
+float_literal proc(storage @mut Storage, text []u8) []u8 ! Error {
+    if (!prefix(text, "0x")) return try decimal_float_literal(storage, text)
+    parsed_bits :: strconv.parse_unsigned(text, maxval!(u64))
+    if (parsed_bits == null) return .invalid_clang_output
+    bits :: parsed_bits?
+    if ((bits & u64(9218868437227405312)) == u64(9218868437227405312)) return .unsupported_declaration
+    scalar :: ptrcast!(@f64, &bits)^
+    buffer := Buffer{ bytes = arraylist.init(storage.allocator) }
+    defer arraylist.deinit(&buffer.bytes)
+    writer :: io.Writer{ context = &buffer, handle = io.Handle{ file_desc = -1 }, write = buffer_write }
+    try io.print("{e}", writer, {scalar})
+    return try decimal_float_literal(storage, try retain_list(storage, &buffer.bytes))
+}
+
+@hide:file
+macro_definition proc(context @mut Context, name []u8) ?[]u8 ! Error {
+    if (context.macros.len == 0) {
+        args := try clang_arguments(context.storage, context.options, context.input)
+        defer arraylist.deinit(&args)
+        try arraylist.append(&args, "-E")
+        try arraylist.append(&args, "-dM")
+        context.macros = try capture(context.storage, context.runtime, args.items)
+    }
+    needle_parts [2][]u8 :: ["#define ", name]
+    needle :: try join(context.storage, needle_parts[..])
+    start := usize(0)
+    while (start < context.macros.len) {
+        end :: start + (find(context.macros[start..], "\n") orelse context.macros.len - start)
+        line :: context.macros[start..end]
+        if (prefix(line, needle) and (line.len == needle.len or line[needle.len] == ' ' or line[needle.len] == '(')) return line[needle.len..]
+        start = end + 1
+    }
+    missing ?[]u8 :: null
+    return missing
+}
+@hide:file
+contextual_macro proc(text []u8) bool {
+    cursor := usize(0)
+    while (cursor < text.len) {
+        byte :: text[cursor]
+        if (byte == '"' or byte == '\'') {
+            cursor += 1
+            while (cursor < text.len and text[cursor] != byte) {
+                if (text[cursor] == '\\') cursor += 1
+                cursor += 1
+            }
+            if (cursor < text.len) cursor += 1
+            continue
+        }
+        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_') {
+            start :: cursor
+            cursor += 1
+            while (cursor < text.len and ((text[cursor] >= 'a' and text[cursor] <= 'z') or (text[cursor] >= 'A' and text[cursor] <= 'Z') or (text[cursor] >= '0' and text[cursor] <= '9') or text[cursor] == '_')) cursor += 1
+            token :: text[start..cursor]
+            contextual_tokens [8][]u8 :: ["__DATE__", "__TIME__", "__TIMESTAMP__", "__FILE__", "__BASE_FILE__", "__LINE__", "__COUNTER__", "__INCLUDE_LEVEL__"]
+            for (contextual_tokens) |contextual| {
+                if (mem.eql(token, contextual)) return true
+            }
+        } else cursor += 1
+    }
+    return false
+}
+@hide:file
+select_macro proc(context @mut Context, name, definition []u8) void ! Error {
+    storage :: context.storage
+    if (prefix(definition, "(")) {
+        try report(context, name, "function-like macros are not declarations and cannot be bound; no C bridge is generated")
+        return .unsupported_declaration
+    }
+    if (trim(definition).len == 0) {
+        try report(context, name, "empty/non-value macros cannot be bound")
+        return .unsupported_declaration
+    }
+    if (contextual_macro(definition)) {
+        try report(context, name, "context-dependent macros are not stable binding constants")
+        return .unsupported_declaration
+    }
+    probe :: try temporary(storage)
+    defer remove_temporary(probe)
+    probe_parts [6][]u8 :: [context.unit_source, "\n#line 1 \"honey-translate-c-selected-macro\"\n__attribute__((used)) const __typeof__((", name, ")) __honey_constant = (", name, ");\n"]
+    text :: try join(storage, probe_parts[..])
+    try write_text(context.runtime, probe.path, text)
+    args := try clang_arguments(storage, context.options, probe.path)
+    defer arraylist.deinit(&args)
+    try arraylist.append(&args, "-Werror=date-time")
+    try arraylist.append(&args, "-fsyntax-only")
+    try arraylist.append(&args, "-Xclang")
+    try arraylist.append(&args, "-ast-dump=json")
+    parsed := try json_parse(storage, try capture(storage, context.runtime, args.items))
+    defer arraylist.deinit(&parsed.nodes)
+    node := inner(&parsed, 1)
+    spelling []u8 := ""
+    while (node != 0) {
+        if (kind(&parsed, node, "VarDecl") and mem.eql(json_text(&parsed, node, "name"), "__honey_constant")) {
+            spelling = json_text(&parsed, property(&parsed, node, "type"), "desugaredQualType")
+            if (spelling.len == 0) spelling = qual_type(&parsed, node)
+            break
+        }
+        node = parsed.nodes.items[node].next
+    }
+    if (spelling.len == 0 or prefix(spelling, "typeof")) {
+        try report(context, name, "Clang did not expose a constant macro type")
+        return .unsupported_declaration
+    }
+    # Asking Clang to emit an IR constant performs C's typed constant evaluation,
+    # including integer promotions and aggregate compound literals. This is never
+    # linked, assembled, executed, or emitted as a bridge.
+    args.items = args.items[..args.items.len - 3]
+    llvm_arguments [4][;0]u8 :: ["-S", "-emit-llvm", "-o", "-"]
+    for (llvm_arguments) |argument| try arraylist.append(&args, argument)
+    llvm :: try capture(storage, context.runtime, args.items)
+    found_global :: find(llvm, "@__honey_constant =")
+    if (found_global == null) return .invalid_clang_output
+    global_start :: found_global?
+    line_end :: global_start + (find(llvm[global_start..], "\n") orelse llvm.len - global_start)
+    line :: llvm[global_start..line_end]
+    found_initializer :: find(line, " constant ")
+    if (found_initializer == null) return .unsupported_declaration
+    initializer_start :: found_initializer?
+    initializer :: trim(line[initializer_start + 10..])
+    cursor := usize(0)
+    literal :: llvm_constant(context, spelling, initializer, &cursor, 0) catch |err| {
+        try report(context, name, "unsupported constant macro initializer (addresses, unions, non-finite floats and nonconstant expressions are not guessed)")
+        return err
+    }
+    rendered_type :: try render_type(context, spelling, 0)
+    string_constant :: prefix(literal, "\"")
+    separator []u8 :: if (string_constant) "" else " "
+    annotation []u8 :: if (string_constant) "" else rendered_type
+    binding_parts [6][]u8 :: [try escaped(storage, name), separator, annotation, " :: ", literal, "\n"]
+    try entry_put(context, &context.bindings, name, try join(storage, binding_parts[..]))
+}
+
+@hide:file
+llvm_space proc(text []u8, cursor @mut usize) void {
+    while (cursor^ < text.len and (text[cursor^] == ' ' or text[cursor^] == '\t')) cursor^ += 1
+}
+@hide:file
+llvm_type_end proc(text []u8, cursor @mut usize) void ! Error {
+    llvm_space(text, cursor)
+    if (cursor^ == text.len) return .invalid_clang_output
+    opening :: text[cursor^]
+    if (opening == '[' or opening == '{' or opening == '<') {
+        closing :: if (opening == '[') u8(']') else if (opening == '{') u8('}') else u8('>')
+        depth := usize(1)
+        cursor^ += 1
+        while (cursor^ < text.len and depth != 0) {
+            if (text[cursor^] == opening) depth += 1
+            if (text[cursor^] == closing) depth -= 1
+            cursor^ += 1
+        }
+        if (depth != 0) return .invalid_clang_output
+    } else {
+        quoted := false
+        while (cursor^ < text.len) {
+            byte :: text[cursor^]
+            if (byte == '"') quoted = !quoted
+            if (!quoted and (byte == ' ' or byte == ',' or byte == '}' or byte == ']')) break
+            cursor^ += 1
+        }
+    }
+    llvm_space(text, cursor)
+}
+@hide:file
+llvm_token proc(text []u8, cursor @mut usize) []u8 {
+    llvm_space(text, cursor)
+    start :: cursor^
+    while (cursor^ < text.len and text[cursor^] != ',' and text[cursor^] != '}' and text[cursor^] != ']' and text[cursor^] != ' ') cursor^ += 1
+    return text[start..cursor^]
+}
+@hide:file
+constant_record proc(context @Context, spelling []u8, depth usize) ?usize {
+    if (depth > 64) return null
+    text :: strip_qualifiers(spelling)
+    if (prefix(text, "struct ")) return lookup_type(context, text[7..], "RecordDecl")
+    if (prefix(text, "union ")) return lookup_type(context, text[6..], "RecordDecl")
+    if (lookup_type(context, text, "TypedefDecl")) |index| {
+        if (owned_record(context, context.declarations.items[index].node)) |record| return record
+        return constant_record(context, qual_type(context.json, context.declarations.items[index].node), depth + 1)
+    }
+    return null
+}
+@hide:file
+llvm_constant proc(context @mut Context, spelling, text []u8, cursor @mut usize, depth usize) []u8 ! Error {
+    if (depth > 64) return .unsupported_declaration
+    storage :: context.storage
+    try llvm_type_end(text, cursor)
+    if (cursor^ >= text.len) return .invalid_clang_output
+    if (text[cursor^] == 'c' and cursor^ + 1 < text.len and text[cursor^ + 1] == '"') return try llvm_string(storage, text, cursor)
+    rendered :: try render_type(context, spelling, 0)
+    if (constant_record(context, spelling, 0)) |index| {
+        node :: context.declarations.items[index].node
+        if (mem.eql(json_text(context.json, node, "tagUsed"), "union")) return .unsupported_declaration
+        zero :: prefix(text[cursor^..], "zeroinitializer")
+        if (zero) cursor^ += 15
+        else {
+            if (text[cursor^] != '{') return .unsupported_declaration
+            cursor^ += 1
+        }
+        record_parts [2][]u8 :: [rendered, " {"]
+        result := try join(storage, record_parts[..])
+        child := inner(context.json, node)
+        count := usize(0)
+        while (child != 0) {
+            if (kind(context.json, child, "FieldDecl")) {
+                field_type :: qual_type(context.json, child)
+                field_literal []u8 := ""
+                if (zero) field_literal = try zero_constant(context, field_type, depth + 1)
+                else field_literal = try llvm_constant(context, field_type, text, cursor, depth + 1)
+                separator []u8 :: if (count == 0) " " else ", "
+                field_parts [5][]u8 :: [result, separator, try escaped(storage, json_text(context.json, child, "name")), " = ", field_literal]
+                result = try join(storage, field_parts[..])
+                count += 1
+                llvm_space(text, cursor)
+                if (!zero and cursor^ < text.len and text[cursor^] == ',') cursor^ += 1
+            }
+            child = context.json.nodes.items[child].next
+        }
+        llvm_space(text, cursor)
+        if (!zero) {
+            if (cursor^ >= text.len or text[cursor^] != '}') return .unsupported_declaration
+            cursor^ += 1
+        }
+        closing_parts [2][]u8 :: [result, " }"]
+        return try join(storage, closing_parts[..])
+    }
+    scalar :: llvm_token(text, cursor)
+    if (prefix(rendered, "?*") or prefix(rendered, "[")) return .unsupported_declaration
+    if (mem.eql(rendered, "bool")) {
+        if (mem.eql(scalar, "true") or mem.eql(scalar, "1")) return "true"
+        if (mem.eql(scalar, "false") or mem.eql(scalar, "0")) return "false"
+        return .unsupported_declaration
+    }
+    if (mem.eql(rendered, "c_float") or mem.eql(rendered, "c_double")) return try float_literal(storage, scalar)
+    negative :: prefix(scalar, "-")
+    digits :: if (negative) scalar[1..] else scalar
+    parsed_magnitude :: strconv.parse_unsigned(digits, maxval!(u64))
+    if (parsed_magnitude == null) return .unsupported_declaration
+    magnitude :: parsed_magnitude?
+    if (negative and (mem.eql(rendered, "c_uchar") or mem.eql(rendered, "c_ushort") or mem.eql(rendered, "c_uint") or mem.eql(rendered, "c_ulong") or mem.eql(rendered, "c_ulonglong"))) {
+        maximum :: if (mem.eql(rendered, "c_uchar")) u64(255) else if (mem.eql(rendered, "c_ushort")) u64(65535) else if (mem.eql(rendered, "c_uint")) u64(4294967295) else maxval!(u64)
+        if (magnitude == 0 or magnitude > maximum) return .invalid_clang_output
+        return try number(storage, maximum - magnitude + 1)
+    }
+    return scalar
+}
+@hide:file
+zero_constant proc(context @mut Context, spelling []u8, depth usize) []u8 ! Error {
+    rendered :: try render_type(context, spelling, 0)
+    if (mem.eql(rendered, "bool")) return "false"
+    if (prefix(rendered, "?*")) return "null"
+    if (constant_record(context, spelling, 0)) |_| {
+        cursor := usize(0)
+        return try llvm_constant(context, spelling, "i8 zeroinitializer", &cursor, depth + 1)
+    }
+    if (prefix(rendered, "[")) return .unsupported_declaration
+    return "0"
+}
+@hide:file
+llvm_string proc(storage @mut Storage, text []u8, cursor @mut usize) []u8 ! Error {
+    cursor^ += 2
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    try arraylist.append(&result, '"')
+    while (cursor^ < text.len and text[cursor^] != '"') {
+        byte := text[cursor^]
+        cursor^ += 1
+        if (byte == '\\') {
+            if (cursor^ + 2 > text.len) return .invalid_clang_output
+            hex_parts [2][]u8 :: ["0x", text[cursor^..cursor^ + 2]]
+            hex :: try join(storage, hex_parts[..])
+            parsed_byte :: strconv.parse_unsigned(hex, 255)
+            if (parsed_byte == null) return .invalid_clang_output
+            decoded :: parsed_byte?
+            byte = u8(decoded)
+            cursor^ += 2
+        }
+        if (byte == 0 and cursor^ < text.len and text[cursor^] == '"') break
+        if (byte >= 32 and byte <= 126 and byte != '\\' and byte != '"') {
+            single [1]u8 :: [byte]
+            character_parts [1][]u8 :: [single[..]]
+            try append_parts(&result, character_parts[..])
+        } else {
+            digits []u8 :: "0123456789abcdef"
+            escaped_bytes [4]u8 :: ['\\', 'x', digits[usize(divtrunc!(byte, 16))], digits[usize(rem!(byte, 16))]]
+            escape_parts [1][]u8 :: [escaped_bytes[..]]
+            try append_parts(&result, escape_parts[..])
+        }
+    }
+    if (cursor^ == text.len) return .invalid_clang_output
+    cursor^ += 1
+    try arraylist.append(&result, '"')
+    return try retain_list(storage, &result)
+}
+
+@hide:file
+json_quote proc(storage @mut Storage, text []u8) []u8 ! Error {
+    bytes := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&bytes)
+    try arraylist.append(&bytes, '"')
+    digits []u8 :: "0123456789abcdef"
+    for (text) |byte| {
+        if (byte == '"' or byte == '\\') {
+            try arraylist.append(&bytes, '\\')
+            try arraylist.append(&bytes, byte)
+        } else if (byte < 32) {
+            for ([u8('\\'), 'u', '0', '0', digits[usize(divtrunc!(byte, 16))], digits[usize(rem!(byte, 16))]]) |escaped_byte| try arraylist.append(&bytes, escaped_byte)
+        } else try arraylist.append(&bytes, byte)
+    }
+    try arraylist.append(&bytes, '"')
+    return try retain_list(storage, &bytes)
+}
+@hide:file
+json_strings proc(storage @mut Storage, strings [][]u8) []u8 ! Error {
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    try arraylist.append(&result, '[')
+    for (strings) |text, i| {
+        separator []u8 :: if (i == 0) "" else ","
+        parts [2][]u8 :: [separator, try json_quote(storage, text)]
+        try append_parts(&result, parts[..])
+    }
+    try arraylist.append(&result, ']')
+    return try retain_list(storage, &result)
+}
+@hide:file
+recipe proc(storage @mut Storage, options Options, includes, version, dependencies []u8) []u8 ! Error {
+    cwd :: try fs.canonical(storage.allocator, ".")
+    defer mem.free(storage.allocator, cwd)
+    environment []u8 := "{"
+    environment_names [7][]u8 :: ["CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "SOURCE_DATE_EPOCH"]
+    for (environment_names) |name, index| {
+        key_parts [1][]u8 :: [name]
+        key :: try join(storage, key_parts[..])
+        pointer :: c.getenv(ptrcast!(key.ptr))
+        text []u8 := ""
+        if (pointer != null) {
+            bytes *u8 :: ptrcast!(pointer?)
+            length := usize(0)
+            while (bytes[length] != 0) length += 1
+            text = bytes[..length]
+        }
+        separator []u8 :: if (index == 0) "" else ","
+        entry_parts [5][]u8 :: [environment, separator, try json_quote(storage, name), ":", try json_quote(storage, text)]
+        environment = try join(storage, entry_parts[..])
+    }
+    closing_parts [2][]u8 :: [environment, "}"]
+    environment = try join(storage, closing_parts[..])
+    recipe_parts [27][]u8 :: [
+        "{\"generator\":\"honey translate-c format 1 (development)\",\"cwd\":", try json_quote(storage, cwd),
+        ",\"name\":", try json_quote(storage, options.name), ",\"target\":", try json_quote(storage, options.target),
+        ",\"clang\":", try json_quote(storage, options.clang), ",\"clang_version\":", try json_quote(storage, version),
+        ",\"language\":\"c11\",\"flags\":[\"-Werror=implicit-function-declaration\"],\"constant_flags\":[\"-Werror=date-time\"],\"sysroot\":", try json_quote(storage, options.sysroot),
+        ",\"headers\":", try json_strings(storage, options.headers), ",\"translation_unit\":", try json_quote(storage, includes),
+        ",\"symbols\":", try json_strings(storage, options.symbols), ",\"include_paths\":", try json_strings(storage, options.includes),
+        ",\"defines\":", try json_strings(storage, options.defines),
+        ",\"dependencies_makefile\":", try json_quote(storage, dependencies), ",\"environment\":", environment, "}",
+    ]
+    return try join(storage, recipe_parts[..])
+}
+@hide:file
+before proc(left, right []u8) bool {
+    count :: if (left.len < right.len) left.len else right.len
+    for (0..count) |i| { if (left[i] != right[i]) return left[i] < right[i] }
+    return left.len < right.len
+}
+@hide:file
+sort_entries proc(entries []mut Entry) void {
+    for (0..entries.len) |i| {
+        current := i
+        while (current > 0 and before(entries[current].key, entries[current - 1].key)) {
+            swap :: entries[current]
+            entries[current] = entries[current - 1]
+            entries[current - 1] = swap
+            current -= 1
+        }
+    }
+}
+@hide:file
+entries_json proc(storage @mut Storage, entries []mut Entry) []u8 ! Error {
+    sort_entries(entries)
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    try arraylist.append(&result, '[')
+    for (entries) |entry, i| {
+        separator []u8 :: if (i == 0) "" else ","
+        parts [6][]u8 :: [separator, "{\"key\":", try json_quote(storage, entry.key), ",\"text\":", try json_quote(storage, entry.text), "}"]
+        try append_parts(&result, parts[..])
+    }
+    try arraylist.append(&result, ']')
+    return try retain_list(storage, &result)
+}
+@hide:file
+manifest proc(context @Context, name, source []u8, common, symbols []mut Entry) []u8 ! Error {
+    package_recipe []u8 :: if (mem.eql(name, "__c_types")) "{\"generator\":\"honey shared C declarations format 1\",\"inputs\":\"sibling binding packages' .honey-cimport recipes\"}" else context.recipe
+    parts [13][]u8 :: [
+        "{\"generator\":\"honey-cimport-1\",\"name\":", try json_quote(context.storage, name),
+        ",\"target\":", try json_quote(context.storage, context.options.target), ",\"source\":", try json_quote(context.storage, source),
+        ",\"recipe\":", package_recipe, ",\"common\":", try entries_json(context.storage, common),
+        ",\"symbols\":", try entries_json(context.storage, symbols), "}\n",
+    ]
+    return try join(context.storage, parts[..])
+}
+@hide:file
+source_text proc(storage @mut Storage, entries []mut Entry, common bool, namespace []u8) []u8 ! Error {
+    sort_entries(entries)
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    try append_parts(&result, &["# generated by honey translate-c; ownership and exact regeneration recipe: .honey-cimport\n# do not edit this file; handwritten .hon files in this directory are preserved.\n# C declarations do not specify ownership/lifetime, callback threading or initialization.\n# consult the C library's contract before calling; no safety or thread affinity is inferred.\n"])
+    if (!common) {
+        import_parts [2][]u8 :: [namespace, " :: import \"@ffi/__c_types\"\n"]
+        try append_parts(&result, import_parts[..])
+    }
+    try arraylist.append(&result, '\n')
+    for (entries) |entry| {
+        entry_parts [2][]u8 :: [entry.text, "\n"]
+        try append_parts(&result, entry_parts[..])
+    }
+    return try retain_list(storage, &result)
+}
+@hide:file
+lstat c_func(path ?*c_char, result ?*mut c.Stat) c_int
+@hide:file
+regular_or_missing proc(storage @mut Storage, path []u8, directory bool) bool ! Error {
+    parts [1][]u8 :: [path]
+    terminated :: try join(storage, parts[..])
+    stat [1]mut c.Stat := undefined
+    if (lstat(ptrcast!(terminated.ptr), stat[..].ptr) != 0) {
+        if (c.__error()?^ == c.ENOENT) return false
+        return .filesystem_failed
+    }
+    expected :: if (directory) c_ushort(16384) else c_ushort(32768)
+    if ((stat[0].st_mode & c_ushort(61440)) != expected) return .unsafe_output
+    return true
+}
+@hide:file
+read_manifest proc(context @Context, directory []u8) ?Json ! Error {
+    parts [2][]u8 :: [directory, "/.honey-cimport"]
+    path :: try join(context.storage, parts[..])
+    if (!try regular_or_missing(context.storage, path, false)) {
+        missing ?Json :: null
+        return missing
+    }
+    parsed := json_parse(context.storage, try read_text(context.storage, context.runtime, path)) catch |err| {
+        if (err == .out_of_memory) return err
+        return .unsafe_output
+    }
+    errdefer arraylist.deinit(&parsed.nodes)
+    if (!mem.eql(json_text(&parsed, 1, "generator"), "honey-cimport-1")) return .unsafe_output
+    if (!mem.eql(json_text(&parsed, 1, "target"), context.options.target)) {
+        try report(context, directory, "binding target differs from this project's generated C types; use a separate project for another target")
+        return .conflicting_declaration
+    }
+    return parsed
+}
+@hide:file
+preflight proc(context @Context, directory []u8, previous ?@Json) void ! Error {
+    parts [2][]u8 :: [directory, "/bindings.hon"]
+    path :: try join(context.storage, parts[..])
+    if (!try regular_or_missing(context.storage, path, false)) {
+        return
+    }
+    if (previous == null) return .unsafe_output
+    actual :: try read_text(context.storage, context.runtime, path)
+    if (!mem.eql(actual, json_text(previous?, 1, "source"))) return .unsafe_output
+}
+@hide:file
+merge_manifest proc(context @Context, parsed @Json, common, symbols @mut arraylist.ArrayList(Entry)) void ! Error {
+    fields [2][]u8 :: ["common", "symbols"]
+    for (fields) |field| {
+        child := parsed.nodes.items[property(parsed, 1, field)].first
+        while (child != 0) {
+            entries :: if (mem.eql(field, "common")) common else symbols
+            try entry_put(context, entries, json_text(parsed, child, "key"), json_text(parsed, child, "text"))
+            child = parsed.nodes.items[child].next
+        }
+    }
+}
+@hide:file
+atomic_write proc(context @Context, path [;0]u8, text []u8) void ! Error {
+    parts [2][]u8 :: [path, ".tmp-XXXXXX"]
+    temporary_path :: try join(context.storage, parts[..])
+    descriptor :: c.mkstemp(ptrcast!(constcast!(temporary_path).ptr))
+    if (descriptor < 0) return .filesystem_failed
+    defer _ = c.unlink(ptrcast!(temporary_path.ptr))
+    file :: io.File{ io = context.runtime, handle = io.Handle{ file_desc = descriptor } }
+    closing := false
+    defer { if (!closing) io.close(file) catch |_| {} }
+    try io.write_all(io.writer(file), text)
+    if (c.fsync(descriptor) != 0) return .filesystem_failed
+    closing = true
+    try io.close(file)
+    if (c.rename(ptrcast!(temporary_path.ptr), ptrcast!(path.ptr)) != 0) return .filesystem_failed
+}
+@hide:file
+install proc(context @mut Context) void ! Error {
+    storage :: context.storage
+    root_parts [2][]u8 :: [context.options.project, "/ffi"]
+    root :: try join(storage, root_parts[..])
+    _ = try regular_or_missing(storage, root, true)
+    try make_directory(storage, root)
+    lock_parts [2][]u8 :: [root, "/.honey-cimport-lock"]
+    lock :: try join(storage, lock_parts[..])
+    if (c.mkdir(ptrcast!(lock.ptr), 448) != 0) {
+        try report(context, lock, "generation is already in progress, or a previous process was interrupted; remove this empty lock directory only after checking no generator is running")
+        return .filesystem_failed
+    }
+    defer _ = c.rmdir(ptrcast!(lock.ptr))
+    package_parts [3][]u8 :: [root, "/", context.options.name]
+    package :: try join(storage, package_parts[..])
+    shared_parts [2][]u8 :: [root, "/__c_types"]
+    shared :: try join(storage, shared_parts[..])
+    _ = try regular_or_missing(storage, package, true)
+    _ = try regular_or_missing(storage, shared, true)
+    previous_package := try read_manifest(context, package)
+    defer {
+        if (previous_package) |saved| {
+            previous := saved
+            arraylist.deinit(&previous.nodes)
+        }
+    }
+    previous_shared := try read_manifest(context, shared)
+    defer {
+        if (previous_shared) |saved| {
+            previous := saved
+            arraylist.deinit(&previous.nodes)
+        }
+    }
+    if (previous_package) |previous| try preflight(context, package, &previous)
+    else try preflight(context, package, null)
+    if (previous_shared) |previous| try preflight(context, shared, &previous)
+    else try preflight(context, shared, null)
+    merged_common := arraylist.init(Entry, storage.allocator)
+    defer arraylist.deinit(&merged_common)
+    merged_symbols := arraylist.init(Entry, storage.allocator)
+    defer arraylist.deinit(&merged_symbols)
+    directory := try fs.open_directory(storage.allocator, root)
+    defer fs.close_directory(&directory) catch |_| {}
+    while (try fs.next(&directory)) |entry| {
+        if (mem.eql(entry.name, context.options.name) or mem.eql(entry.name, "__c_types") or mem.eql(entry.name, ".honey-cimport-lock")) continue
+        if (entry.kind != .directory and entry.kind != .unknown) continue
+        other_parts [3][]u8 :: [root, "/", entry.name]
+        other_path :: try join(storage, other_parts[..])
+        if (try read_manifest(context, other_path)) |other_value| {
+            other := other_value
+            defer arraylist.deinit(&other.nodes)
+            try merge_manifest(context, &other, &merged_common, &merged_symbols)
+        }
+    }
+    for (context.common.items) |entry| try entry_put(context, &merged_common, entry.key, entry.text)
+    for (context.symbols.items) |entry| try entry_put(context, &merged_symbols, entry.key, entry.text)
+    package_source :: try source_text(storage, context.bindings.items, false, context.namespace)
+    shared_source :: try source_text(storage, merged_common.items, true, context.namespace)
+    package_manifest :: try manifest(context, context.options.name, package_source, context.common.items, context.symbols.items)
+    shared_manifest :: try manifest(context, "__c_types", shared_source, merged_common.items, merged_symbols.items)
+    # All collisions, ownership and modification checks finish before the first output write.
+    try make_directory(storage, package)
+    try make_directory(storage, shared)
+    shared_source_parts [2][]u8 :: [shared, "/bindings.hon"]
+    try atomic_write(context, try join(storage, shared_source_parts[..]), shared_source)
+    shared_manifest_parts [2][]u8 :: [shared, "/.honey-cimport"]
+    try atomic_write(context, try join(storage, shared_manifest_parts[..]), shared_manifest)
+    package_source_parts [2][]u8 :: [package, "/bindings.hon"]
+    try atomic_write(context, try join(storage, package_source_parts[..]), package_source)
+    package_manifest_parts [2][]u8 :: [package, "/.honey-cimport"]
+    try atomic_write(context, try join(storage, package_manifest_parts[..]), package_manifest)
+}

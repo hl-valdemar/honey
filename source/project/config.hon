@@ -1,0 +1,287 @@
+import "@std/mem"
+import "@std/io"
+import "@std/fs"
+import "@std/arraylist"
+import "@source/compilation"
+import "@source/loader"
+import "@source/ast"
+import "@source/diagnostics"
+import "@source/ir"
+import "@source/interpreter"
+
+#! owns paths and linker arguments; release exactly once with deinit_config.
+#! source/output are absolute; arguments are ready to append after the LLVM input.
+Config :: struct {
+    allocator mem.Allocator
+    root [;0]u8 = ""
+    name [;0]u8 = ""
+    source [;0]u8 = ""
+    output [;0]u8 = ""
+    arguments arraylist.ArrayList([;0]u8)
+    owned arraylist.ArrayList([]mut u8)
+}
+
+deinit_config proc(config @mut Config) void {
+    for (config.owned.items) |bytes| free_text(config.allocator, bytes)
+    arraylist.deinit(&config.owned)
+    arraylist.deinit(&config.arguments)
+}
+
+#! creates the default output directory only when a project build requests it.
+prepare_output proc(config @Config) void ! Error {
+    if (config.name.len == 0 or config.output.len == 0) return .invalid_config
+    try ensure_directory(config.allocator, parent_path(config.output))
+}
+
+@hide:file
+own proc(config @mut Config, bytes []mut u8) [;0]u8 ! Error {
+    arraylist.append(&config.owned, bytes) catch |err| {
+        free_text(config.allocator, bytes)
+        return err
+    }
+    return bytes.ptr[..bytes.len;0]
+}
+
+@hide:file
+text proc(config @mut Config, bytes []u8) [;0]u8 ! Error {
+    return try own(config, try terminated(config.allocator, bytes))
+}
+
+@hide:file
+path proc(config @mut Config, relative []u8) [;0]u8 ! Error {
+    return try own(config, try join(config.allocator, config.root, relative))
+}
+
+@hide:file
+argument proc(config @mut Config, value []u8) void ! Error {
+    try arraylist.append(&config.arguments, try text(config, value))
+}
+
+@hide:file
+pair proc(config @mut Config, option, value []u8) void ! Error {
+    try argument(config, option)
+    try argument(config, value)
+}
+
+#! discovers build.hon from a directory or its ancestors, type-checks its BuildConfig,
+#! and evaluates it with Honey's bounded constant interpreter. no files are refreshed.
+#! optional reads return name == "" and no arguments when no config is declared.
+#! no output directories are created. diagnostics are local; return status 2 on failure.
+load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required bool) Config ! Error {
+    config := Config{ allocator = allocator, arguments = arraylist.init(allocator), owned = arraylist.init(allocator) }
+    errdefer deinit_config(&config)
+    directory :: try loader.directory(allocator, input)
+    defer mem.free(allocator, directory)
+    root :: try loader.project_root(allocator, directory)
+    defer mem.free(allocator, root)
+    config.root = try text(&config, root)
+    build_path :: try path(&config, "build.hon")
+    if (try fs.kind(allocator, build_path) != .file) {
+        if (!required) return config
+        try io.print("honey build: no build.hon in {s} or its ancestors; run honey init first\n", io.stderr(runtime), {input})
+        return .project_not_found
+    }
+    if (!try declares_config(allocator, runtime, build_path)) {
+        if (!required) return config
+        try io.print("{s}: build config: missing top-level config declaration\n", io.stderr(runtime), {build_path})
+        return .invalid_config
+    }
+    session := compilation.init(allocator)
+    defer compilation.deinit(&session)
+    store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&store)
+    project_package :: try compilation.load(&session, runtime, build_path, &store)
+    build_package :: try compilation.load(&session, runtime, try path(&config, "std/build"), &store)
+    # the typed snapshot keeps field extraction independent of BuildConfig declaration order.
+    # imported package identities are wired exactly like the compiler's native test runner.
+    runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) } }\n}\nmain proc() Snapshot { return snapshot(__honey_project.config) }\n"
+    bytes := arraylist.init(u8, allocator)
+    defer arraylist.deinit(&bytes)
+    for (runner_text) |byte| try arraylist.append(&bytes, byte)
+    runner :: try compilation.add_package(&session)
+    file :: try compilation.add_source(&session, runner, "<honey-build-config>", &bytes, &store)
+    packages [2]compilation.PackageId :: [build_package, project_package]
+    for (packages) |package, index| {
+        declaration :: compilation.declaration(&session, file, index)
+        try arraylist.append(&session.imports, compilation.Import{ node = declaration.node, target = package })
+    }
+    module := try compilation.compile(&session, runner, &store)
+    defer ir.deinit(&module)
+    if (diagnostics.count(&store) != 0) {
+        try report_config_diagnostics(runtime, &session, &store)
+        return .invalid_config
+    }
+    outcome := try interpreter.run_evaluation(allocator, &module, &store)
+    defer interpreter.deinit(&outcome)
+    if (outcome.trap != null or diagnostics.count(&store) != 0) {
+        try report_config_diagnostics(runtime, &session, &store)
+        return .invalid_config
+    }
+    value :: outcome.value
+    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 10) return .invalid_config
+    config.name = try read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 0))
+    if (!valid_name(config.name)) {
+        try io.write_all(io.stderr(runtime), "honey build: config.name must be a nonempty plain executable name\n")
+        return .invalid_config
+    }
+    source :: try read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 1))
+    if (source.len == 0) return .invalid_config
+    config.source = try path(&config, source)
+    output_directory :: try path(&config, "build")
+    config.output = try own(&config, try join(allocator, output_directory, config.name))
+    libraries := try read_list(&config, &module, &outcome, ir.aggregate_item(&module, value, 2))
+    defer arraylist.deinit(&libraries)
+    paths := try read_list(&config, &module, &outcome, ir.aggregate_item(&module, value, 3))
+    defer arraylist.deinit(&paths)
+    for (paths.items) |@entry| {
+        entry^ = try path(&config, entry^)
+        try pair(&config, "-L", entry^)
+    }
+    for (usize(4)..usize(9)) |field| {
+        values := try read_list(&config, &module, &outcome, ir.aggregate_item(&module, value, field))
+        defer arraylist.deinit(&values)
+        for (values.items) |entry, index| {
+            if (entry.len == 0) return .invalid_config
+            match field {
+                4: try pair(&config, "-I", try path(&config, entry))
+                5: try pair(&config, "-D", entry)
+                6: {
+                    if (entry[0] == '-' or (index != 0 and mem.eql(values.items[index - 1], "-framework"))) try argument(&config, entry)
+                    else try argument(&config, try path(&config, entry))
+                }
+                7: try pair(&config, "-framework", entry)
+                8: {
+                    try pair(&config, "-Xlinker", "-rpath")
+                    # dyld's @loader_path/@executable_path are not project-relative paths.
+                    resolved :: if (entry[0] == '@') entry else try path(&config, entry)
+                    try pair(&config, "-Xlinker", resolved)
+                }
+                else: unreachable
+            }
+        }
+    }
+    # the snapshot's exhaustive match normalizes tags; language enum ordinals are not zero-based.
+    linkage :: ir.aggregate_item(&module, value, 9).data.unsigned
+    if (linkage > 2) return .invalid_config
+    for (libraries.items) |library| {
+        if (!valid_name(library) or library[0] == '-') return .invalid_config
+        if (linkage == 0) try pair(&config, "-l", library)
+        else try select_library(&config, runtime, paths.items, library, linkage == 1)
+    }
+    return config
+}
+
+@hide:file
+valid_name proc(name []u8) bool {
+    if (name.len == 0 or mem.eql(name, ".") or mem.eql(name, "..")) return false
+    for (name) |byte| { if (byte == '/' or byte == '\\' or byte == 0) return false }
+    return true
+}
+
+@hide:file
+read_text proc(config @mut Config, module @ir.Module, outcome @interpreter.Outcome, value ir.Value) [;0]u8 ! Error {
+    if (value.type == .string) return try text(config, ir.string_bytes(module, value.data.string))
+    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 2) return .invalid_config
+    pointer :: ir.aggregate_item(module, value, 0)
+    count :: ir.aggregate_item(module, value, 1)
+    if (count.data.unsigned > 1048576) return .invalid_config
+    length :: usize(count.data.unsigned)
+    owned :: try mem.alloc(u8, config.allocator, length + 1)
+    transferred := false
+    errdefer { if (!transferred) mem.free(config.allocator, owned) }
+    for (0..length) |index| {
+        byte :: interpreter.evaluation_byte(outcome, module, pointer, index)
+        if (byte == null or byte?.uninitialized or byte?.data.unsigned == 0 or byte?.data.unsigned > 255) return .invalid_config
+        owned[index] = u8(byte?.data.unsigned)
+    }
+    owned[length] = 0
+    transferred = true
+    return try own(config, owned[..length])
+}
+
+@hide:file
+read_list proc(config @mut Config, module @ir.Module, outcome @interpreter.Outcome, value ir.Value) arraylist.ArrayList([;0]u8) ! Error {
+    result := arraylist.init([;0]u8, config.allocator)
+    errdefer arraylist.deinit(&result)
+    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 2) return .invalid_config
+    pointer :: ir.aggregate_item(module, value, 0)
+    count :: ir.aggregate_item(module, value, 1)
+    if (count.data.unsigned > 65536) return .invalid_config
+    shape :: module.arrays.items[usize(value.array_type)]
+    for (0..usize(count.data.unsigned)) |index| {
+        entry :: interpreter.evaluation_element(outcome, module, pointer, index, shape.element, shape.element_array)
+        if (entry == null) return .invalid_config
+        try arraylist.append(&result, try read_text(config, module, outcome, entry?))
+    }
+    return result
+}
+
+@hide:file
+select_library proc(config @mut Config, runtime io.Io, paths [][;0]u8, library []u8, static bool) void ! Error {
+    suffixes [2]mut []u8 := [".dylib", ".tbd"]
+    suffix_count := usize(2)
+    if (static) {
+        suffixes[0] = ".a"
+        suffix_count = 1
+    }
+    defaults [3][;0]u8 :: ["/usr/lib", "/usr/local/lib", "/opt/homebrew/lib"]
+    for (0..(paths.len + defaults.len)) |index| {
+        directory :: if (index < paths.len) paths[index] else defaults[index - paths.len]
+        for (suffixes[..suffix_count]) |suffix| {
+            filename := arraylist.init(u8, config.allocator)
+            defer arraylist.deinit(&filename)
+            parts [3][]u8 :: ["lib", library, suffix]
+            for (parts) |part| {
+                for (part) |byte| try arraylist.append(&filename, byte)
+            }
+            candidate :: try own(config, try join(config.allocator, directory, filename.items))
+            if (try fs.kind(config.allocator, candidate) == .file) {
+                try argument(config, candidate)
+                return
+            }
+        }
+    }
+    mode []u8 :: if (static) "static (.a)" else "shared (.dylib/.tbd)"
+    try io.print("honey build: cannot find {s} library '{s}'; install it or add its directory to config.lib_paths (relative to {s})\n", io.stderr(runtime), {mode, library, config.root[..]})
+    return .missing_library
+}
+
+#! prints actionable context after a native linker failure (clang retains exact diagnostics).
+report_link_failure proc(runtime io.Io) void {
+    io.write_all(io.stderr(runtime), "honey build: check config.libraries, config.lib_paths and config.frameworks; use config.linkage = .static/.shared to require that library form, and config.rpaths for runtime shared-library discovery\n") catch |_| {}
+}
+
+@hide:file
+report_config_diagnostics proc(runtime io.Io, session @compilation.Compilation, store @diagnostics.Store) void ! Error {
+    for (store.list.items) |diagnostic| {
+        file :: session.sources.items[usize(diagnostic.span.source)]
+        try io.print("{s}:{}: build config: {s}\n", io.stderr(runtime), {file.path, diagnostic.span.start, diagnostics.message(diagnostic)})
+    }
+}
+
+@hide:file
+declares_config proc(allocator mem.Allocator, runtime io.Io, build_path []u8) bool ! Error {
+    parsed := compilation.init(allocator)
+    defer compilation.deinit(&parsed)
+    store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&store)
+    bytes := try loader.read_source(allocator, runtime, build_path)
+    defer arraylist.deinit(&bytes)
+    package :: try compilation.add_package(&parsed)
+    file :: try compilation.add_source(&parsed, package, build_path, &bytes, &store)
+    if (diagnostics.count(&store) != 0) {
+        try report_config_diagnostics(runtime, &parsed, &store)
+        return .invalid_config
+    }
+    tree :: ast.view(&parsed.builder, compilation.source(&parsed, file).root)
+    for (0..ast.package_decl_count(&tree)) |index| {
+        declaration :: ast.package_decl(&tree, index)
+        name :: match ast.decl_kind(&tree, declaration) {
+            .statement: ast.statement_decl(&tree, declaration).name
+            .function: ast.function_decl(&tree, declaration).name
+            else: continue
+        }
+        if (mem.eql(ast.source_text(&tree, name), "config")) return true
+    }
+    return false
+}

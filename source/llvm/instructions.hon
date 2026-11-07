@@ -103,7 +103,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         .load_global: {
             pointer :: fresh(state)
             position :: location(state.line_starts, instruction.span)
-            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
+            try io.print("  %r{} = call ptr @honey.global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
             try io.print("  %r{} = load ", output, {result})
             try write_type(output, state.module, type)
             try io.print(", ptr %r{}\n", output, {pointer})
@@ -192,7 +192,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             if (shape.is_union) {
                 if (shape.tag_type != .void) {
                     position :: location(state.line_starts, instruction.span)
-                    try io.print("  call void @check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
+                    try io.print("  call void @honey.check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
                     try check_union(state, data, shape, usize(instruction.slot), instruction.span)
                 }
                 try io.print("  %r{} = getelementptr i8, ptr %r{}, i64 {}\n", output, {pointer, data, shape.payload_offset})
@@ -241,7 +241,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             pointer :: fresh(state)
             address :: fresh(state)
             position :: location(state.line_starts, instruction.span)
-            try io.print("  %r{} = call ptr @global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
+            try io.print("  %r{} = call ptr @honey.global{}(i64 {}, i64 {}, i64 {})\n", output, {pointer, instruction.slot, usize(instruction.span.source), position.line, position.column})
             try io.print("  %r{} = insertvalue %address poison, ptr %r{}, 0\n", output, {address, pointer})
             try io.print("  %r{} = insertvalue %address %r{}, ptr null, 1\n", output, {result, address})
         }
@@ -250,7 +250,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             flag :: fresh(state)
             position :: location(state.line_starts, instruction.span)
             try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, address})
-            try io.print("  call void @check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
+            try io.print("  call void @honey.check_init(ptr %r{}, i1 true, i64 {}, i64 {}, i64 {})\n", output, {flag, usize(instruction.span.source), position.line, position.column})
             try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {result, address})
         }
         .pointer_address: {
@@ -325,7 +325,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             position :: location(state.line_starts, instruction.span)
             try io.print("  %r{} = extractvalue %address %r{}, 0\n", output, {pointer, address})
             try io.print("  %r{} = extractvalue %address %r{}, 1\n", output, {flag, address})
-            try io.print("  call void @check_init(ptr %r{}, i1 {}, i64 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, usize(instruction.span.source), position.line, position.column})
+            try io.print("  call void @honey.check_init(ptr %r{}, i1 {}, i64 {}, i64 {}, i64 {})\n", output, {flag, instruction.op == .load_address, usize(instruction.span.source), position.line, position.column})
             if (instruction.op == .store_address) {
                 value :: try load(state, instruction.right)
                 try store_payload(state, state.values[usize(instruction.right)], value, pointer)
@@ -336,65 +336,84 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             try io.print(", ptr %r{}, align 1\n", output, {pointer})
         }
         .call: {
+            call_index :: state.next_call
+            state.next_call += 1
             callee :: try load(state, instruction.left)
-            # operands are frame snapshots; loading them before the call preserves evaluation order.
-            # argument registers are consecutive because load emits exactly one fresh register.
-            first_argument :: state.next_register
             for (0..instruction.arguments_count) |index| {
-                _ = try load(state, block.arguments.items[instruction.arguments_start + index])
-            }
-            # C default promotions apply only after the fixed prefix.
-            first_promotion :: state.next_register
-            if (instruction.variadic) {
-                for (instruction.fixed_arguments..instruction.arguments_count) |index| {
-                    operand :: block.arguments.items[instruction.arguments_start + index]
-                    kind :: state.values[usize(operand)].kind
-                    if (variadic_type(kind) == kind) continue
-                    promoted :: fresh(state)
-                    opcode []u8 :: if (kind == .bool or ir.unsigned_integer(kind)) "zext" else "sext"
-                    try io.print("  %r{} = {s} ", output, {promoted, opcode})
-                    try write_type(output, state.module, state.values[usize(operand)])
-                    try io.print(" %r{} to i32\n", output, {first_argument + index})
+                operand :: block.arguments.items[instruction.arguments_start + index]
+                argument_type := state.values[usize(operand)]
+                register := try load(state, operand)
+                if (instruction.variadic and index >= instruction.fixed_arguments) {
+                    promoted :: variadic_type(argument_type.kind)
+                    if (promoted != argument_type.kind) {
+                        converted :: fresh(state)
+                        opcode []u8 :: if (ir.real_type(argument_type.kind)) "fpext"
+                            else if (argument_type.kind == .bool or ir.unsigned_integer(argument_type.kind)) "zext" else "sext"
+                        try io.print("  %r{} = {s} ", output, {converted, opcode})
+                        try write_type(output, state.module, argument_type)
+                        try io.print(" %r{} to ", output, {register})
+                        argument_type.kind = promoted
+                        try write_type(output, state.module, argument_type)
+                        try io.write_all(output, "\n")
+                        register = converted
+                    }
                 }
+                if (record_abi(state.module, argument_type).size != 0) {
+                    pointer :: fresh(state)
+                    try io.print("  %r{} = getelementptr i8, ptr %abi_arg{}_{}, i64 0\n", output, {pointer, call_index, index})
+                    register = try pack_record_into(state, argument_type, register, false, pointer)
+                }
+                try io.print("  %a{}_{} = select i1 true, ", output, {result, index})
+                try write_record_abi(output, state.module, argument_type, false)
+                try io.print(" %r{}, ", output, {register})
+                try write_record_abi(output, state.module, argument_type, false)
+                try io.write_all(output, " poison\n")
             }
-            if (instruction.type != .void) try io.print("  %r{} = call ", output, {result})
+            abi :: record_abi(state.module, type)
+            if (instruction.type != .void and !abi.indirect) try io.print("  %r{} = call ", output, {result})
             else try io.write_all(output, "  call ")
             try write_abi_result(output, state.module, type)
             if (instruction.variadic) {
                 try io.write_all(output, " (")
+                if (abi.indirect) try io.write_all(output, "ptr")
                 for (0..instruction.fixed_arguments) |index| {
-                    if (index != 0) try io.write_all(output, ", ")
+                    if (index != 0 or abi.indirect) try io.write_all(output, ", ")
                     operand :: block.arguments.items[instruction.arguments_start + index]
-                    try write_type(output, state.module, state.values[usize(operand)])
+                    try write_record_abi(output, state.module, state.values[usize(operand)], false)
                 }
-                if (instruction.fixed_arguments != 0) try io.write_all(output, ", ")
+                if (instruction.fixed_arguments != 0 or abi.indirect) try io.write_all(output, ", ")
                 try io.write_all(output, "...)")
             }
             try io.print(" %r{}(", output, {callee})
-            promotion := first_promotion
+            if (abi.indirect) {
+                try write_sret(output, state.module, type)
+                try io.print(" %v{}", output, {u32(instruction.destination)})
+            }
             for (0..instruction.arguments_count) |index| {
-                if (index != 0) try io.write_all(output, ", ")
+                if (index != 0 or abi.indirect) try io.write_all(output, ", ")
                 operand :: block.arguments.items[instruction.arguments_start + index]
                 argument_type := state.values[usize(operand)]
-                register := first_argument + index
-                if (instruction.variadic and index >= instruction.fixed_arguments) {
-                    kind :: variadic_type(argument_type.kind)
-                    if (kind != argument_type.kind) {
-                        register = promotion
-                        promotion += 1
-                        argument_type.kind = kind
-                    }
-                }
+                if (instruction.variadic and index >= instruction.fixed_arguments)
+                    argument_type.kind = variadic_type(argument_type.kind)
                 try write_abi_parameter(output, state.module, argument_type)
-                try io.print(" %r{}", output, {register})
+                try io.print(" %a{}_{}", output, {result, index})
             }
             try io.write_all(output, ")\n")
+            if (abi.indirect) return
+            if (abi.size != 0) {
+                try io.write_all(output, "  store ")
+                try write_record_abi(output, state.module, type, true)
+                try io.print(" %r{}, ptr %v{}, align 1\n", output, {result, u32(instruction.destination)})
+                return
+            }
         }
         .convert: result = try emit_conversion(state, instruction)
         .negate: {
             operand :: try load(state, instruction.left)
-            if (instruction.type == .float) {
-                try io.print("  %r{} = fneg double %r{}\n", output, {result, operand})
+            if (ir.real_type(instruction.type)) {
+                try io.print("  %r{} = fneg ", output, {result})
+                try write_type(output, state.module, type)
+                try io.print(" %r{}\n", output, {operand})
             } else {
                 pair :: fresh(state)
                 overflow :: fresh(state)
@@ -424,14 +443,18 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
         .add, .subtract, .multiply, .divide, .remainder: {
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
-            if (instruction.type == .float) {
+            if (ir.real_type(instruction.type)) {
                 if (instruction.op == .remainder) {
                     zero :: fresh(state)
-                    try io.print("  %r{} = fcmp oeq double %r{}, 0.0\n", output, {zero, right})
+                    try io.print("  %r{} = fcmp oeq ", output, {zero})
+                    try write_type(output, state.module, type)
+                    try io.print(" %r{}, 0.0\n", output, {right})
                     try check_failure(state, zero, .division_by_zero, instruction.span)
                 }
                 opcode :: enummap.get(&float_opcodes, instruction.op)?
-                try io.print("  %r{} = {s} double %r{}, %r{}\n", output, {result, opcode, left, right})
+                try io.print("  %r{} = {s} ", output, {result, opcode})
+                try write_type(output, state.module, type)
+                try io.print(" %r{}, %r{}\n", output, {left, right})
             } else if (instruction.op == .divide or instruction.op == .remainder) {
                 bits :: ir.integer_bits(instruction.type)
                 zero :: fresh(state)
@@ -474,9 +497,11 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             left :: try load(state, instruction.left)
             right :: try load(state, instruction.right)
             operand_type :: state.values[usize(instruction.left)]
-            if (operand_type.kind == .float) {
+            if (ir.real_type(operand_type.kind)) {
                 predicate :: enummap.get(&float_predicates, instruction.op)?
-                try io.print("  %r{} = fcmp {s} double %r{}, %r{}\n", output, {result, predicate, left, right})
+                try io.print("  %r{} = fcmp {s} ", output, {result, predicate})
+                try write_type(output, state.module, operand_type)
+                try io.print(" %r{}, %r{}\n", output, {left, right})
             } else {
                 prefix []u8 := ""
                 if (instruction.op != .equal and instruction.op != .not_equal) {
@@ -551,11 +576,12 @@ sentinel_difference proc(state @mut State, type Type, actual, expected usize) us
     output :: state.output
     if (ir.aggregate(type.kind)) {
         shape :: state.module.arrays.items[usize(type.shape)]
-        count usize :: if (shape.is_union) divtrunc!(shape.byte_size, 8) else if (shape.kind == .record) shape.fields.len else shape.len
+        count usize :: if (shape.is_union) divtrunc!(shape.byte_size, shape.alignment) else if (shape.kind == .record) shape.fields.len else shape.len
         result := fresh(state)
         try io.print("  %r{} = icmp ne i1 false, false\n", output, {result})
         for (0..count) |index| {
-            child :: if (shape.is_union) Type{ kind = .u64 } else if (shape.kind == .record) Type{ kind = shape.fields[index].type, shape = shape.fields[index].array_type } else Type{ kind = shape.element, shape = shape.element_array }
+            unit :: if (shape.alignment == 8) ir.Type.u64 else if (shape.alignment == 4) ir.Type.u32 else if (shape.alignment == 2) ir.Type.u16 else ir.Type.u8
+            child :: if (shape.is_union) Type{ kind = unit } else if (shape.kind == .record) Type{ kind = shape.fields[index].type, shape = shape.fields[index].array_type } else Type{ kind = shape.element, shape = shape.element_array }
             left :: fresh(state)
             right :: fresh(state)
             try io.print("  %r{} = extractvalue ", output, {left})
@@ -594,7 +620,7 @@ sentinel_difference proc(state @mut State, type Type, actual, expected usize) us
         try io.print("  %r{} = icmp ne i1 false, false\n", output, {result})
         return result
     }
-    opcode []u8 :: if (type.kind == .float) "fcmp une" else "icmp ne"
+    opcode []u8 :: if (ir.real_type(type.kind)) "fcmp une" else "icmp ne"
     try io.print("  %r{} = {s} ", output, {result, opcode})
     try write_type(output, state.module, type)
     try io.print(" %r{}, %r{}\n", output, {actual, expected})
@@ -684,7 +710,7 @@ check_union proc(state @mut State, pointer usize, shape ir.ArrayType, field usiz
     try check_failure(state, failed, .inactive_union_field, span)
 }
 
-@hide:file
+@hide
 store_payload proc(state @mut State, type Type, value, pointer usize) void ! io.WriteError {
     if (type.kind == .void) return
     if (ir.aggregate(type.kind)) {
@@ -715,18 +741,30 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
     source :: state.values[usize(instruction.left)].kind
     destination :: instruction.type
     operand :: try load(state, instruction.left)
-    if (source == .float and destination == .float) return operand
+    if (ir.real_type(source) and ir.real_type(destination)) {
+        if (source == destination) return operand
+        result :: fresh(state)
+        opcode []u8 :: if (destination == .float32) "fptrunc" else "fpext"
+        try io.print("  %r{} = {s} ", output, {result, opcode})
+        try write_type(output, state.module, Type{ kind = source })
+        try io.print(" %r{} to ", output, {operand})
+        try write_type(output, state.module, Type{ kind = destination })
+        try io.write_all(output, "\n")
+        return result
+    }
     source_bits :: ir.integer_bits(source)
     destination_bits :: ir.integer_bits(destination)
     source_unsigned :: ir.unsigned_integer(source)
     destination_unsigned :: ir.unsigned_integer(destination)
-    if (destination == .float) {
+    if (ir.real_type(destination)) {
         result :: fresh(state)
         opcode []u8 :: if (source_unsigned) "uitofp" else "sitofp"
-        try io.print("  %r{} = {s} i{} %r{} to double\n", output, {result, opcode, source_bits, operand})
+        try io.print("  %r{} = {s} i{} %r{} to ", output, {result, opcode, source_bits, operand})
+        try write_type(output, state.module, Type{ kind = destination })
+        try io.write_all(output, "\n")
         return result
     }
-    if (source == .float) {
+    if (ir.real_type(source)) {
         # compare the truncated value before fptosi/fptoui, whose out-of-range result is poison.
         truncated :: fresh(state)
         lower_valid :: fresh(state)
@@ -734,7 +772,12 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
         valid :: fresh(state)
         failed :: fresh(state)
         upper :: enummap.get(&conversion_upper_bounds, destination)?
-        try io.print("  %r{} = call double @llvm.trunc.f64(double %r{})\n", output, {truncated, operand})
+        wide := operand
+        if (source == .float32) {
+            wide = fresh(state)
+            try io.print("  %r{} = fpext float %r{} to double\n", output, {wide, operand})
+        }
+        try io.print("  %r{} = call double @llvm.trunc.f64(double %r{})\n", output, {truncated, wide})
         if (destination_unsigned) try io.print("  %r{} = fcmp oge double %r{}, 0.0\n", output, {lower_valid, truncated})
         else try io.print("  %r{} = fcmp oge double %r{}, -{s}\n", output, {lower_valid, truncated, upper})
         try io.print("  %r{} = fcmp olt double %r{}, {s}\n", output, {upper_valid, truncated, upper})
@@ -769,6 +812,7 @@ emit_conversion proc(state @mut State, instruction ir.Instruction) usize ! io.Wr
 variadic_type proc(type ir.Type) ir.Type {
     match type {
         .bool, .i8, .u8, .i16, .u16: return .i32
+        .float32: return .float
         else: return type
     }
 }

@@ -2214,9 +2214,8 @@ diagnoses_demanded_opaque_values_and_incompatible_opaque_pointers test {
     }
 }
 
-rejects_demanded_unavailable_c_floating_types_without_unknown_names test {
-    sources [2][]u8 :: [
-        "single c_func() c_float\nmain proc() void { single() }\n",
+rejects_demanded_unavailable_c_longdouble_without_unknown_names test {
+    sources [1][]u8 :: [
         "extended c_func() c_longdouble\nmain proc() void { extended() }\n",
     ]
     for sources |source| {
@@ -2235,9 +2234,10 @@ rejects_demanded_unavailable_c_floating_types_without_unknown_names test {
 }
 
 preserves_variadic_call_signatures_and_interpreter_foreign_traps test {
-    sources [2][]u8 :: [
+    sources [3][]u8 :: [
         "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1) }\n",
         "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1, true, i8(-2), u8(3), i16(-4), u16(5), 6.5) }\n",
+        "take c_func(_ c_int, ...) c_int\nmain proc() c_int { return take(1, c_float(6.5)) }\n",
     ]
     for sources |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -2272,7 +2272,7 @@ rejects_variadic_arity_fixed_types_and_non_c_trailing_values test {
         "take c_func(_ c_int, ...) c_int\nmain proc() c_int { values [2]i64 :: [1, 2]\nreturn take(1, values) }\n",
     ]
     codes [4]diagnostics.Code :: [
-        .argument_count_mismatch, .type_mismatch, .invalid_operand, .invalid_operand,
+        .argument_count_mismatch, .type_mismatch, .unsupported_c_abi_type, .unsupported_c_abi_type,
     ]
     for sources |source, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -2317,4 +2317,125 @@ rejects_string_arguments_for_mutable_or_nonbyte_pointers test {
         defer interpreter.deinit(&outcome)
         try expect_trap(outcome, &diagnostic_store, .type_mismatch)
     }
+}
+
+float32_literals_arithmetic_conversions_and_layout_execute_with_single_precision test {
+    sources [6][]u8 :: [
+        "main proc() f32 { return 16777217.0 }\n",
+        "main proc() f32 { value f32 :: 16777216\nreturn value + 1.0 }\n",
+        "main proc() f32 { value f32 :: 3.0\nreturn value / 2.0 }\n",
+        "main proc() f32 { return f32(i64(16777217)) }\n",
+        "main proc() f32 { values [2]mut f32 := [1.25, 2.5]\nvalues[0] = values[1] / 2.0\nreturn values[0] }\n",
+        "main proc() f32 { return rem!(f32(5.5), f32(2.0)) }\n",
+    ]
+    expected [6]f64 :: [16777216.0, 16777216.0, 1.5, 16777216.0, 1.25, 1.5]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.float32, outcome.value.type)
+        try testing.expect_equal(expected[index], outcome.value.data.real)
+    }
+}
+
+float32_widening_and_aggregate_storage_keep_native_layout test {
+    source ::
+        `Vector :: c_struct { x f32, y f32 }
+        `Bits :: union { real f32, bytes [3]u8 }
+        `main proc() bool {
+        `    single f32 :: 1.25
+        `    wide f64 :: single
+        `    return (wide == 1.25 and sizeof!(f32) == 4 and alignof!(f32) == 4
+        `        and sizeof!(Vector) == 8 and alignof!(Vector) == 4
+        `        and sizeof!(Bits) == 4 and alignof!(Bits) == 4)
+        `}
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    try testing.expect(outcome.value.data.boolean)
+}
+
+float32_integer_literals_require_exactness_but_explicit_conversions_round test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned("main proc() f32 { return 16777217 }\n", &diagnostic_store)
+    defer ir.deinit(&module)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try expect_trap(outcome, &diagnostic_store, .inexact_integer_literal)
+}
+
+promotes_float32_variadic_arguments_to_float64_in_ir test {
+    source ::
+        `take c_func(_ c_float, ...) void
+        `main proc() void { take(1.25, c_float(2.5)) }
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(ir.Type.float32, module.functions.items[0].parameters.items[0])
+    entry :: &module.functions.items[usize(module.entry?)]
+    promoted := false
+    for (entry.blocks.items) |block| {
+        for (block.instructions.items) |instruction| {
+            if (instruction.op == .convert and instruction.type == .float) promoted = true
+        }
+    }
+    try testing.expect(promoted)
+}
+
+float32_decimal_literals_round_once_at_normal_subnormal_and_overflow_midpoints test {
+    literals [8][]u8 :: [
+        "1.0000000596046447753906250000000001",
+        "1.000000059604644775390625",
+        "1.0000000596046447753906249999999999",
+        "1.0000001788139343261718749999999999",
+        "1.000000178813934326171875",
+        "0.000000000000000000000000000000000000000000000700649232162408535461864791644958065640130970938257885878534141944895541342930300743319094181060791015625001",
+        "0.000000000000000000000000000000000000000000000700649232162408535461864791644958065640130970938257885878534141944895541342930300743319094181060791015625",
+        "340282356779733661637539395458142568447.0",
+    ]
+    expected [8]f64 :: [
+        1.00000011920928955078125, 1.0, 1.0,
+        1.00000011920928955078125, 1.0000002384185791015625,
+        0.00000000000000000000000000000000000000000000140129846432481707092372958328991613128026194187651577175706828388979108268586060148663818836212158203125,
+        0.0, 340282346638528859811704183484516925440.0,
+    ]
+    for (literals) |literal, index| {
+        source := arraylist.init(u8, mem.c_allocator)
+        defer arraylist.deinit(&source)
+        for ("main proc() f32 { return ") |byte| try arraylist.append(&source, byte)
+        for (literal) |byte| try arraylist.append(&source, byte)
+        for (" }\n") |byte| try arraylist.append(&source, byte)
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source.items, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(expected[index], outcome.value.data.real)
+    }
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    module := try compile_owned(
+        "main proc() f32 { return 340282356779733661637539395458142568448.0 }\n",
+        &diagnostic_store,
+    )
+    defer ir.deinit(&module)
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try expect_trap(outcome, &diagnostic_store, .literal_out_of_range)
 }

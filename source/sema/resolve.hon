@@ -11,7 +11,7 @@ BuiltinType :: enum {
     int, float,
     bool, string,
     void, i64,
-    f64, usize,
+    f32, f64, usize,
     i8, i16, i32, isize,
     u8, u16, u32, u64, uint,
     anyopaque
@@ -35,6 +35,7 @@ builtins [_]Builtin :: [
     { name = "string", type = .string },
     { name = "void", type = .void },
     { name = "i64", type = .i64 },
+    { name = "f32", type = .f32 },
     { name = "f64", type = .f64 },
     { name = "usize", type = .usize },
     { name = "i8", type = .i8 },
@@ -59,7 +60,7 @@ builtins [_]Builtin :: [
     { name = "c_short", type = .c_short },
     { name = "c_ushort", type = .c_ushort },
     { name = "c_double", type = .f64 },
-    { name = "c_float", type = .unavailable },
+    { name = "c_float", type = .f32 },
     { name = "c_longdouble", type = .unavailable },
     { name = "type", type = .type },
     { name = "noreturn", type = .noreturn },
@@ -349,6 +350,8 @@ conflicts proc(state @State, scope ?@Scope, name strpool.StringId, before ast.Sp
         }
         return conflicts(state, current.parent, name, before)
     }
+    spelling :: ast.source_text(state.tree, before)
+    if (spelling.len >= 3 and spelling[0] == '@' and spelling[1] == '"') return false
     if lookup(state, null, name) |found| {
         # identifier-spelled builtin names are fallbacks; builtin type keywords remain reserved.
         return found.data.builtin != .type and found.data.builtin != .string

@@ -1,0 +1,16 @@
+import "@tests/support"
+
+quoted_names_preserve_declarations_members_and_builtin_overrides test {
+    context := try support.init("quoted identifiers")
+    defer support.deinit(&context)
+    try support.check_text(&context, "quoted_identifiers",
+        `@"i32" :: alias c_int
+        `@"type" :: c_struct { @"proc" @"i32" }
+        `@"test" proc(value @"type") @"i32" { return value.@"proc" }
+        `main proc() c_int {
+        `    value @"type" :: { @"proc" = 42 }
+        `    return @"test"(value)
+        `}
+        `
+        , support.Expected{ stdout = "42\n" })
+}

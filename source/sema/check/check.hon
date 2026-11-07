@@ -6,6 +6,7 @@ import "@std/strconv"
 import "@std/enummap"
 import "@source/ast"
 import "@source/diagnostics"
+import "@source/ir"
 sema :: import "@source/sema"
 
 TypeKind :: enum {
@@ -13,6 +14,7 @@ TypeKind :: enum {
     invalid
     int
     float
+    float32
     bool
     string
     void
@@ -169,6 +171,7 @@ Cell :: struct {
     role Role = .none
     type Type = Type{}
     numeric bool = false
+    real_literal bool = false
     anchored bool = false
     demand TypeKind = .none
     conversion_unsigned bool = false
@@ -576,7 +579,7 @@ check_elaborated proc(
                             if (state.cells[count_group].type.kind == .none and state.cells[count_group].demand == .none)
                                 try impose(&state, expression.right, .usize, .invalid_operand, expression.span)
                         } else try numeric_operand(&state, id, expression.right)
-                        if (expression.operator == .divide) {
+                        if (expression.operator == .divide and state.cells[root(&state, usize(id))].demand != .float32) {
                             try impose(&state, id, .float, .integer_division, expression.span)
                         }
                     }
@@ -607,6 +610,8 @@ check_elaborated proc(
             if (cells[i].numeric and cells[i].anchored) {
                 kind TypeKind :: if (cells[i].demand != .none)
                     cells[i].demand
+                else if (cells[i].real_literal)
+                    .float
                 else if (cells[i].conversion_unsigned)
                     .u64
                 else
@@ -653,7 +658,8 @@ check_elaborated proc(
             if (ast.decl_kind(tree, previous) != .function or !ast.function_external(tree, previous)) continue
             if (cells[usize(previous)].role == .none) continue
             if (ast.name_id(tree, id) == ast.name_id(tree, previous) and !same_signature(&state, id, previous)) {
-                try fail(&state, id, .type_mismatch, ast.function_decl(tree, id).name)
+                try fail(&state, id, .incompatible_c_symbol, ast.function_decl(tree, id).name)
+                state.types[usize(previous)] = state.types[usize(id)]
             }
         }
     }
@@ -965,6 +971,7 @@ join proc(state @mut State, left, right ast.NodeId) void {
         state.cells[a].type = state.cells[b].type
     }
     state.cells[a].numeric = state.cells[a].numeric or state.cells[b].numeric
+    state.cells[a].real_literal = state.cells[a].real_literal or state.cells[b].real_literal
     state.cells[a].anchored = state.cells[a].anchored or state.cells[b].anchored
     if (state.cells[a].demand == .none) state.cells[a].demand = state.cells[b].demand
     if (state.cells[a].expected.kind == .none) state.cells[a].expected = state.cells[b].expected
@@ -990,6 +997,14 @@ collect_invalid proc(state @mut State, id ast.NodeId) void {
 
 @hide:file
 check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (mem.AllocError | diagnostics.CapacityError) {
+    return try check_annotation_context(state, id, allow_void, false)
+}
+
+# aliases and immediate pointees may name incomplete types; nested value annotations may not.
+@hide:file
+check_annotation_context proc(
+    state @mut State, id ast.NodeId, allow_void, allow_opaque bool,
+) Type ! (mem.AllocError | diagnostics.CapacityError) {
     if (state.cells[usize(id)].role == .annotation) return state.types[usize(id)]
     state.cells[usize(id)].role = .annotation
     if (ast.expr_kind(state.tree, id) == .slice_type or ast.expr_kind(state.tree, id) == .optional_type) {
@@ -1005,7 +1020,9 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
         return type
     }
     if (type_syntax(ast.expr_kind(state.tree, id))) {
-        type :: try check_type_expression(state, id, false)
+        type := try check_type_expression(state, id, false)
+        if (type.kind == .anyopaque and !allow_opaque)
+            type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
         state.types[usize(id)] = type
         state.cells[usize(id)].type = type
         return type
@@ -1058,7 +1075,7 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
             type.kind = enummap.get(&builtin_kinds, binding.data.builtin)?
             if (binding.data.builtin == .unavailable)
                 type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, id)))
-            if (type.kind == .anyopaque and state.pointer_depth == 0) {
+            if (type.kind == .anyopaque and !allow_opaque) {
                 type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
             }
             if ((type.kind == .void or type.kind == .noreturn) and !allow_void) {
@@ -1072,7 +1089,7 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
                 initializer :: ast.statement_decl(state.tree, target).initializer
                 if (type_syntax(ast.expr_kind(state.tree, initializer))) {
                     type = try check_type_expression(state, initializer, true)
-                    if (type.kind == .anyopaque and state.pointer_depth == 0)
+                    if (type.kind == .anyopaque and !allow_opaque)
                         type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
                 } else {
                     type = invalid_type(try diagnostics.add(state.diagnostics, .expected_type, ast.node_span(state.tree, id)))
@@ -1172,10 +1189,10 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
     if (!ast.function_external(tree, id)) try collect_block(state, function.body, function.return_type, false)
     else {
         if (mem.eql(ast.source_text(tree, function.name), "main")) try fail(state, id, .invalid_entry, function.name)
-        if (!c_abi_type(state, state.types[usize(function.return_type)])) try fail(state, id, .invalid_operand, function.span)
+        if (!c_abi_type(state, state.types[usize(function.return_type)])) try fail(state, id, .unsupported_c_abi_type, function.span)
         for (0..ast.function_param_count(tree, id)) |i| {
             parameter :: ast.function_param(tree, id, i)
-            if (!c_abi_type(state, state.cells[usize(parameter)].type)) try fail(state, id, .invalid_operand, ast.node_span(tree, parameter))
+            if (!c_abi_type(state, state.cells[usize(parameter)].type)) try fail(state, id, .unsupported_c_abi_type, ast.node_span(tree, parameter))
         }
     }
 }
@@ -1489,10 +1506,9 @@ collect_expression proc(state @mut State, id ast.NodeId) void ! (mem.AllocError 
             state.cells[usize(id)].anchored = true
         }
         .literal_float: {
-            state.cells[usize(id)].type = Type{ kind = .float }
             state.cells[usize(id)].numeric = true
             state.cells[usize(id)].anchored = true
-            state.cells[usize(id)].demand = .float
+            state.cells[usize(id)].real_literal = true
         }
         .literal_bool: state.cells[usize(id)].type = Type{ kind = .bool }
         .literal_string: state.cells[usize(id)].type = Type{ kind = .string }
@@ -1698,13 +1714,19 @@ unsigned_kind proc(kind TypeKind) bool {
 
 @hide:file
 numeric_kind proc(kind TypeKind) bool {
-    return integer_kind(kind) or kind == .float
+    return integer_kind(kind) or real_kind(kind)
+}
+
+@hide:file
+real_kind proc(kind TypeKind) bool {
+    return kind == .float or kind == .float32
 }
 
 @hide:file
 builtin_kinds :: $enummap.init(sema.BuiltinType, TypeKind, {
     int = .int, i64 = .int,
     float = .float, f64 = .float,
+    f32 = .float32,
     i8 = .i8,
     i16 = .i16,
     i32 = .i32,
@@ -1844,6 +1866,10 @@ impose proc(state @mut State, id ast.NodeId, kind TypeKind, code diagnostics.Cod
     index :: root(state, usize(id))
     if (state.cells[index].type.kind == .invalid) return
     state.cells[index].anchored = true
+    if (state.cells[index].real_literal and !real_kind(kind)) {
+        state.cells[index].type = invalid_type(try diagnostics.add(state.diagnostics, code, span))
+        return
+    }
     if (state.cells[index].demand == .none) {
         state.cells[index].demand = kind
     } else if (state.cells[index].demand != kind) {
@@ -2180,7 +2206,8 @@ addressable_target proc(state @mut State, id ast.NodeId) bool {
 @hide:file
 same_signature proc(state @State, left, right ast.NodeId) bool {
     if (left == right) return true
-    if (ast.callable_foreign(state.tree, left) != ast.callable_foreign(state.tree, right)) return false
+    if (ast.callable_foreign(state.tree, left) != ast.callable_foreign(state.tree, right)
+        and (!c_abi_signature(state, left, 0) or !c_abi_signature(state, right, 0))) return false
     if (ast.callable_variadic(state.tree, left) != ast.callable_variadic(state.tree, right)) return false
     tree :: state.tree
     if (ast.function_param_count(tree, left) != ast.function_param_count(tree, right)) return false
@@ -2200,6 +2227,8 @@ assignable_type proc(state @State, actual, expected Type, widening bool) bool {
     if (actual.kind == .noreturn) return true
     if (same_type(state, actual, expected)) return true
     if (widening and integer_widens(actual, expected)) return true
+    if (widening and actual.kind == .float32 and expected.kind == .float
+        and actual.nominal == ast.NodeId(maxval!(u32)) and expected.nominal == ast.NodeId(maxval!(u32))) return true
     if (expected.kind == .fallible) {
         target :: state.arrays.items[usize(expected.array_type)]
         if (actual.kind == .fallible) {
@@ -2225,6 +2254,7 @@ assignable_type proc(state @State, actual, expected Type, widening bool) bool {
             source :: state.arrays.items[usize(actual.array_type)].element
             if (source.kind != child.kind
                 and !(widening and integer_widens(source, child))
+                and !(widening and source.kind == .float32 and child.kind == .float)
                 and !(source.kind == .pointer and child.kind == .slice)
                 and !(source.kind == .string and child.kind == .pointer)) return false
             return assignable_type(state, source, child, widening)
@@ -2475,7 +2505,7 @@ validate proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | diagnost
                     ) return
                     if (comparison(expression.operator) and integer_comparison_kind(left, right) != .none) return
                     if (!numeric_kind(left.kind) or !numeric_kind(right.kind) or !same_type(state, left, right)) try fail(state, id, .invalid_operand, expression.span)
-                    else if (expression.operator == .divide and left.kind != .float) try fail(state, id, .integer_division, expression.span)
+                    else if (expression.operator == .divide and !real_kind(left.kind)) try fail(state, id, .integer_division, expression.span)
                 }
                 .range: {
                     if (state.cells[usize(id)].match_pattern) return
@@ -2584,7 +2614,7 @@ validate_call proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | dia
                 argument :: ast.call_arg(tree, id, i)
                 actual :: state.types[usize(argument)]
                 if (!c_abi_type(state, actual) or actual.kind == .void)
-                    try fail(state, argument, .invalid_operand, ast.node_span(tree, argument))
+                    try fail(state, argument, .unsupported_c_abi_type, ast.node_span(tree, argument))
             }
             continue
         }
@@ -2911,7 +2941,7 @@ check_pointer_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError 
     view :: ast.pointer_type(state.tree, id)
     state.pointer_depth += 1
     defer state.pointer_depth -= 1
-    element :: try check_annotation(state, view.element, true)
+    element :: try check_annotation_context(state, view.element, true, true)
     if (element.kind == .invalid) return element
     binding :: sema.binding(state.resolution, view.element)
     if (
@@ -2934,7 +2964,7 @@ check_function_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
     result_type :: try check_annotation(state, result, true)
     if (result_type.kind == .invalid) type = result_type
     if (ast.callable_foreign(state.tree, id) and !c_abi_type(state, result_type))
-        type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, id)))
+        type = invalid_type(try diagnostics.add(state.diagnostics, .unsupported_c_abi_type, ast.node_span(state.tree, id)))
     try depend(state, result, id)
     for 0..ast.function_param_count(state.tree, id) |i| {
         parameter :: ast.function_param(state.tree, id, i)
@@ -2945,7 +2975,7 @@ check_function_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError
         state.types[usize(parameter)] = parameter_type
         if (parameter_type.kind == .invalid and type.kind != .invalid) type = parameter_type
         if (ast.callable_foreign(state.tree, id) and !c_abi_type(state, parameter_type))
-            type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, parameter)))
+            type = invalid_type(try diagnostics.add(state.diagnostics, .unsupported_c_abi_type, ast.node_span(state.tree, parameter)))
         try depend(state, annotation, parameter)
         try depend(state, parameter, id)
     }
@@ -3005,15 +3035,33 @@ checked_sentinel proc(state @mut State, id ast.NodeId, element Type) ?i64 ! (mem
 
 @hide:file
 c_abi_type proc(state @State, type Type) bool {
-    if (type.kind == .optional) return c_abi_pointer(state, state.arrays.items[usize(type.array_type)].element)
-    if (type.kind == .function) return ast.callable_foreign(state.tree, type.function)
-    return integer_kind(type.kind) or type.kind == .float or type.kind == .bool or type.kind == .pointer or type.kind == .void or type.kind == .invalid
+    return c_abi_value_type(state, type, 0)
 }
 
 @hide:file
-c_abi_pointer proc(state @State, type Type) bool {
-    return type.kind == .pointer or (type.kind == .function and c_abi_type(state, type))
+c_abi_signature proc(state @State, signature ast.NodeId, depth usize) bool {
+    if (depth >= 128) return false
+    if (!c_abi_value_type(state, state.types[usize(ast.callable_result(state.tree, signature))], depth + 1)) return false
+    for (0..ast.function_param_count(state.tree, signature)) |i| {
+        parameter :: ast.param(state.tree, ast.function_param(state.tree, signature, i))
+        type :: state.types[usize(parameter.type)]
+        if (type.kind == .void or !c_abi_value_type(state, type, depth + 1)) return false
+    }
+    return true
 }
+
+@hide:file
+c_abi_value_type proc(state @State, type Type, depth usize) bool {
+    if (depth >= 128) return false
+    if (type.kind == .optional) {
+        child :: state.arrays.items[usize(type.array_type)].element
+        return child.kind == .pointer or (child.kind == .function and c_abi_signature(state, child.function, depth + 1))
+    }
+    if (type.kind == .function) return c_abi_signature(state, type.function, depth + 1)
+    if (type.kind == .record or type.kind == .enumeration) return c_record_field_type(state, type, depth + 1)
+    return numeric_kind(type.kind) or type.kind == .bool or type.kind == .pointer or type.kind == .void or type.kind == .invalid
+}
+
 
 @hide:file
 builtin_name proc(state @State, id ast.NodeId) []u8 {
@@ -3135,7 +3183,7 @@ infer_builtin proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.A
         left :: try infer_shape(state, ast.call_arg(state.tree, id, 0), defaults)
         right :: try infer_shape(state, ast.call_arg(state.tree, id, 1), defaults)
         if (defaults and left.kind != .invalid and right.kind != .invalid
-            and ((!integer_kind(left.kind) and !(remainder and left.kind == .float)) or !same_type(state, left, right))) try fail(state, id, .invalid_operand, span)
+            and ((!integer_kind(left.kind) and !(remainder and real_kind(left.kind))) or !same_type(state, left, right))) try fail(state, id, .invalid_operand, span)
         return group_type(state, id)
     }
     if (some) {
@@ -3885,7 +3933,7 @@ context_demand proc(state @mut State, id ast.NodeId, expected Type, code diagnos
     if (
         early and expected.kind != .array and expected.kind != .record
         and expected.kind != .pointer and expected.kind != .slice and expected.kind != .optional and expected.kind != .fallible
-        and expected.kind != .enumeration and !integer_kind(expected.kind)
+        and expected.kind != .enumeration and !numeric_kind(expected.kind)
     ) return
     try demand(state, id, expected, code)
 }
@@ -3895,6 +3943,7 @@ bound_family proc(state @mut State, id ast.NodeId) TypeKind {
     index :: root(state, usize(id))
     if (state.cells[index].type.kind != .none) return state.cells[index].type.kind
     if (state.cells[index].demand != .none) return state.cells[index].demand
+    if (state.cells[index].real_literal) return .float
     producer :: state.cells[index].producer
     if (producer == ast.NodeId(maxval!(u32)) or state.cells[index].visiting) return .none
     state.cells[index].visiting = true
@@ -3915,6 +3964,7 @@ bound_family proc(state @mut State, id ast.NodeId) TypeKind {
     left :: bound_family(state, left_node)
     right :: bound_family(state, right_node)
     if (left == .float or right == .float) return .float
+    if (left == .float32 or right == .float32) return .float32
     if (integer_kind(left)) return left
     if (integer_kind(right)) return right
     return .none
@@ -4092,9 +4142,11 @@ intern_record proc(state @mut State, declaration ast.NodeId, fields []mut Record
 c_record_field_type proc(state @State, type Type, depth usize) bool {
     if (depth >= 128 or type.nominal != ast.NodeId(maxval!(u32))) return false
     if (numeric_kind(type.kind) or type.kind == .bool or type.kind == .pointer) return true
-    if (type.kind == .function) return c_abi_type(state, type)
-    if (type.kind == .optional)
-        return c_abi_pointer(state, state.arrays.items[usize(type.array_type)].element)
+    if (type.kind == .function) return c_abi_signature(state, type.function, depth + 1)
+    if (type.kind == .optional) {
+        child :: state.arrays.items[usize(type.array_type)].element
+        return child.kind == .pointer or (child.kind == .function and c_abi_signature(state, child.function, depth + 1))
+    }
     if (type.kind == .enumeration)
         return state.enums.items[usize(type.enum_type)].explicit_backing
     if (type.kind == .array) {
@@ -4103,8 +4155,9 @@ c_record_field_type proc(state @State, type Type, depth usize) bool {
     }
     if (type.kind != .record) return false
     record :: state.records.items[usize(type.record_type)]
-    if (record.is_union or record.declaration == ast.NodeId(maxval!(u32))
-        or !ast.record_c_layout(state.tree, record.declaration) or record.fields.len == 0) return false
+    if (record.tag_type.kind != .none or record.declaration == ast.NodeId(maxval!(u32))
+        or (!record.is_union and !ast.record_c_layout(state.tree, record.declaration))
+        or record.fields.len == 0) return false
     for (record.fields) |field| {
         if (!c_record_field_type(state, field.type, depth + 1)) return false
     }
@@ -4385,7 +4438,7 @@ check_type_expression proc(state @mut State, id ast.NodeId, nominal bool) Type !
     }
     state.cells[usize(id)].record_checking = true
     defer state.cells[usize(id)].record_checking = false
-    type := try check_annotation(state, ast.type_operand(state.tree, id), true)
+    type := try check_annotation_context(state, ast.type_operand(state.tree, id), true, kind == .alias_expr)
     operand_binding :: sema.binding(state.resolution, ast.type_operand(state.tree, id))
     constraint :: (
         operand_binding.kind == .builtin
@@ -4927,26 +4980,29 @@ constant_order proc(left, right ConstantInteger) i32 {
 }
 
 @hide:file
-constant_real proc(state @mut State, id ast.NodeId) ?f64 ! mem.AllocError {
-    if (ast.float_value(state.tree, id)) |value| return value
+constant_real proc(state @mut State, id ast.NodeId, kind TypeKind) ?f64 ! mem.AllocError {
+    if (ast.float_value(state.tree, id)) |value|
+        return if (kind == .float32) ir.round_float32(value) else value
     missing ?f64 :: null
     if (ast.expr_kind(state.tree, id) == .literal_float) {
-        return strconv.parse_float(state.edges.allocator, ast.literal_text(state.tree, id)) catch |err| {
+        text :: ast.literal_text(state.tree, id)
+        value :: strconv.parse_float(state.edges.allocator, text) catch |err| {
             match err {
                 .out_of_memory: return err
                 .invalid_number, .out_of_range: return missing
             }
         }
+        return if (kind == .float32) ir.round_decimal_float32(text, value) else value
     }
     if (evaluate_integer(state, id, true)) |value| {
-        real :: f64(value.magnitude)
+        real f64 :: if (kind == .float32) ir.round_float32(f64(value.magnitude)) else f64(value.magnitude)
         if (value.negative) return -real
         return real
     }
     if (ast.expr_kind(state.tree, id) == .unary) {
         view :: ast.unary_expr(state.tree, id)
         if (view.operator == .negate) {
-            if (try constant_real(state, view.operand)) |value| return -value
+            if (try constant_real(state, view.operand, kind)) |value| return -value
         }
     }
     return missing
@@ -4974,10 +5030,10 @@ pattern_interval proc(state @mut State, id ast.NodeId, key Type) ?PatternInterva
         high = range_view.end
         inclusive = range_view.inclusive
     }
-    interval := PatternInterval{ inclusive = inclusive, real = key.kind == .float }
+    interval := PatternInterval{ inclusive = inclusive, real = real_kind(key.kind) }
     if (interval.real) {
-        if (try constant_real(state, low)) |value| interval.real_low = value else return missing
-        if (try constant_real(state, high)) |value| interval.real_high = value else return missing
+        if (try constant_real(state, low, key.kind)) |value| interval.real_low = value else return missing
+        if (try constant_real(state, high, key.kind)) |value| interval.real_high = value else return missing
     } else if (key.kind == .bool) {
         if (ast.expr_kind(state.tree, low) != .literal_bool or low != high) return missing
         value :: mem.eql(ast.literal_text(state.tree, low), "true")

@@ -714,7 +714,7 @@ all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
     operations [6]ir.Op :: [.equal, .not_equal, .less, .less_equal, .greater, .greater_equal]
     lefts [3]i64 :: [-2, 2, 3]
     rights [3]i64 :: [3, 2, -2]
-    operand_types [2]ir.Type :: [.int, .float]
+    operand_types [3]ir.Type :: [.int, .float, .float32]
     for (operand_types) |type| {
         for (lefts) |left, pair| {
             right :: rights[pair]
@@ -727,7 +727,7 @@ all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
                 module.entry = main
                 left_value := ir.Value{ type = type, data = ir.ValueData{ integer = left } }
                 right_value := ir.Value{ type = type, data = ir.ValueData{ integer = right } }
-                if (type == .float) {
+                if (ir.real_type(type)) {
                     left_value.data = ir.ValueData{ real = f64(left) }
                     right_value.data = ir.ValueData{ real = f64(right) }
                 }
@@ -756,28 +756,31 @@ all_numeric_comparisons_dispatch_on_operand_type_not_bool_result_type test {
 
 nan_comparisons_obey_ieee_rules_in_either_operand_position test {
     operations [6]ir.Op :: [.equal, .not_equal, .less, .less_equal, .greater, .greater_equal]
-    for (operations) |op| {
-        for (usize(0)..usize(3)) |position| {
-            module := ir.init(mem.c_allocator)
-            defer ir.deinit(&module)
-            store := diagnostics.init(mem.c_allocator)
-            defer diagnostics.deinit(&store)
-            main :: try add_function(&module, &[], 0, .bool)
-            module.entry = main
-            try emit(&module, main, ir.Instruction{
-                op = .constant, type = .float, destination = ir.ValueId(0),
-                constant = ir.Value{ type = .float, data = ir.ValueData{ real = 0 } },
-            })
-            try emit(&module, main, ir.Instruction{ op = .divide, type = .float, destination = ir.ValueId(1), left = ir.ValueId(0), right = ir.ValueId(0) })
-            left ir.ValueId :: if (position == 1) ir.ValueId(0) else ir.ValueId(1)
-            right ir.ValueId :: if (position == 0) ir.ValueId(0) else ir.ValueId(1)
-            try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = left, right = right })
-            return_value(&module, main, ir.ValueId(2))
-            outcome := try run(mem.c_allocator, &module, &store)
-            defer deinit(&outcome)
-            try testing.expect(outcome.trap == null)
-            try testing.expect_equal(ir.Type.bool, outcome.value.type)
-            try testing.expect_equal(op == .not_equal, outcome.value.data.boolean)
+    types [2]ir.Type :: [.float, .float32]
+    for (types) |type| {
+        for (operations) |op| {
+            for (usize(0)..usize(3)) |position| {
+                module := ir.init(mem.c_allocator)
+                defer ir.deinit(&module)
+                store := diagnostics.init(mem.c_allocator)
+                defer diagnostics.deinit(&store)
+                main :: try add_function(&module, &[], 0, .bool)
+                module.entry = main
+                try emit(&module, main, ir.Instruction{
+                    op = .constant, type = type, destination = ir.ValueId(0),
+                    constant = ir.Value{ type = type, data = ir.ValueData{ real = 0 } },
+                })
+                try emit(&module, main, ir.Instruction{ op = .divide, type = type, destination = ir.ValueId(1), left = ir.ValueId(0), right = ir.ValueId(0) })
+                left ir.ValueId :: if (position == 1) ir.ValueId(0) else ir.ValueId(1)
+                right ir.ValueId :: if (position == 0) ir.ValueId(0) else ir.ValueId(1)
+                try emit(&module, main, ir.Instruction{ op = op, type = .bool, destination = ir.ValueId(2), left = left, right = right })
+                return_value(&module, main, ir.ValueId(2))
+                outcome := try run(mem.c_allocator, &module, &store)
+                defer deinit(&outcome)
+                try testing.expect(outcome.trap == null)
+                try testing.expect_equal(ir.Type.bool, outcome.value.type)
+                try testing.expect_equal(op == .not_equal, outcome.value.data.boolean)
+            }
         }
     }
 }
@@ -1691,4 +1694,176 @@ union_scalar_reinterpretation_and_zero_leaf_payloads_keep_their_shapes test {
     try testing.expect(zero.trap == null)
     try testing.expect_equal(empty, zero.value.array_type)
     try testing.expect_equal(usize(0), zero.value.data.elements.len)
+}
+
+@hide:file
+Float32Case :: struct {
+    op ir.Op
+    left f64
+    right f64 = 0
+    expected f64
+}
+
+float32_arithmetic_rounds_each_result_in_runtime_and_comptime test {
+    cases [9]Float32Case :: [
+        Float32Case{ op = .add, left = 16777216.0, right = 1.0, expected = 16777216.0 },
+        Float32Case{ op = .add, left = 16777217.0, right = -16777216.0, expected = 0.0 },
+        Float32Case{ op = .subtract, left = 16777216.0, right = -1.0, expected = 16777216.0 },
+        Float32Case{ op = .multiply, left = 4097.0, right = 4097.0, expected = 16785408.0 },
+        Float32Case{ op = .divide, left = 1.0, right = 3.0, expected = 0.3333333432674408 },
+        Float32Case{ op = .remainder, left = 5.5, right = 2.0, expected = 1.5 },
+        Float32Case{ op = .negate, left = 0.0, expected = -0.0 },
+        Float32Case{ op = .negate, left = 16777217.0, expected = -16777216.0 },
+        Float32Case{ op = .multiply, left = 0.000000000000000000000000000000000000000000001401298464324817, right = 0.5, expected = 0.0 },
+    ]
+    for (cases) |item| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        main :: try add_function(&module, &[], 0, .float32)
+        module.entry = main
+        try emit(&module, main, ir.Instruction{ op = .constant, type = .float32, destination = ir.ValueId(0), constant = ir.Value{ type = .float32, data = ir.ValueData{ real = item.left } } })
+        try emit(&module, main, ir.Instruction{ op = .constant, type = .float32, destination = ir.ValueId(1), constant = ir.Value{ type = .float32, data = ir.ValueData{ real = item.right } } })
+        try emit(&module, main, ir.Instruction{ op = item.op, type = .float32, destination = ir.ValueId(2), left = ir.ValueId(0), right = ir.ValueId(1) })
+        return_value(&module, main, ir.ValueId(2))
+        for (0..usize(2)) |mode| {
+            outcome := if (mode == 0) try run(mem.c_allocator, &module, &store)
+                else try run_evaluation(mem.c_allocator, &module, &store)
+            defer deinit(&outcome)
+            try testing.expect(outcome.trap == null)
+            try testing.expect_equal(ir.Type.float32, outcome.value.type)
+            try testing.expect_equal(ptrcast!(@u64, &item.expected)^, ptrcast!(@u64, &outcome.value.data.real)^)
+        }
+    }
+}
+
+@hide:file
+Float32ConversionCase :: struct {
+    source ir.Value
+    target ir.Type
+    expected ?ir.Value
+}
+
+float32_conversions_preserve_integer_midpoints_and_overflow_boundaries test {
+    nan_bits :: u64(0x7ff8000000000000)
+    cases [22]Float32ConversionCase :: [
+        Float32ConversionCase{
+            source = ir.Value{ type = .u64, data = ir.ValueData{ unsigned = 0x8000008000000001 } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = 9223373136366403584.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .int, data = ir.ValueData{ integer = 0x4000004000000001 } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = 4611686568183201792.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .int, data = ir.ValueData{ integer = -0x4000004000000001 } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = -4611686568183201792.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .u64, data = ir.ValueData{ unsigned = maxval!(u64) } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = 18446744073709551616.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .int, data = ir.ValueData{ integer = maxval!(i64) } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = 9223372036854775808.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .int, data = ir.ValueData{ integer = minval!(i64) } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = -9223372036854775808.0 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float, data = ir.ValueData{ real = 0.1 } }, target = .float32,
+            expected = ir.Value{ type = .float32, data = ir.ValueData{ real = 0.10000000149011612 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = 0.1 } }, target = .float,
+            expected = ir.Value{ type = .float, data = ir.ValueData{ real = 0.10000000149011612 } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = 2147483520.0 } }, target = .i32,
+            expected = ir.Value{ type = .i32, data = ir.ValueData{ integer = 2147483520 } },
+        },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 2147483648.0 } }, target = .i32, expected = null },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 2147483647.0 } }, target = .i32, expected = null },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = -2147483648.0 } }, target = .i32,
+            expected = ir.Value{ type = .i32, data = ir.ValueData{ integer = -2147483648 } },
+        },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = -2147483904.0 } }, target = .i32, expected = null },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = 4294967040.0 } }, target = .u32,
+            expected = ir.Value{ type = .u32, data = ir.ValueData{ unsigned = 4294967040 } },
+        },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 4294967296.0 } }, target = .u32, expected = null },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 9223372036854775808.0 } }, target = .int, expected = null },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = -9223372036854775808.0 } }, target = .int,
+            expected = ir.Value{ type = .int, data = ir.ValueData{ integer = minval!(i64) } },
+        },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = 18446742974197923840.0 } }, target = .u64,
+            expected = ir.Value{ type = .u64, data = ir.ValueData{ unsigned = 18446742974197923840 } },
+        },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 18446744073709551616.0 } }, target = .u64, expected = null },
+        Float32ConversionCase{
+            source = ir.Value{ type = .float32, data = ir.ValueData{ real = -0.5 } }, target = .u64,
+            expected = ir.Value{ type = .u64, data = ir.ValueData{ unsigned = 0 } },
+        },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0 } }, target = .u64, expected = null },
+        Float32ConversionCase{ source = ir.Value{ type = .float32, data = ir.ValueData{ real = ptrcast!(@f64, &nan_bits)^ } }, target = .int, expected = null },
+    ]
+    for (cases) |item| {
+        module := ir.init(mem.c_allocator)
+        defer ir.deinit(&module)
+        store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&store)
+        main :: try add_function(&module, &[], 0, item.target)
+        module.entry = main
+        span :: diagnostics.Span{ start = 17, end = 29 }
+        try emit(&module, main, ir.Instruction{ op = .constant, type = item.source.type, destination = ir.ValueId(0), constant = item.source })
+        try emit(&module, main, ir.Instruction{ op = .convert, type = item.target, destination = ir.ValueId(1), left = ir.ValueId(0), span = span })
+        return_value(&module, main, ir.ValueId(1))
+        for (0..usize(2)) |mode| {
+            outcome := if (mode == 0) try run(mem.c_allocator, &module, &store)
+                else try run_evaluation(mem.c_allocator, &module, &store)
+            defer deinit(&outcome)
+            if (item.expected) |expected| {
+                try testing.expect(outcome.trap == null)
+                try testing.expect_equal(expected.type, outcome.value.type)
+                if (ir.real_type(expected.type)) try testing.expect_equal(expected.data.real, outcome.value.data.real)
+                else try testing.expect_equal(expected.data.unsigned, outcome.value.data.unsigned)
+            } else try expect_trap(outcome, &store, .integer_overflow, span)
+        }
+    }
+}
+
+float32_address_stores_and_union_bit_views_share_four_bytes test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    variants [2]ir.RecordField :: [ir.RecordField{ type = .float32 }, ir.RecordField{ type = .u32 }]
+    shape :: try ir.add_union(&module, variants[..], false)
+    main :: try add_function(&module, &[], 0, .u32)
+    _ = try ir.add_local(&module, main, .record, shape)
+    module.entry = main
+    try emit(&module, main, ir.Instruction{ op = .constant, type = .float32, destination = ir.ValueId(0), constant = ir.Value{ type = .float32, data = ir.ValueData{ real = 16777217.0 } } })
+    try emit(&module, main, ir.Instruction{ op = .union_literal, type = .record, array_type = shape, destination = ir.ValueId(1), left = ir.ValueId(0) })
+    try emit(&module, main, ir.Instruction{ op = .store_local, slot = 0, left = ir.ValueId(1) })
+    try emit(&module, main, ir.Instruction{ op = .address_local, type = .address, pointee = .record, array_type = shape, destination = ir.ValueId(2), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .field_address, type = .address, pointee = .float32, destination = ir.ValueId(3), left = ir.ValueId(2), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .load_address, type = .float32, destination = ir.ValueId(4), left = ir.ValueId(3) })
+    try emit(&module, main, ir.Instruction{ op = .negate, type = .float32, destination = ir.ValueId(5), left = ir.ValueId(4) })
+    try emit(&module, main, ir.Instruction{ op = .store_address, left = ir.ValueId(3), right = ir.ValueId(5) })
+    try emit(&module, main, ir.Instruction{ op = .load_local, type = .record, array_type = shape, destination = ir.ValueId(6), slot = 0 })
+    try emit(&module, main, ir.Instruction{ op = .field, type = .u32, destination = ir.ValueId(7), left = ir.ValueId(6), slot = 1 })
+    return_value(&module, main, ir.ValueId(7))
+    for (0..usize(2)) |mode| {
+        outcome := if (mode == 0) try run(mem.c_allocator, &module, &store)
+            else try run_evaluation(mem.c_allocator, &module, &store)
+        defer deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(u64(0xcb800000), outcome.value.data.unsigned)
+    }
 }

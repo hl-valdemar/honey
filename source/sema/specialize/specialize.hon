@@ -1392,7 +1392,7 @@ expand_typeinfo proc(state @mut State, id ast.NodeId) void ! Error {
     if (resolved.kind == .builtin) {
         builtin_kind :: builtin_identity(resolved.data.builtin)
         if (try integer_type(state, type)) tag = "integer"
-        else if (builtin_kind == .float) tag = "float"
+        else if (builtin_kind == .float or builtin_kind == .f32) tag = "float"
         else if (builtin_kind == .bool) tag = "bool"
         else if (builtin_kind == .void) tag = "void"
         else if (builtin_kind == .noreturn) tag = "noreturn"
@@ -3450,6 +3450,9 @@ evaluate_expected proc(state @mut State, id, annotation ast.NodeId) Value ! Erro
     }
     if (!is_type(state, annotation)) {
         type :: try canonical_type(state, annotation)
+        resolved :: binding(state, type)
+        if (resolved.kind == .builtin and resolved.data.builtin == .f32 and flexible(state, id))
+            return try evaluate_ir(state, id, type)
         if (type != no_node and ast.expr_kind(&state.tree, type) == .array_type
             and !try type_array_initialized(state, id, id)) return Value{}
         if (type != no_node and ast.expr_kind(&state.tree, type) == .optional_type) {
@@ -3609,7 +3612,7 @@ snapshot_layout proc(checked @typecheck.Result, type typecheck.Type, depth usize
         .void, .anyopaque: return [0, 1]
         .bool, .i8, .u8: return [1, 1]
         .i16, .u16: return [2, 2]
-        .i32, .u32: return [4, 4]
+        .i32, .u32, .float32: return [4, 4]
         .int, .isize, .usize, .u64, .float, .pointer, .function: return [8, 8]
         .string, .slice: return [16, 8]
         .enumeration: return snapshot_layout(checked,
@@ -3655,12 +3658,10 @@ snapshot_layout proc(checked @typecheck.Result, type typecheck.Type, depth usize
                 }
                 if (child[1] > alignment) alignment = child[1]
             }
-            if (record.is_union) {
+            if (record.is_union and record.tag_type.kind == .enumeration) {
                 alignment = 8
-                if (record.tag_type.kind == .enumeration) {
-                    if (size > maxval!(usize) - 8) return [no_index, 1]
-                    size += 8
-                }
+                if (size > maxval!(usize) - 8) return [no_index, 1]
+                size += 8
             }
             if (size > maxval!(usize) - alignment) return [no_index, 1]
             return [divtrunc!(size + alignment - 1, alignment) * alignment, alignment]
@@ -3905,6 +3906,7 @@ serialized_type proc(
             .u64: .u64
             .usize: .usize
             .float: .f64
+            .float32: .f32
             .bool: .bool
             .string: .string
             .void: .void
@@ -4238,7 +4240,7 @@ serialize_value proc(
         magnitude :: if (negative) u64(-(value.data.integer + 1)) + 1 else value.data.unsigned
         result = try ast.add_integer(state.builder, span, magnitude)
         if (negative) result = try ast.add_unary(state.builder, span, .negate, result)
-    } else if (type.kind == .float) {
+    } else if (type.kind == .float or type.kind == .float32) {
         result = try ast.add_float(state.builder, span, value.data.real)
     } else if (type.kind == .bool) {
         result = try ast.add_boolean(state.builder, span, value.data.boolean)
@@ -8377,7 +8379,8 @@ execute_type_statement_body proc(state @mut State, execution @mut TypeExecution,
                 resolved_type :: binding(state, actual)
                 numeric :: (try integer_type(state, actual)
                     or (resolved_type.kind == .builtin
-                        and builtin_identity(resolved_type.data.builtin) == .float))
+                        and (builtin_identity(resolved_type.data.builtin) == .float
+                            or builtin_identity(resolved_type.data.builtin) == .f32)))
                 if (numeric) execution.locals.items[index].annotation = actual
             }
             value :: try type_execution_value(state, expression, execution.locals.items[index].annotation)
@@ -8795,7 +8798,9 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
         if (class == .statement) {
             declaration :: ast.statement_decl(&state.tree, target)
             if (declaration.mutability != .constant) return Value{}
-            value := try evaluate(state, declaration.initializer)
+            value := if (declaration.type) |annotation|
+                try evaluate_expected(state, declaration.initializer, annotation)
+            else try evaluate(state, declaration.initializer)
             if (declaration.type) |annotation| value.annotation = annotation
             return value
         }
@@ -8924,7 +8929,7 @@ evaluate proc(state @mut State, id ast.NodeId) Value ! Error {
 @hide:file
 evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
     view :: ast.binary_expr(&state.tree, id)
-    if (view.operator == .divide) return try evaluate_ir(state, id, try builtin(state, id, .float))
+    if (view.operator == .divide) return try evaluate_ir(state, id, try expression_type(state, id, 0))
     if (view.operator == .bit_and or view.operator == .bit_or or view.operator == .bit_xor
         or view.operator == .shift_left or view.operator == .shift_right or view.operator == .shift_left_saturating)
         return try evaluate_ir(state, id, try expression_type(state, id, 0))
@@ -8941,8 +8946,7 @@ evaluate_binary proc(state @mut State, id ast.NodeId) Value ! Error {
             view.operator == .equal or view.operator == .not_equal or view.operator == .less
             or view.operator == .less_equal or view.operator == .greater or view.operator == .greater_equal
         )
-        kind sema.BuiltinType :: if (boolean) .bool else .float
-        result_type :: try builtin(state, id, kind)
+        result_type :: if (boolean) try builtin(state, id, .bool) else try expression_type(state, id, 0)
         return try evaluate_ir(state, id, result_type)
     }
     if (
@@ -9466,8 +9470,14 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 or view.operator == .less_equal or view.operator == .greater or view.operator == .greater_equal
                 or view.operator == .logical_and or view.operator == .logical_or
             ) return try builtin(state, id, .bool)
-            if ((view.operator == .bit_and or view.operator == .bit_or or view.operator == .bit_xor)
-                and flexible(state, view.left)) return try expression_type(state, view.right, depth + 1)
+            left_flexible :: flexible(state, view.left)
+            right_flexible :: flexible(state, view.right)
+            if (view.operator == .divide and left_flexible and right_flexible)
+                return try builtin(state, id, .f64)
+            if (left_flexible and !right_flexible)
+                return try expression_type(state, view.right, depth + 1)
+            if (left_flexible and right_flexible and ast.expr_kind(&state.tree, view.right) == .literal_float)
+                return try builtin(state, id, .f64)
             return try expression_type(state, view.left, depth + 1)
         }
         .selection: {
@@ -9771,7 +9781,7 @@ valid_value proc(state @mut State, annotation ast.NodeId, value Value) bool ! Er
         kind :: resolved.data.builtin
         if (kind == .bool) return value.kind == .boolean
         if (kind == .string) return value.kind == .string
-        if (kind == .float or kind == .f64) return value.kind == .real
+        if (kind == .float or kind == .f64 or kind == .f32) return value.kind == .real
         if (kind == .void) return (
             value.kind == .aggregate and value.annotation != no_node
             and try same_type(state, type, value.annotation)

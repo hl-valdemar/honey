@@ -18,6 +18,7 @@ State :: struct {
     line_starts []arraylist.ArrayList(usize)
     values []mut Type
     next_register usize = 0
+    next_call usize = 0
 }
 
 @hide:file
@@ -74,22 +75,22 @@ emit proc(
     }
     try io.write_all(output, runtime)
     for (sources) |source, index| {
-        try io.print("\n@p{} = private constant ", output, {index})
+        try io.print("\n@honey.p{} = private constant ", output, {index})
         try bytes_constant(output, source.path, false)
     }
-    try io.print("\n@paths = private constant [{} x %string] [", output, {sources.len})
+    try io.print("\n@honey.paths = private constant [{} x %string] [", output, {sources.len})
     for (sources) |source, index| {
         if (index != 0) try io.write_all(output, ", ")
-        try io.print("%string {{ ptr @p{}, i64 {} }}", output, {index, source.path.len})
+        try io.print("%string {{ ptr @honey.p{}, i64 {} }}", output, {index, source.path.len})
     }
     try io.write_all(output, "]\n")
     for (module.strings.items) |string, index| {
-        try io.print("@s{} = private constant ", output, {index})
+        try io.print("@honey.s{} = private constant ", output, {index})
         try bytes_constant(output, string.allocation[..string.len], true)
         try io.write_all(output, "\n")
     }
     for (diagnostic_store.list.items) |diagnostic, index| {
-        try io.print("@d{} = private constant ", output, {index})
+        try io.print("@honey.d{} = private constant ", output, {index})
         try bytes_constant(output, diagnostics.message(diagnostic), false)
         try io.write_all(output, "\n")
     }
@@ -101,18 +102,18 @@ emit proc(
         .unreachable_executed,
     ]
     for (memory_codes) |code| {
-        try io.print("@memory_{s} = private constant ", output, {enummap.get(&memory_symbols, code)?})
+        try io.print("@honey.memory_{s} = private constant ", output, {enummap.get(&memory_symbols, code)?})
         try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?, false)
         try io.write_all(output, "\n")
     }
     try emit_reporting(output, diagnostic_store, line_starts.items, sources, primary)
     for (module.globals.items) |global, index| {
-        try io.print("@g{} = internal global ", output, {index})
+        try io.print("@honey.g{} = internal global ", output, {index})
         storage_kind :: if (global.type == .void) ir.Type.invalid else global.type
         try write_type(output, module, Type{ kind = storage_kind, shape = global.array_type })
         alignment usize := global.alignment
         if (alignment == 0) alignment = ir.storage_alignment(module, global.type, global.array_type)
-        try io.print(" zeroinitializer, align {}\n@gs{} = internal global i8 0\n",
+        try io.print(" zeroinitializer, align {}\n@honey.gs{} = internal global i8 0\n",
             output, {alignment, index})
         try emit_global(output, module, global, index)
     }
@@ -155,17 +156,27 @@ emit proc(
     if (module.entry) |entry| {
         function :: module.functions.items[usize(entry)]
         result :: Type{ kind = function.result, shape = function.result_array_type }
-        if (result.kind != .void) try io.write_all(output, "  %r0 = ")
-        else try io.write_all(output, "  ")
-        try io.write_all(output, "call ")
-        try write_abi_result(output, module, result)
-        try io.write_all(output, " ")
-        try function_symbol(output, module, entry)
+        entry_state := State{ output = output, module = module, line_starts = line_starts.items,
+            values = &[], next_register = 2 }
+        argument ?usize := null
         if (module.entry_init_io != null) {
-            try io.write_all(output, "(")
+            try io.write_all(output, "  %r2 = select i1 true, ")
             try write_type(output, module, local_type(&function, 0))
-            try io.write_all(output, " %init)\n  call void @free(ptr %descriptors)\n")
-        } else try io.write_all(output, "()\n")
+            try io.write_all(output, " %init, ")
+            try write_type(output, module, local_type(&function, 0))
+            try io.write_all(output, " poison\n")
+            entry_state.next_register = 3
+            argument = 2
+        }
+        actual :: try direct_call(&entry_state, entry, argument)
+        if (result.kind != .void) {
+            try io.write_all(output, "  %r0 = select i1 true, ")
+            try write_type(output, module, result)
+            try io.print(" %r{}, ", output, {actual})
+            try write_type(output, module, result)
+            try io.write_all(output, " poison\n")
+        }
+        if (module.entry_init_io != null) try io.write_all(output, "  call void @free(ptr %descriptors)\n")
         printable := result
         operand usize := 0
         if (function.result_fallible) {
@@ -181,7 +192,7 @@ emit proc(
             try write_type(output, module, Type{ kind = shape.tag_type })
             try io.write_all(output, " %tag, ")
             try write_constant(output, module, success.tag)
-            try io.write_all(output, "\n  br i1 %success, label %ok, label %error\nerror:\n  call void @report(i64 -1)\n  ret i32 1\nok:\n")
+            try io.write_all(output, "\n  br i1 %success, label %ok, label %error\nerror:\n  call void @honey.report(i64 -1)\n  ret i32 1\nok:\n")
             printable = Type{ kind = success.type, shape = success.array_type }
             operand = 1
             if (printable.kind != .void) {
@@ -192,9 +203,9 @@ emit proc(
         }
         if (module.entry_init_io == null and printable.kind != .void and printable.kind != .invalid) {
             try print_call(output, module, printable, operand)
-            try io.write_all(output, "  call void @out(i32 1, ptr @newline, i64 1)\n")
+            try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.newline, i64 1)\n")
         }
-        try io.write_all(output, "  call void @report(i64 -1)\n")
+        try io.write_all(output, "  call void @honey.report(i64 -1)\n")
         if (module.entry_init_io != null and diagnostics.count(diagnostic_store) == 0) {
             if (printable.kind == .i32) try io.print("  ret i32 %r{}\n", output, {operand})
             else try io.write_all(output, "  ret i32 0\n")
@@ -203,7 +214,7 @@ emit proc(
             try io.print("  ret i32 {}\n", output, {status})
         }
     } else {
-        try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
+        try io.print("  call void @honey.trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
     }
     try io.write_all(output, "}\n")
     try flush_output(&buffered)
@@ -219,7 +230,7 @@ emit_init_arguments proc(output io.Writer, module @ir.Module, system ir.Function
         `declare ptr @malloc(i64)
         `declare void @free(ptr)
         `declare i64 @strlen(ptr)
-        `@startup_error = private constant [59 x i8] c"infrastructure error: cannot allocate argument descriptors\0A"
+        `@honey.startup_error = private constant [59 x i8] c"infrastructure error: cannot allocate argument descriptors\0A"
         `define i32 @main(i32 %argc, ptr %argv) {
         `entry:
         `  %argc64 = zext i32 %argc to i64
@@ -230,7 +241,7 @@ emit_init_arguments proc(output io.Writer, module @ir.Module, system ir.Function
         `  %missing = icmp eq ptr %descriptors, null
         `  br i1 %missing, label %allocation_error, label %arguments
         `allocation_error:
-        `  call void @out(i32 2, ptr @startup_error, i64 59)
+        `  call void @honey.out(i32 2, ptr @honey.startup_error, i64 59)
         `  ret i32 2
         `arguments:
         `  br label %argument_loop
@@ -250,11 +261,14 @@ emit_init_arguments proc(output io.Writer, module @ir.Module, system ir.Function
         `  br label %argument_loop
         `invoke:
     )
-    try io.write_all(output, "  %io = call ")
+    state := State{ output = output, module = module, line_starts = &[], values = &[],
+        next_register = 100 }
+    value :: try direct_call(&state, system, null)
+    try io.write_all(output, "  %io = select i1 true, ")
     try write_type(output, module, io_type)
-    try io.write_all(output, " ")
-    try function_symbol(output, module, system)
-    try io.write_all(output, "()\n  %with_io = insertvalue ")
+    try io.print(" %r{}, ", output, {value})
+    try write_type(output, module, io_type)
+    try io.write_all(output, " poison\n  %with_io = insertvalue ")
     try write_type(output, module, init)
     try io.write_all(output, " poison, ")
     try write_type(output, module, io_type)
@@ -286,6 +300,7 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         .i32, .u32: try io.write_all(output, "i32")
         .int, .isize, .u64, .usize: try io.write_all(output, "i64")
         .float: try io.write_all(output, "double")
+        .float32: try io.write_all(output, "float")
         .bool: try io.write_all(output, "i1")
         .string: try io.write_all(output, "%string")
         .function, .pointer: try io.write_all(output, "ptr")
@@ -299,8 +314,9 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         .record: {
             shape :: module.arrays.items[usize(type.shape)]
             if (shape.is_union) {
-                words usize :: divtrunc!(shape.byte_size, 8)
-                try io.print("{{ [{} x i64] }}", output, {words})
+                unit :: shape.alignment * 8
+                words :: divtrunc!(shape.byte_size, shape.alignment)
+                try io.print("{{ [{} x i{}] }}", output, {words, unit})
                 return
             }
             try io.write_all(output, "{ ")
@@ -335,12 +351,12 @@ abi_extension proc(kind ir.Type) []u8 {
 write_abi_result proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
     extension :: abi_extension(type.kind)
     if (extension.len != 0) try io.print("{s} ", output, {extension})
-    try write_type(output, module, type)
+    try write_record_abi(output, module, type, true)
 }
 
 @hide
 write_abi_parameter proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
-    try write_type(output, module, type)
+    try write_record_abi(output, module, type, false)
     extension :: abi_extension(type.kind)
     if (extension.len != 0) try io.print(" {s}", output, {extension})
 }
@@ -349,7 +365,7 @@ write_abi_parameter proc(output io.Writer, module @ir.Module, type Type) void ! 
 function_symbol proc(output io.Writer, module @ir.Module, id ir.FunctionId) void ! io.WriteError {
     name :: module.functions.items[usize(id)].external_name
     if (name.len == 0) {
-        try io.print("@f{}", output, {u32(id)})
+        try io.print("@honey.f{}", output, {u32(id)})
         return
     }
     try io.write_all(output, "@\"")
@@ -361,7 +377,7 @@ function_symbol proc(output io.Writer, module @ir.Module, id ir.FunctionId) void
     try io.write_all(output, "\"")
 }
 
-@hide:file
+@hide
 local_type proc(function @ir.Function, index usize) Type {
     type := Type{ kind = function.locals.items[index] }
     if (type.kind == .void) type.kind = .invalid
@@ -404,31 +420,31 @@ emit_reporting proc(
     sources []diagnostics.Source,
     primary diagnostics.SourceId,
 ) void ! io.WriteError {
-    try io.write_all(output, "define internal void @io_failure() noreturn {\nentry:\n")
-    try io.print("  %path_result = call i64 @write(i32 2, ptr @p{}, i64 {})\n", output, {usize(primary), sources[usize(primary)].path.len})
-    try io.write_all(output, "  %message_result = call i64 @write(i32 2, ptr @write_error, i64 44)\n  call void @exit(i32 2)\n  unreachable\n}\n")
-    try io.write_all(output, "define internal void @diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
-    try io.print("  %descriptor = getelementptr [{} x %string], ptr @paths, i64 0, i64 %source\n", output, {sources.len})
-    try io.write_all(output, "  %path = load %string, ptr %descriptor\n  %bytes = extractvalue %string %path, 0\n  %path_length = extractvalue %string %path, 1\n  call void @out(i32 2, ptr %bytes, i64 %path_length)\n")
+    try io.write_all(output, "define internal void @honey.io_failure() noreturn {\nentry:\n")
+    try io.print("  %path_result = call i64 @write(i32 2, ptr @honey.p{}, i64 {})\n", output, {usize(primary), sources[usize(primary)].path.len})
+    try io.write_all(output, "  %message_result = call i64 @write(i32 2, ptr @honey.write_error, i64 44)\n  call void @exit(i32 2)\n  unreachable\n}\n")
+    try io.write_all(output, "define internal void @honey.diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
+    try io.print("  %descriptor = getelementptr [{} x %string], ptr @honey.paths, i64 0, i64 %source\n", output, {sources.len})
+    try io.write_all(output, "  %path = load %string, ptr %descriptor\n  %bytes = extractvalue %string %path, 0\n  %path_length = extractvalue %string %path, 1\n  call void @honey.out(i32 2, ptr %bytes, i64 %path_length)\n")
     try io.write_all(output,
-        `  call void @out(i32 2, ptr @colon, i64 1)
-        `  call void @print_integer(i32 2, i64 %line, i1 true)
-        `  call void @out(i32 2, ptr @colon, i64 1)
-        `  call void @print_integer(i32 2, i64 %column, i1 true)
-        `  %label = select i1 %trap, ptr @runtime_trap, ptr @error
+        `  call void @honey.out(i32 2, ptr @honey.colon, i64 1)
+        `  call void @honey.print_integer(i32 2, i64 %line, i1 true)
+        `  call void @honey.out(i32 2, ptr @honey.colon, i64 1)
+        `  call void @honey.print_integer(i32 2, i64 %column, i1 true)
+        `  %label = select i1 %trap, ptr @honey.runtime_trap, ptr @honey.error
         `  %label_length = select i1 %trap, i64 16, i64 9
-        `  call void @out(i32 2, ptr %label, i64 %label_length)
-        `  call void @out(i32 2, ptr %message, i64 %length)
-        `  call void @out(i32 2, ptr @newline, i64 1)
+        `  call void @honey.out(i32 2, ptr %label, i64 %label_length)
+        `  call void @honey.out(i32 2, ptr %message, i64 %length)
+        `  call void @honey.out(i32 2, ptr @honey.newline, i64 1)
         `  ret void
         `}
     )
-    try io.write_all(output, "define internal void @report(i64 %trap) {\nentry:\n")
+    try io.write_all(output, "define internal void @honey.report(i64 %trap) {\nentry:\n")
     for (diagnostic_store.list.items) |diagnostic, index| {
         position :: location(line_starts, diagnostic.span)
         message :: diagnostics.message(diagnostic)
         try io.print("  %t{} = icmp eq i64 %trap, {}\n", output, {index, index})
-        try io.print("  call void @diagnose(i64 {}, i64 {}, i64 {}, ptr @d{}, i64 {}, i1 %t{})\n", output, {
+        try io.print("  call void @honey.diagnose(i64 {}, i64 {}, i64 {}, ptr @honey.d{}, i64 {}, i1 %t{})\n", output, {
             usize(diagnostic.span.source), position.line, position.column, index, message.len, index,
         })
     }
@@ -438,26 +454,26 @@ emit_reporting proc(
 @hide:file
 emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index usize) void ! io.WriteError {
     type :: Type{ kind = global.type, shape = global.array_type }
-    try io.print("define internal ptr @global{}(i64 %source, i64 %line, i64 %column) {{\nentry:\n", output, {index})
-    try io.print("  %state = load i8, ptr @gs{}\n", output, {index})
+    try io.print("define internal ptr @honey.global{}(i64 %source, i64 %line, i64 %column) {{\nentry:\n", output, {index})
+    try io.print("  %state = load i8, ptr @honey.gs{}\n", output, {index})
     try io.write_all(output,
         `  switch i8 %state, label %initialize [ i8 1, label %cycle i8 2, label %ready ]
         `cycle:
-        `  call void @trap(i64 -1, i64 %source, i64 %line, i64 %column, ptr @cycle, i64 27)
+        `  call void @honey.trap(i64 -1, i64 %source, i64 %line, i64 %column, ptr @honey.cycle, i64 27)
         `  unreachable
         `initialize:
     )
-    try io.print("  store i8 1, ptr @gs{}\n", output, {index})
+    try io.print("  store i8 1, ptr @honey.gs{}\n", output, {index})
     if (type.kind == .void) {
-        try io.print("  call void @f{}()\n", output, {u32(global.initializer)})
+        try io.print("  call void @honey.f{}()\n", output, {u32(global.initializer)})
     } else {
-        try io.write_all(output, "  %value = call ")
-        try write_abi_result(output, module, type)
-        try io.print(" @f{}()\n  store ", output, {u32(global.initializer)})
+        state := State{ output = output, module = module, line_starts = &[], values = &[] }
+        value :: try direct_call(&state, global.initializer, null)
+        try io.write_all(output, "  store ")
         try write_type(output, module, type)
-        try io.print(" %value, ptr @g{}\n", output, {index})
+        try io.print(" %r{}, ptr @honey.g{}\n", output, {value, index})
     }
-    try io.print("  store i8 2, ptr @gs{}\n  br label %ready\nready:\n  ret ptr @g{}\n}}\n", output, {index, index})
+    try io.print("  store i8 2, ptr @honey.gs{}\n  br label %ready\nready:\n  ret ptr @honey.g{}\n}}\n", output, {index, index})
 }
 
 @hide:file
@@ -469,15 +485,19 @@ print_call proc(output io.Writer, module @ir.Module, type Type, operand usize) v
             if (bits < 64) {
                 extension []u8 :: if (unsigned) "zext" else "sext"
                 try io.print("  %print_value{} = {s} i{} %r{} to i64\n", output, {operand, extension, bits, operand})
-                try io.print("  call void @print_integer(i32 1, i64 %print_value{}, i1 {})\n", output, {operand, unsigned})
-            } else try io.print("  call void @print_integer(i32 1, i64 %r{}, i1 {})\n", output, {operand, unsigned})
+                try io.print("  call void @honey.print_integer(i32 1, i64 %print_value{}, i1 {})\n", output, {operand, unsigned})
+            } else try io.print("  call void @honey.print_integer(i32 1, i64 %r{}, i1 {})\n", output, {operand, unsigned})
         }
-        .float: try io.print("  call void @print_float(double %r{})\n", output, {operand})
-        .bool: try io.print("  call void @print_bool(i1 %r{})\n", output, {operand})
-        .string: try io.print("  call void @print_string(%string %r{})\n", output, {operand})
-        .pointer: try io.write_all(output, "  call void @out(i32 1, ptr @pointer_text, i64 9)\n")
+        .float: try io.print("  call void @honey.print_float(double %r{})\n", output, {operand})
+        .float32: {
+            try io.print("  %print_value{} = fpext float %r{} to double\n", output, {operand, operand})
+            try io.print("  call void @honey.print_float(double %print_value{})\n", output, {operand})
+        }
+        .bool: try io.print("  call void @honey.print_bool(i1 %r{})\n", output, {operand})
+        .string: try io.print("  call void @honey.print_string(%string %r{})\n", output, {operand})
+        .pointer: try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.pointer_text, i64 9)\n")
         .array, .record: {
-            try io.print("  call void @print_array{}(", output, {u32(type.shape)})
+            try io.print("  call void @honey.print_array{}(", output, {u32(type.shape)})
             try write_type(output, module, type)
             try io.print(" %r{})\n", output, {operand})
         }
@@ -490,15 +510,15 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
     shape :: module.arrays.items[usize(id)]
     type :: Type{ kind = .array, shape = id }
     element :: Type{ kind = shape.element, shape = shape.element_array }
-    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
     try write_type(output, module, type)
     try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
     try write_type(output, module, type)
     try io.write_all(output, "\n  store ")
     try write_type(output, module, type)
-    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @honey.array_open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
+    try io.write_all(output, " %value, ptr %storage\n  call void @honey.out(i32 1, ptr @honey.array_open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
     try io.print("  %done = icmp eq i64 %index, {}\n", output, {shape.len})
-    try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @out(i32 1, ptr @separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
+    try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @honey.out(i32 1, ptr @honey.separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
     try write_type(output, module, type)
     try io.write_all(output, ", ptr %storage, i64 0, i64 %index\n  %r0 = load ")
     try write_type(output, module, element)
@@ -506,7 +526,7 @@ emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
     # functions may occur inside arrays without being printable source results.
     if (element.kind != .function) try print_call(output, module, element, 0)
     else try io.write_all(output, "  call void @exit(i32 2)\n")
-    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @out(i32 1, ptr @honey.array_close, i64 1)\n  ret void\n}\n")
+    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @honey.out(i32 1, ptr @honey.array_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide:file
@@ -517,31 +537,31 @@ emit_record_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) voi
         try emit_union_printer(output, module, id)
         return
     }
-    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
     try write_type(output, module, type)
-    try io.write_all(output, " %value) {\nentry:\n  call void @out(i32 1, ptr @record_open, i64 1)\n")
+    try io.write_all(output, " %value) {\nentry:\n  call void @honey.out(i32 1, ptr @honey.record_open, i64 1)\n")
     for (shape.fields) |field, index| {
-        if (index != 0) try io.write_all(output, "  call void @out(i32 1, ptr @separator, i64 2)\n")
+        if (index != 0) try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.separator, i64 2)\n")
         try io.print("  %r{} = extractvalue ", output, {index})
         try write_type(output, module, type)
         try io.print(" %value, {}\n", output, {index})
         if (field.type != .function) try print_call(output, module, Type{ kind = field.type, shape = field.array_type }, index)
         else try io.write_all(output, "  call void @exit(i32 2)\n")
     }
-    try io.write_all(output, "  call void @out(i32 1, ptr @record_close, i64 1)\n  ret void\n}\n")
+    try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.record_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide:file
 emit_union_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
     shape :: module.arrays.items[usize(id)]
     type :: Type{ kind = .record, shape = id }
-    try io.print("define internal void @print_array{}(", output, {u32(id)})
+    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
     try write_type(output, module, type)
     try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
     try write_type(output, module, type)
     try io.write_all(output, "\n  store ")
     try write_type(output, module, type)
-    try io.write_all(output, " %value, ptr %storage\n  call void @out(i32 1, ptr @record_open, i64 1)\n")
+    try io.write_all(output, " %value, ptr %storage\n  call void @honey.out(i32 1, ptr @honey.record_open, i64 1)\n")
     if (shape.tag_type != .void) {
         try io.write_all(output, "  %tag = load ")
         try write_type(output, module, Type{ kind = shape.tag_type })
@@ -573,7 +593,7 @@ emit_union_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void
         }
         try io.write_all(output, "  br label %end\n")
     }
-    try io.write_all(output, "end:\n  call void @out(i32 1, ptr @record_close, i64 1)\n  ret void\n}\n")
+    try io.write_all(output, "end:\n  call void @honey.out(i32 1, ptr @honey.record_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide
@@ -603,7 +623,7 @@ store proc(state @State, destination ir.ValueId, register usize) void ! io.Write
 @hide
 check_local proc(state @State, slot u32, read bool, span diagnostics.Span) void ! io.WriteError {
     position :: location(state.line_starts, span)
-    try io.print("  call void @check_init(ptr %i{}, i1 {}, i64 {}, i64 {}, i64 {})\n", state.output, {slot, read, usize(span.source), position.line, position.column})
+    try io.print("  call void @honey.check_init(ptr %i{}, i1 {}, i64 {}, i64 {}, i64 {})\n", state.output, {slot, read, usize(span.source), position.line, position.column})
 }
 
 @hide:file
@@ -632,7 +652,7 @@ trap proc(state @State, code diagnostics.Code, span diagnostics.Span) void ! io.
     symbol :: enummap.get(&trap_symbols, code)
     message :: enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?
     length :: message.len
-    try io.print("  call void @trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @", state.output, {usize(span.source), position.line, position.column})
+    try io.print("  call void @honey.trap(i64 -1, i64 {}, i64 {}, i64 {}, ptr @honey.", state.output, {usize(span.source), position.line, position.column})
     if (symbol) |name| try io.write_all(state.output, name)
     else try io.print("memory_{s}", state.output, {enummap.get(&memory_symbols, code)?})
     try io.print(", i64 {})\n  unreachable\n", state.output, {length})
@@ -655,8 +675,22 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
             bits :: ptrcast!(@u64, &value.data.real)^
             try io.print("bitcast (i64 {} to double)", output, {bits})
         }
+        .float32: {
+            real :: ir.round_float32(value.data.real)
+            # LLVM accepts an exact double-width hexadecimal spelling for float constants.
+            bits :: ptrcast!(@u64, &real)^
+            digits :: "0123456789ABCDEF"
+            spelling [18]mut u8 := undefined
+            spelling[0] = '0'
+            spelling[1] = 'x'
+            for (0..usize(16)) |index| {
+                shift :: (15 - index) * 4
+                spelling[index + 2] = digits[usize((bits >> shift) & 15)]
+            }
+            try io.write_all(output, spelling[..])
+        }
         .bool: try io.print("{}", output, {value.data.boolean})
-        .string: try io.print("{{ ptr @s{}, i64 {} }}", output, {u32(value.data.string), ir.string_bytes(module, value.data.string).len})
+        .string: try io.print("{{ ptr @honey.s{}, i64 {} }}", output, {u32(value.data.string), ir.string_bytes(module, value.data.string).len})
         .pointer: {
             if (value.data.unsigned == maxval!(u64)) try io.write_all(output, "null")
             else unreachable
@@ -680,12 +714,14 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
         .record: {
             shape :: module.arrays.items[usize(value.array_type)]
             if (shape.is_union) {
-                words usize :: divtrunc!(shape.byte_size, 8)
-                try io.print("{{ [{} x i64] [", output, {words})
+                unit :: shape.alignment
+                words :: divtrunc!(shape.byte_size, unit)
+                try io.print("{{ [{} x i{}] [", output, {words, unit * 8})
                 for (0..words) |index| {
                     if (index != 0) try io.write_all(output, ", ")
-                    word :: ir.read_storage(module, .u64, ir.no_array, value.data.elements[index * 8..], true)
-                    try io.print("i64 {}", output, {word.data.unsigned})
+                    kind :: if (unit == 8) ir.Type.u64 else if (unit == 4) ir.Type.u32 else if (unit == 2) ir.Type.u16 else ir.Type.u8
+                    word :: ir.read_storage(module, kind, ir.no_array, value.data.elements[index * unit..], true)
+                    try io.print("i{} {}", output, {unit * 8, word.data.unsigned})
                 }
                 try io.write_all(output, "] }")
                 return
@@ -707,19 +743,25 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
 @hide:file
 emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.WriteError {
     output :: state.output
+    result_type :: Type{ kind = function.result, shape = function.result_array_type }
+    abi :: record_abi(state.module, result_type)
     if (function.external_name.len != 0) try io.write_all(output, "declare ")
     else try io.write_all(output, "define internal ")
     try write_abi_result(output, state.module, Type{ kind = function.result, shape = function.result_array_type })
     try io.write_all(output, " ")
     try function_symbol(output, state.module, ir.FunctionId(id))
     try io.write_all(output, "(")
+    if (abi.indirect) {
+        try write_sret(output, state.module, result_type)
+        try io.write_all(output, " %abi_sret")
+    }
     for (function.parameters.items) |_, index| {
-        if (index != 0) try io.write_all(output, ", ")
+        if (index != 0 or abi.indirect) try io.write_all(output, ", ")
         try write_abi_parameter(output, state.module, local_type(function, index))
         try io.print(" %p{}", output, {index})
     }
     if (function.variadic) {
-        if (function.parameters.items.len != 0) try io.write_all(output, ", ")
+        if (function.parameters.items.len != 0 or abi.indirect) try io.write_all(output, ", ")
         try io.write_all(output, "...")
     }
     if (function.external_name.len != 0) {
@@ -730,19 +772,57 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
     for (function.locals.items) |_, index| {
         type :: local_type(function, index)
         try io.print("  %l{} = alloca ", output, {index})
-        try write_type(output, state.module, type)
+        parameter_abi :: record_abi(state.module, type)
+        if (parameter_abi.size != 0) {
+            words usize :: divtrunc!(parameter_abi.size + 7, 8)
+            try io.print("[{} x i64], align 16", output, {words})
+        } else try write_type(output, state.module, type)
         try io.print("\n  %i{} = alloca i1\n  store i1 {}, ptr %i{}\n", output, {index, index < function.parameters.items.len, index})
         if (index < function.parameters.items.len) {
-            try io.write_all(output, "  store ")
-            try write_type(output, state.module, type)
-            try io.print(" %p{}, ptr %l{}\n", output, {index, index})
+            if (parameter_abi.indirect) {
+                value :: fresh(state)
+                try io.print("  %r{} = load ", output, {value})
+                try write_type(output, state.module, type)
+                try io.print(", ptr %p{}, align 1\n  store ", output, {index})
+                try write_type(output, state.module, type)
+                try io.print(" %r{}, ptr %l{}\n", output, {value, index})
+            } else {
+                try io.write_all(output, "  store ")
+                try write_record_abi(output, state.module, type, false)
+                try io.print(" %p{}, ptr %l{}\n", output, {index, index})
+            }
         }
     }
     for (state.values) |type, index| {
         if (type.kind == .void) continue
         try io.print("  %v{} = alloca ", output, {index})
-        try write_type(output, state.module, type)
+        # ABI results may occupy a complete eight-byte carrier even for smaller source records.
+        value_abi :: record_abi(state.module, type)
+        if (value_abi.size != 0) {
+            words usize :: divtrunc!(value_abi.size + 7, 8)
+            try io.print("[{} x i64], align 16", output, {words})
+        } else try write_type(output, state.module, type)
         try io.write_all(output, "\n")
+    }
+    # caller-owned copies live in the entry block, so calls inside loops never grow the stack.
+    call_index := usize(0)
+    for (function.blocks.items) |block| {
+        for (block.instructions.items) |instruction| {
+            if (instruction.op != .call) continue
+            for (0..instruction.arguments_count) |index| {
+                operand :: block.arguments.items[instruction.arguments_start + index]
+                argument_abi :: record_abi(state.module, state.values[usize(operand)])
+                if (argument_abi.size == 0) continue
+                words usize :: divtrunc!(argument_abi.size + 7, 8)
+                try io.print("  %abi_arg{}_{} = alloca [{} x i64], align 16\n", output,
+                    {call_index, index, words})
+            }
+            call_index += 1
+        }
+    }
+    if (abi.size != 0 and !abi.indirect) {
+        words usize :: divtrunc!(abi.size + 7, 8)
+        try io.print("  %abi_return = alloca [{} x i64], align 16\n", output, {words})
     }
     try io.print("  br label %b{}\n", output, {u32(function.entry)})
     for (function.blocks.items) |block, index| {
@@ -753,13 +833,25 @@ emit_function proc(state @mut State, function @ir.Function, id usize) void ! io.
             .return_value: {
                 if (terminator.value == ir.no_value or state.values[usize(terminator.value)].kind == .void) try io.write_all(output, "  ret void\n")
                 else {
-                    result :: try load(state, terminator.value)
-                    try io.write_all(output, "  ret ")
-                    try write_type(output, state.module, state.values[usize(terminator.value)])
-                    try io.print(" %r{}\n", output, {result})
+                    result := try load(state, terminator.value)
+                    type :: state.values[usize(terminator.value)]
+                    if (abi.indirect) {
+                        try io.write_all(output, "  store ")
+                        try write_type(output, state.module, type)
+                        try io.print(" %r{}, ptr %abi_sret\n  ret void\n", output, {result})
+                    } else {
+                        if (abi.size != 0) {
+                            pointer :: fresh(state)
+                            try io.print("  %r{} = getelementptr i8, ptr %abi_return, i64 0\n", output, {pointer})
+                            result = try pack_record_into(state, type, result, true, pointer)
+                        }
+                        try io.write_all(output, "  ret ")
+                        try write_record_abi(output, state.module, type, true)
+                        try io.print(" %r{}\n", output, {result})
+                    }
                 }
             }
-            .trap: try io.print("  call void @trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
+            .trap: try io.print("  call void @honey.trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(terminator.diagnostic)})
             .unreachable: try trap(state, .unreachable_executed, terminator.span)
             .jump: try io.print("  br label %b{}\n", output, {u32(terminator.target)})
             .branch: {

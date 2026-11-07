@@ -1,0 +1,14 @@
+import "@std/process"
+import "@std/mem"
+import "@std/io"
+import "@source/project"
+
+main proc(init process.Init) i32 ! (project.Error | io.WriteError) {
+    if (init.args.values.len != 3) return 2
+    required :: mem.eql(init.args.values[2], "required")
+    config := try project.load_config(mem.c_allocator, init.io, init.args.values[1], required)
+    defer project.deinit_config(&config)
+    try io.print("name={s}\nsource={s}\noutput={s}\n", io.stdout(init.io), {config.name, config.source, config.output})
+    for (config.arguments.items) |argument| try io.print("{s}\n", io.stdout(init.io), {argument})
+    return 0
+}

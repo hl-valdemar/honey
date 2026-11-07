@@ -1,0 +1,143 @@
+import "@std/mem"
+import "@std/arraylist"
+import "@tests/support"
+
+@hide:file
+translate proc(context @mut support.Context, project [;0]u8, package [;0]u8, header [;0]u8, selections [][;0]u8) support.Result ! support.Error {
+    arguments := arraylist.init([;0]u8, context.allocator)
+    defer arraylist.deinit(&arguments)
+    initial [9][;0]u8 :: [context.compiler, "translate-c", package, "--project", project, "--target", "arm64-apple-macos11", "--header", header]
+    for (initial) |argument| try arraylist.append(&arguments, argument)
+    for (selections) |selection| {
+        try arraylist.append(&arguments, "--symbol")
+        try arraylist.append(&arguments, selection)
+    }
+    return try support.run(context, arguments.items, support.RunOptions{})
+}
+
+selected_declarations_shared_identity_and_regeneration test {
+    context := try support.init("cimport_selected")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/bindings.h")
+    first :: try translate(&context, project, "first", header, &["move_point", "set_callback", "open_handle", "Value", "Mode", "ANSWER", "RATIO", "LABEL"])
+    try support.expect_result(&context, first, 0, "", "")
+    bindings_path :: try support.path(&context, project, "ffi/first/bindings.hon")
+    common_path :: try support.path(&context, project, "ffi/__c_types/bindings.hon")
+    manifest_path :: try support.path(&context, project, "ffi/first/.honey-cimport")
+    original :: try support.read(&context, bindings_path)
+    original_common :: try support.read(&context, common_path)
+    original_manifest :: try support.read(&context, manifest_path)
+    try support.expect(&context, support.contains(original, "move_point c_func("), "external function spelling was changed")
+    try support.expect(&context, support.contains(original, "c_float"), "C float was not preserved")
+    try support.expect(&context, support.contains(original, "Callback :: alias ?*c_func("), "callback typedef was omitted")
+    try support.expect(&context, support.contains(original, "MODE_DONE c_int :: 8"), "implicit enumerator was not evaluated")
+    try support.expect(&context, support.contains(original, "ANSWER c_int :: 42"), "Clang constant evaluation was not used")
+    try support.expect(&context, support.contains(original, "LABEL :: \"honey\""), "string macro was not emitted")
+    try support.expect(&context, !support.contains(original, "global_value") and !support.contains(original, "inline_only"), "unselected unsupported declarations leaked into bindings")
+    handwritten :: try support.put(&context, project, "ffi/first/helpers.hon", "helper :: 42\n")
+    again :: try translate(&context, project, "first", header, &["move_point", "set_callback", "open_handle", "Value", "Mode", "ANSWER", "RATIO", "LABEL"])
+    try support.expect_result(&context, again, 0, "", "")
+    try support.expect(&context, mem.eql(original, try support.read(&context, bindings_path)), "regeneration is not deterministic")
+    try support.expect(&context, mem.eql(original_common, try support.read(&context, common_path)), "shared declarations are not deterministic")
+    try support.expect(&context, mem.eql(original_manifest, try support.read(&context, manifest_path)), "recipe/provenance is not deterministic")
+    try support.expect(&context, mem.eql("helper :: 42\n", try support.read(&context, handwritten)), "handwritten file was modified")
+    second :: try translate(&context, project, "second", header, &["move_point"])
+    try support.expect_result(&context, second, 0, "", "")
+    shared :: try support.read(&context, common_path)
+    try support.expect(&context, support.count(shared, "c_struct {") == 1, "shared C record was duplicated nominally")
+    source :: try support.put(&context, project, "source/main.hon", "a :: import \"@ffi/first\"\nb :: import \"@ffi/second\"\nconvert proc(point a.Point) b.Point { return point }\nmain proc() i32 { return 0 }\n")
+    checked :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+    try support.expect(&context, checked.status == 0, checked.stderr)
+    trimmed :: try translate(&context, project, "first", header, &["open_handle"])
+    try support.expect_result(&context, trimmed, 0, "", "")
+    try support.expect(&context, !support.contains(try support.read(&context, bindings_path), "move_point"), "obsolete generated declarations survived regeneration")
+    try support.write(&context, bindings_path, "handwritten :: 123\n")
+    refused :: try translate(&context, project, "first", header, &["move_point"])
+    try support.expect(&context, refused.status == 1 and support.contains(refused.stderr, "refusing to overwrite"), "edited generated output was overwritten")
+    try support.expect(&context, mem.eql("handwritten :: 123\n", try support.read(&context, bindings_path)), "edited output was destroyed")
+}
+
+unsupported_requests_are_explicit_and_non_destructive test {
+    context := try support.init("cimport_unsupported")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/bindings.h")
+    unsupported [4][;0]u8 :: ["global_value", "inline_only", "APPLY", "not_declared"]
+    for (unsupported) |selection| {
+        result :: try translate(&context, project, "rejected", header, &[selection])
+        try support.expect(&context, result.status == 1 and support.contains(result.stderr, selection), "unsupported requested declaration was silently omitted")
+        try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi/rejected/bindings.hon")), "failed translation wrote partial bindings")
+    }
+    layout_header :: try support.put(&context, project, "layout.h", "struct __attribute__((packed)) Packed { char tag; int value; };\nstruct Bits { unsigned flag : 1; };\nstruct Flexible { int count; int values[]; };\n")
+    layouts [3][;0]u8 :: ["Packed", "Bits", "Flexible"]
+    for (layouts) |selection| {
+        result :: try translate(&context, project, "layout", layout_header, &[selection])
+        try support.expect(&context, result.status == 1 and support.contains(result.stderr, "unsupported"), "unsupported C layout was guessed")
+    }
+    unowned :: try support.put(&context, project, "ffi/unowned/bindings.hon", "preserve :: 7\n")
+    collision :: try translate(&context, project, "unowned", header, &["move_point"])
+    try support.expect(&context, collision.status == 1 and mem.eql("preserve :: 7\n", try support.read(&context, unowned)), "unowned output was overwritten")
+}
+
+external_collisions_keywords_and_clang_settings test {
+    context := try support.init("cimport_collisions")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    first_header :: try support.put(&context, project, "first.h", "extern int shared_symbol(int);\nextern int proc(int);\ntypedef struct Keyword { int mut; int test; } Keyword;\n")
+    first :: try translate(&context, project, "one", first_header, &["shared_symbol", "proc", "Keyword"])
+    try support.expect_result(&context, first, 0, "", "")
+    bindings :: try support.read(&context, try support.path(&context, project, "ffi/one/bindings.hon"))
+    common :: try support.read(&context, try support.path(&context, project, "ffi/__c_types/bindings.hon"))
+    try support.expect(&context, support.contains(bindings, "@\"proc\" c_func("), "Honey keyword was not explicitly escaped")
+    try support.expect(&context, support.contains(common, "@\"mut\" c_int") and support.contains(common, "@\"test\" c_int"), "keyword fields were not escaped")
+    second_header :: try support.put(&context, project, "second.h", "extern long shared_symbol(long);\n")
+    second :: try translate(&context, project, "two", second_header, &["shared_symbol"])
+    try support.expect(&context, second.status == 1 and support.contains(second.stderr, "shared_symbol") and support.contains(second.stderr, "incompatible"), "linker-level collision across namespaces was not diagnosed")
+    _ = try support.put(&context, project, "include/selected.h", "typedef struct Selected { int value; } Selected;\n")
+    configured_header :: try support.put(&context, project, "configured.h", "#include <selected.h>\n#ifndef ENABLE_BINDING\n#error explicit define required\n#endif\nextern Selected configured(Selected);\n")
+    included :: try support.path(&context, project, "include")
+    configured :: try support.run(&context, &[context.compiler, "translate-c", "configured", "--project", project, "--target", "arm64-apple-macos11", "--header", configured_header, "--symbol", "configured", "-I", included, "-D", "ENABLE_BINDING=1"], support.RunOptions{})
+    try support.expect_result(&context, configured, 0, "", "")
+}
+
+uninitialized_project_is_rejected test {
+    context := try support.init("cimport_uninitialized")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/bindings.h")
+    result :: try translate(&context, project, "rejected", header, &["move_point"])
+    try support.expect(&context, result.status == 2 and support.contains(result.stderr, "run honey init"), "uninitialized project was accepted despite unresolved @ffi imports")
+    try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi")), "invalid project validation wrote partial bindings")
+}
+
+pointer_qualifiers_and_scientific_constants test {
+    context := try support.init("cimport_qualifiers")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/qualifiers.h")
+    generated :: try translate(&context, project, "qualified", header, &["pointer_levels", "readonly_text", "get_small_value", "get_large_value", "get_fraction_value", "get_negative_zero", "SMALL_VALUE", "LARGE_VALUE", "FRACTION_VALUE", "NEGATIVE_ZERO"])
+    try support.expect_result(&context, generated, 0, "", "")
+    fixture :: try support.path(&context, context.root, "tests/cimport/fixtures/qualifiers.hon")
+    source :: try support.put(&context, project, "source/main.hon", try support.read(&context, fixture))
+    checked :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+    try support.expect(&context, checked.status == 0, checked.stderr)
+    llvm :: try support.put(&context, context.temporary, "qualified.ll", checked.stdout)
+    implementation :: try support.path(&context, context.root, "tests/cimport/fixtures/qualifiers.c")
+    linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx11.0.0", "-O2", llvm, implementation, "-o", context.executable], {})
+    try support.expect_result(&context, linked, 0, "", "")
+    result :: try support.run(&context, &[context.executable], {})
+    try support.expect_result(&context, result, 0, "42\n", "")
+    try support.write(&context, source, "binding :: import \"@ffi/qualified\"\nmain proc() i32 { return binding.pointer_levels(\"immutable\", \"immutable\", null, null, null, null, null, null) }\n")
+    rejected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+    try support.expect(&context, rejected.status == 1, "immutable string was accepted as a mutable C pointer")
+}

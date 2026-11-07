@@ -110,6 +110,38 @@ scan proc(
             continue
         }
 
+        if (char == '@' and cursor + 1 < program.len and program[cursor + 1] == '"') {
+            start :: cursor
+            result :: scan_quoted(start + 1, program, '"') catch |err| {
+                diagnostic :: try diagnostics.add(diagnostic_store, diagnostic_code(err.code), make_span(source, start, err.end))
+                try add_token(state, Token{
+                    span = make_span(source, start, err.end), kind = .invalid,
+                    data = TokenData{ diagnostic = diagnostic },
+                })
+                cursor = err.end
+                continue
+            }
+            spelling :: program[start + 2..result.end - 1]
+            valid := spelling.len != 0
+            for (spelling) |byte, index| {
+                if (!is_alpha(byte) and byte != '_' and (index == 0 or !is_digit(byte))) valid = false
+            }
+            if (valid) {
+                try add_token(state, Token{
+                    span = make_span(source, start, result.end), kind = .ident,
+                    data = TokenData{ str_id = try strpool.intern(pool, spelling) },
+                })
+            } else {
+                diagnostic :: try diagnostics.add(diagnostic_store, .invalid_character, make_span(source, start, result.end))
+                try add_token(state, Token{
+                    span = make_span(source, start, result.end), kind = .invalid,
+                    data = TokenData{ diagnostic = diagnostic },
+                })
+            }
+            cursor = result.end
+            continue
+        }
+
         if is_alpha(char) or char == '_' {
             start :: cursor
             result :: try scan_ident(start, program, pool)

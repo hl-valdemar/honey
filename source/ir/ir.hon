@@ -18,6 +18,7 @@ Type :: enum {
     invalid
     int
     float
+    float32
     bool
     string
     void
@@ -32,6 +33,184 @@ Type :: enum {
 
 aggregate proc(type Type) bool {
     return type == .array or type == .record
+}
+
+real_type proc(type Type) bool {
+    return type == .float or type == .float32
+}
+
+@hide:file
+round_shift_even proc(value u64, shift u64) u64 {
+    truncated :: value >> shift
+    remainder :: value & ((u64(1) << shift) - 1)
+    half :: u64(1) << (shift - 1)
+    if (remainder > half or (remainder == half and (truncated & 1) != 0)) return truncated + 1
+    return truncated
+}
+
+@hide:file
+float32_bits proc(value f64) u64 {
+    bits :: ptrcast!(@u64, &value)^
+    sign :: (bits >> 32) & 2147483648
+    exponent :: (bits >> 52) & 2047
+    fraction :: bits & 4503599627370495
+    if (exponent == 2047) {
+        if (fraction == 0) return sign | 2139095040
+        return sign | 2139095040 | (fraction >> 29) | 4194304
+    }
+    if (exponent > 1150) return sign | 2139095040
+    if (exponent < 873) return sign
+    significand :: fraction | 4503599627370496
+    if (exponent < 897) return sign | round_shift_even(significand, 926 - exponent)
+    rounded := round_shift_even(significand, 29)
+    target_exponent u64 := exponent - 896
+    if (rounded == 16777216) {
+        rounded = rounded >> 1
+        target_exponent += 1
+    }
+    if (target_exponent >= 255) return sign | 2139095040
+    return sign | (target_exponent << 23) | (rounded - 8388608)
+}
+
+@hide:file
+float32_real proc(bits u64) f64 {
+    sign :: (bits & 2147483648) << 32
+    exponent := (bits >> 23) & 255
+    fraction := bits & 8388607
+    result := sign
+    if (exponent == 255) result = sign | (u64(2047) << 52) | (fraction << 29)
+    else if (exponent != 0) result = sign | ((exponent + 896) << 52) | (fraction << 29)
+    else if (fraction != 0) {
+        exponent = 897
+        while (fraction < 8388608) {
+            fraction = fraction << 1
+            exponent -= 1
+        }
+        result = sign | (exponent << 52) | ((fraction - 8388608) << 29)
+    }
+    return ptrcast!(@f64, &result)^
+}
+
+#! rounds binary64 to IEEE binary32, ties to even, retaining its exact value in binary64.
+#! signed zero, subnormals, infinities, and NaNs require no host binary32 support.
+round_float32 proc(value f64) f64 {
+    return float32_real(float32_bits(value))
+}
+
+# compare the original decimal at binary32 midpoints, where binary64 can discard
+# a decimal tail that determines which binary32 neighbor is nearest.
+@hide:file
+decimal_midpoint_order proc(text []u8, midpoint u64) i32 {
+    significand := (midpoint & u64(4503599627370495)) | (u64(1) << 52)
+    power := i32((midpoint >> 52) & 2047) - 1023 - 52
+    while ((significand & 1) == 0) {
+        significand >>= 1
+        power += 1
+    }
+    digits [192]mut u8 := undefined
+    count := usize(0)
+    while (significand != 0) {
+        digits[count] = u8(rem!(significand, 10))
+        count += 1
+        significand = divtrunc!(significand, 10)
+    }
+    scale := power
+    if (power < 0) scale = -power
+    else scale = 0
+    multiplier :: if (power < 0) u16(5) else u16(2)
+    steps := power
+    if (power < 0) steps = -power
+    for (0..usize(steps)) |_| {
+        carry := u16(0)
+        for (0..count) |index| {
+            product :: u16(digits[index]) * multiplier + carry
+            digits[index] = u8(rem!(product, 10))
+            carry = divtrunc!(product, 10)
+        }
+        if (carry != 0) {
+            digits[count] = u8(carry)
+            count += 1
+        }
+    }
+    start := usize(0)
+    if (text[0] == '+' or text[0] == '-') start = 1
+    end := start
+    before_point := i64(0)
+    leading := i64(0)
+    point := false
+    nonzero := false
+    while (end < text.len and text[end] != 'e' and text[end] != 'E') {
+        byte :: text[end]
+        if (byte == '.') point = true
+        else {
+            if (!point) before_point += 1
+            if (byte != '0') nonzero = true
+            if (!nonzero) leading += 1
+        }
+        end += 1
+    }
+    decimal_exponent := i64(0)
+    if (end < text.len) {
+        cursor := end + 1
+        negative := false
+        if (text[cursor] == '+' or text[cursor] == '-') {
+            negative = text[cursor] == '-'
+            cursor += 1
+        }
+        # finite nonzero input cannot need an exponent beyond its digit count.
+        limit :: i64(text.len) + 1024
+        while (cursor < text.len) {
+            if (decimal_exponent < limit)
+                decimal_exponent = decimal_exponent * 10 + i64(text[cursor] - '0')
+            cursor += 1
+        }
+        if (negative) decimal_exponent = -decimal_exponent
+    }
+    order :: before_point - leading + decimal_exponent
+    midpoint_order :: i64(count) - i64(scale)
+    if (order < midpoint_order) return -1
+    if (order > midpoint_order) return 1
+    cursor := start
+    skipped := i64(0)
+    position := usize(0)
+    while (cursor < end or position < count) {
+        actual := u8(0)
+        if (cursor < end) {
+            byte :: text[cursor]
+            cursor += 1
+            if (byte == '.') continue
+            if (skipped < leading) {
+                skipped += 1
+                continue
+            }
+            actual = byte - '0'
+        }
+        expected :: if (position < count) digits[count - position - 1] else u8(0)
+        if (actual < expected) return -1
+        if (actual > expected) return 1
+        position += 1
+    }
+    return 0
+}
+
+#! rounds a valid decimal spelling without double rounding through its parsed binary64 value.
+#! `value` must be the nearest-even binary64 parse of `text`; storage is fixed and temporary.
+round_decimal_float32 proc(text []u8, value f64) f64 {
+    bits :: ptrcast!(@u64, &value)^
+    magnitude :: bits & u64(9223372036854775807)
+    exponent :: i32((magnitude >> 52) & 2047) - 1023
+    if (exponent < -150 or exponent > 127) return round_float32(value)
+    shift :: if (exponent < -126) u64(-exponent - 97) else u64(29)
+    significand :: (magnitude & u64(4503599627370495)) | (u64(1) << 52)
+    mask :: (u64(1) << shift) - 1
+    halfway :: u64(1) << (shift - 1)
+    if ((significand & mask) != halfway) return round_float32(value)
+    order :: decimal_midpoint_order(text, magnitude)
+    adjusted := magnitude
+    if (order < 0) adjusted -= 1
+    else if (order > 0) adjusted += 1
+    adjusted |= bits & (u64(1) << 63)
+    return round_float32(ptrcast!(@f64, &adjusted)^)
 }
 
 @hide:file
@@ -410,28 +589,31 @@ aggregate_item proc(module @Module, value Value, index usize) Value {
     }
 }
 
-#! copies variant descriptors; all payloads share one eight-byte-aligned storage region.
+#! copies variant descriptors; tagged payloads retain eight-byte alignment, untagged unions use C layout.
 add_union proc(module @mut Module, fields []RecordField, tagged bool) ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
     if (module.arrays.items.len >= usize(no_array)) return .storage_limit_reached
     owned :: try mem.alloc(RecordField, module.allocator, fields.len)
     errdefer mem.free(module.allocator, owned)
     size usize := 0
+    alignment usize := if (tagged) 8 else 1
     for (fields) |field, index| {
         width :: storage_size(module, field.type, field.array_type)
+        field_alignment :: storage_alignment(module, field.type, field.array_type)
+        if (!tagged and field_alignment > alignment) alignment = field_alignment
         if (width > size) size = width
         owned[index] = field
         owned[index].offset = if (tagged) 8 else 0
         owned[index].byte_offset = owned[index].offset
     }
     prefix usize :: if (tagged) 8 else 0
-    if (size > divtrunc!(maxval!(usize), sizeof!(Value)) - 15) return .storage_limit_reached
-    size = aligned_size(size, 8) + prefix
+    if (size > divtrunc!(maxval!(usize), sizeof!(Value)) - (alignment - 1) - prefix) return .storage_limit_reached
+    size = aligned_size(size, alignment) + prefix
     id :: ArrayId(module.arrays.items.len)
     tag_type :: if (tagged and fields.len != 0) fields[0].tag.type else Type.void
     try arraylist.append(&module.arrays, ArrayType{
         kind = .record, fields = owned, is_union = true,
         tag_type = tag_type,
-        payload_offset = prefix, cells = size, byte_size = size, alignment = 8,
+        payload_offset = prefix, cells = size, byte_size = size, alignment = alignment,
     })
     return id
 }
@@ -443,11 +625,13 @@ aligned_size proc(size, alignment usize) usize {
 
 @hide:file
 scalar_alignments :: $enummap.init_default(Type, usize, usize(1), {
+    float32 = 4,
     float = 8, string = 8, function = 8, pointer = 8,
 })
 
 @hide:file
 scalar_sizes :: $enummap.init_default(Type, usize, usize(0), {
+    float32 = 4,
     float = 8, function = 8, pointer = 8,
     string = 16,
     bool = 1,
@@ -512,6 +696,7 @@ read_storage proc(module @Module, type Type, shape ArrayId, cells []mut Value, r
         .i32: data = ValueData{ integer = i64(ptrcast!(@i32, &bits)^) }
         .int, .isize: data = ValueData{ integer = ptrcast!(@i64, &bits)^ }
         .float: data = ValueData{ real = ptrcast!(@f64, &bits)^ }
+        .float32: data = ValueData{ real = float32_real(bits) }
         .bool: data = ValueData{ boolean = (bits & 1) != 0 }
         .string: data = ValueData{ string = StringId(bits) }
         .function: data = ValueData{ unsigned = bits }
@@ -546,6 +731,7 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
     bits u64 := 0
     match value.type {
         .float: bits = ptrcast!(@u64, &value.data.real)^
+        .float32: bits = float32_bits(value.data.real)
         .bool: bits = if (value.data.boolean) 1 else 0
         .string: bits = u64(value.data.string)
         .function: bits = if (value.data.function == maxval!(FunctionId)) maxval!(u64) else u64(value.data.function)

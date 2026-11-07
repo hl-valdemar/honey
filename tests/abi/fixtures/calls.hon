@@ -1,0 +1,378 @@
+import "./keywords"
+
+F2 :: c_struct { x f32, y f32 }
+F4 :: c_struct { x f32, y f32, z f32, w f32 }
+D2 :: c_struct { x f64, y f64 }
+D4 :: c_struct { x f64, y f64, z f64, w f64 }
+NestedF :: c_struct { rows [2]mut F2 }
+NestedD :: c_struct { rows [2]mut D2 }
+MatrixF :: c_struct { rows [2]mut [2]mut f32 }
+MatrixD :: c_struct { rows [2]mut [2]mut f64 }
+FloatUnion :: union { record F4, values [4]mut f32, scalar f32 }
+DoubleUnion :: union { record D2, values [2]mut f64, scalar f64 }
+Mixed :: c_struct { tag u8, number f32, tail u16 }
+Odd3 :: c_struct { bytes [3]mut u8 }
+Odd9 :: c_struct { bytes [9]mut u8 }
+OddUnion :: union { word u16, bytes [3]mut u8 }
+MixedUnion :: union { bits u64, number f32, bytes [5]mut u8 }
+Large :: c_struct { values [3]mut u64 }
+LargeUnion :: union { values [3]mut u64, bytes [19]mut u8 }
+Padded :: c_struct { tag u8, number f64, tail u16 }
+Color :: c_struct { r u8, g u8, b u8, a u8 }
+color_identity c_func(value Color) Color
+abi_callback_color c_func(callback *c_func(value Color) Color) c_int
+honey_color_identity proc(value Color) Color { return value }
+f0 c_func() c_int
+g0 c_func() c_int
+s0 c_func() c_int
+p0 c_func() c_int
+paths c_func() c_int
+out c_func() c_int
+trap c_func() c_int
+report c_func() c_int
+print_float c_func() c_int
+fmt_int c_func() c_int
+collision_seed c_int := 7
+collision_text string := "private"
+
+abi_layout c_func(index c_uint, property c_uint) c_ulong
+abi_float c_func(value c_float) c_float
+abi_float_bits c_func(value c_float) u32
+abi_float_from_bits c_func(bits u32) c_float
+abi_variadic c_func(count c_int, ...) c_int
+abi_f2 c_func(value F2) F2
+abi_f4 c_func(value F4) F4
+abi_d2 c_func(value D2) D2
+abi_d4 c_func(value D4) D4
+abi_nested_f c_func(value NestedF) NestedF
+abi_nested_d c_func(value NestedD) NestedD
+abi_matrix_f c_func(value MatrixF) MatrixF
+abi_matrix_d c_func(value MatrixD) MatrixD
+abi_float_union c_func(value FloatUnion) FloatUnion
+abi_double_union c_func(value DoubleUnion) DoubleUnion
+abi_mixed c_func(value Mixed) Mixed
+abi_odd3 c_func(value Odd3) Odd3
+abi_odd9 c_func(value Odd9) Odd9
+abi_odd_union c_func(value OddUnion) OddUnion
+abi_mixed_union c_func(value MixedUnion) MixedUnion
+abi_large c_func(value Large) Large
+abi_large_union c_func(value LargeUnion) LargeUnion
+abi_pressure c_func(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64, h u64, i u64,
+    j f64, k f64, l f64, m f64, n f64, o f64, p f64, q f64,
+    floats F4, odd Odd9, mixed Mixed, large Large, tail f64,
+) Mixed
+abi_callback_float c_func(callback *c_func(value f32) f32) c_int
+abi_callback_f2 c_func(callback *c_func(value F2) F2) c_int
+abi_callback_f4 c_func(callback *c_func(value F4) F4) c_int
+abi_callback_d2 c_func(callback *c_func(value D2) D2) c_int
+abi_callback_d4 c_func(callback *c_func(value D4) D4) c_int
+abi_callback_nested_f c_func(callback *c_func(value NestedF) NestedF) c_int
+abi_callback_nested_d c_func(callback *c_func(value NestedD) NestedD) c_int
+abi_callback_matrix_f c_func(callback *c_func(value MatrixF) MatrixF) c_int
+abi_callback_matrix_d c_func(callback *c_func(value MatrixD) MatrixD) c_int
+abi_callback_float_union c_func(callback *c_func(value FloatUnion) FloatUnion) c_int
+abi_callback_double_union c_func(callback *c_func(value DoubleUnion) DoubleUnion) c_int
+abi_callback_mixed c_func(callback *c_func(value Mixed) Mixed) c_int
+abi_callback_odd3 c_func(callback *c_func(value Odd3) Odd3) c_int
+abi_callback_odd9 c_func(callback *c_func(value Odd9) Odd9) c_int
+abi_callback_odd_union c_func(callback *c_func(value OddUnion) OddUnion) c_int
+abi_callback_mixed_union c_func(callback *c_func(value MixedUnion) MixedUnion) c_int
+abi_callback_large c_func(callback *c_func(value Large) Large) c_int
+abi_callback_large_union c_func(callback *c_func(value LargeUnion) LargeUnion) c_int
+abi_callback_pressure c_func(callback *c_func(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64, h u64, i u64,
+    j f64, k f64, l f64, m f64, n f64, o f64, p f64, q f64,
+    floats F4, odd Odd9, mixed Mixed, large Large, tail f64,
+) Mixed) c_int
+
+layout proc($T type, index c_uint, value *T, first, second *u8) bool {
+    base *u8 :: ptrcast!(value)
+    return (
+        usize(abi_layout(index, 0)) == sizeof!(T)
+        and usize(abi_layout(index, 1)) == alignof!(T)
+        and base + usize(abi_layout(index, 2)) == first
+        and base + usize(abi_layout(index, 3)) == second
+    )
+}
+
+check_layouts proc() bool {
+    f2 F2 :: { x = 1, y = 3 }
+    f4 F4 :: { x = 1, y = 3, z = 5, w = 7 }
+    d2 D2 :: { x = 1, y = 3 }
+    d4 D4 :: { x = 1, y = 3, z = 5, w = 7 }
+    nf NestedF :: { rows = [f2, f2] }
+    nd NestedD :: { rows = [d2, d2] }
+    fu FloatUnion :: { record = f4 }
+    du DoubleUnion :: { record = d2 }
+    mixed Mixed :: { tag = 1, number = 3, tail = 5 }
+    odd3 Odd3 :: { bytes = [1, 3, 5] }
+    odd9 Odd9 :: { bytes = [1, 3, 5, 7, 9, 11, 13, 15, 17] }
+    ou OddUnion :: { word = 35 }
+    mu MixedUnion :: { bits = 33 }
+    large Large :: { values = [1, 3, 5] }
+    lu LargeUnion :: { values = [1, 3, 5] }
+    padded Padded :: { tag = 1, number = 3, tail = 5 }
+    mf MatrixF :: { rows = [[1, 3], [5, 7]] }
+    md MatrixD :: { rows = [[1, 3], [5, 7]] }
+    return (
+        layout(F2, 0, &f2, ptrcast!(&f2.x), ptrcast!(&f2.y))
+        and layout(F4, 1, &f4, ptrcast!(&f4.z), ptrcast!(&f4.w))
+        and layout(D2, 2, &d2, ptrcast!(&d2.x), ptrcast!(&d2.y))
+        and layout(D4, 3, &d4, ptrcast!(&d4.z), ptrcast!(&d4.w))
+        and layout(NestedF, 4, &nf, ptrcast!(&nf.rows), ptrcast!(&nf.rows[1].y))
+        and layout(NestedD, 5, &nd, ptrcast!(&nd.rows), ptrcast!(&nd.rows[1].y))
+        and layout(FloatUnion, 6, &fu, ptrcast!(&fu.record), ptrcast!(&fu.values))
+        and layout(DoubleUnion, 7, &du, ptrcast!(&du.record), ptrcast!(&du.values))
+        and layout(Mixed, 8, &mixed, ptrcast!(&mixed.number), ptrcast!(&mixed.tail))
+        and layout(Odd3, 9, &odd3, ptrcast!(&odd3.bytes), ptrcast!(&odd3.bytes[2]))
+        and layout(Odd9, 10, &odd9, ptrcast!(&odd9.bytes), ptrcast!(&odd9.bytes[8]))
+        and layout(OddUnion, 11, &ou, ptrcast!(&ou.word), ptrcast!(&ou.bytes))
+        and layout(MixedUnion, 12, &mu, ptrcast!(&mu.bits), ptrcast!(&mu.number))
+        and layout(Large, 13, &large, ptrcast!(&large.values), ptrcast!(&large.values[2]))
+        and layout(LargeUnion, 14, &lu, ptrcast!(&lu.values), ptrcast!(&lu.bytes))
+        and layout(Padded, 15, &padded, ptrcast!(&padded.number), ptrcast!(&padded.tail))
+        and layout(MatrixF, 16, &mf, ptrcast!(&mf.rows), ptrcast!(&mf.rows[1][1]))
+        and layout(MatrixD, 17, &md, ptrcast!(&md.rows), ptrcast!(&md.rows[1][1]))
+    )
+}
+
+honey_float proc(value f32) f32 { return value + 0.5 }
+honey_f2 proc(value F2) F2 {
+    result := value
+    result.x += 1
+    result.y += 2
+    return result
+}
+honey_f4 proc(value F4) F4 {
+    result := value
+    result.x += 1
+    result.y += 2
+    result.z += 3
+    result.w += 4
+    return result
+}
+honey_d2 proc(value D2) D2 {
+    result := value
+    result.x += 1
+    result.y += 2
+    return result
+}
+honey_d4 proc(value D4) D4 {
+    result := value
+    result.x += 1
+    result.y += 2
+    result.z += 3
+    result.w += 4
+    return result
+}
+honey_nested_f proc(value NestedF) NestedF {
+    result := value
+    result.rows[0] = honey_f2(result.rows[0])
+    result.rows[1] = honey_f2(result.rows[1])
+    return result
+}
+honey_nested_d proc(value NestedD) NestedD {
+    result := value
+    result.rows[0] = honey_d2(result.rows[0])
+    result.rows[1] = honey_d2(result.rows[1])
+    return result
+}
+honey_float_union proc(value FloatUnion) FloatUnion {
+    result := value
+    result.record = honey_f4(result.record)
+    return result
+}
+honey_double_union proc(value DoubleUnion) DoubleUnion {
+    result := value
+    result.record = honey_d2(result.record)
+    return result
+}
+honey_matrix_f proc(value MatrixF) MatrixF {
+    result := value
+    for (0..usize(2)) |row| {
+        for (0..usize(2)) |column| result.rows[row][column] += f32(row * 2 + column + 1)
+    }
+    return result
+}
+honey_matrix_d proc(value MatrixD) MatrixD {
+    result := value
+    for (0..usize(2)) |row| {
+        for (0..usize(2)) |column| result.rows[row][column] += f64(row * 2 + column + 1)
+    }
+    return result
+}
+honey_mixed proc(value Mixed) Mixed {
+    result := value
+    result.tag += 1
+    result.number += 2
+    result.tail += 3
+    return result
+}
+honey_odd3 proc(value Odd3) Odd3 {
+    result := value
+    for (0..usize(3)) |index| result.bytes[index] += u8(index + 1)
+    return result
+}
+honey_odd9 proc(value Odd9) Odd9 {
+    result := value
+    for (0..usize(9)) |index| result.bytes[index] += u8(index + 1)
+    return result
+}
+honey_odd_union proc(value OddUnion) OddUnion {
+    result := value
+    result.word += 7
+    return result
+}
+honey_mixed_union proc(value MixedUnion) MixedUnion {
+    result := value
+    result.bits += 9
+    return result
+}
+honey_large proc(value Large) Large {
+    result := value
+    for (0..usize(3)) |index| result.values[index] += u64(index + 1)
+    return result
+}
+honey_large_union proc(value LargeUnion) LargeUnion {
+    result := value
+    for (0..usize(3)) |index| result.values[index] += u64(index + 1)
+    return result
+}
+honey_pressure proc(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64, h u64, i u64,
+    j f64, k f64, l f64, m f64, n f64, o f64, p f64, q f64,
+    floats F4, odd Odd9, mixed Mixed, large Large, tail f64,
+) Mixed {
+    result := mixed
+    result.tag += u8(a + b + c + d + e + f + g + h + i)
+    result.number += f32(j + k + l + m + n + o + p + q + f64(floats.x) + f64(floats.w) + tail)
+    result.tail += u16(odd.bytes[8]) + u16(large.values[2])
+    return result
+}
+
+main proc() i16 {
+    if (!check_layouts()) return -1
+    if (sizeof!(Color) != 4 or alignof!(Color) != 1) return -44
+    color :: color_identity({ r = 17, g = 63, b = 129, a = 255 })
+    if (color.r != 17 or color.g != 63 or color.b != 129 or color.a != 255) return -45
+    if (abi_callback_color(honey_color_identity) != 1) return -46
+    if (
+        f0() != 1 or g0() != 2 or s0() != 3 or p0() != 4
+        or paths() != 5 or out() != 6 or trap() != 7 or report() != 8
+        or print_float() != 9 or fmt_int() != 10
+    ) return -47
+    if (collision_seed != 7 or collision_text.len != 7) return -48
+    # enough calls to overflow an ordinary stack if coercion slots were allocated per iteration.
+    for (0..usize(1000000)) |_| {
+        next :: color_identity(color)
+        if (next.r != 17 or next.g != 63 or next.b != 129 or next.a != 255) return -49
+        indirect :: abi_large({ values = [1, 3, 5] })
+        if (indirect.values[0] != 2 or indirect.values[1] != 5 or indirect.values[2] != 8) return -50
+    }
+    if (abi_float(1.25) != 1.75) return -2
+    if (abi_float_bits(f32(-0.0)) != 0x80000000) return -3
+    if (abi_float_bits(f32(0.000000000000000000000000000000000000000000001401298464324817)) != 1) return -4
+    if (abi_float_bits(abi_float_from_bits(0x007fffff)) != 0x007fffff) return -5
+    if (abi_float_bits(abi_float_from_bits(0x00800000)) != 0x00800000) return -6
+    if (abi_float_bits(f32(16777217)) != 0x4b800000) return -7
+    if (abi_variadic(12, f32(1.25), c_float(-2.5), f32(16777217), f32(0.1),
+        f32(5.5), f32(6.25), f32(7.75), f32(8.5), f32(9.25), f32(10.75), f32(0.0), f32(-0.0)) != 1) return -8
+    f2 :: abi_f2({ x = 1, y = 3 })
+    if (f2.x != 2 or f2.y != 5) return -9
+    f4 :: abi_f4({ x = 1, y = 3, z = 5, w = 7 })
+    if (f4.x != 2 or f4.y != 5 or f4.z != 8 or f4.w != 11) return -10
+    d2 :: abi_d2({ x = 1, y = 3 })
+    if (d2.x != 2 or d2.y != 5) return -11
+    d4 :: abi_d4({ x = 1, y = 3, z = 5, w = 7 })
+    if (d4.x != 2 or d4.y != 5 or d4.z != 8 or d4.w != 11) return -12
+    nf :: abi_nested_f({ rows = [{ x = 1, y = 3 }, { x = 5, y = 7 }] })
+    if (nf.rows[0].x != 2 or nf.rows[0].y != 5 or nf.rows[1].x != 6 or nf.rows[1].y != 9) return -13
+    nd :: abi_nested_d({ rows = [{ x = 1, y = 3 }, { x = 5, y = 7 }] })
+    if (nd.rows[0].x != 2 or nd.rows[0].y != 5 or nd.rows[1].x != 6 or nd.rows[1].y != 9) return -14
+    fu :: abi_float_union({ values = [1, 3, 5, 7] })
+    if (fu.record.x != 2 or fu.record.y != 5 or fu.record.z != 8 or fu.record.w != 11) return -15
+    du :: abi_double_union({ values = [1, 3] })
+    if (du.record.x != 2 or du.record.y != 5) return -16
+    mixed :: abi_mixed({ tag = 1, number = 3, tail = 5 })
+    if (mixed.tag != 2 or mixed.number != 5 or mixed.tail != 8) return -17
+    odd3 :: abi_odd3({ bytes = [1, 3, 5] })
+    if (odd3.bytes[0] != 2 or odd3.bytes[1] != 5 or odd3.bytes[2] != 8) return -18
+    odd9 :: abi_odd9({ bytes = [1, 3, 5, 7, 9, 11, 13, 15, 17] })
+    for (0..usize(9)) |index| { if (odd9.bytes[index] != u8(2 + index * 3)) return -19 }
+    if (abi_odd_union({ word = 35 }).word != 42) return -20
+    if (abi_mixed_union({ bits = 33 }).bits != 42) return -21
+    large Large := { values = [1, 3, 5] }
+    large_result := abi_large(large)
+    if (large.values[0] != 1 or large.values[1] != 3 or large.values[2] != 5) return -22
+    for (0..usize(3)) |index| { if (large_result.values[index] != u64(2 + index * 3)) return -23 }
+    large_result.values[0] = 99
+    if (large.values[0] != 1) return -24
+    large.values[2] = 77
+    if (large_result.values[2] != 8) return -25
+    lu LargeUnion := { values = [1, 3, 5] }
+    lu_result := abi_large_union(lu)
+    if (lu.values[0] != 1 or lu.values[1] != 3 or lu.values[2] != 5) return -26
+    for (0..usize(3)) |index| { if (lu_result.values[index] != u64(2 + index * 3)) return -27 }
+    lu_result.values[0] = 99
+    if (lu.values[0] != 1) return -28
+    lu.values[2] = 77
+    if (lu_result.values[2] != 8) return -29
+    pressure :: abi_pressure(1, 2, 3, 4, 5, 6, 7, 8, 9,
+        1, 2, 3, 4, 5, 6, 7, 8, { x = 1, y = 3, z = 5, w = 7 },
+        { bytes = [1, 3, 5, 7, 9, 11, 13, 15, 17] },
+        { tag = 1, number = 3, tail = 5 }, { values = [1, 3, 5] }, 9)
+    if (pressure.tag != 46 or pressure.number != 56 or pressure.tail != 27) return -30
+    mf :: abi_matrix_f({ rows = [[1, 3], [5, 7]] })
+    md :: abi_matrix_d({ rows = [[1, 3], [5, 7]] })
+    for (0..usize(2)) |row| {
+        for (0..usize(2)) |column| {
+            expected :: 2 + (row * 2 + column) * 3
+            if (mf.rows[row][column] != f32(expected) or md.rows[row][column] != f64(expected)) return -43
+        }
+    }
+    if (abi_callback_matrix_f(honey_matrix_f) != 1 or abi_callback_matrix_d(honey_matrix_d) != 1) return -44
+    partial :: abi_partial(1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7,
+        { bytes = [1, 3, 5, 7, 9, 11, 13, 15, 17] },
+        { x = 1, y = 3, z = 5, w = 7 }, 8, 8)
+    if (partial.values[0] != 36 or partial.values[1] != 36 or partial.values[2] != 24) return -45
+    if (abi_callback_partial(honey_partial) != 1) return -46
+    if (abi_callback_float(honey_float) != 1) return -31
+    if (abi_callback_f2(honey_f2) != 1 or abi_callback_f4(honey_f4) != 1) return -32
+    if (abi_callback_d2(honey_d2) != 1 or abi_callback_d4(honey_d4) != 1) return -33
+    if (abi_callback_nested_f(honey_nested_f) != 1 or abi_callback_nested_d(honey_nested_d) != 1) return -34
+    if (abi_callback_float_union(honey_float_union) != 1 or abi_callback_double_union(honey_double_union) != 1) return -35
+    if (abi_callback_mixed(honey_mixed) != 1) return -36
+    if (abi_callback_odd3(honey_odd3) != 1 or abi_callback_odd9(honey_odd9) != 1) return -37
+    if (abi_callback_odd_union(honey_odd_union) != 1 or abi_callback_mixed_union(honey_mixed_union) != 1) return -38
+    if (abi_callback_large(honey_large) != 1 or abi_callback_large_union(honey_large_union) != 1) return -39
+    if (abi_callback_pressure(honey_pressure) != 1) return -40
+    quoted keywords.@"i32" :: keywords.@"proc"(41)
+    if (quoted != 42) return -41
+    keyword_record :: keywords.abi_keyword_record({ @"proc" = 41 })
+    if (keyword_record.@"proc" != 42) return -42
+    return 42
+}
+
+# leave only one integer and one SIMD register before aggregates that require more than one.
+abi_partial c_func(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64,
+    h f64, i f64, j f64, k f64, l f64, m f64, n f64,
+    odd Odd9, floats F4, tail u64, end f64,
+) Large
+abi_callback_partial c_func(callback *c_func(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64,
+    h f64, i f64, j f64, k f64, l f64, m f64, n f64,
+    odd Odd9, floats F4, tail u64, end f64,
+) Large) c_int
+honey_partial proc(
+    a u64, b u64, c u64, d u64, e u64, f u64, g u64,
+    h f64, i f64, j f64, k f64, l f64, m f64, n f64,
+    odd Odd9, floats F4, tail u64, end f64,
+) Large {
+    return { values = [
+        a + b + c + d + e + f + g + tail,
+        u64(h + i + j + k + l + m + n + end),
+        u64(odd.bytes[8]) + u64(floats.w),
+    ] }
+}

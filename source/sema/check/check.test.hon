@@ -3055,3 +3055,118 @@ tests_preserve_explicit_backed_error_values_in_inferred_payloads test {
     }
     try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
 }
+
+float32_contexts_preserve_width_and_resolve_c_float_alias test {
+    source ::
+        `single c_float :: 1.25
+        `wide f64 :: single
+        `halve proc(value f32) f32 { return value / 2.0 }
+        `answer f32 :: halve(single) + 0.5
+        `values [2]f32 :: [1.5, 2]
+        `converted :: f32(f64(2.5))
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    try expect_kind(result, ast.package_decl(tree, 0), .float32)
+    annotation :: ast.statement_decl(tree, ast.package_decl(tree, 0)).type?
+    try testing.expect_equal(sema.BuiltinType.f32, sema.binding(&fixture.resolution, annotation).data.builtin)
+    try expect_kind(result, ast.package_decl(tree, 1), .float)
+    try expect_kind(result, ast.package_decl(tree, 3), .float32)
+    _ = try expect_array(result, ast.package_decl(tree, 4), 2, false, .float32)
+    try expect_kind(result, ast.package_decl(tree, 5), .float32)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+float32_rejects_implicit_narrowing_mixed_width_arithmetic_and_real_integer_context test {
+    sources [4][]u8 :: [
+        "wide f64 :: 1.5\nnarrow f32 :: wide\n",
+        "single f32 :: 1.5\nwide f64 :: 2.5\nmixed :: single + wide\n",
+        "invalid i32 :: 1.5\n",
+        "take proc(value @f64) void {}\nmain proc() void { value f32 :: 1.5\n take(&value) }\n",
+    ]
+    for (sources) |source| {
+        fixture := try array_fixture(source)
+        defer deinit_array_fixture(&fixture)
+        try testing.expect(diagnostics.count(&fixture.diagnostics) > 0)
+    }
+}
+
+c_aggregate_signatures_accept_nested_unions_and_ordinary_procedure_callbacks test {
+    source ::
+        `Vector :: c_struct { x c_float, y c_float }
+        `Bits :: union { real c_float, integer u32 }
+        `Packet :: c_struct { vector Vector, bits Bits, samples [2]c_float }
+        `exchange c_func(_ Packet, _ *c_func(_ Packet) Packet) Packet
+        `callback proc(value Packet) Packet { return value }
+        `main proc() void {
+        `    value Packet :: { vector = { x = 1.0, y = 2.0 }, bits = { real = 3.0 }, samples = [4.0, 5.0] }
+        `    exchange(value, callback)
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+c_aggregate_signatures_reject_honey_records_tagged_unions_and_non_c_fields test {
+    sources [4][]u8 :: [
+        "Value :: struct { x i32 }\ntake c_func(_ Value) void\nmain proc() void { take({ x = 1 }) }\n",
+        "Value :: union(enum) { x i32 }\ntake c_func(_ Value) void\nmain proc() void { take({ x = 1 }) }\n",
+        "Value :: union { text string }\ntake c_func(_ Value) void\nmain proc() void { take({ text = \"bad\" }) }\n",
+        "Value :: c_struct { text string }\ntake c_func(_ Value) void\nmain proc() void { take({ text = \"bad\" }) }\n",
+    ]
+    for (sources) |source, index| {
+        fixture := try array_fixture(source)
+        defer deinit_array_fixture(&fixture)
+        try testing.expect(diagnostics.count(&fixture.diagnostics) > 0)
+        if (index < 3) try testing.expect(code_count(&fixture.diagnostics, .unsupported_c_abi_type) > 0)
+    }
+}
+
+float32_match_overlap_uses_exact_decimal_tail_rounding test {
+    source ::
+        `main proc() i32 {
+        `    value f32 :: 1.0
+        `    return match value {
+        `        1.0: 1,
+        `        1.0000000596046447753906250000000001: 2,
+        `        else: 0,
+        `    }
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+opaque_aliases_preserve_pointee_nominal_identity test {
+    fixture := try array_fixture(
+        `Resource :: opaque
+        `Handle :: alias Resource
+        `HandleAlias :: alias Handle
+        `retain proc(value ?*HandleAlias) ?*Resource { return value }
+        `main proc() bool {
+        `    handle ?*Handle :: null
+        `    resource ?*Resource :: retain(handle)
+        `    return resource == null
+        `}
+    )
+    defer deinit_array_fixture(&fixture)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+opaque_aliases_do_not_admit_by_value_storage_or_signatures test {
+    sources [7][]u8 :: [
+        "Resource :: opaque\nHandle :: alias Resource\nmain proc() void { value Handle := undefined }\n",
+        "Resource :: opaque\nHandle :: alias Resource\ntake proc(value Handle) void {}\nmain proc() void { take(undefined) }\n",
+        "Resource :: opaque\nHandle :: alias Resource\nmake proc() Handle { return undefined }\nmain proc() void { _ = make() }\n",
+        "Resource :: opaque\nHandle :: alias Resource\nmain proc() void { values [1]Handle := undefined }\n",
+        "Resource :: opaque\nBad :: alias proc(value Resource) void\ntake proc(run Bad) void {}\nmain proc() void { take(undefined) }\n",
+        "Resource :: opaque\nHandle :: alias Resource\nBad :: alias @proc(value Handle) void\nmain proc() void { callback Bad := undefined }\n",
+        "Resource :: opaque\nHandle :: alias Resource\nBad :: alias @proc() Handle\nmain proc() void { callback Bad := undefined }\n",
+    ]
+    for (sources) |source| {
+        fixture := try array_fixture(source)
+        defer deinit_array_fixture(&fixture)
+        try testing.expect(diagnostics.count(&fixture.diagnostics) > 0)
+    }
+}

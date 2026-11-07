@@ -1,0 +1,41 @@
+round_intermediate proc(value f32) f32 { return (value + 1) - value }
+
+semantics proc() bool {
+    if (sizeof!(f32) != 4 or alignof!(f32) != 4) return false
+    if (sizeof!(c_float) != 4 or c_float != f32) return false
+    if (sizeof!([3]f32) != 12) return false
+    if (round_intermediate(16777216) != 0) return false
+    if (f32(16777217) != 16777216) return false
+    if (f32(16777219) != 16777220) return false
+    above f32 :: 1.0000000596046447753906250000000001
+    halfway f32 :: 1.000000059604644775390625
+    below f32 :: 1.0000000596046447753906249999999999
+    if (above != 1.00000011920928955078125) return false
+    if (halfway != 1 or below != 1) return false
+    if (f32(f64(1.000000059604644775390625)) != 1) return false
+    if (f32(f64(1.000000178813934326171875)) != f32(1.0000002384185791015625)) return false
+    if (f64(f32(0.1)) != 0.100000001490116119384765625) return false
+    if (i32(f32(-42.75)) != -42 or u32(f32(42.75)) != 42) return false
+    if (f32(i32(-16777217)) != -16777216) return false
+    if (f32(u32(16777219)) != 16777220) return false
+    if (f32(i64(4611686293305294849)) != 4611686568183201792.0) return false
+    if (f32(u64(9223372586610589697)) != 9223373136366403584.0) return false
+    tiny f32 :: 0.000000000000000000000000000000000000000000001401298464324817070923729583289916131280
+    if (tiny <= 0 or tiny / 2 != 0 or (tiny * 2) / 2 != tiny) return false
+    normal f32 :: 0.00000000000000000000000000000000000001175494350822287507968736537222245677819
+    if (normal / 2 <= 0 or (normal / 2) * 2 != normal) return false
+    positive_zero f32 :: 0.0
+    negative_zero f32 :: -0.0
+    if (positive_zero != negative_zero) return false
+    if (!(f32(1) / positive_zero > 0) or !(f32(1) / negative_zero < 0)) return false
+    if (!(f64(f32(1) / negative_zero) < 0)) return false
+    infinity f32 :: f32(340282346638528859811704183484516925440.0) * 2
+    nan f32 :: positive_zero / positive_zero
+    return infinity > 0 and nan != nan and !(nan < 0) and !(nan >= 0)
+}
+
+main proc() i16 {
+    if (!$(semantics())) return -1
+    if (!semantics()) return -2
+    return 42
+}

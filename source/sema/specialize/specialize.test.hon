@@ -728,3 +728,45 @@ executes_demanded_local_dependent_array_extents_before_checking_layout test {
     )
 }
 
+
+comptime_float32_preserves_rounding_inference_and_scalar_annotations test {
+    try expect_specialization(
+        `precision proc() f32 {
+        `    value f32 :: 16777216.0
+        `    return value + 1.0
+        `}
+        `verify proc(value f32) type {
+        `    if (value != 16777216.0) compile_error!("f32 argument did not round")
+        `    constant f32 :: $(precision())
+        `    if (constant != 16777216.0) compile_error!("f32 arithmetic widened")
+        `    left f32 :: 3.0
+        `    quotient :: $(left / 2.0)
+        `    if (quotient != 1.5) compile_error!("f32 division lost precision")
+        `    return f32
+        `}
+        `T :: verify(16777217.0)
+        `identity proc($Value type, value Value) Value { return value }
+        `saved :: $(identity(f32(1.5)))
+        `main proc() T { return saved }
+        , .compile_error, 0,
+    )
+}
+
+comptime_float32_aggregate_snapshots_keep_record_and_union_layout test {
+    try expect_specialization(
+        `Vector :: c_struct { x f32, y f32 }
+        `Bits :: union { real f32, integer u32 }
+        `make proc() Vector { return { x = 1.25, y = 2.5 } }
+        `record :: $(make())
+        `bits Bits :: $(Bits { real = 1.0 })
+        `verify proc(value Vector, raw Bits) type {
+        `    if (value.x != 1.25 or value.y != 2.5) compile_error!("record snapshot changed")
+        `    if (raw.real != 1.0) compile_error!("union snapshot changed")
+        `    if (sizeof!(Bits) != 4 or alignof!(Vector) != 4) compile_error!("snapshot layout changed")
+        `    return f32
+        `}
+        `T :: verify(record, bits)
+        `main proc() T { return record.x }
+        , .compile_error, 0,
+    )
+}

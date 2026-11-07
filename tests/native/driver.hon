@@ -264,8 +264,8 @@ check_cli_errors proc(context @mut support.Context, full bool) void ! support.Er
     if (full) {
         no_arguments :: try support.run(context, &[context.compiler], support.RunOptions{})
         try support.expect(context, no_arguments.status == 2 and support.contains(no_arguments.stderr, "usage:"), "CLI rejects absent command")
-        no_source :: try support.run(context, &[context.compiler, "build"], support.RunOptions{})
-        try support.expect(context, no_source.status == 2 and support.contains(no_source.stderr, "usage:"), "CLI rejects missing build source")
+        no_output :: try support.run(context, &[context.compiler, "build", source, "-o"], support.RunOptions{})
+        try support.expect(context, no_output.status == 2 and support.contains(no_output.stderr, "usage:"), "CLI rejects missing build output")
         missing :: try support.run(context, &[context.compiler, "run", try support.path(context, context.temporary, "missing.hon")], support.RunOptions{})
         try support.expect(context, missing.status == 2 and support.contains(missing.stderr, "infrastructure error:"), "CLI reports missing source infrastructure error")
     }

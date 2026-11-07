@@ -1,0 +1,153 @@
+import "@std/io"
+import "@source/ir"
+
+@hide
+RecordAbi :: struct {
+    size usize = 0
+    scalar ir.Type = .invalid
+    count usize = 0
+    indirect bool = false
+}
+
+@hide:file
+homogeneous proc(module @ir.Module, type Type, depth usize) RecordAbi {
+    if (depth > 128) return RecordAbi{}
+    if (ir.real_type(type.kind)) return RecordAbi{ scalar = type.kind, count = 1 }
+    if (!ir.aggregate(type.kind)) return RecordAbi{}
+    shape :: module.arrays.items[usize(type.shape)]
+    if (shape.is_union and shape.tag_type != .void) return RecordAbi{}
+    result := RecordAbi{}
+    count :: if (type.kind == .array) ir.array_storage_len(shape) else shape.fields.len
+    for (0..count) |index| {
+        child :: if (type.kind == .array) Type{ kind = shape.element, shape = shape.element_array }
+            else Type{ kind = shape.fields[index].type, shape = shape.fields[index].array_type }
+        member :: homogeneous(module, child, depth + 1)
+        if (member.scalar == .invalid or (result.scalar != .invalid and member.scalar != result.scalar)) return RecordAbi{}
+        result.scalar = member.scalar
+        if (shape.is_union) {
+            if (member.count > result.count) result.count = member.count
+        } else result.count += member.count
+        if (result.count > 4) return RecordAbi{}
+    }
+    return result
+}
+
+# Darwin arm64 uses float registers for HFAs, up to two integer registers otherwise,
+# and caller-owned copies plus x8 result storage for larger nonhomogeneous records.
+@hide
+record_abi proc(module @ir.Module, type Type) RecordAbi {
+    if (type.kind != .record) return RecordAbi{}
+    size :: ir.storage_size(module, type.kind, type.shape)
+    result :: homogeneous(module, type, 0)
+    if (result.count != 0) return RecordAbi{ size = size, scalar = result.scalar, count = result.count }
+    return RecordAbi{ size = size, indirect = size > 16 }
+}
+
+@hide
+write_record_abi proc(output io.Writer, module @ir.Module, type Type, result bool) void ! io.WriteError {
+    abi :: record_abi(module, type)
+    if (abi.size == 0) {
+        try write_type(output, module, type)
+    } else if (abi.indirect) {
+        spelling []u8 :: if (result) "void" else "ptr"
+        try io.write_all(output, spelling)
+    } else if (abi.count != 0) {
+        try io.print("[{} x ", output, {abi.count})
+        try write_type(output, module, Type{ kind = abi.scalar })
+        try io.write_all(output, "]")
+    } else if (abi.size <= 8) {
+        bits usize :: if (result) abi.size * 8 else usize(64)
+        try io.print("i{}", output, {bits})
+    } else try io.write_all(output, "[2 x i64]")
+}
+
+# scratch carriers are rounded up so small C values never cause an overread.
+@hide
+abi_scratch proc(state @mut State, type Type) usize ! io.WriteError {
+    abi :: record_abi(state.module, type)
+    pointer :: fresh(state)
+    words usize :: divtrunc!(abi.size + 7, 8)
+    try io.print("  %r{} = alloca [{} x i64], align 16\n", state.output, {pointer, words})
+    return pointer
+}
+
+@hide
+pack_record proc(state @mut State, type Type, value usize, result bool) usize ! io.WriteError {
+    abi :: record_abi(state.module, type)
+    if (abi.size == 0) return value
+    pointer :: try abi_scratch(state, type)
+    return try pack_record_into(state, type, value, result, pointer)
+}
+
+@hide
+pack_record_into proc(state @mut State, type Type, value usize, result bool, pointer usize) usize ! io.WriteError {
+    abi :: record_abi(state.module, type)
+    words usize :: divtrunc!(abi.size + 7, 8)
+    if (!abi.indirect and abi.count == 0)
+        try io.print("  store [{} x i64] zeroinitializer, ptr %r{}\n", state.output, {words, pointer})
+    try store_payload(state, type, value, pointer)
+    if (abi.indirect) return pointer
+    packed :: fresh(state)
+    try io.print("  %r{} = load ", state.output, {packed})
+    try write_record_abi(state.output, state.module, type, result)
+    try io.print(", ptr %r{}, align 1\n", state.output, {pointer})
+    return packed
+}
+
+@hide
+unpack_record proc(state @mut State, type Type, value usize, result bool) usize ! io.WriteError {
+    abi :: record_abi(state.module, type)
+    if (abi.size == 0) return value
+    pointer := value
+    if (!abi.indirect) {
+        pointer = try abi_scratch(state, type)
+        try io.write_all(state.output, "  store ")
+        try write_record_abi(state.output, state.module, type, result)
+        try io.print(" %r{}, ptr %r{}, align 1\n", state.output, {value, pointer})
+    }
+    unpacked :: fresh(state)
+    try io.print("  %r{} = load ", state.output, {unpacked})
+    try write_type(state.output, state.module, type)
+    try io.print(", ptr %r{}, align 1\n", state.output, {pointer})
+    return unpacked
+}
+
+@hide
+write_sret proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteError {
+    try io.write_all(output, "ptr sret(")
+    try write_type(output, module, type)
+    try io.print(") align {}", output, {ir.storage_alignment(module, type.kind, type.shape)})
+}
+
+# calls emitted outside IR blocks use the same lowering as ordinary calls.
+@hide
+direct_call proc(state @mut State, id ir.FunctionId, argument ?usize) usize ! io.WriteError {
+    function :: &state.module.functions.items[usize(id)]
+    type :: Type{ kind = function.result, shape = function.result_array_type }
+    abi :: record_abi(state.module, type)
+    parameter := usize(0)
+    if (argument) |value| parameter = try pack_record(state, local_type(function, 0), value, false)
+    pointer := usize(0)
+    if (abi.indirect) pointer = try abi_scratch(state, type)
+    result := fresh(state)
+    if (type.kind != .void and !abi.indirect) try io.print("  %r{} = ", state.output, {result})
+    else try io.write_all(state.output, "  ")
+    try io.write_all(state.output, "call ")
+    try write_abi_result(state.output, state.module, type)
+    try io.write_all(state.output, " ")
+    try function_symbol(state.output, state.module, id)
+    try io.write_all(state.output, "(")
+    if (abi.indirect) {
+        try write_sret(state.output, state.module, type)
+        try io.print(" %r{}", state.output, {pointer})
+    }
+    if (argument != null) {
+        if (abi.indirect) try io.write_all(state.output, ", ")
+        try write_abi_parameter(state.output, state.module, local_type(function, 0))
+        try io.print(" %r{}", state.output, {parameter})
+    }
+    try io.write_all(state.output, ")\n")
+    if (type.kind == .void) return result
+    if (abi.indirect) result = pointer
+    return try unpack_record(state, type, result, true)
+}

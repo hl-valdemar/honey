@@ -87,3 +87,55 @@ preserves_stream_bytes_and_write_failures test {
     }
     try testing.expect(failed)
 }
+
+darwin_record_carriers_distinguish_hfa_mixed_and_indirect_values test {
+    module := ir.init(mem.c_allocator)
+    defer ir.deinit(&module)
+    floats :: try ir.add_record(&module, &[
+        ir.RecordField{ type = .float32 },
+        ir.RecordField{ type = .float32 },
+    ])
+    mixed :: try ir.add_record(&module, &[
+        ir.RecordField{ type = .float32 },
+        ir.RecordField{ type = .i32 },
+    ])
+    large :: try ir.add_record(&module, &[
+        ir.RecordField{ type = .int },
+        ir.RecordField{ type = .int },
+        ir.RecordField{ type = .int },
+    ])
+    small :: try ir.add_record(&module, &[
+        ir.RecordField{ type = .u8 },
+        ir.RecordField{ type = .u8 },
+        ir.RecordField{ type = .u8 },
+    ])
+    alternative_fields [2]ir.RecordField :: [
+        ir.RecordField{ type = .record, array_type = floats },
+        ir.RecordField{ type = .float32 },
+    ]
+    alternatives :: try ir.add_union(&module, alternative_fields[..], false)
+    try testing.expect_equal(usize(4), module.arrays.items[usize(alternatives)].alignment)
+    try testing.expect_equal(usize(8), module.arrays.items[usize(alternatives)].byte_size)
+    nested := floats
+    for (0..70) |_| {
+        nested_fields [1]ir.RecordField :: [
+            ir.RecordField{ type = .record, array_type = nested },
+        ]
+        nested = try ir.add_record(&module, nested_fields[..])
+    }
+    nested_abi :: record_abi(&module, Type{ kind = .record, shape = nested })
+    try testing.expect_equal(usize(2), nested_abi.count)
+    try testing.expect_equal(ir.Type.float32, nested_abi.scalar)
+    output := OutputCapture{ bytes = arraylist.init(u8, mem.c_allocator) }
+    defer arraylist.deinit(&output.bytes)
+    shapes [5]ir.ArrayId :: [floats, alternatives, mixed, large, small]
+    for (shapes) |shape| {
+        type :: Type{ kind = .record, shape = shape }
+        try write_record_abi(capture_output(&output), &module, type, false)
+        try io.write_all(capture_output(&output), "/")
+        try write_record_abi(capture_output(&output), &module, type, true)
+        try io.write_all(capture_output(&output), "\n")
+    }
+    try testing.expect(mem.eql(output.bytes.items,
+        "[2 x float]/[2 x float]\n[2 x float]/[2 x float]\ni64/i64\nptr/void\ni64/i24\n"))
+}
