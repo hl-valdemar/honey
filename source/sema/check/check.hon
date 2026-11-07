@@ -468,6 +468,8 @@ check_elaborated proc(
             and !cells[usize(binding.data.declaration)].fixed and !has_narrowing(&state, id)
         ) join(&state, id, binding.data.declaration)
     }
+    try infer_test_errors(&state)
+
 
     # assignment inputs observe established declaration types, never contribute
     # constraints back into those declarations.
@@ -1131,7 +1133,20 @@ collect_function proc(state @mut State, id ast.NodeId) void ! (mem.AllocError | 
     state.cells[usize(id)].role = .function
     state.cells[usize(id)].fixed = true
     state.cells[usize(id)].type = Type{ kind = .function, function = id }
-    _ = try check_annotation(state, function.return_type, true)
+    if (ast.function_test(tree, id)) {
+        members :: try mem.alloc(EnumMember, state.enums.allocator, 0)
+        members_owned := true
+        defer if (members_owned) mem.free(state.enums.allocator, members)
+        try arraylist.append(&state.enums, EnumType{
+            declaration = function.return_type, backing = .u16, members = members, composed = true,
+        })
+        members_owned = false
+        failure :: Type{ kind = .enumeration, enum_type = EnumId(state.enums.items.len - 1) }
+        result :: try intern_array(state, ArrayType{ kind = .fallible, element = Type{ kind = .void }, error_type = failure })
+        state.cells[usize(function.return_type)].role = .annotation
+        state.cells[usize(function.return_type)].type = result
+        state.types[usize(function.return_type)] = result
+    } else _ = try check_annotation(state, function.return_type, true)
     try depend(state, function.return_type, id)
     for (0..ast.function_param_count(tree, id)) |i| {
         parameter :: ast.function_param(tree, id, i)
@@ -5100,6 +5115,13 @@ error_assignable proc(result @Result, actual, expected Type) bool {
 
 @hide:file
 error_subset proc(records []RecordType, enums []EnumType, actual, expected Type) bool {
+    if (expected.kind == .record and records[usize(expected.record_type)].composed) {
+        for records[usize(expected.record_type)].fields |field| {
+            same_record :: actual.kind == .record and field.type.kind == .record and field.type.record_type == actual.record_type
+            same_enum :: actual.kind == .enumeration and field.type.kind == .enumeration and field.type.enum_type == actual.enum_type
+            if ((same_record or same_enum) and field.type.nominal == actual.nominal) return true
+        }
+    }
     if (actual.nominal != expected.nominal) return false
     if (actual.kind == .record and expected.kind == .record and actual.record_type == expected.record_type) return true
     if (actual.kind == .enumeration and expected.kind == .enumeration and actual.enum_type == expected.enum_type) return true
@@ -5107,15 +5129,7 @@ error_subset proc(records []RecordType, enums []EnumType, actual, expected Type)
     if (expected.kind == .record) {
         descriptor :: records[usize(expected.record_type)]
         if (!descriptor.is_union or descriptor.tag_type.kind != .enumeration) return false
-        if (descriptor.composed and actual.kind == .record and !records[usize(actual.record_type)].is_union) {
-            for descriptor.fields |field| {
-                if (
-                    field.type.kind == .record and field.type.record_type == actual.record_type
-                    and field.type.nominal == actual.nominal
-                ) return true
-            }
-            return false
-        }
+        if (descriptor.composed and actual.kind == .record and !records[usize(actual.record_type)].is_union) return false
         target = descriptor.tag_type
     }
     if (target.kind != .enumeration) return false
@@ -5207,23 +5221,115 @@ append_sum_variants proc(state @mut State, variants @mut arraylist.ArrayList(Sum
         })
         return true
     }
+    return try append_error_payload(state, variants, type, descriptor.declaration)
+}
+
+@hide:file
+append_error_payload proc(
+    state @mut State, variants @mut arraylist.ArrayList(SumVariant), type Type, definition ast.NodeId,
+) bool ! mem.AllocError {
     name := ast.NodeId(maxval!(u32))
     for 0..ast.package_decl_count(state.tree) |i| {
         declaration :: ast.package_decl(state.tree, i)
         if (
             ast.decl_kind(state.tree, declaration) == .statement
-            and ast.statement_decl(state.tree, declaration).initializer == descriptor.declaration
+            and ast.statement_decl(state.tree, declaration).initializer == definition
         ) name = declaration
     }
     if (name == ast.NodeId(maxval!(u32))) {
         for (state.nodes) |i| {
             if (state.cells[i].role != .declaration) continue
-            if (ast.statement_decl(state.tree, ast.NodeId(i)).initializer == descriptor.declaration) name = ast.NodeId(i)
+            if (ast.statement_decl(state.tree, ast.NodeId(i)).initializer == definition) name = ast.NodeId(i)
         }
     }
     if (name == ast.NodeId(maxval!(u32))) return false
     try arraylist.append(variants, SumVariant{ name = name, payload = type, tag = try global_variant(state, name, type) })
     return true
+}
+
+@hide:file
+append_test_error_variants proc(
+    state @mut State, variants @mut arraylist.ArrayList(SumVariant), type Type,
+) bool ! mem.AllocError {
+    if (type.nominal != ast.NodeId(maxval!(u32))) return try append_error_payload(state, variants, type, type.nominal)
+    if (type.kind == .enumeration) {
+        descriptor :: state.enums.items[usize(type.enum_type)]
+        # explicit-backed errors retain their original values inside a named payload.
+        if (descriptor.explicit_backing) return try append_error_payload(state, variants, type, descriptor.declaration)
+    }
+    if (type.kind == .record) {
+        descriptor :: state.records.items[usize(type.record_type)]
+        if (descriptor.is_union and descriptor.tag_type.kind == .enumeration
+            and state.enums.items[usize(descriptor.tag_type.enum_type)].explicit_backing)
+            return try append_error_payload(state, variants, type, descriptor.declaration)
+    }
+    return try append_sum_variants(state, variants, type)
+}
+
+@hide:file
+collect_test_errors proc(
+    state @mut State, id ast.NodeId, failure Type, variants @mut arraylist.ArrayList(SumVariant),
+) void ! (mem.AllocError | diagnostics.CapacityError) {
+    tree :: state.tree
+    source := Type{}
+    if (ast.node_class(tree, id) == .expression and ast.expr_kind(tree, id) == .try_expr) {
+        operand :: try infer_shape(state, ast.type_operand(tree, id), false)
+        if (operand.kind == .fallible) source = state.arrays.items[usize(operand.array_type)].error_type
+    } else if (ast.node_class(tree, id) == .statement and ast.stmt_kind(tree, id) == .return_stmt) {
+        if (ast.return_stmt(tree, id).value) |value| {
+            if (ast.expr_kind(tree, value) == .enum_literal) {
+                name :: ast.enum_literal(tree, value)
+                if (!type_has_variant(state, failure, name)) try arraylist.append(variants, SumVariant{
+                    name = name, payload = Type{ kind = .void }, tag = try global_variant(state, name, Type{ kind = .void }),
+                })
+            } else {
+                source = try infer_shape(state, value, false)
+                if (source.kind == .fallible) source = state.arrays.items[usize(source.array_type)].error_type
+            }
+        }
+    } else if (ast.node_class(tree, id) == .statement and ast.stmt_kind(tree, id) == .errdefer_stmt) {
+        if (ast.cleanup_stmt(tree, id).capture) |capture| seed_capture(state, capture, failure)
+    }
+    if ((source.kind == .enumeration or source.kind == .record)
+        and !error_subset(state.records.items, state.enums.items, source, failure)) {
+        if (!try append_test_error_variants(state, variants, source)) {
+            try fail(state, id, .invalid_sum_type, ast.node_span(tree, id))
+        }
+    }
+    for 0..ast.child_count(tree, id) |i| {
+        try collect_test_errors(state, ast.child(tree, id, i), failure, variants)
+    }
+}
+
+@hide:file
+infer_test_errors proc(state @mut State) void ! (mem.AllocError | diagnostics.CapacityError) {
+    changed := true
+    while (changed) {
+        changed = false
+        for 0..ast.package_decl_count(state.tree) |i| {
+            function :: ast.package_decl(state.tree, i)
+            if (!ast.function_test(state.tree, function)) continue
+            declaration :: ast.function_decl(state.tree, function)
+            previous :: state.types[usize(declaration.return_type)]
+            if (previous.kind != .fallible) continue
+            failure :: state.arrays.items[usize(previous.array_type)].error_type
+            variants arraylist.ArrayList(SumVariant) := arraylist.init(state.enums.allocator)
+            defer arraylist.deinit(&variants)
+            try collect_test_errors(state, declaration.body, failure, &variants)
+            if (variants.items.len == 0) continue
+            _ = try append_sum_variants(state, &variants, failure)
+            inferred :: try compose_error_type(state, declaration.return_type, &variants)
+            result := inferred
+            if (inferred.kind != .invalid) {
+                changed = true
+                result = try intern_array(state, ArrayType{
+                    kind = .fallible, element = Type{ kind = .void }, error_type = inferred,
+                })
+            }
+            state.cells[usize(declaration.return_type)].type = result
+            state.types[usize(declaration.return_type)] = result
+        }
+    }
 }
 
 @hide:file
@@ -5248,6 +5354,13 @@ check_sum_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocError | di
     if (!valid) {
         return invalid_type(try diagnostics.add(state.diagnostics, .invalid_sum_type, ast.node_span(state.tree, id)))
     }
+    return try compose_error_type(state, id, &variants)
+}
+
+@hide:file
+compose_error_type proc(
+    state @mut State, id ast.NodeId, variants @mut arraylist.ArrayList(SumVariant),
+) Type ! (mem.AllocError | diagnostics.CapacityError) {
     count := usize(0)
     all_void := true
     for 0..(variants.items.len) |i| {

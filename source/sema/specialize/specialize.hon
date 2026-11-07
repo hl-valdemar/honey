@@ -103,6 +103,7 @@ State :: struct {
     rewrites @mut Result
     mapping []mut ast.NodeId
     resolution @mut sema.Resolution
+    testing_assertions [3]mut ast.NodeId
     evaluation_diagnostic diagnostics.DiagnosticId = diagnostics.no_diagnostic
     type_execution_depth usize = 0
     type_execution_remaining usize = 0
@@ -143,6 +144,9 @@ elaborate proc(
     for (0..ast.node_count(&original)) |i| {
         id :: ast.NodeId(i)
         class :: ast.node_class(&original, id)
+        if (class == .import
+            and mem.eql(ast.source_text(&original, ast.import_decl(&original, id).path), "@std/testing")
+            and resolution.storage.bindings[i].kind == .namespace) needed = true
         if (class == .expression
             and (ast.expr_kind(&original, id) == .comptime_expr or ast.expr_kind(&original, id) == .block_expr))
             needed = true
@@ -196,6 +200,7 @@ elaborate proc(
         rewrites = &result,
         mapping = mapping,
         resolution = resolution,
+        testing_assertions = [no_node, no_node, no_node],
         demanded_functions = demanded_functions,
         execution_functions = execution_functions,
         execution_visited = arraylist.init(allocator),
@@ -216,6 +221,18 @@ elaborate proc(
     }
     count :: ast.node_count(&state.tree)
     for (0..count) |i| try arraylist.append(&state.bindings, sema.binding(resolution, ast.NodeId(i)))
+    testing_package :: package_import(&state, "@std/testing")
+    if (testing_package != no_node) {
+        names [3][]u8 :: ["expect", "expect_equal", "expect_type"]
+        for (0..ast.package_decl_count_at(&state.tree, testing_package)) |i| {
+            declaration :: ast.package_decl_at(&state.tree, testing_package, i)
+            if (ast.node_class(&state.tree, declaration) != .function) continue
+            for (names) |name, index| {
+                if (mem.eql(strpool.get_str(strings, ast.name_id(&state.tree, declaration))?, name))
+                    state.testing_assertions[index] = declaration
+            }
+        }
+    }
     try collect_demanded_functions(&state, root, false)
     for (0..ast.package_decl_count(&state.tree)) |i| {
         id :: ast.package_decl(&state.tree, i)
@@ -881,6 +898,7 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
         }
     }
     if (class == .expression and ast.expr_kind(&state.tree, id) == .call) {
+        try inject_assertion_location(state, id)
         callee :: ast.call_expr(&state.tree, id).callee
         resolved_callee :: binding(state, callee)
         closed :: (resolved_callee.kind == .declaration
@@ -1111,6 +1129,57 @@ value_block_terminal proc(state @State, id ast.NodeId) bool {
     }
 }
 
+@hide:file
+inject_assertion_location proc(state @mut State, call ast.NodeId) void ! Error {
+    callee :: binding(state, ast.call_expr(&state.tree, call).callee)
+    if (callee.kind != .declaration) return
+    function :: callee.data.declaration
+    matched := false
+    for (state.testing_assertions) |assertion| {
+        if (function == assertion) matched = true
+    }
+    if (!matched) return
+    count :: ast.function_param_count(&state.tree, function)
+    supplied :: ast.call_arg_count(&state.tree, call)
+    if (supplied >= count) return
+    runtime_count := usize(0)
+    for (0..count) |i| {
+        if (!ast.param(&state.tree, ast.function_param(&state.tree, function, i)).comptime)
+            runtime_count += 1
+    }
+    # explicit type prefixes and inferred type parameters share the assertion API.
+    explicit_types := usize(0)
+    while (explicit_types < supplied and explicit_types < count - runtime_count) {
+        annotation :: try expression_type(state, ast.call_arg(&state.tree, call, explicit_types), 0)
+        if (annotation == no_node or !is_type(state, annotation)) break
+        explicit_types += 1
+    }
+    if (supplied + 1 != runtime_count + explicit_types) return
+    span :: ast.node_span(&state.tree, call)
+    source :: ast.source_files(&state.tree)[usize(span.source)]
+    line := usize(1)
+    column := usize(1)
+    for (source.text[..usize(span.start)]) |byte| {
+        if (byte == '\n') {
+            line += 1
+            column = 1
+        } else column += 1
+    }
+    file_value :: try ast.add_string(state.builder, span, source.path)
+    line_value :: try ast.add_integer(state.builder, span, u64(line))
+    column_value :: try ast.add_integer(state.builder, span, u64(column))
+    try refresh(state)
+    location_type :: ast.param(&state.tree, ast.function_param(&state.tree, function, count - 1)).type
+    values [3]ast.NodeId :: [file_value, line_value, column_value]
+    location :: try metadata_record(state, call, location_type, values[..])
+    arguments [4]mut ast.NodeId := undefined
+    for (0..supplied) |i| arguments[i] = ast.call_arg(&state.tree, call, i)
+    arguments[supplied] = location
+    replacement :: try ast.add_call(state.builder, span, ast.call_expr(&state.tree, call).callee, arguments[..supplied + 1])
+    try replace(state, call, replacement)
+    try refresh(state)
+}
+
 # reflection values are owned AST snapshots. only ordinary leaves and selected
 # runtime bodies enter IR; metadata slices never retain interpreter addresses.
 @hide:file
@@ -1145,14 +1214,13 @@ metadata_variant_tags proc(state @mut State, type ast.NodeId) ast.NodeId ! Error
 }
 
 @hide:file
-metadata_import proc(state @State) ast.NodeId {
-    # reflection uses the real metadata package loaded anywhere in this compilation.
-    # generated helpers retain their source spans, not the importer's lexical scope.
+package_import proc(state @State, path []u8) ast.NodeId {
+    # generated helpers retain declaration bindings, not the importer's lexical scope.
     for (0..state.original_count) |i| {
         imported :: ast.NodeId(i)
         resolved :: binding(state, imported)
         if (ast.node_class(&state.tree, imported) != .import or resolved.kind != .namespace) continue
-        if (mem.eql(ast.source_text(&state.tree, ast.import_decl(&state.tree, imported).path), "@std/meta"))
+        if (mem.eql(ast.source_text(&state.tree, ast.import_decl(&state.tree, imported).path), path))
             return resolved.data.namespace
     }
     return no_node
@@ -1172,11 +1240,13 @@ metadata_type proc(state @mut State, package ast.NodeId, name []u8) ast.NodeId !
 @hide:file
 metadata_record proc(state @mut State, at, type ast.NodeId, values []ast.NodeId) ast.NodeId ! Error {
     try refresh(state)
+    shape := type
+    if (ast.expr_kind(&state.tree, shape) != .record_type) shape = try canonical_type(state, shape)
     fields := arraylist.init(ast.NodeId, state.allocator)
     defer arraylist.deinit(&fields)
     span :: ast.node_span(&state.tree, at)
     for (values) |value, i| {
-        field :: ast.field(&state.tree, ast.record_field(&state.tree, type, i))
+        field :: ast.field(&state.tree, ast.record_field(&state.tree, shape, i))
         owned := value
         if (!is_type(state, field.type?))
             owned = try ast.add_typed_constant(state.builder, span, field.type?, value)
@@ -1282,7 +1352,7 @@ expand_typeinfo proc(state @mut State, id ast.NodeId) void ! Error {
         else try reject(state, id, .expected_type)
         return
     }
-    package :: metadata_import(state)
+    package :: package_import(state, "@std/meta")
     if (package == no_node) {
         try reject(state, id, .missing_metadata_import)
         return
@@ -9441,6 +9511,9 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
                 element = ast.slice_type(&state.tree, base).element
                 mutable = ast.slice_type(&state.tree, base).mutable
             }
+            scalar :: binding(state, base)
+            if (scalar.kind == .builtin and scalar.data.builtin == .string)
+                element = try builtin(state, id, .u8)
             if (element == no_node) return no_node
             result :: try ast.add_slice_type(state.builder, ast.node_span(&state.tree, id), element, mutable, null)
             try refresh(state)

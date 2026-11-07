@@ -146,6 +146,7 @@ parse_decl proc(state @mut State) ast.NodeId ! ParseError {
         next_is(state, .import) or next_is(state, .test)
         or (next_is(state, .ident) and next_n_is(state, 1, .double_colon) and next_n_is(state, 2, .import))
     ) return try parse_import_decl(state)
+    if (next_is(state, .ident) and next_n_is(state, 1, .test)) return try parse_test_decl(state)
     if (next_is(state, .ident) and (next_n_is(state, 1, .proc) or next_n_is(state, 1, .c_func))) return try parse_func_decl(state)
     return try parse_statement_decl(state)
 }
@@ -175,6 +176,27 @@ parse_import_decl proc(state @mut State) ast.NodeId ! ParseError {
         return try ast.add_invalid_decl(state.builder, span, diagnostic)
     }
     return try ast.add_import_decl(state.builder, span, path, namespace, test_only)
+}
+
+@hide:file
+parse_test_decl proc(state @mut State) ast.NodeId ! ParseError {
+    name :: try consume(state, .ident)
+    keyword :: try consume(state, .test)
+    # checking replaces this generated annotation with the inferred fallible result.
+    return_type :: try ast.add_enum_type(state.builder, keyword.span, null, &[])
+    body :: try parse_block(state)
+    body_span :: ast.builder_span(state.builder, body)
+    id :: try ast.add_function_decl(
+        state.builder,
+        ast.Span{ start = name.span.start, end = body_span.end, source = name.span.source },
+        name.span,
+        name.data.str_id,
+        return_type,
+        &[],
+        body,
+    )
+    ast.set_function_test(state.builder, id)
+    return id
 }
 
 @hide:file

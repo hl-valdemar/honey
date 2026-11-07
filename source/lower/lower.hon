@@ -1878,16 +1878,16 @@ convert_value proc(state @mut State, value ir.ValueId, actual, expected typechec
     if (!destination.is_union) return value
     if (actual.kind == .record and actual.record_type == expected.record_type) return value
     shape :: try array_shape(state, expected)
-    if (actual.kind == .record and !source_union) {
-        for destination.fields |field, i| {
-            if (field.type.kind != .record or field.type.record_type != actual.record_type or field.type.nominal != actual.nominal) continue
-            return try emit(state, ir.Instruction{
-                op = .union_literal, type = .record, array_type = shape, slot = u32(i), left = value,
-                constant = state.module.arrays.items[usize(shape)].fields[i].tag, span = span,
-            })
-        }
-        unreachable
+    for destination.fields |field, i| {
+        same_record :: actual.kind == .record and field.type.kind == .record and field.type.record_type == actual.record_type
+        same_enum :: actual.kind == .enumeration and field.type.kind == .enumeration and field.type.enum_type == actual.enum_type
+        if ((!same_record and !same_enum) or field.type.nominal != actual.nominal) continue
+        return try emit(state, ir.Instruction{
+            op = .union_literal, type = .record, array_type = shape, slot = u32(i), left = value,
+            constant = state.module.arrays.items[usize(shape)].fields[i].tag, span = span,
+        })
     }
+    if (actual.kind == .record and !source_union) unreachable
     discriminant := value
     source_shape := ir.no_array
     if (source_union) {

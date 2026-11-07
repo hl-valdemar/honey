@@ -38,11 +38,19 @@ Package :: struct {
     path []u8 = &[]
     root ?ast.NodeId = null
     loading bool = false
+    testing bool = false
 }
 
 Import :: struct {
     node ast.NodeId
     target ?PackageId
+}
+
+#! names and source IDs borrow the owning compilation until deinit.
+Test :: struct {
+    package PackageId
+    source SourceId
+    name []u8
 }
 
 #! owns source buffers, paths, the AST arena, package graph and one identifier pool.
@@ -56,6 +64,8 @@ Compilation :: struct {
     imports arraylist.ArrayList(Import)
     paths hashmap.StringHashMap(PackageId)
     module_root ?ast.NodeId = null
+    testing bool = false
+    tests arraylist.ArrayList(Test)
 }
 
 LoadError :: enum { empty_package }
@@ -71,6 +81,7 @@ init proc(allocator mem.Allocator) Compilation {
         packages = arraylist.init(allocator),
         imports = arraylist.init(allocator),
         paths = hashmap.init(allocator),
+        tests = arraylist.init(allocator),
     }
 }
 
@@ -88,6 +99,7 @@ deinit proc(compilation @mut Compilation) void {
     arraylist.deinit(&compilation.sources)
     arraylist.deinit(&compilation.packages)
     arraylist.deinit(&compilation.imports)
+    arraylist.deinit(&compilation.tests)
     strpool.deinit(&compilation.strings)
 }
 
@@ -177,7 +189,89 @@ load proc(
     entry_file ?[]u8 := null
     if (try fs.kind(compilation.allocator, canonical) != .directory) entry_file = canonical
     transferred = true
-    return try load_package(compilation, runtime, project_root, directory, entry_file, null, diagnostic_store)
+    return try load_package(compilation, runtime, project_root, directory, entry_file, null, compilation.testing, diagnostic_store)
+}
+
+#! loads test sources and test-only dependencies, then creates an isolated native entry.
+#! the returned package is the generated runner; test metadata borrows this compilation.
+load_tests proc(
+    compilation @mut Compilation, runtime io.Io, path []u8,
+    diagnostic_store @mut diagnostics.Store,
+) PackageId ! Error {
+    compilation.testing = true
+    root :: try load(compilation, runtime, path, diagnostic_store)
+    directory :: compilation.packages.items[usize(root)].path
+    project_root :: try loader.project_root(compilation.allocator, directory)
+    defer mem.free(compilation.allocator, project_root)
+    entry_is_file :: try fs.kind(compilation.allocator, path) != .directory
+    try enable_tests(compilation, runtime, project_root, root, !entry_is_file, diagnostic_store)
+    process_path :: try loader.resolve(compilation.allocator, project_root, directory, "@std/process")
+    process_package :: try load_package(compilation, runtime, project_root, process_path, null, null, false, diagnostic_store)
+    mem_path :: try loader.resolve(compilation.allocator, project_root, directory, "@std/mem")
+    mem_package :: try load_package(compilation, runtime, project_root, mem_path, null, null, false, diagnostic_store)
+    for (compilation.sources.items) |file, source_index| {
+        tree :: ast.view(&compilation.builder, file.root)
+        for (0..ast.package_decl_count(&tree)) |index| {
+            node :: ast.package_decl(&tree, index)
+            if (!compilation.packages.items[usize(file.package)].testing or !ast.function_test(&tree, node)) continue
+            try arraylist.append(&compilation.tests, Test{
+                package = file.package, source = SourceId(source_index),
+                name = strpool.get_str(&compilation.strings, ast.name_id(&tree, node))?,
+            })
+        }
+    }
+    text := arraylist.init(u8, compilation.allocator)
+    defer arraylist.deinit(&text)
+    try append_text(&text, "__honey_process :: import \"@std/process\"\n__honey_mem :: import \"@std/mem\"\n")
+    for (0..(compilation.tests.items.len)) |index| {
+        try append_text(&text, "__honey_test_")
+        try append_number(&text, index)
+        try append_text(&text, " :: import \"test\"\n")
+    }
+    try append_text(&text, "main proc(init __honey_process.Init) i32 {\n")
+    try append_text(&text, "if (init.args.values.len != 2) return 2\n")
+    for (compilation.tests.items) |entry, index| {
+        try append_text(&text, "if (__honey_mem.eql(init.args.values[1], \"")
+        try append_number(&text, index)
+        try append_text(&text, "\")) {\n__honey_test_")
+        try append_number(&text, index)
+        try append_text(&text, ".")
+        try append_text(&text, entry.name)
+        try append_text(&text, "() catch |_| { return 1 }\nreturn 0\n}\n")
+    }
+    try append_text(&text, "return 2\n}\n")
+    runner :: try add_package(compilation)
+    file_id :: try add_source(compilation, runner, "<honey-test-runner>", &text, diagnostic_store)
+    file_root :: source(compilation, file_id).root
+    for (0..(compilation.tests.items.len + 2)) |index| {
+        node :: ast.builder_package_decl(&compilation.builder, file_root, index)
+        target :: if (index == 0) process_package else if (index == 1) mem_package else compilation.tests.items[index - 2].package
+        try arraylist.append(&compilation.imports, Import{ node = node, target = target })
+    }
+    return runner
+}
+
+@hide:file
+append_text proc(text @mut arraylist.ArrayList(u8), bytes []u8) void ! mem.AllocError {
+    if (bytes.len > maxval!(usize) - text.items.len) return .out_of_memory
+    length :: text.items.len
+    try arraylist.reserve(text, length + bytes.len)
+    text.items = text.items.ptr[..length + bytes.len]
+    memcopy!(text.items[length..], bytes)
+}
+
+@hide:file
+append_number proc(text @mut arraylist.ArrayList(u8), number usize) void ! mem.AllocError {
+    digits [20]mut u8 := undefined
+    start := digits.len
+    value := number
+    while true {
+        start -= 1
+        digits[start] = '0' + u8(rem!(value, 10))
+        value = divtrunc!(value, 10)
+        if (value == 0) break
+    }
+    try append_text(text, digits[start..])
 }
 
 @hide:file
@@ -188,6 +282,7 @@ load_package proc(
     owned_directory []mut u8,
     entry_file ?[]u8,
     import_span ?diagnostics.Span,
+    allow_empty bool,
     diagnostic_store @mut diagnostics.Store,
 ) PackageId ! Error {
     registered := false
@@ -220,13 +315,46 @@ load_package proc(
             }
         }
     }
-    if (compilation.packages.items[usize(id)].sources.items.len == 0) {
+    if (!allow_empty and compilation.packages.items[usize(id)].sources.items.len == 0) {
         if (import_span) |span| {
             if (!read_failed) _ = try diagnostics.add(diagnostic_store, .package_unavailable, span)
         } else return .empty_package
     }
+    try load_imports(compilation, runtime, project_root, id, 0, false, diagnostic_store)
+    compilation.packages.items[usize(id)].loading = false
+    return id
+}
+
+@hide:file
+enable_tests proc(
+    compilation @mut Compilation, runtime io.Io, project_root []u8,
+    package PackageId, include_siblings bool, diagnostic_store @mut diagnostics.Store,
+) void ! Error {
+    if (compilation.packages.items[usize(package)].testing) return
+    compilation.packages.items[usize(package)].testing = true
+    previous_count :: compilation.packages.items[usize(package)].sources.items.len
+    if (include_siblings) {
+        files := try loader.source_files(compilation.allocator, compilation.packages.items[usize(package)].path, true)
+        defer {
+            for (files.items) |path| mem.free(compilation.allocator, path)
+            arraylist.deinit(&files)
+        }
+        for (files.items) |path| {
+            if (!loader.is_test_file(path)) continue
+            try load_source(compilation, runtime, package, path, diagnostic_store)
+        }
+        try load_imports(compilation, runtime, project_root, package, previous_count, false, diagnostic_store)
+    }
+    try load_imports(compilation, runtime, project_root, package, 0, true, diagnostic_store)
+}
+
+@hide:file
+load_imports proc(
+    compilation @mut Compilation, runtime io.Io, project_root []u8,
+    id PackageId, first_source usize, test_only bool, diagnostic_store @mut diagnostics.Store,
+) void ! Error {
     # Source and package arrays may grow during recursion; retain IDs, never their element addresses.
-    for (0..(compilation.packages.items[usize(id)].sources.items.len)) |index| {
+    for (first_source..(compilation.packages.items[usize(id)].sources.items.len)) |index| {
         file_id :: compilation.packages.items[usize(id)].sources.items[index]
         root :: source(compilation, file_id).root
         count :: ast.builder_package_decl_count(&compilation.builder, root)
@@ -235,7 +363,7 @@ load_package proc(
             tree :: ast.view(&compilation.builder, root)
             if (ast.decl_kind(&tree, node) != .import) continue
             imported :: ast.import_decl(&tree, node)
-            if (imported.test_only) continue
+            if (imported.test_only != test_only) continue
             path :: ast.source_text(&tree, imported.path)
             target ?PackageId := null
             if (path.len == 0 or path[0] == '/' or (path.len == 1 and path[0] == '@')) {
@@ -265,7 +393,10 @@ load_package proc(
                 defer { if (owned) mem.free(compilation.allocator, resolved) }
                 if (try fs.kind(compilation.allocator, resolved) == .directory) {
                     owned = false
-                    target = try load_package(compilation, runtime, project_root, resolved, null, imported.path, diagnostic_store)
+                    target = try load_package(compilation, runtime, project_root, resolved, null, imported.path, imported.test_only, diagnostic_store)
+                    if (imported.test_only) {
+                        try enable_tests(compilation, runtime, project_root, target?, true, diagnostic_store)
+                    }
                 } else {
                     _ = try diagnostics.add(diagnostic_store, .package_unavailable, imported.path)
                 }
@@ -273,8 +404,6 @@ load_package proc(
             try arraylist.append(&compilation.imports, Import{ node = node, target = target })
         }
     }
-    compilation.packages.items[usize(id)].loading = false
-    return id
 }
 
 @hide:file
@@ -320,7 +449,11 @@ package_root proc(compilation @mut Compilation, package PackageId) ast.NodeId ! 
         root :: source(compilation, id).root
         tree :: ast.view(&compilation.builder, root)
         if (index == 0) span = ast.node_span(&tree, root)
-        for (0..ast.package_decl_count(&tree)) |i| try arraylist.append(&declarations, ast.package_decl(&tree, i))
+        for (0..ast.package_decl_count(&tree)) |i| {
+            decl :: ast.package_decl(&tree, i)
+            if (!compilation.packages.items[usize(package)].testing and ast.function_test(&tree, decl)) continue
+            try arraylist.append(&declarations, decl)
+        }
     }
     root :: try ast.add_package(&compilation.builder, span, declarations.items)
     compilation.packages.items[usize(package)].root = root
@@ -353,6 +486,7 @@ compile proc(
     tree := ast.view(&compilation.builder, compilation.module_root?)
     for (compilation.imports.items) |link| {
         imported :: ast.import_decl(&tree, link.node)
+        if (imported.test_only) continue
         name := strpool.no_str
         failure ?diagnostics.DiagnosticId := null
         for (diagnostic_store.list.items) |diagnostic, index| {

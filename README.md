@@ -18,7 +18,7 @@ after bootstrapping, verify production self-hosting:
 python3 tests/self_host.py
 ```
 
-the check copies production sources without test-only imports or the testing package, builds `build/honey-stage1`, then uses it to build `build/honey-stage2`. both generations run with only Clang on `PATH`, without Bro. the second generation runs interpreter/native examples, package/provenance and formatted-IO checks, standalone LLVM assembly and CLI/error scenarios.
+the check copies production sources without test-only imports or the testing package, builds `build/honey-stage1`, then uses it to build `build/honey-stage2`. both generations run with only Clang on `PATH`, without Bro. the second generation runs interpreter/native examples, package/provenance and formatted-IO checks, Honey test-framework acceptance, standalone LLVM assembly and CLI/error scenarios.
 
 bootstrap compatibility: compiler feature adoption and releases MUST follow the [required two-release policy](AGENTS.md#bootstrap-compatibility-required).
 
@@ -69,7 +69,19 @@ the backend (`@source/llvm`) consumes the existing typed IR, emits native functi
 
 LLVM emission batches text fragments in a fixed 16 KiB stack buffer for both `emit-llvm` and `build`. successful emission flushes all buffered bytes before returning. short writes are completed; writer errors, including final-flush failures, propagate without retrying the failed buffer. the emitter borrows the destination writer and does not close it.
 
-run the bootstrap suite with `bro test`. after `bro build`, run `python3 tests/native.py` for executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling.
+run the Honey-owned suite after bootstrapping:
+
+```sh
+./build/honey test
+```
+
+`test` defaults to `source`; an explicit file or directory selects another entry package. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
+
+assertions use `@std/testing`: `try testing.expect(condition)`, `try testing.expect_equal(expected, actual)` and `try testing.expect_type(Expected, actual)`. Honey supplies omitted `SourceLocation` arguments at the assertion call site, including through aliased imports; explicit locations remain unchanged. helpers still declare their ordinary fallible return types.
+
+Honey compiles one private native runner with Clang at `-O0`, then runs each test in a separate child process. assertion errors and runtime traps fail that test without suppressing later tests. each test starts with fresh globals; scoped cleanup runs on ordinary success/error returns, not process-ending traps. results and the passed/failed summary go to stderr. statuses are `0` for success (including no tests), `1` for source diagnostics or failed tests, and `2` for usage/infrastructure failure. temporary runner and LLVM files are removed on success and failure.
+
+`bro test` remains the bootstrap compatibility check. `python3 tests/testing.py` checks Honey's discovery, assertion locations, error propagation, cleanup, trap isolation and production exclusion. run `python3 tests/native.py` for executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling.
 
 the scalar-function package acceptance gate is verified by the native suite: root and dependency sibling files, transitive/shared imports, same-spelled declarations with distinct signatures, file-local aliases and conflicts, missing packages/members, argument errors and dependency-file diagnostics. file-command checks cover `run`, `emit-llvm` and `build`, loading dependency siblings while excluding root siblings.
 

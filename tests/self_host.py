@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 import native
+import testing
 
 
 ROOT = native.ROOT
@@ -58,6 +59,8 @@ def main():
         native.check_packages(temporary, executable)
         native.check_dependency_provenance(temporary, executable)
         native.check_io_packages(temporary, executable)
+        testing.HONEY = compiler
+        testing.check()
         source = ROOT / "programs/factorial.hon"
         emitted = native.run(str(compiler), "emit-llvm", str(source))
         assert emitted.returncode == 0 and emitted.stderr == b"", native.outcome(emitted)

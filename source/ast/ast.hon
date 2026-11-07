@@ -4,7 +4,7 @@
 #! * literal .. -> int (decimal or 0b/0o/0x-prefixed) | float | string | 'true' | 'false' | 'null'
 #! * op ....... -> '+' | '-' | '*' | '/' | '&' | 'xor' | '|' | '<<' | '>>' | '<<|' | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'and' | 'or'
 #! * expr ..... -> identifier | literal | type | '.' member | '[' [expr {',' expr} [',']] ']' | [type] '{' [initializer {',' initializer} [',']] '}' | '(' expr ')' | ('-' | '!' | '~' | '&' | 'try' | '$') expr | expr ('^' | '?') | expr op expr | expr '(' [expr {',' expr} [',']] ')' | identifier '!' '(' [expr {',' expr} [',']] ')' | expr '[' expr ']' | expr '[' [expr] '..' [expr] [';' expr] ']' | expr '.' (member | int) | expr ('..' | '..=') expr | 'match' expr '{' match_arms '}' | expr 'catch' ['|' identifier '|'] (expr | block) | expr 'orelse' expr
-#! * decl ..... -> identifier [type] binding expr | identifier 'c_func' '(' parameters ')' type | ['test'] [identifier '::'] 'import' string
+#! * decl ..... -> identifier [type] binding expr | identifier 'proc' '(' parameters ')' type block | identifier 'c_func' '(' parameters ')' type | identifier 'test' block | ['test'] [identifier '::'] 'import' string
 #! * parameters -> [['$'] identifier {',' ['$'] identifier} type {',' ['$'] identifier {',' ['$'] identifier} type} [',']]; '$' marks each compile-time parameter independently.
 #! bare '$' is a compile-time prefix with unary precedence; '$(' expr ')' retains primary precedence. 'orelse' canonicalizes to an optional match.
 #! value expressions also accept 'if' guard ['|' identifier '|'] expr 'else' expr, canonicalized to matches; else is required.
@@ -231,6 +231,7 @@ NodeData :: union {
 @hide:file optional_match_flag      u8 :: 0b00010000
 @hide:file compound_assignment_flag u8 :: 0b00100000
 @hide:file package_local_flag       u8 :: 0b01000000
+@hide:file test_function_flag       u8 :: 0b10000000
 
 @hide:file
 Node :: struct {
@@ -1225,6 +1226,17 @@ function_external proc(tree @Tree, id NodeId) bool {
     node :: get_node(&tree.storage, id)
     if (node.kind != .func_decl) return false
     return tree.storage.extra.items[usize(node.data1.extra) - 1] != 0
+}
+
+set_function_test proc(builder @mut Builder, id NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .func_decl)
+    node.flags = node.flags | test_function_flag
+}
+
+function_test proc(tree @Tree, id NodeId) bool {
+    node :: get_node(&tree.storage, id)
+    return node.kind == .func_decl and (node.flags & test_function_flag) != 0
 }
 
 set_file_local proc(builder @mut Builder, id NodeId) void {

@@ -101,6 +101,10 @@ ends_with proc(text, suffix []u8) bool {
     return text.len >= suffix.len and mem.eql(text[text.len - suffix.len..], suffix)
 }
 
+is_test_file proc(path []u8) bool {
+    return ends_with(path, ".test.hon") or ends_with(path, ".test.bro")
+}
+
 @hide:file
 before proc(left, right []u8) bool {
     count :: if (left.len < right.len) left.len else right.len
@@ -113,6 +117,13 @@ before proc(left, right []u8) bool {
 #! lists production sources in bytewise order; free each path with mem.free using the same allocator.
 #! release the list with arraylist.deinit, which uses its retained allocator; temporary directory storage is released before returning.
 files proc(allocator mem.Allocator, package_dir []u8) arraylist.ArrayList([]u8) ! Error {
+    return try source_files(allocator, package_dir, false)
+}
+
+#! as files, optionally including test sources in the same bytewise ordering.
+source_files proc(
+    allocator mem.Allocator, package_dir []u8, include_tests bool,
+) arraylist.ArrayList([]u8) ! Error {
     handle := try fs.open_directory(allocator, package_dir)
     closing := false
     defer { if (!closing) fs.close_directory(&handle) catch |_| {} }
@@ -130,8 +141,7 @@ files proc(allocator mem.Allocator, package_dir []u8) arraylist.ArrayList([]u8) 
         name :: entry.name
         if (
             (!ends_with(name, ".hon") and !ends_with(name, ".bro"))
-            or ends_with(name, ".test.hon")
-            or ends_with(name, ".test.bro")
+            or (!include_tests and is_test_file(name))
         ) continue
         path :: try join(allocator, package_dir, name)
         errdefer mem.free(allocator, path)

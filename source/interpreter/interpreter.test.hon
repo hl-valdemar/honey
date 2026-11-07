@@ -565,8 +565,9 @@ evaluation_backing_survives_returns_and_releases_at_every_allocation_boundary te
     return_value(&module, main, ir.ValueId(1))
     trap_id :: try diagnostics.add(&store, .invalid_escape, diagnostics.Span{ start = 0, end = 0 })
     for [false, true] |trap| {
-        if (trap) module.functions.items[usize(main)].blocks.items[0].terminator =
-            ir.Terminator{ kind = .trap, diagnostic = trap_id }
+        if (trap) {
+            module.functions.items[usize(main)].blocks.items[0].terminator = ir.Terminator{ kind = .trap, diagnostic = trap_id }
+        }
         succeeded := false
         for (usize(0)..usize(64)) |limit| {
             state := AllocationState{ remaining = limit }

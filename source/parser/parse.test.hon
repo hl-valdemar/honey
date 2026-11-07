@@ -2680,3 +2680,35 @@ parses_while_update_clauses_as_separate_canonical_blocks test {
     plain :: ast.while_stmt(&tree, ast.block_statement(&tree, body, 4))
     try testing.expect(plain.capture == null and plain.step == null)
 }
+
+parses_tests_as_functions_with_source_spans_and_independent_flags test {
+    source ::
+        `@hide:file sample test {
+        `    defer cleanup()
+        `    try check()
+        `}
+        `ordinary proc() void {}
+    strings := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&strings)
+    store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&store)
+    scan := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan)
+    try lexer.scan(&scan, source, &strings, &store)
+    tree := try parse(mem.c_allocator, scan.tokens.items, source, &store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&store))
+    try testing.expect_equal(2, ast.package_decl_count(&tree))
+    sample :: ast.package_decl(&tree, 0)
+    function :: ast.function_decl(&tree, sample)
+    try testing.expect(ast.function_test(&tree, sample))
+    try testing.expect(ast.file_local(&tree, sample))
+    try testing.expect(!ast.function_external(&tree, sample))
+    try testing.expect(!ast.callable_variadic(&tree, sample))
+    try testing.expect_equal("sample", ast.source_text(&tree, function.name))
+    try testing.expect_equal("test", ast.source_text(&tree, ast.node_span(&tree, function.return_type)))
+    try testing.expect_equal(0, ast.function_param_count(&tree, sample))
+    try testing.expect_equal(2, ast.block_statement_count(&tree, function.body))
+    try testing.expect_equal(ast.StmtKind.defer_stmt, ast.stmt_kind(&tree, ast.block_statement(&tree, function.body, 0)))
+    try testing.expect(!ast.function_test(&tree, ast.package_decl(&tree, 1)))
+}

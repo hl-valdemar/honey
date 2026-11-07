@@ -2932,3 +2932,75 @@ integer_widening_is_value_only_and_preserves_rigid_source_types test {
     }
     try testing.expect_equal(3, diagnostics.count(&fixture.diagnostics))
 }
+
+tests_infer_propagated_and_returned_errors_without_relaxing_procedures test {
+    source ::
+        `AllocationError :: enum { allocation_failed }
+        `AssertionError :: enum { assertion_failed }
+        `Detail :: struct { code i32 }
+        `allocate proc() void ! AllocationError { return .allocation_failed }
+        `assertion proc() void ! AssertionError { return .assertion_failed }
+        `detail proc() void ! Detail { return Detail{ code = 7 } }
+        `fallible_test test {
+        `    defer {}
+        `    errdefer |err| { _ = err }
+        `    try allocate()
+        `    try assertion()
+        `    try detail()
+        `    return .returned_failure
+        `}
+        `forward_test test { try later_test() }
+        `later_test test { return .later_failure }
+        `successful_test test { return }
+        `fallthrough_test test {}
+        `catch_test proc() void { fallible_test() catch |_| {} }
+        `strict proc() void ! AllocationError { try assertion() }
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    function :: ast.package_decl(tree, 6)
+    annotation :: ast.function_decl(tree, function).return_type
+    try expect_kind(result, annotation, .fallible)
+    inferred :: array_type(result, type_of(result, annotation).array_type)
+    try testing.expect_equal(TypeKind.void, inferred.element.kind)
+    try testing.expect_equal(TypeKind.record, inferred.error_type.kind)
+    for usize(3)..usize(6) |i| {
+        original :: ast.function_decl(tree, ast.package_decl(tree, i)).return_type
+        failure :: array_type(result, type_of(result, original).array_type).error_type
+        try testing.expect(error_assignable(result, failure, inferred.error_type))
+    }
+    for usize(7)..usize(11) |i| {
+        test_function :: ast.package_decl(tree, i)
+        try expect_kind(result, ast.function_decl(tree, test_function).return_type, .fallible)
+        try testing.expect(fallthrough_diagnostic(result, test_function) == null)
+    }
+    try testing.expect_equal(1, code_count(&fixture.diagnostics, .incompatible_propagated_error))
+    try testing.expect_equal(1, diagnostics.count(&fixture.diagnostics))
+}
+
+tests_preserve_explicit_backed_error_values_in_inferred_payloads test {
+    source ::
+        `RawError :: enum(u32) { raw_failure = 91 }
+        `OtherError :: enum { other_failure }
+        `raw proc() void ! RawError { return .raw_failure }
+        `other proc() void ! OtherError { return .other_failure }
+        `sample test {
+        `    try raw()
+        `    try other()
+        `}
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    sample :: ast.function_decl(tree, ast.package_decl(tree, 4)).return_type
+    try expect_kind(result, sample, .fallible)
+    inferred :: array_type(result, type_of(result, sample).array_type).error_type
+    try testing.expect_equal(TypeKind.record, inferred.kind)
+    for usize(2)..usize(4) |i| {
+        annotation :: ast.function_decl(tree, ast.package_decl(tree, i)).return_type
+        original :: array_type(result, type_of(result, annotation).array_type).error_type
+        try testing.expect(error_assignable(result, original, inferred))
+    }
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}

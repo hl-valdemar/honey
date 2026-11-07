@@ -95,6 +95,10 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
     if (args.values.len == 3) {
         if (mem.eql(args.values[1], "run")) return try run_file(allocator, runtime, args.values[2])
         if (mem.eql(args.values[1], "emit-llvm")) return try emit_file(allocator, runtime, args.values[2])
+        if (mem.eql(args.values[1], "test")) return try test_path(allocator, runtime, args.values[2])
+    }
+    if (args.values.len == 2 and mem.eql(args.values[1], "test")) {
+        return try test_path(allocator, runtime, "source")
     }
     if (args.values.len == 5 or args.values.len == 6) {
         if (mem.eql(args.values[1], "build") and mem.eql(args.values[3], "-o") and args.values[4].len != 0) {
@@ -118,6 +122,7 @@ usage proc(output io.Writer) void ! io.WriteError {
     try io.write_all(output, "usage: honey run <file-or-directory>\n")
     try io.write_all(output, "       honey emit-llvm <file-or-directory>\n")
     try io.write_all(output, "       honey build <file-or-directory> -o <executable> [-O0|-O2]\n")
+    try io.write_all(output, "       honey test [file-or-directory]\n")
 }
 
 @hide:file
@@ -151,6 +156,16 @@ build_file proc(
     root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
+    return try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, output, optimization)
+}
+
+@hide:file
+build_module proc(
+    allocator mem.Allocator, runtime io.Io,
+    session @compilation.Compilation, root compilation.PackageId,
+    module @ir.Module, diagnostic_store @mut diagnostics.Store,
+    output [;0]u8, optimization [;0]u8,
+) i32 ! DriverError {
 
     template [18]mut u8 := undefined
     memcopy!(template[..], "/tmp/honey-XXXXXX\0")
@@ -162,9 +177,9 @@ build_file proc(
     defer {
         if (!closing) io.close(file) catch |_| {}
     }
-    sources :: compilation.source_files(&session)
+    sources :: compilation.source_files(session)
     primary :: session.packages.items[usize(root)].sources.items[0]
-    try llvm.emit(allocator, io.writer(file), &module, &diagnostic_store, sources, primary)
+    try llvm.emit(allocator, io.writer(file), module, diagnostic_store, sources, primary)
     closing = true
     try io.close(file)
     temporary [;0]u8 :: template[..].ptr[..17;0]
@@ -174,8 +189,59 @@ build_file proc(
     ]
     status :: try process.run(allocator, arguments[..])
     if (status != 0) return .compiler_failed
-    try report_diagnostics(allocator, io.stderr(runtime), sources, &diagnostic_store, null)
-    return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
+    try report_diagnostics(allocator, io.stderr(runtime), sources, diagnostic_store, null)
+    return if (diagnostics.count(diagnostic_store) == 0) 0 else 1
+}
+
+@hide:file
+test_path proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
+    session := compilation.init(allocator)
+    defer compilation.deinit(&session)
+    diagnostic_store := diagnostics.init(allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    root :: try compilation.load_tests(&session, runtime, path, &diagnostic_store)
+    module := try compilation.compile(&session, root, &diagnostic_store)
+    defer ir.deinit(&module)
+    if (diagnostics.count(&diagnostic_store) != 0) {
+        try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, null)
+        return 1
+    }
+    if (session.tests.items.len == 0) {
+        try io.write_all(io.stderr(runtime), "0 passed, 0 failed\n")
+        return 0
+    }
+    template [18]mut u8 := undefined
+    memcopy!(template[..], "/tmp/honey-XXXXXX\0")
+    descriptor :: c.mkstemp(ptrcast!(template[..].ptr))
+    if (descriptor < 0) return .temporary_file_failed
+    defer _ = c.unlink(ptrcast!(template[..].ptr))
+    try io.close(io.File{ io = runtime, handle = io.Handle{ file_desc = descriptor } })
+    executable [;0]u8 :: template[..].ptr[..17;0]
+    status :: try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, executable, "-O0")
+    if (status != 0) return status
+    failed := usize(0)
+    for (session.tests.items) |entry, index| {
+        digits [21]mut u8 := undefined
+        digits[20] = 0
+        start := usize(20)
+        number := index
+        while true {
+            start -= 1
+            digits[start] = '0' + u8(rem!(number, 10))
+            number = divtrunc!(number, 10)
+            if (number == 0) break
+        }
+        argument [;0]u8 :: digits[start..].ptr[..20 - start;0]
+        arguments [2][;0]u8 :: [executable, argument]
+        result :: try process.run(allocator, arguments[..])
+        if (result != 0) failed += 1
+        label []u8 :: if (result == 0) "ok" else "failed"
+        try io.print("{s}:{s} ... {s}\n", io.stderr(runtime), {
+            session.sources.items[usize(entry.source)].path, entry.name, label,
+        })
+    }
+    try io.print("{} passed, {} failed\n", io.stderr(runtime), {session.tests.items.len - failed, failed})
+    return if (failed == 0) 0 else 1
 }
 
 @hide:file
