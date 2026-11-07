@@ -292,7 +292,7 @@ write_type proc(output io.Writer, module @ir.Module, type Type) void ! io.WriteE
         .address: try io.write_all(output, "%address")
         .array: {
             shape :: module.arrays.items[usize(type.shape)]
-            try io.print("[{} x ", output, {shape.len})
+            try io.print("[{} x ", output, {ir.array_storage_len(shape)})
             try write_type(output, module, Type{ kind = shape.element, shape = shape.element_array })
             try io.write_all(output, "]")
         }
@@ -668,7 +668,7 @@ write_constant proc(output io.Writer, module @ir.Module, value ir.Value) void ! 
         .array: {
             shape :: module.arrays.items[usize(value.array_type)]
             try io.write_all(output, "[")
-            for (0..shape.len) |index| {
+            for (0..ir.array_storage_len(shape)) |index| {
                 if (index != 0) try io.write_all(output, ", ")
                 element :: ir.aggregate_item(module, value, index)
                 try write_type(output, module, Type{ kind = element.type, shape = element.array_type })

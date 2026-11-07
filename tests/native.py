@@ -11,6 +11,94 @@ HONEY = ROOT / "build/honey"
 
 # Explicit expectations guard against frontend bugs shared by both execution paths.
 CASES = {
+    "sentinel_arrays_keep_logical_lengths_and_physical_storage": (
+        """
+        main proc() [10]usize {
+            values [2;7]mut u8 := [19, 23]
+            copy := values
+            copy[0] = 1
+            empty [0;7]u8 :: []
+            inferred [_;9]u8 :: [3, 4, 5]
+            nested [2][1;7]u16 :: [[11], [13]]
+            total usize := 0
+            for (values) |value| total += usize(value)
+            return [
+                values.len, sizeof!([2;7]u8), usize(values[2]),
+                usize(copy[0]), usize(values[0]), total,
+                empty.len, usize(empty[0]), inferred.len, sizeof!([2][1;7]u16),
+            ]
+        }
+        """, b"[2, 3, 7, 1, 19, 42, 0, 7, 3, 8]\n", None,
+    ),
+    "sentinel_arrays_survive_generic_inference_and_owned_comptime_results": (
+        """
+        identity proc($N usize, $S u8, value [N;S]u8) [N;S]u8 { return value }
+        make proc() [2;7]mut i16 {
+            values [2;7]mut i16 := [19, 23]
+            return values
+        }
+        main proc() [8]usize {
+            value [2;3]u8 :: [11, 13]
+            inferred :: identity(value)
+            owned :: $(make())
+            different usize :: if $([2;0]u8 != [2;1]u8) 1 else 0
+            ordinary usize :: if $([2;0]u8 != [2]u8) 1 else 0
+            return [
+                inferred.len, usize(inferred[2]), usize(owned[0]), usize(owned[1]),
+                usize(owned[2]), sizeof!([2;7]i16), different, ordinary,
+            ]
+        }
+        """, b"[2, 3, 19, 23, 7, 6, 1, 1]\n", None,
+    ),
+    "sentinel_array_views_preserve_endpoints_and_allow_weakening": (
+        """
+        length proc(value [;0]u8) usize { return value.len }
+        ordinary proc(value []u8) usize { return value.len }
+        main proc() [7]usize {
+            values [2;0]mut u8 := [19, 23]
+            pointer :: &values
+            borrowed [;0]u8 :: &values
+            suffix [;0]u8 :: pointer[1..]
+            interior [;23]u8 :: values[..1;23]
+            checked [;0]u8 :: values[..2;0]
+            return [
+                length(values), length(suffix), ordinary(values[..1]), interior.len,
+                checked.len, usize(suffix.ptr[1]), length(borrowed),
+            ]
+        }
+        """, b"[2, 1, 1, 1, 2, 0, 2]\n", None,
+    ),
+    "sentinel_array_endpoint_checks_observe_corrupted_backing": (
+        """
+        main proc() usize {
+            values [2;0]mut u8 := [19, 23]
+            pointer :: (&values).ptr
+            pointer[2] = 1
+            checked :: values[..2;0]
+            return checked.len
+        }
+        """, b"", b"sentinel",
+    ),
+    "sentinel_arrays_preserve_full_width_values_and_generated_storage": (
+        """
+        wide proc() [0;$(maxval!(u64))]u64 { return [] }
+        signed proc() [0;$(minval!(i64))]i64 { return [] }
+        Fixed proc($S u8) type { return [1;S]u8 }
+        FromEndpoint proc() type {
+            value [0;7]u8 :: []
+            return [value[0]]u8
+        }
+        main proc() [5]bool {
+            unsigned_value :: $(wide())
+            signed_value :: $(signed())
+            generated Fixed(9) :: [5]
+            return [
+                unsigned_value[0] == maxval!(u64), signed_value[0] == minval!(i64),
+                generated[1] == 9, sizeof!(FromEndpoint()) == 7, generated.len == 1,
+            ]
+        }
+        """, b"[true, true, true, true, true]\n", None,
+    ),
     "numeric_conditional_arms_supply_literal_context_before_defaulting": (
         """
         choose proc(flag bool) usize {

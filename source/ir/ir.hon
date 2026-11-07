@@ -118,6 +118,7 @@ ArrayType :: struct {
     element Type = .invalid
     element_array ArrayId = no_array
     len usize = 0
+    sentinel ?Value = null
     cells usize = 0
     mutable bool = false
     fields []mut RecordField = &[]
@@ -306,26 +307,38 @@ add_array proc(
     element_array ArrayId,
     len usize,
     mutable bool,
+    sentinel ?Value,
 ) ArrayId ! (mem.AllocError | diagnostics.CapacityError) {
     debug.assert(aggregate(element) == (element_array != no_array))
+    debug.assert(sentinel == null or (integer_bits(element) != 0 and sentinel?.type == element))
+    if (sentinel != null and len == maxval!(usize)) return .storage_limit_reached
+    extra :: if (sentinel != null) usize(1) else usize(0)
+    storage_len :: len + extra
     width :: if (aggregate(element)) module.arrays.items[usize(element_array)].cells else 1
-    if (width != 0 and len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
-    cells :: len * width
+    if (width != 0 and storage_len > divtrunc!(maxval!(usize), width)) return .storage_limit_reached
+    cells :: storage_len * width
     if (cells > divtrunc!(maxval!(usize), sizeof!(Value))) return .storage_limit_reached
     if (module.arrays.items.len >= usize(no_array)) return .storage_limit_reached
     stride :: storage_size(module, element, element_array)
-    if (stride != 0 and len > divtrunc!(maxval!(usize), stride)) return .storage_limit_reached
+    if (stride != 0 and storage_len > divtrunc!(maxval!(usize), stride)) return .storage_limit_reached
     id :: ArrayId(module.arrays.items.len)
     try arraylist.append(&module.arrays, ArrayType{
         element = element,
         element_array = element_array,
         len = len,
+        sentinel = sentinel,
         cells = cells,
         mutable = mutable,
-        byte_size = len * stride,
+        byte_size = storage_len * stride,
         alignment = storage_alignment(module, element, element_array),
     })
     return id
+}
+
+#! returns the physical element count, including a fixed array's trailing sentinel.
+array_storage_len proc(shape ArrayType) usize {
+    extra :: if (shape.sentinel != null) usize(1) else usize(0)
+    return shape.len + extra
 }
 
 #! copies declaration-order fields and derives their flattened offsets; child shapes must exist.
@@ -523,7 +536,7 @@ write_storage proc(module @Module, cells []mut Value, value Value) void {
             memcopy!(cells[..shape.byte_size], value.data.elements)
             return
         }
-        count :: if (shape.kind == .record) shape.fields.len else shape.len
+        count :: if (shape.kind == .record) shape.fields.len else array_storage_len(shape)
         for (0..count) |i| {
             offset :: if (shape.kind == .record) shape.fields[i].byte_offset else i * storage_size(module, shape.element, shape.element_array)
             write_storage(module, cells[offset..], aggregate_item(module, value, i))
@@ -578,7 +591,7 @@ copy_aggregate proc(module @Module, destination Value, source Value) void {
         memcopy!(destination.data.elements, source.data.elements)
         return
     }
-    count :: if (shape.kind == .record) shape.fields.len else shape.len
+    count :: if (shape.kind == .record) shape.fields.len else array_storage_len(shape)
     for (0..count) |i| {
         child :: aggregate_item(module, source, i)
         if (aggregate(child.type)) copy_aggregate(module, aggregate_item(module, destination, i), child)

@@ -232,6 +232,8 @@ NodeData :: union {
 @hide:file compound_assignment_flag u8 :: 0b00100000
 @hide:file package_local_flag       u8 :: 0b01000000
 @hide:file test_function_flag       u8 :: 0b10000000
+# node kinds have disjoint flags; array mutability does not need extra storage.
+@hide:file array_mutable_flag       u8 :: 0b00000001
 
 @hide:file
 Node :: struct {
@@ -337,6 +339,7 @@ ArrayTypeView :: struct {
     count ?NodeId
     element NodeId
     mutable bool
+    sentinel ?NodeId = null
 }
 
 PointerTypeView :: struct {
@@ -774,13 +777,19 @@ add_array_type proc(
     builder @mut Builder, span Span, count ?NodeId, element NodeId, mutable bool,
 ) NodeId ! mem.AllocError {
     raw_count :: if (count) |id| id else no_node
-    flag :: if (mutable) u32(1) else u32(0)
+    flags :: if (mutable) array_mutable_flag else u8(0)
     return try add_node(builder, Node{
         kind = .expr_array_type,
-        main = NodeData{ extra = flag },
+        flags = flags,
         data0 = NodeData{ node_id = raw_count },
         data1 = NodeData{ node_id = element },
     }, span)
+}
+
+set_array_sentinel proc(builder @mut Builder, id NodeId, sentinel NodeId) void {
+    node :: &builder.storage.nodes.items[usize(id)]
+    debug.assert(node.kind == .expr_array_type)
+    node.main = NodeData{ node_id = sentinel }
 }
 
 add_pointer_type proc(
@@ -1811,7 +1820,8 @@ array_type proc(tree @Tree, id NodeId) ArrayTypeView {
         span = get_span(&tree.storage, id),
         count = maybe_node_id(u32(node.data0.node_id)),
         element = node.data1.node_id,
-        mutable = node.main.extra != 0,
+        mutable = (node.flags & array_mutable_flag) != 0,
+        sentinel = maybe_node_id(u32(node.main.node_id)),
     }
 }
 
@@ -2115,9 +2125,10 @@ node_layout proc(node Node) NodeLayout {
         .expr_unary: layout.direct_children = 2
         .expr_binary, .expr_range, .expr_index, .expr_selection, .expr_typed_constant, .expr_slice_constant,
         .expr_memory_constant,
-        .expr_fallible_type, .expr_sum_type, .expr_array_type, .expr_slice_type:
+        .expr_fallible_type, .expr_sum_type, .expr_slice_type:
             layout.direct_children = 6
         .expr_pointer_type: layout.direct_children = 4
+        .expr_array_type: layout.direct_children = 7
         .expr_address_constant: layout.direct_children = 7
         .expr_optional_type, .expr_distinct_type, .expr_alias, .expr_union_tag_type, .expr_enum_literal,
         .expr_try, .expr_comptime, .expr_block: layout.direct_children = 1

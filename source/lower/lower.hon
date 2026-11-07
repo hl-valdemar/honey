@@ -292,12 +292,20 @@ prepare_array proc(state @mut State, id typecheck.ArrayId) ir.ArrayId ! (mem.All
     descriptor :: typecheck.array_type(state.checked, id)
     child := ir.no_array
     child = try array_shape(state, descriptor.element)
+    sentinel_value ?ir.Value := null
+    if (descriptor.sentinel) |sentinel| {
+        sentinel_value = ir.Value{
+            type = lower_type(state, descriptor.element),
+            data = ir.ValueData{ integer = sentinel },
+        }
+    }
     result :: try ir.add_array(
         state.module,
         lower_type(state, descriptor.element),
         child,
         descriptor.len,
         descriptor.mutable,
+        sentinel_value,
     )
     state.arrays[usize(id)] = result
     return result
@@ -2101,7 +2109,13 @@ lower_slice proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
         if (state.terminated) return ir.no_value
         base_type :: typecheck.type_of(state.checked, expression.base)
         has_sentinel := base_type.kind == .string
-        if (base_type.kind == .slice) has_sentinel = typecheck.array_type(state.checked, base_type.array_type).sentinel != null
+        if (base_type.kind == .slice or base_type.kind == .array)
+            has_sentinel = typecheck.array_type(state.checked, base_type.array_type).sentinel != null
+        if (base_type.kind == .pointer) {
+            source :: typecheck.pointer_type(state.checked, base_type.pointer_type).element
+            if (source.kind == .array)
+                has_sentinel = typecheck.array_type(state.checked, source.array_type).sentinel != null
+        }
         if (parts.bound != ir.no_value and !has_sentinel) {
             one :: try usize_constant(state, 1, span)
             through :: try emit(state, ir.Instruction{ op = .add, type = .usize, left = end, right = one, span = span })
@@ -2231,8 +2245,12 @@ lower_place proc(state @mut State, id ast.NodeId) ir.ValueId ! (mem.AllocError |
             if (state.terminated) return ir.no_value
             index :: try lower_as(state, expression.index, typecheck.Type{ kind = .usize })
             if (state.terminated or trap_type(state, id)) return ir.no_value
-            one :: try usize_constant(state, 1, span)
-            end :: try emit(state, ir.Instruction{ op = .add, type = .usize, left = index, right = one, span = span })
+            sentinel :: base_type.kind == .slice and typecheck.array_type(state.checked, base_type.array_type).sentinel != null
+            end := index
+            if (!sentinel) {
+                one :: try usize_constant(state, 1, span)
+                end = try emit(state, ir.Instruction{ op = .add, type = .usize, left = index, right = one, span = span })
+            }
             _ = try emit(state, ir.Instruction{ op = .slice_check, left = index, right = end, extra = parts.bound, span = span })
             pointer :: try emit(state, ir.Instruction{
                 op = .pointer_offset, type = .pointer, left = parts.pointer, right = index,

@@ -1039,7 +1039,13 @@ check_annotation proc(state @mut State, id ast.NodeId, allow_void bool) Type ! (
                 type = if (actual.kind == .invalid) actual else invalid_type(try diagnostics.add(state.diagnostics, .invalid_array_length, ast.node_span(state.tree, count)))
             }
         }
-        if (type.kind != .invalid) type = try intern_array(state, ArrayType{ element = element, len = len, mutable = view.mutable })
+        descriptor := ArrayType{ element = element, len = len, mutable = view.mutable }
+        if (view.sentinel) |sentinel| {
+            if (try checked_sentinel(state, sentinel, element)) |value| {
+                descriptor.sentinel = value
+            } else type = invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, sentinel)))
+        }
+        if (type.kind != .invalid) type = try intern_array(state, descriptor)
         state.types[usize(id)] = type
         state.cells[usize(id)].type = type
         return type
@@ -2978,17 +2984,23 @@ check_container_type proc(state @mut State, id ast.NodeId) Type ! (mem.AllocErro
         view :: ast.slice_type(state.tree, id)
         descriptor.mutable = view.mutable
         if (view.sentinel) |sentinel| {
-            try collect_expression(state, sentinel)
-            try demand(state, sentinel, child, .type_mismatch)
-            if (constant_integer(state, sentinel)) |value| {
-                if (!integer_kind(child.kind) or !integer_fits(value, child.kind)) {
-                    return invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, sentinel)))
-                }
-                descriptor.sentinel = sentinel_bits(value)
+            if (try checked_sentinel(state, sentinel, child)) |value| {
+                descriptor.sentinel = value
             } else return invalid_type(try diagnostics.add(state.diagnostics, .invalid_operand, ast.node_span(state.tree, sentinel)))
         }
     }
     return try intern_array(state, descriptor)
+}
+
+@hide:file
+checked_sentinel proc(state @mut State, id ast.NodeId, element Type) ?i64 ! (mem.AllocError | diagnostics.CapacityError) {
+    try collect_expression(state, id)
+    try demand(state, id, element, .type_mismatch)
+    if (constant_integer(state, id)) |value| {
+        if (integer_kind(element.kind) and integer_fits(value, element.kind)) return sentinel_bits(value)
+    }
+    missing ?i64 :: null
+    return missing
 }
 
 @hide:file
@@ -3073,7 +3085,7 @@ infer_slice proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
     }
     descriptor.kind = .slice
     descriptor.len = 0
-    descriptor.sentinel = null
+    if (view.end != null) descriptor.sentinel = null
     if (view.sentinel) |node| {
         try demand(state, node, descriptor.element, .invalid_operand)
         if (constant_integer(state, node)) |value| {
@@ -3326,8 +3338,10 @@ array_cells proc(state @State, type Type) ?usize {
     if (view.len == no_index) return null
     child := usize(0)
     if (array_cells(state, view.element)) |value| child = value else return null
-    if (child != 0 and view.len > divtrunc!(maxval!(usize), child)) return null
-    return view.len * child
+    extra :: if (view.sentinel != null) usize(1) else usize(0)
+    count :: view.len + extra
+    if (child != 0 and count > divtrunc!(maxval!(usize), child)) return null
+    return count * child
 }
 
 @hide:file
@@ -3546,7 +3560,9 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
             if (expected.kind == .slice and operand.kind == .array) {
                 array :: state.arrays.items[usize(operand.array_type)]
                 writable :: array.mutable and (mutable or ast.expr_kind(state.tree, view.operand) == .array_literal)
-                type :: try intern_array(state, ArrayType{ kind = .slice, element = array.element, mutable = writable })
+                type :: try intern_array(state, ArrayType{
+                    kind = .slice, element = array.element, mutable = writable, sentinel = array.sentinel,
+                })
                 seed(state, id, type)
                 return type
             }
@@ -3692,10 +3708,12 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         expected :: state.cells[index].expected
         element := Type{}
         mutable := false
+        sentinel ?i64 := null
         if (expected.kind == .array) {
             view :: state.arrays.items[usize(expected.array_type)]
             element = view.element
             mutable = view.mutable
+            sentinel = view.sentinel
         }
         for 0..len |i| {
             child :: ast.array_element(state.tree, literal, i)
@@ -3706,7 +3724,7 @@ infer_shape proc(state @mut State, id ast.NodeId, defaults bool) Type ! (mem.All
         }
         if (element.kind == .none and len == 0 and defaults) element = Type{ kind = .int }
         if (element.kind != .none) {
-            type :: try intern_array(state, ArrayType{ element = element, len = len, mutable = mutable })
+            type :: try intern_array(state, ArrayType{ element = element, len = len, mutable = mutable, sentinel = sentinel })
             state.cells[index].type = type
             return type
         }

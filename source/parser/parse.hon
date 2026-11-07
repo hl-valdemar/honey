@@ -925,11 +925,16 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
         } else {
             count = try parse_expr(state)
         }
+        sentinel ?ast.NodeId := null
+        if (next_is(state, .semicolon)) {
+            state.next_token += 1
+            sentinel = try parse_expr(state)
+        }
         _ = try consume(state, .close_bracket)
         mutable :: next_is(state, .mut)
         if (mutable) state.next_token += 1
         element :: try parse_type_atom(state)
-        return try ast.add_array_type(
+        id :: try ast.add_array_type(
             state.builder,
             ast.Span{
                 start = open.span.start,
@@ -938,6 +943,8 @@ parse_type_atom proc(state @mut State) ast.NodeId ! ParseError {
             },
             count, element, mutable,
         )
+        if (sentinel) |node| ast.set_array_sentinel(state.builder, id, node)
+        return id
     }
     if (next_is(state, .proc) or next_is(state, .c_func)) return try parse_function_type(state, current(state).span, false)
     if (next_is(state, .struct) or next_is(state, .c_struct)) return try parse_record_type(state)

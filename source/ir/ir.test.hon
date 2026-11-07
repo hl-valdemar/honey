@@ -7,21 +7,21 @@ shape_and_segment_limits_preserve_zero_leaf_arrays_and_allow_retry test {
     defer deinit(&module)
     limit :: divtrunc!(maxval!(usize), sizeof!(Value))
     rejected := false
-    _ = add_array(&module, .int, no_array, limit + 1, false) catch |error| {
+    _ = add_array(&module, .int, no_array, limit + 1, false, null) catch |error| {
         rejected = error == .storage_limit_reached
         yield no_array
     }
     try testing.expect(rejected)
-    pair :: try add_array(&module, .int, no_array, 2, false)
+    pair :: try add_array(&module, .int, no_array, 2, false, null)
     rejected = false
-    _ = add_array(&module, .array, pair, maxval!(usize), false) catch |error| {
+    _ = add_array(&module, .array, pair, maxval!(usize), false, null) catch |error| {
         rejected = error == .storage_limit_reached
         yield no_array
     }
     try testing.expect(rejected)
-    full :: try add_array(&module, .int, no_array, limit - 2, false)
-    empty :: try add_array(&module, .bool, no_array, 0, false)
-    zero_rows :: try add_array(&module, .array, empty, maxval!(usize), false)
+    full :: try add_array(&module, .int, no_array, limit - 2, false, null)
+    empty :: try add_array(&module, .bool, no_array, 0, false, null)
+    zero_rows :: try add_array(&module, .array, empty, maxval!(usize), false, null)
     try arraylist.append(&module.functions, init_function(module.allocator))
     function :: FunctionId(0)
     try arraylist.append(&module.functions.items[0].blocks, init_block(module.allocator))
@@ -102,4 +102,34 @@ byte_views_preserve_relocations_split_across_native_scalar_leaves test {
     try testing.expect(!read_storage(&module, .pointer, no_array, bytes[3..], true).forged)
     write_storage(&module, bytes[6..], Value{ type = .u8 })
     try testing.expect(read_storage(&module, .pointer, no_array, bytes[3..], true).forged)
+}
+
+sentinel_array_storage_preserves_nested_and_raw_trailing_cells test {
+    module := init(mem.c_allocator)
+    defer deinit(&module)
+    sentinel :: Value{ type = .u64, data = ValueData{ unsigned = maxval!(u64) } }
+    row :: try add_array(&module, .u64, no_array, 0, false, sentinel)
+    rows :: try add_array(&module, .array, row, 2, false, null)
+    shape :: module.arrays.items[usize(row)]
+    try testing.expect_equal(usize(0), shape.len)
+    try testing.expect_equal(usize(1), array_storage_len(shape))
+    try testing.expect_equal(usize(1), shape.cells)
+    try testing.expect_equal(usize(8), shape.byte_size)
+    try testing.expect_equal(usize(2), module.arrays.items[usize(rows)].cells)
+    try testing.expect_equal(usize(16), storage_size(&module, .array, rows))
+    source_cells [2]mut Value := [sentinel, sentinel]
+    source :: Value{ type = .array, array_type = rows, data = ValueData{ elements = source_cells[..] } }
+    bytes [16]mut Value := undefined
+    write_storage(&module, bytes[..], source)
+    raw :: read_storage(&module, .array, rows, bytes[..], true)
+    destination_cells [2]mut Value := undefined
+    destination :: Value{ type = .array, array_type = rows, data = ValueData{ elements = destination_cells[..] } }
+    copy_aggregate(&module, destination, raw)
+    for (destination_cells) |cell| try testing.expect_equal(maxval!(u64), cell.data.unsigned)
+    rejected := false
+    _ = add_array(&module, .u64, no_array, maxval!(usize), false, sentinel) catch |error| {
+        rejected = error == .storage_limit_reached
+        yield no_array
+    }
+    try testing.expect(rejected)
 }

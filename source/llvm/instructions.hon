@@ -120,6 +120,19 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
                 try write_type(output, state.module, state.values[usize(operand)])
                 try io.print(" %r{}, ptr %r{}\n", output, {value, pointer})
             }
+            if (instruction.op == .array_literal) {
+                shape :: state.module.arrays.items[usize(instruction.array_type)]
+                if (shape.sentinel) |sentinel| {
+                    pointer :: fresh(state)
+                    try io.print("  %r{} = getelementptr ", output, {pointer})
+                    try write_type(output, state.module, type)
+                    try io.print(", ptr %v{}, i64 0, i64 {}\n  store ", output, {u32(instruction.destination), shape.len})
+                    try write_type(output, state.module, Type{ kind = shape.element, shape = shape.element_array })
+                    try io.write_all(output, " ")
+                    try write_constant(output, state.module, sentinel)
+                    try io.print(", ptr %r{}\n", output, {pointer})
+                }
+            }
             return
         }
         .union_literal: {
@@ -196,7 +209,7 @@ emit_instruction proc(state @mut State, block @ir.Block, instruction ir.Instruct
             base_type :: state.values[usize(instruction.left)]
             shape :: state.module.arrays.items[usize(base_type.shape)]
             failed :: fresh(state)
-            try io.print("  %r{} = icmp uge i64 %r{}, {}\n", output, {failed, index, shape.len})
+            try io.print("  %r{} = icmp uge i64 %r{}, {}\n", output, {failed, index, ir.array_storage_len(shape)})
             try check_failure(state, failed, .index_out_of_bounds, instruction.span)
             pointer :: fresh(state)
             if (instruction.op == .index_address) {
@@ -677,7 +690,7 @@ store_payload proc(state @mut State, type Type, value, pointer usize) void ! io.
     if (ir.aggregate(type.kind)) {
         shape :: state.module.arrays.items[usize(type.shape)]
         if (!shape.is_union) {
-            count usize :: if (type.kind == .record) shape.fields.len else shape.len
+            count usize :: if (type.kind == .record) shape.fields.len else ir.array_storage_len(shape)
             for (0..count) |i| {
                 child :: if (type.kind == .record) Type{ kind = shape.fields[i].type, shape = shape.fields[i].array_type } else Type{ kind = shape.element, shape = shape.element_array }
                 offset usize :: if (type.kind == .record) shape.fields[i].byte_offset else i * ir.storage_size(state.module, shape.element, shape.element_array)

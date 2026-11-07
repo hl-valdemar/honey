@@ -2089,6 +2089,48 @@ empty_array_entry_results_need_no_escaped_allocation test {
     try testing.expect_equal(usize(0), state.live)
 }
 
+fixed_sentinel_arrays_keep_physical_storage_and_logical_lengths test {
+    sources [_][]u8 :: [
+        "main proc() bool {\n a [2;0]u8 :: [20,22]\n b :: a\n return b.len == 2 and b[0] == 20 and b[b.len] == 0 and b.ptr[b.len] == 0\n}\n",
+        "main proc() bool {\n a [0;255]u8 :: []\n b :: a\n return b.len == 0 and b[0] == 255 and b.ptr[0] == 255\n}\n",
+        "main proc() bool {\n a [2][1;7]u8 :: [[20],[22]]\n b :: a\n return b.len == 2 and b[0].len == 1 and b[0][1] == 7 and b[1].ptr[1] == 7\n}\n",
+        "a [2;0]u8 :: [20,22]\nidentity proc(value [2;0]u8) [2;0]u8 { return value }\nmain proc() bool {\n b :: identity(a)\n return b.len == 2 and b.ptr[2] == 0\n}\n",
+        "main proc() bool {\n a [2;0]u8 :: [20,22]\n s [;0]u8 :: a[..]\n t [;0]u8 :: (&a)[1..;0]\n return s.len == 2 and s[s.len] == 0 and s.ptr[s.len] == 0 and t.len == 1 and t[t.len] == 0\n}\n",
+        "main proc() bool {\n a [0;18446744073709551615]u64 :: []\n b :: a\n return b.ptr[0] == 18446744073709551615\n}\n",
+        "main proc() bool {\n a [0;-9223372036854775808]i64 :: []\n b :: a\n return b.ptr[0] == -9223372036854775808\n}\n",
+    ]
+    for (sources) |source| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_owned(source, &diagnostic_store)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        try testing.expect_equal(ir.Type.bool, outcome.value.type)
+        try testing.expect(outcome.value.data.boolean)
+    }
+}
+
+fixed_sentinel_array_assertions_check_the_physical_endpoint test {
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `main proc() int {
+        `    a [2;0]mut u8 := [20,22]
+        `    a[2] = 1
+        `    s :: a[..;0]
+        `    return int(s.len)
+        `}
+    module := try compile_owned(source, &diagnostic_store)
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+    defer interpreter.deinit(&outcome)
+    try expect_trap(outcome, &diagnostic_store, .sentinel_mismatch)
+}
+
 fallible_source_handlers_do_not_catch_runtime_allocation_failures test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)

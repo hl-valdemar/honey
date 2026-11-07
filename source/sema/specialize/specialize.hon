@@ -386,6 +386,8 @@ scan_demand_execution proc(state @mut State, id, body ast.NodeId, static_control
         if (kind == .array_type) {
             if (ast.array_type(&state.tree, id).count) |count|
                 if (runtime_dependency(state, count, body, 0)) return true
+            if (ast.array_type(&state.tree, id).sentinel) |sentinel|
+                if (runtime_dependency(state, sentinel, body, 0)) return true
         }
         if (kind == .match_expr) {
             subject :: ast.match_expr(&state.tree, id).subject
@@ -1099,6 +1101,7 @@ expand_expected proc(state @mut State, id, expected ast.NodeId) void ! Error {
                 folded :: try materialize(state, value)
                 replacement :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, id),
                     folded.node, view.element, view.mutable)
+                if (view.sentinel) |sentinel| ast.set_array_sentinel(state.builder, replacement, sentinel)
                 try replace(state, id, replacement)
                 try refresh(state)
             }
@@ -3614,9 +3617,12 @@ snapshot_layout proc(checked @typecheck.Result, type typecheck.Type, depth usize
         .array: {
             descriptor :: typecheck.array_type(checked, type.array_type)
             child :: snapshot_layout(checked, descriptor.element, depth + 1)
+            extra :: if (descriptor.sentinel != null) usize(1) else usize(0)
+            if (descriptor.len > maxval!(usize) - extra) return [no_index, 1]
+            count :: descriptor.len + extra
             if (child[0] == no_index or (child[0] != 0
-                and descriptor.len > divtrunc!(maxval!(usize), child[0]))) return [no_index, 1]
-            return [child[0] * descriptor.len, child[1]]
+                and count > divtrunc!(maxval!(usize), child[0]))) return [no_index, 1]
+            return [child[0] * count, child[1]]
         }
         .optional: {
             child_type :: typecheck.array_type(checked, type.array_type).element
@@ -3859,20 +3865,21 @@ serialized_type proc(
         descriptor :: typecheck.array_type(checked, type.array_type)
         child :: try serialized_type(state, checked, descriptor.element, span, depth + 1)
         if (child == no_node) return no_node
+        sentinel ?ast.NodeId := null
+        if (descriptor.sentinel) |value| {
+            unsigned :: (descriptor.element.kind == .u8 or descriptor.element.kind == .u16
+                or descriptor.element.kind == .u32 or descriptor.element.kind == .u64 or descriptor.element.kind == .usize)
+            negative :: value < 0 and !unsigned
+            magnitude :: if (negative) u64(-(value + 1)) + 1 else ptrcast!(@u64, &value)^
+            literal := try ast.add_integer(state.builder, span, magnitude)
+            if (negative) literal = try ast.add_unary(state.builder, span, .negate, literal)
+            sentinel = literal
+        }
         if (type.kind == .array) {
             count :: try ast.add_integer(state.builder, span, u64(descriptor.len))
             result = try ast.add_array_type(state.builder, span, count, child, descriptor.mutable)
+            if (sentinel) |node| ast.set_array_sentinel(state.builder, result, node)
         } else if (type.kind == .slice) {
-            sentinel ?ast.NodeId := null
-            if (descriptor.sentinel) |value| {
-                unsigned :: (descriptor.element.kind == .u8 or descriptor.element.kind == .u16
-                    or descriptor.element.kind == .u32 or descriptor.element.kind == .u64 or descriptor.element.kind == .usize)
-                negative :: value < 0 and !unsigned
-                magnitude :: if (negative) u64(-(value + 1)) + 1 else ptrcast!(@u64, &value)^
-                literal := try ast.add_integer(state.builder, span, magnitude)
-                if (negative) literal = try ast.add_unary(state.builder, span, .negate, literal)
-                sentinel = literal
-            }
             result = try ast.add_slice_type(state.builder, span, child, descriptor.mutable, sentinel)
         } else if (type.kind == .optional) result = try ast.add_optional_type(state.builder, span, child)
         else {
@@ -4098,6 +4105,17 @@ serialize_value proc(
         }
     } else if (type.kind == .array) {
         array :: typecheck.array_type(checked, type.array_type)
+        if (array.sentinel) |sentinel| {
+            endpoint :: ir.aggregate_item(module, value, array.len)
+            if (endpoint.uninitialized) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .read_before_initialization, span)
+                return no_node
+            }
+            if (endpoint.data.integer != sentinel) {
+                state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, .sentinel_mismatch, span)
+                return no_node
+            }
+        }
         elements := arraylist.init(ast.NodeId, state.allocator)
         defer arraylist.deinit(&elements)
         for (0..array.len) |i| {
@@ -6677,10 +6695,15 @@ type_array_projection proc(state @mut State, id ast.NodeId) bool ! Error {
             if (!type_record_storage(state, array.type, 0))
                 selected_type = ast.field(&state.tree, ast.record_field(&state.tree, type, slot)).type?
         } else if (kind == .index) {
+            sentinel ?ast.NodeId := null
+            if (ast.expr_kind(&state.tree, type) == .array_type)
+                sentinel = ast.array_type(&state.tree, type).sentinel
+            count :: ast.array_element_count(&state.tree, array.value)
             index :: try type_array_index(state, ast.index_expr(&state.tree, id).index,
-                ast.array_element_count(&state.tree, array.value), false)
+                count, sentinel != null)
             if (index == no_index) return false
-            selected = ast.array_element(&state.tree, array.value, index)
+            if (index == count) selected = sentinel?
+            else selected = ast.array_element(&state.tree, array.value, index)
             if (!type_record_storage(state, array.type, 0))
                 selected_type = ast.array_type(&state.tree, type).element
         } else {
@@ -7096,6 +7119,10 @@ type_array_compatible proc(state @mut State, expected, actual ast.NodeId) bool !
     a :: ast.array_type(&state.tree, left)
     b :: ast.array_type(&state.tree, right)
     if (a.mutable != b.mutable or b.count == null) return false
+    if ((a.sentinel == null) != (b.sentinel == null)) return false
+    if (a.sentinel) |sentinel| {
+        if (!try value_equal(state, try evaluate(state, sentinel), try evaluate(state, b.sentinel?))) return false
+    }
     if (a.count) |count| {
         if (!try value_equal(state, try evaluate(state, count), try evaluate(state, b.count?))) return false
     }
@@ -7191,6 +7218,7 @@ type_storage_undefined proc(state @mut State, expression, annotation ast.NodeId)
         ast.typed_constant(&state.tree, child).type else descriptor.element
     count :: try ast.add_integer(state.builder, span, length.magnitude)
     concrete :: try ast.add_array_type(state.builder, type_span, count, element_type, descriptor.mutable)
+    if (descriptor.sentinel) |sentinel| ast.set_array_sentinel(state.builder, concrete, sentinel)
     literal :: try ast.add_array_literal(state.builder, span, elements.items)
     result :: try ast.add_typed_constant(state.builder, span, concrete, literal)
     try refresh(state)
@@ -7255,6 +7283,7 @@ type_array_value proc(state @mut State, expression, annotation ast.NodeId) ast.N
         length :: try ast.add_integer(state.builder, span, u64(count))
         concrete :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, annotation),
             length, element_type, array.mutable)
+        if (array.sentinel) |sentinel| ast.set_array_sentinel(state.builder, concrete, sentinel)
         literal :: try ast.add_array_literal(state.builder, span, elements.items)
         result :: try ast.add_typed_constant(state.builder, span, concrete, literal)
         try refresh(state)
@@ -9044,6 +9073,10 @@ same_type_context proc(state @mut State, left, right ast.NodeId, metadata bool) 
             p :: ast.array_type(&state.tree, a)
             q :: ast.array_type(&state.tree, b)
             if (p.mutable != q.mutable or p.count == null or q.count == null) return false
+            if ((p.sentinel == null) != (q.sentinel == null)) return false
+            if (p.sentinel) |sentinel| {
+                if (!try value_equal(state, try evaluate(state, sentinel), try evaluate(state, q.sentinel?))) return false
+            }
             pv :: try evaluate(state, p.count?)
             qv :: try evaluate(state, q.count?)
             return try value_equal(state, pv, qv) and try same_type_context(state, p.element, q.element, metadata)
@@ -9179,6 +9212,7 @@ type_hash_context proc(state @mut State, id ast.NodeId, metadata bool) usize ! E
             mutable :: if (view.mutable) usize(1) else usize(0)
             hash = mix(hash, mutable)
             if (view.count) |count| hash = mix(hash, try value_hash(state, try evaluate(state, count)))
+            if (view.sentinel) |sentinel| hash = mix(hash, try value_hash(state, try evaluate(state, sentinel)))
             return mix(hash, try type_hash_context(state, view.element, metadata))
         }
         .slice_type: {
@@ -9264,6 +9298,7 @@ storage_array_type proc(state @mut State, annotation, initializer ast.NodeId, de
     unchanged_count :: if (array.count) |length| count != null and count? == length else count == null
     if (unchanged_count and element == array.element) return type
     result :: try ast.add_array_type(state.builder, ast.node_span(&state.tree, type), count, element, array.mutable)
+    if (array.sentinel) |sentinel| ast.set_array_sentinel(state.builder, result, sentinel)
     try refresh(state)
     return result
 }
@@ -9499,23 +9534,41 @@ expression_type proc(state @mut State, id ast.NodeId, depth usize) ast.NodeId ! 
             base_kind :: ast.expr_kind(&state.tree, base)
             element := no_node
             mutable := false
+            sentinel ?ast.NodeId := null
             if (base_kind == .array_type) {
-                element = ast.array_type(&state.tree, base).element
-                mutable = ast.array_type(&state.tree, base).mutable
+                array :: ast.array_type(&state.tree, base)
+                element = array.element
+                mutable = array.mutable
+                sentinel = array.sentinel
             }
             if (base_kind == .pointer_type) {
-                element = ast.pointer_type(&state.tree, base).element
-                mutable = ast.pointer_type(&state.tree, base).mutable
+                pointer :: ast.pointer_type(&state.tree, base)
+                child :: try canonical_type(state, pointer.element)
+                element = pointer.element
+                mutable = pointer.mutable
+                if (child != no_node and ast.expr_kind(&state.tree, child) == .array_type) {
+                    array :: ast.array_type(&state.tree, child)
+                    element = array.element
+                    mutable = mutable and array.mutable
+                    sentinel = array.sentinel
+                }
             }
             if (base_kind == .slice_type) {
-                element = ast.slice_type(&state.tree, base).element
-                mutable = ast.slice_type(&state.tree, base).mutable
+                slice :: ast.slice_type(&state.tree, base)
+                element = slice.element
+                mutable = slice.mutable
+                sentinel = slice.sentinel
             }
             scalar :: binding(state, base)
-            if (scalar.kind == .builtin and scalar.data.builtin == .string)
+            if (scalar.kind == .builtin and scalar.data.builtin == .string) {
                 element = try builtin(state, id, .u8)
+                sentinel = try ast.add_integer(state.builder, ast.node_span(&state.tree, id), 0)
+                try refresh(state)
+            }
             if (element == no_node) return no_node
-            result :: try ast.add_slice_type(state.builder, ast.node_span(&state.tree, id), element, mutable, null)
+            if (view.end != null) sentinel = null
+            if (view.sentinel) |node| sentinel = node
+            result :: try ast.add_slice_type(state.builder, ast.node_span(&state.tree, id), element, mutable, sentinel)
             try refresh(state)
             return result
         }
@@ -9590,8 +9643,12 @@ infer proc(state @mut State, function, pattern, actual ast.NodeId, arguments []m
             if (actual_kind != .array_type) return false
             p :: ast.array_type(&state.tree, pattern)
             a :: ast.array_type(&state.tree, concrete)
+            if ((p.sentinel == null) != (a.sentinel == null)) return false
             if (p.count) |count| {
                 if (a.count == null or !try infer_value(state, function, count, try evaluate(state, a.count?), arguments, false)) return false
+            }
+            if (p.sentinel) |sentinel| {
+                if (a.sentinel == null or !try infer_value(state, function, sentinel, try evaluate(state, a.sentinel?), arguments, false)) return false
             }
             return try infer(state, function, p.element, a.element, arguments, contextual)
         }

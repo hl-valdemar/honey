@@ -2313,6 +2313,57 @@ fixed_arrays_contextualize_forward_aliases_counts_nested_literals_and_signatures
     try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
 }
 
+sentinel_arrays_keep_logical_counts_identity_and_slice_weakening test {
+    source ::
+        `fixed [2;0]u8 :: [1, 2]
+        `inferred [_;0]u8 :: [3, 4]
+        `empty [_;255]u8 :: []
+        `copy :: fixed
+        `tail :: fixed[1..]
+        `bounded :: fixed[0..2]
+        `borrowed [;0]u8 :: &fixed
+        `plain []u8 :: fixed
+        `different [2;1]u8 :: [1, 2]
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    tree :: &fixture.tree
+    result :: &fixture.result
+    for (0..usize(2)) |i| {
+        descriptor :: try expect_array(result, ast.package_decl(tree, i), 2, false, .u8)
+        try testing.expect_equal(i64(0), descriptor.sentinel?)
+    }
+    empty :: try expect_array(result, ast.package_decl(tree, 2), 0, false, .u8)
+    try testing.expect_equal(i64(255), empty.sentinel?)
+    fixed :: type_of(result, ast.package_decl(tree, 0))
+    try testing.expect_equal(fixed.array_type, type_of(result, ast.package_decl(tree, 3)).array_type)
+    try testing.expect(fixed.array_type != type_of(result, ast.package_decl(tree, 8)).array_type)
+    tail :: array_type(result, type_of(result, ast.package_decl(tree, 4)).array_type)
+    bounded :: array_type(result, type_of(result, ast.package_decl(tree, 5)).array_type)
+    try testing.expect_equal(i64(0), tail.sentinel?)
+    try testing.expect(bounded.sentinel == null)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}
+
+sentinel_arrays_reject_invalid_values_counts_and_by_value_weakening test {
+    source ::
+        `negative [0;-1]u8 :: []
+        `large [0;256]u8 :: []
+        `noninteger [0;0]bool :: []
+        `runtime := 0
+        `dynamic [0;runtime]u8 :: []
+        `wrong [2;0]u8 :: [1]
+        `overflow [18446744073709551615;0]u8 :: []
+        `valid [1;0]u8 :: [1]
+        `weakened [1]u8 :: valid
+        `different [1;1]u8 :: valid
+    fixture := try array_fixture(source)
+    defer deinit_array_fixture(&fixture)
+    try testing.expect(code_count(&fixture.diagnostics, .invalid_operand) >= 4)
+    try testing.expect(code_count(&fixture.diagnostics, .array_length_mismatch) >= 1)
+    try testing.expect(code_count(&fixture.diagnostics, .array_size_overflow) >= 1)
+    try testing.expect(code_count(&fixture.diagnostics, .type_mismatch) >= 2)
+}
+
 nested_array_numeric_context_flows_through_index_children_before_defaults test {
     source ::
         `first float :: later[0][0]

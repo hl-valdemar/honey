@@ -463,7 +463,7 @@ execute proc(
                     operand :: block.arguments.items[instruction.arguments_start + i]
                     element :: frames.items[frame_index].values[usize(operand)]
                     if (ir.aggregate(element.type)) {
-                        count :: element.data.elements.len
+                        count :: module.arrays.items[usize(element.array_type)].cells
                         target :: aggregate_view(element.type, element.array_type, destination.data.elements[offset..offset + count])
                         ir.copy_aggregate(module, target, element)
                         offset += count
@@ -471,6 +471,10 @@ execute proc(
                         destination.data.elements[offset] = element
                         offset += 1
                     }
+                }
+                if (instruction.op == .array_literal) {
+                    shape :: module.arrays.items[usize(instruction.array_type)]
+                    if (shape.sentinel) |sentinel| destination.data.elements[offset] = sentinel
                 }
                 continue
             }
@@ -593,7 +597,7 @@ execute proc(
                 base :: frames.items[frame_index].values[usize(instruction.left)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 shape :: module.arrays.items[usize(base.array_type)]
-                if (index >= u64(shape.len)) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
+                if (index >= u64(ir.array_storage_len(shape))) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 value = ir.aggregate_item(module, base, usize(index))
             }
             .field: {
@@ -655,7 +659,7 @@ execute proc(
                 base :: frames.items[frame_index].addresses[usize(base_id)]
                 index :: frames.items[frame_index].values[usize(instruction.right)].data.unsigned
                 shape :: module.arrays.items[usize(base.array_type)]
-                if (index >= u64(shape.len)) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
+                if (index >= u64(ir.array_storage_len(shape))) return try runtime_trap(diagnostic_store, .index_out_of_bounds, instruction.span)
                 width :: if (base.raw or base.byte_view) ir.storage_size(module, shape.element, shape.element_array) else element_cells(module, shape)
                 start :: usize(index) * width
                 address := base
@@ -1050,7 +1054,7 @@ project_pointer proc(
     if (shape.kind == .array) {
         stride :: ir.storage_size(module, shape.element, shape.element_array)
         index :: if (stride == 0) usize(0) else divtrunc!(offset, stride)
-        if (index >= shape.len) return null
+        if (index >= ir.array_storage_len(shape)) return null
         width :: element_cells(module, shape)
         start :: index * width
         child := base
