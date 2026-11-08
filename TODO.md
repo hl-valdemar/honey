@@ -18,4 +18,17 @@ goal: build a small raylib game in a sibling project, using Honey's stdlib and d
 
 `../honey-pong` builds without warnings with a macOS 15.0 minimum; its physics check passes, and user-confirmed graphical execution clears the displayless-host acceptance blocker. compiler unit/native/ABI/project/binding suites and two-generation self-hosting pass, with no new feature syntax adopted in compiler production sources. the required two-release bootstrap rollout remains a release/adoption gate: publish compiler support, then pin that published release before adopting new features in compiler or production dependencies.
 
+## language-native build toolchain
+
+goal: ordinary Honey configuration with a small interface; describe artifacts rather than manually wiring a public step graph.
+
+- [ ] evolve the existing `build.BuildConfig` rather than introducing a builder framework. describe sources, native dependencies and generated inputs; keep compilation, linking and ordering internal.
+- [ ] provide conventional `honey build`, `honey test` and `honey install` project commands without requiring explicit step registration or repeated artifact declarations.
+- [ ] allow ordinary Honey helpers and platform choices to produce configuration values. configuration evaluation must not execute commands, download dependencies or install files.
+- [ ] integrate the validated, versioned user-local installation flow: preserve bootstraps and older installations, validate candidates before atomic activation, and retain rollback. keep compiler bootstrap/validation as a compiler-specific recipe and recovery available outside the compiler executable.
+- [ ] add multiple-artifact configuration when a real project needs it; keep single-artifact projects simple.
+- [ ] add custom generation/asset tasks when needed, with explicit inputs and outputs. infer dependencies from artifact/output references, not declaration order or shell-command inspection; do not cache undeclared effects as if they were tracked.
+
+initial scope: existing declarative configuration, conventional commands and safe installation. defer plugins, package resolution and a public step graph. preserve project-vendored library control and the required bootstrap rollout policy.
+
 See [README.md](README.md) for implemented features, current compiler boundaries and verification commands.
