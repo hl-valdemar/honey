@@ -35,20 +35,22 @@ the distribution must include matching `std/` and `ffi/c/` templates beside the 
 
 `build.hon` supplies a `config :: build.BuildConfig{ ... }` with `name` and `source`. native dependencies use `libraries`, `lib_paths`, `links` (C sources, objects, archives or native linker options), `includes`, `defines`, `frameworks` and `rpaths`. paths are project-relative unless absolute; dyld `@loader_path`/`@executable_path` runtime paths remain unchanged. `linkage = .automatic`, `.static` or `.shared` selects the dependency library form, not the program's output kind. explicit `build <source> -o <output>` and `test <source>` also use project link settings when a config exists; marker-only `build.hon` files remain valid for those commands.
 
+`macos_deployment_target = "15.0"` sets a project's minimum macOS version for LLVM emission, compilation and linking; the default remains `"11.0"`. use numeric `major.minor` or `major.minor.patch`, at least 11.0, and match native dependencies' requirements. older vendored `std/build/build.hon` files need the `macos_deployment_target []u8 = "11.0"` field added explicitly to `BuildConfig`; builds never upgrade that file automatically. `emit-llvm` honors the project target without resolving native libraries.
+
 generate only the C declarations a project needs, using the installed Clang frontend:
 
 ```sh
 ./build/honey translate-c raylib --project ../my-game \
     --header /opt/homebrew/opt/raylib/include/raylib.h \
-    --target arm64-apple-macos11 \
+    --target arm64-apple-macos15 \
     --symbol InitWindow --symbol CloseWindow --symbol DrawCircle
 ```
 
 repeat `--header`/`--symbol` for additional inputs; `-I`, `-D`, `--sysroot` and `--clang` select preprocessing settings and the frontend executable. the project must contain `source/` and a `build.hon`/`build.bro` root marker. generation creates `ffi/raylib/bindings.hon`, transitive shared nominal types under `ffi/__c_types/`, and ownership/recipe snapshots. import the result with `import "@ffi/raylib"`. generation does not link raylib, install libraries or generate C bridges; configure the actual native library separately.
 
-binding packages isolate unrelated C names, while shared declarations retain one nominal identity. unsupported requested constructs are diagnosed rather than silently skipped. regeneration is deterministic and refuses to overwrite modified generated files or unrelated outputs; keep handwritten helpers in separate files. regenerate deliberately when headers, target or preprocessor settings change. C declarations do not establish ownership, callback lifetime, thread affinity or initialization contracts.
+binding packages isolate unrelated C names, while shared declarations retain one nominal identity. unsupported requested constructs are diagnosed rather than silently skipped. regeneration is deterministic and refuses to overwrite modified generated files or unrelated outputs; keep handwritten helpers in separate files. regenerate deliberately when headers, target or preprocessor settings change. a single binding package can be retargeted; other generated packages must use the same target, and conflicts leave outputs unchanged. C declarations do not establish ownership, callback lifetime, thread affinity or initialization contracts.
 
-raylib window execution requires an active macOS display; a hidden window is not a headless renderer. a displayless host cannot verify the graphical loop. Honey currently targets macOS 11.0; check dependency deployment requirements before distributing a program (the tested Homebrew raylib 5.5 library requires macOS 15.0 and emits a linker warning).
+raylib window execution requires an active macOS display; a hidden window is not a headless renderer. a displayless host cannot verify the graphical loop. the tested Homebrew raylib 5.5 library requires macOS 15.0; set `macos_deployment_target = "15.0"` in the project configuration rather than suppressing deployment-target linker warnings.
 
 run a source file with the interpreter:
 
@@ -82,7 +84,7 @@ compile the same supported language subset to a standalone Apple Silicon macOS e
 ./build/factorial
 ```
 
-this prints `120`. `build` requires `-o <executable>` and accepts `-O0` (the default) or `-O2` as its final option. Honey emits textual LLVM IR and invokes `clang` from `PATH` without a shell, targeting `arm64-apple-macosx11.0.0`. Apple Clang 21 is the verified toolchain; LLVM libraries, LLVM bindings and a C emission stage are not required. the temporary IR file is private and removed after compilation, including on failure.
+this prints `120`. `build` requires `-o <executable>` and accepts `-O0` (the default) or `-O2` as its final option. Honey emits textual LLVM IR and invokes `clang` from `PATH` without a shell, targeting `arm64-apple-macosx11.0.0` by default or the project's configured macOS minimum. Apple Clang 21 is the verified toolchain; LLVM libraries, LLVM bindings and a C emission stage are not required. the temporary IR file is private and removed after compilation, including on failure.
 
 inspect or compile the LLVM text separately:
 

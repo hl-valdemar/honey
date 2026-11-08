@@ -1701,10 +1701,6 @@ read_manifest proc(context @Context, directory []u8) ?Json ! Error {
     }
     errdefer arraylist.deinit(&parsed.nodes)
     if (!mem.eql(json_text(&parsed, 1, "generator"), "honey-cimport-1")) return .unsafe_output
-    if (!mem.eql(json_text(&parsed, 1, "target"), context.options.target)) {
-        try report(context, directory, "binding target differs from this project's generated C types; use a separate project for another target")
-        return .conflicting_declaration
-    }
     return parsed
 }
 @hide:file
@@ -1798,6 +1794,10 @@ install proc(context @mut Context) void ! Error {
         if (try read_manifest(context, other_path)) |other_value| {
             other := other_value
             defer arraylist.deinit(&other.nodes)
+            if (!mem.eql(json_text(&other, 1, "target"), context.options.target)) {
+                try report(context, other_path, "binding target differs from this project's other generated C packages; use a separate project for another target")
+                return .conflicting_declaration
+            }
             try merge_manifest(context, &other, &merged_common, &merged_symbols)
         }
     }

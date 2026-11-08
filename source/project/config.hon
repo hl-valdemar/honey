@@ -9,14 +9,16 @@ import "@source/diagnostics"
 import "@source/ir"
 import "@source/interpreter"
 
-#! owns paths and linker arguments; release exactly once with deinit_config.
-#! source/output are absolute; arguments are ready to append after the LLVM input.
+#! owns paths, target and linker arguments; release exactly once with deinit_config.
+#! source/output are absolute; target is a validated Darwin arm64 Clang/LLVM triple.
+#! arguments are ready to append after the LLVM input.
 Config :: struct {
     allocator mem.Allocator
     root [;0]u8 = ""
     name [;0]u8 = ""
     source [;0]u8 = ""
     output [;0]u8 = ""
+    target [;0]u8 = "arm64-apple-macosx11.0.0"
     arguments arraylist.ArrayList([;0]u8)
     owned arraylist.ArrayList([]mut u8)
 }
@@ -66,8 +68,9 @@ pair proc(config @mut Config, option, value []u8) void ! Error {
 #! discovers build.hon from a directory or its ancestors, type-checks its BuildConfig,
 #! and evaluates it with Honey's bounded constant interpreter. no files are refreshed.
 #! optional reads return name == "" and no arguments when no config is declared.
+#! library selection is skipped for IR-only callers when `resolve_libraries` is false.
 #! no output directories are created. diagnostics are local; return status 2 on failure.
-load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required bool) Config ! Error {
+load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, resolve_libraries bool) Config ! Error {
     config := Config{ allocator = allocator, arguments = arraylist.init(allocator), owned = arraylist.init(allocator) }
     errdefer deinit_config(&config)
     directory :: try loader.directory(allocator, input)
@@ -94,7 +97,7 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required bo
     build_package :: try compilation.load(&session, runtime, try path(&config, "std/build"), &store)
     # the typed snapshot keeps field extraction independent of BuildConfig declaration order.
     # imported package identities are wired exactly like the compiler's native test runner.
-    runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) } }\n}\nmain proc() Snapshot { return snapshot(__honey_project.config) }\n"
+    runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n macos_deployment_target []u8\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) }, macos_deployment_target = value.macos_deployment_target }\n}\nmain proc() Snapshot { return snapshot(__honey_project.config) }\n"
     bytes := arraylist.init(u8, allocator)
     defer arraylist.deinit(&bytes)
     for (runner_text) |byte| try arraylist.append(&bytes, byte)
@@ -118,7 +121,27 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required bo
         return .invalid_config
     }
     value :: outcome.value
-    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 10) return .invalid_config
+    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 11) return .invalid_config
+    deployment_version :: read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 10)) catch |err| {
+        if (err == .invalid_config) try report_invalid_deployment_target(runtime)
+        return err
+    }
+    components :: deployment_components(deployment_version)
+    if (components == null) {
+        try report_invalid_deployment_target(runtime)
+        return .invalid_config
+    }
+    normalized :: components?
+    target [32]mut u8 := undefined
+    target_length := usize(0)
+    target_parts [6][]u8 :: ["arm64-apple-macosx", normalized[0], ".", normalized[1], ".", normalized[2]]
+    for (target_parts) |part| {
+        for (part) |byte| {
+            target[target_length] = byte
+            target_length += 1
+        }
+    }
+    config.target = try text(&config, target[..target_length])
     config.name = try read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 0))
     if (!valid_name(config.name)) {
         try io.write_all(io.stderr(runtime), "honey build: config.name must be a nonempty plain executable name\n")
@@ -165,10 +188,44 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required bo
     if (linkage > 2) return .invalid_config
     for (libraries.items) |library| {
         if (!valid_name(library) or library[0] == '-') return .invalid_config
-        if (linkage == 0) try pair(&config, "-l", library)
+        if (linkage == 0 or !resolve_libraries) try pair(&config, "-l", library)
         else try select_library(&config, runtime, paths.items, library, linkage == 1)
     }
     return config
+}
+
+@hide:file
+report_invalid_deployment_target proc(runtime io.Io) void ! Error {
+    try io.write_all(io.stderr(runtime), "honey build: config.macos_deployment_target must be decimal major.minor[.patch], at least 11.0 for Apple Silicon (major <= 65535, minor/patch <= 255); for example \"15.0\"\n")
+}
+
+# Mach-O stores the major version in 16 bits and the minor/patch in 8 bits each.
+# returned components borrow the input with leading zeros removed; an omitted patch is zero.
+@hide:file
+deployment_components proc(deployment_version []u8) ?[3][]u8 {
+    components [3]mut []u8 := ["", "", "0"]
+    cursor := usize(0)
+    for (usize(0)..usize(3)) |index| {
+        start := cursor
+        number := u32(0)
+        limit :: if (index == 0) u32(65535) else u32(255)
+        while (cursor < deployment_version.len and deployment_version[cursor] >= '0' and deployment_version[cursor] <= '9') {
+            number = number * 10 + u32(deployment_version[cursor] - '0')
+            if (number > limit) return null
+            cursor += 1
+        }
+        if (cursor == start or (index == 0 and number < 11)) return null
+        while (start + 1 < cursor and deployment_version[start] == '0') start += 1
+        components[index] = deployment_version[start..cursor]
+        if (cursor == deployment_version.len) {
+            if (index == 0) return null
+            normalized [3][]u8 :: [components[0], components[1], components[2]]
+            return normalized
+        }
+        if (deployment_version[cursor] != '.' or index == 2) return null
+        cursor += 1
+    }
+    return null
 }
 
 @hide:file

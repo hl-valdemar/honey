@@ -52,10 +52,10 @@ preserves_stream_bytes_and_write_failures test {
     sources [_]diagnostics.Source :: [{ path = "fixture.hon", text = "" }]
     reference := OutputCapture{ bytes = arraylist.init(u8, mem.c_allocator) }
     defer arraylist.deinit(&reference.bytes)
-    try emit(mem.c_allocator, capture_output(&reference), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0))
+    try emit(mem.c_allocator, capture_output(&reference), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0), "arm64-apple-macosx11.0.0")
     actual := OutputCapture{ bytes = arraylist.init(u8, mem.c_allocator), chunk = 7 }
     defer arraylist.deinit(&actual.bytes)
-    try emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0))
+    try emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0), "arm64-apple-macosx11.0.0")
     try testing.expect(mem.eql(reference.bytes.items, actual.bytes.items))
 
     boundaries [_]usize :: [divtrunc!(reference.bytes.items.len, 2), reference.bytes.items.len - 1]
@@ -65,7 +65,7 @@ preserves_stream_bytes_and_write_failures test {
         actual.fail_at = boundary
         actual.failed = false
         failed = false
-        emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+        emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0), "arm64-apple-macosx11.0.0") catch |err| {
             failed = err == .write_failed
         }
         try testing.expect(failed)
@@ -75,14 +75,14 @@ preserves_stream_bytes_and_write_failures test {
     arraylist.clear(&actual.bytes)
     actual.mode = 1
     failed = false
-    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0), "arm64-apple-macosx11.0.0") catch |err| {
         failed = err == .no_progress
     }
     try testing.expect(failed)
 
     actual.mode = 2
     failed = false
-    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0)) catch |err| {
+    emit(mem.c_allocator, capture_output(&actual), &module, &diagnostic_store, sources[..], diagnostics.SourceId(0), "arm64-apple-macosx11.0.0") catch |err| {
         failed = err == .write_failed
     }
     try testing.expect(failed)

@@ -34,6 +34,8 @@ standalone_creation_preserves_local_files test {
     try support.expect(&context, built.status == 0, "standalone project builds using vendored packages")
     executable :: try support.path(&context, root, "build/app")
     ran :: try support.run(&context, &[executable], {})
+    metadata :: try support.run(&context, &["otool", "-l", executable], {})
+    try support.expect(&context, metadata.status == 0 and support.contains(metadata.stdout, "cmd LC_BUILD_VERSION\n") and support.contains(metadata.stdout, " minos 11.0\n"), "default executable retains the macOS 11 deployment minimum")
     try support.expect(&context, ran.status == 0 and mem.eql(ran.stdout, "42\n"), "generated project uses current supported Honey syntax and preserves its entry")
     after_build :: try support.read(&context, stdlib)
     try support.expect(&context, mem.eql(after_build, "# user stdlib customization\n"), "build never refreshes vendored sources")
@@ -58,21 +60,36 @@ public_config_interprets_real_honey_values test {
     interpreted :: try support.run(&context, &[fixture_executable, root, "required"], {})
     try support.expect(&context, interpreted.status == 0 and support.contains(interpreted.stdout, "name=configured\n"), "config uses Honey constant evaluation")
     try support.expect(&context, support.contains(interpreted.stdout, "/source\n") and support.contains(interpreted.stdout, "/build/configured\n"), "public config returns absolute project paths")
+    try support.expect(&context, support.contains(interpreted.stdout, "target=arm64-apple-macosx11.0.0\n"), "default config retains the exact macOS 11 target")
     try support.expect(&context, try fs.kind(context.allocator, try support.path(&context, root, "build")) == .missing, "loading a config does not create output directories")
     unconfigured :: try support.path(&context, context.temporary, "no-build-file")
     try support.directory(&context, unconfigured)
     no_file :: try support.run(&context, &[fixture_executable, unconfigured, "optional"], {})
-    try support.expect(&context, no_file.status == 0 and mem.eql(no_file.stdout, "name=\nsource=\noutput=\n"), "optional projects without build.hon have no linker arguments")
+    try support.expect(&context, no_file.status == 0 and mem.eql(no_file.stdout, "name=\nsource=\noutput=\ntarget=arm64-apple-macosx11.0.0\n"), "optional projects without build.hon retain the default target and no linker arguments")
     marker :: try support.path(&context, context.temporary, "marker-only")
     _ = try support.put(&context, marker, "build.hon", "# project-root marker\n")
     absent :: try support.run(&context, &[fixture_executable, marker, "optional"], {})
-    try support.expect(&context, absent.status == 0 and mem.eql(absent.stdout, "name=\nsource=\noutput=\n"), "optional marker-only configs need neither config nor std/build")
+    try support.expect(&context, absent.status == 0 and mem.eql(absent.stdout, "name=\nsource=\noutput=\ntarget=arm64-apple-macosx11.0.0\n"), "optional marker-only configs retain the default target and need neither config nor std/build")
     try support.expect(&context, try fs.kind(context.allocator, try support.path(&context, marker, "build")) == .missing, "optional reads have no output-directory side effect")
     required_marker :: try support.run(&context, &[fixture_executable, marker, "required"], {})
     try support.expect(&context, required_marker.status != 0 and support.contains(required_marker.stderr, "missing top-level config"), "required project builds reject marker-only configs")
     _ = try support.put(&context, marker, "build.hon", "config ::\n")
     malformed :: try support.run(&context, &[fixture_executable, marker, "optional"], {})
     try support.expect(&context, malformed.status != 0 and support.contains(malformed.stderr, "build config"), "optional mode never ignores malformed config declarations")
+    for (["15.0", "15.2.1", "00015.000.000"]) |version, index| {
+        config_text :: try support.concat(&context, &["import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"configured\", source = \"source\", macos_deployment_target = \"", version, "\" }\n"])
+        try support.write(&context, build_file, config_text)
+        configured :: try support.run(&context, &[fixture_executable, root, "required"], {})
+        expected :: if (index == 1) "target=arm64-apple-macosx15.2.1\n" else "target=arm64-apple-macosx15.0.0\n"
+        try support.expect(&context, configured.status == 0 and support.contains(configured.stdout, expected), "configured deployment versions are normalized into a complete target triple")
+    }
+    for (["", "10.15", "15", "15.", "15..0", "15.0.", "15.0.0.1", "15.0-beta", "-15.0", "15.0 -Wl,-w", "15.0/../../", "0xf.0", "65536.0", "15.256", "15.0.256", "999999999999999999999999999.0", "15.0\\0unsafe"]) |version| {
+        config_text :: try support.concat(&context, &["import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"configured\", source = \"source\", macos_deployment_target = \"", version, "\" }\n"])
+        try support.write(&context, build_file, config_text)
+        rejected :: try support.run(&context, &[fixture_executable, root, "required"], {})
+        try support.expect(&context, rejected.status != 0 and support.contains(rejected.stderr, "config.macos_deployment_target") and support.contains(rejected.stderr, "major.minor[.patch]"), "invalid deployment versions fail with an actionable config diagnostic")
+    }
+    try support.expect(&context, try fs.kind(context.allocator, try support.path(&context, root, "build")) == .missing, "configured and invalid deployment targets have no output-directory side effects")
 }
 
 static_and_shared_native_libraries test {
@@ -103,7 +120,17 @@ static_and_shared_native_libraries test {
         ran :: try support.run(&context, &[executable], {})
         try support.expect_result(&context, ran, 0, "42\n", "")
     }
-    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"missing\", source = \"source\", libraries = &[\"honey_absent_library\"], lib_paths = &[\"native libraries\"], linkage = .static }\n")
+    newer_shared :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx15.0.0", "-dynamiclib", c_file, "-framework", "CoreFoundation", "-install_name", "@rpath/libanswer.dylib", "-o", dynamic], {})
+    try support.expect_result(&context, newer_shared, 0, "", "")
+    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"native\", source = \"source\", libraries = &[\"answer\"], lib_paths = &[\"native libraries\"], frameworks = &[\"CoreFoundation\"], rpaths = &[\"@executable_path/../native libraries\"], linkage = .shared, macos_deployment_target = \"15.0\" }\n")
+    newer_build :: try support.run(&context, &[context.compiler, "build", root], {})
+    try support.expect_result(&context, newer_build, 0, "", "")
+    executable :: try support.path(&context, root, "build/native")
+    metadata :: try support.run(&context, &["otool", "-l", executable], {})
+    try support.expect(&context, metadata.status == 0 and support.contains(metadata.stdout, "cmd LC_BUILD_VERSION\n") and support.contains(metadata.stdout, " minos 15.0\n"), "configured executable records macOS 15 and links a macOS 15 native library without warnings")
+    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"missing\", source = \"source\", libraries = &[\"honey_absent_library\"], lib_paths = &[\"native libraries\"], linkage = .static, macos_deployment_target = \"15.0\" }\n")
+    emitted :: try support.run(&context, &[context.compiler, "emit-llvm", try support.path(&context, root, "source")], {})
+    try support.expect(&context, emitted.status == 0 and mem.eql(emitted.stderr, "") and support.contains(emitted.stdout, "target triple = \"arm64-apple-macosx15.0.0\""), "IR emission honors the target without requiring configured native libraries to exist")
     missing :: try support.run(&context, &[context.compiler, "build", root], {})
     try support.expect(&context, missing.status != 0 and support.contains(missing.stderr, "honey_absent_library") and support.contains(missing.stderr, "config.lib_paths"), "missing libraries have actionable diagnostics")
 }

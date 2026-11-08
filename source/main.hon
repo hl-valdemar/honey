@@ -118,12 +118,12 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
                     return 2
                 }
             }
-            config := project.load_config(allocator, runtime, args.values[2], false) catch |_| {
+            config := project.load_config(allocator, runtime, args.values[2], false, true) catch |_| {
                 try io.print("honey build: cannot load project configuration for {s}\n", io.stderr(runtime), {args.values[2]})
                 return 2
             }
             defer project.deinit_config(&config)
-            return try build_file(allocator, runtime, args.values[2], args.values[4], optimization, config.arguments.items)
+            return try build_file(allocator, runtime, args.values[2], args.values[4], optimization, config.arguments.items, config.target)
         }
     }
     try usage(io.stderr(runtime))
@@ -148,7 +148,7 @@ build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i3
             return 2
         }
     }
-    config := project.load_config(allocator, runtime, root, true) catch |_| {
+    config := project.load_config(allocator, runtime, root, true, true) catch |_| {
         try io.print("honey build: cannot load project configuration for {s}\n", io.stderr(runtime), {root})
         return 2
     }
@@ -159,7 +159,7 @@ build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i3
         try io.write_all(io.stderr(runtime), "\n")
         return 2
     }
-    return try build_file(allocator, runtime, config.source, config.output, optimization, config.arguments.items)
+    return try build_file(allocator, runtime, config.source, config.output, optimization, config.arguments.items, config.target)
 }
 
 @hide:file
@@ -176,6 +176,11 @@ usage proc(output io.Writer) void ! io.WriteError {
 
 @hide:file
 emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverError {
+    config := project.load_config(allocator, runtime, path, false, false) catch |_| {
+        try io.print("honey emit-llvm: cannot load project configuration for {s}\n", io.stderr(runtime), {path})
+        return 2
+    }
+    defer project.deinit_config(&config)
     session := compilation.init(allocator)
     defer compilation.deinit(&session)
     diagnostic_store := diagnostics.init(allocator)
@@ -185,7 +190,7 @@ emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! Driver
     defer ir.deinit(&module)
     sources :: compilation.source_files(&session)
     primary :: session.packages.items[usize(root)].sources.items[0]
-    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, sources, primary)
+    try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, sources, primary, config.target)
     try report_diagnostics(allocator, io.stderr(runtime), sources, &diagnostic_store, null)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
@@ -198,6 +203,7 @@ build_file proc(
     output [;0]u8,
     optimization [;0]u8,
     native_arguments [][;0]u8,
+    target [;0]u8,
 ) i32 ! DriverError {
     session := compilation.init(allocator)
     defer compilation.deinit(&session)
@@ -206,7 +212,7 @@ build_file proc(
     root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
-    return try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, output, optimization, native_arguments)
+    return try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, output, optimization, native_arguments, target)
 }
 
 @hide:file
@@ -216,6 +222,7 @@ build_module proc(
     module @ir.Module, diagnostic_store @mut diagnostics.Store,
     output [;0]u8, optimization [;0]u8,
     native_arguments [][;0]u8,
+    target [;0]u8,
 ) i32 ! DriverError {
 
     template [21]mut u8 := undefined
@@ -230,12 +237,12 @@ build_module proc(
     }
     sources :: compilation.source_files(session)
     primary :: session.packages.items[usize(root)].sources.items[0]
-    try llvm.emit(allocator, io.writer(file), module, diagnostic_store, sources, primary)
+    try llvm.emit(allocator, io.writer(file), module, diagnostic_store, sources, primary, target)
     closing = true
     try io.close(file)
     temporary [;0]u8 :: template[..].ptr[..20;0]
     arguments [7][;0]u8 :: [
-        "clang", "-target", "arm64-apple-macosx11.0.0",
+        "clang", "-target", target,
         optimization, temporary, "-o", output,
     ]
     status := i32(0)
@@ -281,12 +288,12 @@ test_path proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! Driver
     defer _ = c.unlink(ptrcast!(template[..].ptr))
     try io.close(io.File{ io = runtime, handle = io.Handle{ file_desc = descriptor } })
     executable [;0]u8 :: template[..].ptr[..17;0]
-    config := project.load_config(allocator, runtime, path, false) catch |_| {
+    config := project.load_config(allocator, runtime, path, false, true) catch |_| {
         try io.print("honey test: cannot load project configuration for {s}\n", io.stderr(runtime), {path})
         return 2
     }
     defer project.deinit_config(&config)
-    status :: try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, executable, "-O0", config.arguments.items)
+    status :: try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, executable, "-O0", config.arguments.items, config.target)
     if (status != 0) return status
     failed := usize(0)
     for (session.tests.items) |entry, index| {

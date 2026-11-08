@@ -48,6 +48,7 @@ buffered_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io
 
 #! writes a standalone native LLVM module; all temporary emitter storage is released before returning.
 #! buffers writes and flushes before success; does not close the borrowed destination.
+#! `target` is a validated Darwin arm64 LLVM target triple.
 emit proc(
     allocator mem.Allocator,
     destination io.Writer,
@@ -55,6 +56,7 @@ emit proc(
     diagnostic_store @diagnostics.Store,
     sources []diagnostics.Source,
     primary diagnostics.SourceId,
+    target []u8,
 ) void ! (mem.AllocError | io.WriteError) {
     storage [16384]mut u8 := undefined
     buffered := BufferedOutput{ output = destination, bytes = storage[..] }
@@ -73,6 +75,7 @@ emit proc(
         }
         try arraylist.append(&line_starts, starts)
     }
+    try io.print("target triple = \"{s}\"\n", output, {target})
     try io.write_all(output, runtime)
     for (sources) |source, index| {
         try io.print("\n@honey.p{} = private constant ", output, {index})
