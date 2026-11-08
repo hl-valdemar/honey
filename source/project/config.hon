@@ -199,6 +199,20 @@ report_invalid_deployment_target proc(runtime io.Io) void ! Error {
     try io.write_all(io.stderr(runtime), "honey build: config.macos_deployment_target must be decimal major.minor[.patch], at least 11.0 for Apple Silicon (major <= 65535, minor/patch <= 255); for example \"15.0\"\n")
 }
 
+@hide:file
+sysctlbyname c_func(name ?*c_char, old_value ?*mut anyopaque, old_length ?*mut c_ulong, new_value ?*anyopaque, new_length c_ulong) c_int
+
+#! queries only at project creation; the returned version borrows `buffer`.
+@hide
+host_macos_version proc(buffer []mut u8) [;0]u8 ! Error {
+    length [1]mut c_ulong := [c_ulong(buffer.len)]
+    if (sysctlbyname("kern.osproductversion", buffer.ptr, length[..].ptr, null, 0) != 0) return .host_version_failed
+    if (length[0] == 0 or length[0] > c_ulong(buffer.len)) return .host_version_failed
+    count :: usize(length[0]) - 1
+    if (buffer[count] != 0 or deployment_components(buffer[..count]) == null) return .host_version_failed
+    return buffer.ptr[..count;0]
+}
+
 # Mach-O stores the major version in 16 bits and the minor/patch in 8 bits each.
 # returned components borrow the input with leading zeros removed; an omitted patch is zero.
 @hide:file

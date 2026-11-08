@@ -9,7 +9,7 @@ import "@source/loader"
 
 version :: "0.0.0-dev"
 
-Failure :: enum { template_not_found, directory_conflict, copy_failed, invalid_config, missing_library, project_not_found }
+Failure :: enum { template_not_found, directory_conflict, copy_failed, invalid_config, missing_library, project_not_found, host_version_failed }
 Error :: alias (fs.ReadFileError | io.WriteError | compilation.Error | Failure)
 
 @hide:file
@@ -27,6 +27,7 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 {
         text []u8 :: match err {
             .template_not_found: "matching std/ and ffi/c/ templates not found; install them beside honey or under ../share/honey"
             .directory_conflict: "a required project directory conflicts with an existing file"
+            .host_version_failed: "cannot determine the host macOS version for the new build.hon"
             .invalid_path: "invalid project path"
             .out_of_memory: "out of memory"
             else: "cannot initialize project; check destination permissions and template files"
@@ -80,8 +81,17 @@ initialize proc(allocator mem.Allocator, runtime io.Io, destination []u8) void !
     }
     build_path :: try join(allocator, root, "build.hon")
     defer free_text(allocator, build_path)
-    # a fixed valid name avoids injecting arbitrary filesystem bytes into Honey source.
-    try write_missing(build_path, "import \"@std/build\"\n\nconfig :: build.BuildConfig{\n    name = \"app\",\n    source = \"source\",\n}\n")
+    build_kind :: try fs.kind(allocator, build_path)
+    if (build_kind == .missing) {
+        version_buffer [32]mut u8 := undefined
+        host_version :: try host_macos_version(version_buffer[..])
+        build_buffer [256]mut u8 := undefined
+        # the fixed name and validated numeric version cannot inject Honey source.
+        length :: c.snprintf(ptrcast!(build_buffer[..].ptr), c_ulong(build_buffer.len),
+            "import \"@std/build\"\n\nconfig :: build.BuildConfig{\n    name = \"app\",\n    source = \"source\",\n    macos_deployment_target = \"%s\",\n}\n", host_version.ptr)
+        if (length < 0 or usize(length) >= build_buffer.len) return .host_version_failed
+        try write_missing(build_path, build_buffer[..usize(length)])
+    } else if (build_kind != .file) return .directory_conflict
     provenance :: try join(allocator, root, ".honey-origin")
     defer free_text(allocator, provenance)
     if (need_std) {

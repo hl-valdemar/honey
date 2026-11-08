@@ -2282,7 +2282,9 @@ branch_body_constant proc(state @State, id ast.NodeId, depth usize) bool {
 
 @hide:file
 builtin proc(state @mut State, at ast.NodeId, kind sema.BuiltinType) ast.NodeId ! Error {
-    id :: try ast.add_identifier(state.builder, ast.node_span(&state.tree, at), strpool.no_str)
+    # callers may have grown builder storage since the last state view refresh.
+    tree :: ast.view(state.builder, state.tree.root)
+    id :: try ast.add_identifier(state.builder, ast.node_span(&tree, at), strpool.no_str)
     try refresh(state)
     state.bindings.items[usize(id)] = sema.Binding{ kind = .builtin, data = sema.BindingData{ builtin = kind } }
     return id

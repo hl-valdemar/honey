@@ -11,6 +11,17 @@ standalone_creation_preserves_local_files test {
     for (["std/mem/mem.hon", "ffi/c/stdio.hon", "source/main.hon", "build.hon", ".honey-origin"]) |relative| {
         try support.expect(&context, try fs.kind(context.allocator, try support.path(&context, root, relative)) == .file, "new vendors a complete standalone project")
     }
+    host :: try support.run(&context, &["/usr/bin/sw_vers", "-productVersion"], {})
+    try support.expect(&context, host.status == 0 and host.stdout.len > 1 and host.stdout[host.stdout.len - 1] == '\n', "host product version is available")
+    host_version :: host.stdout[..host.stdout.len - 1]
+    minimum_version := host_version
+    if (support.count(host_version, ".") == 2 and mem.eql(host_version[host_version.len - 2..], ".0")) minimum_version = host_version[..host_version.len - 2]
+    expected_minimum :: try support.concat(&context, &[" minos ", minimum_version, "\n"])
+    fresh_build :: try support.run(&context, &[context.compiler, "build", root], {})
+    try support.expect_result(&context, fresh_build, 0, "", "")
+    fresh_executable :: try support.path(&context, root, "build/app")
+    fresh_metadata :: try support.run(&context, &["otool", "-l", fresh_executable], {})
+    try support.expect(&context, fresh_metadata.status == 0 and support.contains(fresh_metadata.stdout, expected_minimum), "new projects record the host minimum in the executable")
     config :: try support.path(&context, root, "build.hon")
     source :: try support.path(&context, root, "source/main.hon")
     stdlib :: try support.path(&context, root, "std/local-edit.hon")
@@ -24,6 +35,7 @@ standalone_creation_preserves_local_files test {
     try support.write(&context, memory_path, modified_memory)
     origin :: try support.path(&context, root, ".honey-origin")
     try support.write(&context, origin, "original distribution; locally annotated\n")
+    try support.write(&context, config, "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"app\", source = \"source\", macos_deployment_target = \"11.0\" }\n")
     original :: try support.read(&context, config)
     initialized :: try support.run(&context, &[context.compiler, "init"], { cwd = root })
     try support.expect(&context, initialized.status == 0, "init is non-destructive")
@@ -35,7 +47,7 @@ standalone_creation_preserves_local_files test {
     executable :: try support.path(&context, root, "build/app")
     ran :: try support.run(&context, &[executable], {})
     metadata :: try support.run(&context, &["otool", "-l", executable], {})
-    try support.expect(&context, metadata.status == 0 and support.contains(metadata.stdout, "cmd LC_BUILD_VERSION\n") and support.contains(metadata.stdout, " minos 11.0\n"), "default executable retains the macOS 11 deployment minimum")
+    try support.expect(&context, metadata.status == 0 and support.contains(metadata.stdout, "cmd LC_BUILD_VERSION\n") and support.contains(metadata.stdout, " minos 11.0\n"), "an explicit lower deployment target survives init and build")
     try support.expect(&context, ran.status == 0 and mem.eql(ran.stdout, "42\n"), "generated project uses current supported Honey syntax and preserves its entry")
     after_build :: try support.read(&context, stdlib)
     try support.expect(&context, mem.eql(after_build, "# user stdlib customization\n"), "build never refreshes vendored sources")
