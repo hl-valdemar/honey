@@ -1,0 +1,114 @@
+import "@ffi/c"
+import "@std/mem"
+import "@std/fs"
+
+@hide
+InstallFailure :: enum { install_io, install_locked, unmanaged_install, no_previous_install, invalid_install, install_build_failed, install_check_failed }
+@hide
+InstallError :: alias Error | InstallFailure
+
+@hide:file
+lstat c_func(path ?*c_char, result ?*mut c.Stat) c_int
+@hide:file
+chmod c_func(path ?*c_char, mode c_ushort) c_int
+
+# unlike fs.kind, a dangling symlink is an existing link, never an empty destination.
+@hide
+install_kind proc(path []u8) fs.Kind ! InstallError {
+    result [1]mut c.Stat := undefined
+    if (lstat(ptrcast!(path.ptr), result[..].ptr) == 0) {
+        mode :: result[0].st_mode & c_ushort(61440)
+        if (mode == 16384) return .directory
+        if (mode == 32768) return .file
+        if (mode == 40960) return .link
+        return .other
+    }
+    if (c.__error()?^ == c.ENOENT) return .missing
+    return .install_io
+}
+
+@hide
+install_executable_mode proc(path []u8) void ! InstallError {
+    if (chmod(ptrcast!(path.ptr), 493) != 0) return .install_io
+}
+
+@hide
+install_copy_file proc(source, destination []u8) void ! InstallError {
+    input :: c.open(ptrcast!(source.ptr), c.O_RDONLY)
+    if (input < 0) return .install_io
+    defer _ = c.close(input)
+    output :: c.open(ptrcast!(destination.ptr), c.O_WRONLY | c.O_CREAT | c.O_EXCL, c_int(420))
+    if (output < 0) return .install_io
+    closed := false
+    complete := false
+    defer {
+        if (!closed) _ = c.close(output)
+        if (!complete) _ = c.unlink(ptrcast!(destination.ptr))
+    }
+    buffer [65536]mut u8 := undefined
+    while true {
+        count :: c.read(input, buffer[..].ptr, c_ulong(buffer.len))
+        if (count < 0) {
+            if (c.__error()?^ == c.EINTR) continue
+            return .install_io
+        }
+        if (count == 0) break
+        offset := usize(0)
+        while (offset < usize(count)) {
+            written :: c.write(output, buffer[offset..usize(count)].ptr, c_ulong(usize(count) - offset))
+            if (written < 0 and c.__error()?^ == c.EINTR) continue
+            if (written <= 0) return .install_io
+            offset += usize(written)
+        }
+    }
+    closed = true
+    if (c.close(output) != 0) return .install_io
+    complete = true
+}
+
+@hide
+install_copy_tree proc(allocator mem.Allocator, source, destination []u8) void ! InstallError {
+    kind :: try fs.kind(allocator, source)
+    if (kind == .file) {
+        try install_copy_file(source, destination)
+        return
+    }
+    if (kind != .directory) return .install_io
+    try ensure_directory(allocator, destination)
+    directory := try fs.open_directory(allocator, source)
+    defer fs.close_directory(&directory) catch |_| {}
+    while (try fs.next(&directory)) |entry| {
+        input :: try join(allocator, source, entry.name)
+        defer free_text(allocator, input)
+        output :: try join(allocator, destination, entry.name)
+        defer free_text(allocator, output)
+        try install_copy_tree(allocator, input, output)
+    }
+}
+
+# staging cleanup never follows links out of the owned tree.
+@hide
+install_remove_tree proc(allocator mem.Allocator, path []u8) void ! InstallError {
+    kind :: try install_kind(path)
+    if (kind == .missing) return
+    if (kind != .directory) {
+        if (c.unlink(ptrcast!(path.ptr)) != 0) return .install_io
+        return
+    }
+    directory := try fs.open_directory(allocator, path)
+    defer fs.close_directory(&directory) catch |_| {}
+    while (try fs.next(&directory)) |entry| {
+        child :: try join(allocator, path, entry.name)
+        defer free_text(allocator, child)
+        try install_remove_tree(allocator, child)
+    }
+    if (c.rmdir(ptrcast!(path.ptr)) != 0) return .install_io
+}
+
+@hide
+install_temp_directory proc(allocator mem.Allocator, parent, pattern []u8) []mut u8 ! InstallError {
+    path :: try join(allocator, parent, pattern)
+    errdefer free_text(allocator, path)
+    if (c.mkdtemp(ptrcast!(path.ptr)) == null) return .install_io
+    return path
+}

@@ -18,6 +18,9 @@ Config :: struct {
     name [;0]u8 = ""
     source [;0]u8 = ""
     output [;0]u8 = ""
+    install_version [;0]u8 = "0.0.0-dev"
+    install_self_hosted bool = false
+    install_bootstrap [;0]u8 = ""
     target [;0]u8 = "arm64-apple-macosx11.0.0"
     arguments arraylist.ArrayList([;0]u8)
     owned arraylist.ArrayList([]mut u8)
@@ -65,8 +68,8 @@ pair proc(config @mut Config, option, value []u8) void ! Error {
     try argument(config, value)
 }
 
-#! discovers build.hon from a directory or its ancestors, type-checks its BuildConfig,
-#! and evaluates it with Honey's bounded constant interpreter. no files are refreshed.
+#! discovers build.hon from a directory or its ancestors, type-checks its BuildConfig
+#! and optional InstallConfig, then evaluates them with Honey's bounded constant interpreter.
 #! optional reads return name == "" and no arguments when no config is declared.
 #! library selection is skipped for IR-only callers when `resolve_libraries` is false.
 #! no output directories are created. diagnostics are local; return status 2 on failure.
@@ -84,7 +87,8 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, r
         try io.print("honey build: no build.hon in {s} or its ancestors; run honey init first\n", io.stderr(runtime), {input})
         return .project_not_found
     }
-    if (!try declares_config(allocator, runtime, build_path)) {
+    declarations :: try config_declarations(allocator, runtime, build_path)
+    if (!declarations.config) {
         if (!required) return config
         try io.print("{s}: build config: missing top-level config declaration\n", io.stderr(runtime), {build_path})
         return .invalid_config
@@ -97,10 +101,15 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, r
     build_package :: try compilation.load(&session, runtime, try path(&config, "std/build"), &store)
     # the typed snapshot keeps field extraction independent of BuildConfig declaration order.
     # imported package identities are wired exactly like the compiler's native test runner.
-    runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n macos_deployment_target []u8\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) }, macos_deployment_target = value.macos_deployment_target }\n}\nmain proc() Snapshot { return snapshot(__honey_project.config) }\n"
+    runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n macos_deployment_target []u8\n install_version []u8 = \"0.0.0-dev\"\n install_self_hosted u8 = 0\n install_bootstrap []u8 = \"\"\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) }, macos_deployment_target = value.macos_deployment_target }\n}\n"
+    # absent installation settings never reference InstallConfig, preserving older vendored std/build.
+    runner_main :: if (declarations.installation) "installation_snapshot proc(value __honey_build.InstallConfig) Snapshot {\n result := snapshot(__honey_project.config)\n result.install_version = value.version\n result.install_self_hosted = if (value.self_hosted) u8(1) else u8(0)\n result.install_bootstrap = value.bootstrap\n return result\n}\nmain proc() Snapshot { return installation_snapshot(__honey_project.installation) }\n" else "main proc() Snapshot { return snapshot(__honey_project.config) }\n"
     bytes := arraylist.init(u8, allocator)
     defer arraylist.deinit(&bytes)
-    for (runner_text) |byte| try arraylist.append(&bytes, byte)
+    runner_parts [2][]u8 :: [runner_text, runner_main]
+    for (runner_parts) |part| {
+        for (part) |byte| try arraylist.append(&bytes, byte)
+    }
     runner :: try compilation.add_package(&session)
     file :: try compilation.add_source(&session, runner, "<honey-build-config>", &bytes, &store)
     packages [2]compilation.PackageId :: [build_package, project_package]
@@ -121,7 +130,13 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, r
         return .invalid_config
     }
     value :: outcome.value
-    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 11) return .invalid_config
+    if (value.type != .record or module.arrays.items[usize(value.array_type)].fields.len != 14) return .invalid_config
+    config.install_version = try read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 11))
+    self_hosted :: ir.aggregate_item(&module, value, 12).data.unsigned
+    if (self_hosted > 1) return .invalid_config
+    config.install_self_hosted = self_hosted == 1
+    bootstrap :: try read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 13))
+    if (bootstrap.len != 0) config.install_bootstrap = try path(&config, bootstrap)
     deployment_version :: read_text(&config, &module, &outcome, ir.aggregate_item(&module, value, 10)) catch |err| {
         if (err == .invalid_config) try report_invalid_deployment_target(runtime)
         return err
@@ -331,7 +346,13 @@ report_config_diagnostics proc(runtime io.Io, session @compilation.Compilation, 
 }
 
 @hide:file
-declares_config proc(allocator mem.Allocator, runtime io.Io, build_path []u8) bool ! Error {
+ConfigDeclarations :: struct {
+    config bool = false
+    installation bool = false
+}
+
+@hide:file
+config_declarations proc(allocator mem.Allocator, runtime io.Io, build_path []u8) ConfigDeclarations ! Error {
     parsed := compilation.init(allocator)
     defer compilation.deinit(&parsed)
     store := diagnostics.init(allocator)
@@ -345,6 +366,7 @@ declares_config proc(allocator mem.Allocator, runtime io.Io, build_path []u8) bo
         return .invalid_config
     }
     tree :: ast.view(&parsed.builder, compilation.source(&parsed, file).root)
+    result := ConfigDeclarations{}
     for (0..ast.package_decl_count(&tree)) |index| {
         declaration :: ast.package_decl(&tree, index)
         name :: match ast.decl_kind(&tree, declaration) {
@@ -352,7 +374,9 @@ declares_config proc(allocator mem.Allocator, runtime io.Io, build_path []u8) bo
             .function: ast.function_decl(&tree, declaration).name
             else: continue
         }
-        if (mem.eql(ast.source_text(&tree, name), "config")) return true
+        declaration_name :: ast.source_text(&tree, name)
+        if (mem.eql(declaration_name, "config")) result.config = true
+        if (mem.eql(declaration_name, "installation")) result.installation = true
     }
-    return false
+    return result
 }

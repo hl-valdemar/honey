@@ -1,42 +1,423 @@
+import "@ffi/c"
 import "@std/mem"
 import "@std/io"
 import "@std/fs"
 import "@std/process"
 
-#! an explicit install command may run the project's external recipe; config evaluation never does.
-#! null means no recipe exists and the ordinary executable installation should be used.
-run_install_recipe proc(allocator mem.Allocator, runtime io.Io, root []u8, has_optimization bool) ?i32 {
-    recipe :: join(allocator, root, "install.sh") catch |_| { return 2 }
-    defer free_text(allocator, recipe)
-    kind :: fs.kind(allocator, recipe) catch |_| { return 2 }
-    if (kind == .missing) return null
-    if (has_optimization) {
-        io.write_all(io.stderr(runtime), "honey install: project install.sh controls optimization; omit -O0/-O2\n") catch |_| {}
+@hide:file
+proc_pidpath c_func(pid c_int, buffer ?*mut anyopaque, size c_uint) c_int
+@hide:file
+posix_spawn_file_actions_init c_func(actions ?*mut c.posix_spawn_file_actions_t) c_int
+@hide:file
+posix_spawn_file_actions_destroy c_func(actions ?*mut c.posix_spawn_file_actions_t) c_int
+@hide:file
+posix_spawn_file_actions_adddup2 c_func(actions ?*mut c.posix_spawn_file_actions_t, source, destination c_int) c_int
+@hide:file
+posix_spawn_file_actions_addclose c_func(actions ?*mut c.posix_spawn_file_actions_t, descriptor c_int) c_int
+
+#! builds and validates a private bundle before atomically replacing the managed launcher.
+#! reports failures to stderr and returns 2; a failed candidate never removes an active bundle.
+install_command proc(allocator mem.Allocator, runtime io.Io, config @Config, optimization [;0]u8) i32 {
+    install_project(allocator, runtime, config, optimization) catch |err| {
+        install_report(runtime, err)
         return 2
     }
-    if (kind != .file) {
-        io.write_all(io.stderr(runtime), "honey install: install.sh must be a regular file\n") catch |_| {}
-        return 2
-    }
-    arguments [2][;0]u8 :: ["/bin/sh", recipe.ptr[..recipe.len;0]]
-    return process.run(allocator, arguments[..]) catch |_| {
-        io.write_all(io.stderr(runtime), "honey install: cannot run project install.sh\n") catch |_| {}
-        return 2
-    }
+    return 0
 }
 
-#! installs only after a successful build; the external script retains recovery without Honey.
-install_executable proc(allocator mem.Allocator, runtime io.Io, config @Config) i32 {
-    distribution :: find_templates(allocator) catch |_| {
-        io.write_all(io.stderr(runtime), "honey install: matching toolchain distribution not found\n") catch |_| {}
+#! restores the retained previous bundle without reading a project or invoking its compiler.
+rollback_command proc(allocator mem.Allocator, runtime io.Io, name []u8) i32 {
+    install_rollback(allocator, runtime, name) catch |err| {
+        install_report(runtime, err)
         return 2
     }
-    defer free_text(allocator, distribution)
-    installer :: join(allocator, distribution, "install-project.sh") catch |_| { return 2 }
-    defer free_text(allocator, installer)
-    arguments [4][;0]u8 :: ["/bin/sh", installer.ptr[..installer.len;0], config.name, config.output]
-    return process.run(allocator, arguments[..]) catch |_| {
-        io.write_all(io.stderr(runtime), "honey install: cannot run toolchain installer\n") catch |_| {}
-        return 2
+    return 0
+}
+
+@hide:file
+install_report proc(runtime io.Io, error InstallError) void {
+    message []u8 :: match error {
+        .install_locked: "installation is locked; check for another installer before removing .install-lock"
+        .unmanaged_install: "refusing unmanaged, dangling, or non-executable installation pointer"
+        .no_previous_install: "no previous installation to restore"
+        .invalid_install: "invalid installation name, version, source, or bootstrap"
+        .install_build_failed: "candidate build failed; active installation unchanged"
+        .install_check_failed: "candidate validation failed; active installation unchanged"
+        .out_of_memory: "out of memory"
+        else: "filesystem operation failed; check installation paths and permissions"
     }
+    io.print("honey install: {s}\n", io.stderr(runtime), {message}) catch |_| {}
+}
+
+@hide:file
+install_environment proc(key [;0]u8) []u8 {
+    pointer :: c.getenv(ptrcast!(key.ptr))
+    if (pointer == null) return ""
+    bytes *u8 :: ptrcast!(pointer?)
+    length := usize(0)
+    while (bytes[length] != 0) length += 1
+    return bytes[..length]
+}
+
+@hide:file
+install_component proc(text []u8) bool {
+    if (text.len == 0 or text[0] == '-' or mem.eql(text, ".") or mem.eql(text, "..")) return false
+    for (text) |byte| {
+        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9')) continue
+        if (byte == '-' or byte == '_' or byte == '.' or byte == '+') continue
+        return false
+    }
+    return true
+}
+
+@hide:file
+InstallPaths :: struct {
+    prefix []mut u8
+    versions []mut u8
+    launcher []mut u8
+    previous []mut u8
+    lock []mut u8
+}
+
+@hide:file
+install_paths proc(allocator mem.Allocator, name []u8) InstallPaths ! InstallError {
+    if (!install_component(name)) return .invalid_install
+    environment :: install_environment("PREFIX")
+    initial :: if (environment.len != 0) try terminated(allocator, environment) else try join(allocator, install_environment("HOME"), ".local")
+    defer free_text(allocator, initial)
+    if (environment.len == 0 and install_environment("HOME").len == 0) return .invalid_install
+    try ensure_directory(allocator, initial)
+    canonical :: try fs.canonical(allocator, initial)
+    defer mem.free(allocator, canonical)
+    prefix :: try terminated(allocator, canonical)
+    errdefer free_text(allocator, prefix)
+    bin :: try join(allocator, prefix, "bin")
+    defer free_text(allocator, bin)
+    try ensure_directory(allocator, bin)
+    opt :: try join(allocator, prefix, "opt")
+    defer free_text(allocator, opt)
+    versions :: try join(allocator, opt, name)
+    errdefer free_text(allocator, versions)
+    try ensure_directory(allocator, versions)
+    launcher :: try join(allocator, bin, name)
+    errdefer free_text(allocator, launcher)
+    previous :: try join(allocator, versions, "previous")
+    errdefer free_text(allocator, previous)
+    lock :: try join(allocator, versions, ".install-lock")
+    errdefer free_text(allocator, lock)
+    if (c.mkdir(ptrcast!(lock.ptr), 448) != 0) {
+        if (c.__error()?^ == c.EEXIST) return .install_locked
+        return .install_io
+    }
+    return InstallPaths{ prefix = prefix, versions = versions, launcher = launcher, previous = previous, lock = lock }
+}
+
+@hide:file
+install_close_paths proc(allocator mem.Allocator, paths @InstallPaths) void {
+    install_remove_tree(allocator, paths.lock) catch |_| {}
+    free_text(allocator, paths.lock)
+    free_text(allocator, paths.previous)
+    free_text(allocator, paths.launcher)
+    free_text(allocator, paths.versions)
+    free_text(allocator, paths.prefix)
+}
+
+# numbering is shared across declared versions and allocated while holding the name's lock.
+@hide:file
+install_number proc(text []u8) usize {
+    marker :: "-install."
+    position := usize(0)
+    while (position + marker.len < text.len) {
+        if (mem.eql(text[position..position + marker.len], marker)) {
+            value := usize(0)
+            valid := true
+            for (text[position + marker.len..]) |byte| {
+                if (byte < '0' or byte > '9') {
+                    valid = false
+                    break
+                }
+                digit :: usize(byte - '0')
+                if (value > divtrunc!(maxval!(usize) - digit, 10)) return maxval!(usize)
+                value = value * 10 + digit
+            }
+            if (valid) return value
+        }
+        position += 1
+    }
+    return 0
+}
+
+@hide:file
+install_release proc(allocator mem.Allocator, versions, declared_version []u8) []mut u8 ! InstallError {
+    if (!install_component(declared_version)) return .invalid_install
+    next := usize(1)
+    directory := try fs.open_directory(allocator, versions)
+    defer fs.close_directory(&directory) catch |_| {}
+    while (try fs.next(&directory)) |entry| {
+        number :: install_number(entry.name)
+        if (number == 0) continue
+        path :: try join(allocator, versions, entry.name)
+        defer free_text(allocator, path)
+        if (try install_kind(path) != .directory) continue
+        if (number == maxval!(usize)) return .invalid_install
+        if (number >= next) next = number + 1
+    }
+    buffer [32]mut u8 := undefined
+    length :: c.snprintf(ptrcast!(buffer[..].ptr), c_ulong(buffer.len), "%llu", c_ulonglong(next))
+    if (length <= 0 or usize(length) >= buffer.len) return .invalid_install
+    base :: try join(allocator, versions, declared_version)
+    defer free_text(allocator, base)
+    suffix :: "-install."
+    path :: try mem.alloc(u8, allocator, base.len + suffix.len + usize(length) + 1)
+    errdefer mem.free(allocator, path)
+    memcopy!(path[..base.len], base)
+    memcopy!(path[base.len..base.len + suffix.len], suffix)
+    memcopy!(path[base.len + suffix.len..path.len - 1], buffer[..usize(length)])
+    path[path.len - 1] = 0
+    if (c.mkdir(ptrcast!(path.ptr), 493) != 0) return .install_io
+    return path[..path.len - 1]
+}
+
+@hide:file
+install_managed_target proc(allocator mem.Allocator, versions, name, target []u8) void ! InstallError {
+    if (target.len <= versions.len + 1 or !mem.eql(target[..versions.len], versions) or target[versions.len] != '/') return .unmanaged_install
+    relative :: target[versions.len + 1..]
+    end := usize(0)
+    while (end < relative.len and relative[end] != '/') end += 1
+    if (end == relative.len) return .unmanaged_install
+    release :: relative[..end]
+    if (!install_component(release)) return .unmanaged_install
+    legacy :: release.len > 8 and mem.eql(release[..8], "release.")
+    if (!legacy and install_number(release) == 0) return .unmanaged_install
+    rest :: relative[end + 1..]
+    if (rest.len != 4 + name.len or !mem.eql(rest[..4], "bin/") or !mem.eql(rest[4..], name)) return .unmanaged_install
+    root :: try join(allocator, versions, release)
+    defer free_text(allocator, root)
+    bin :: try join(allocator, root, "bin")
+    defer free_text(allocator, bin)
+    if (try install_kind(root) != .directory or try install_kind(bin) != .directory) return .unmanaged_install
+    if (try install_kind(target) != .file or c.access(ptrcast!(target.ptr), 1) != 0) return .unmanaged_install
+}
+
+# returns owned terminated text; an absent pointer is represented by an empty string.
+@hide:file
+install_pointer proc(allocator mem.Allocator, versions, name, path []u8) []mut u8 ! InstallError {
+    kind :: try install_kind(path)
+    if (kind == .missing) return try terminated(allocator, "")
+    if (kind != .link) return .unmanaged_install
+    buffer [4096]mut u8 := undefined
+    length :: c.readlink(ptrcast!(path.ptr), ptrcast!(buffer[..].ptr), c_ulong(buffer.len))
+    if (length <= 0 or usize(length) == buffer.len) return .unmanaged_install
+    target :: try terminated(allocator, buffer[..usize(length)])
+    errdefer free_text(allocator, target)
+    try install_managed_target(allocator, versions, name, target)
+    return target
+}
+
+@hide:file
+install_activate proc(allocator mem.Allocator, runtime io.Io, paths @InstallPaths, current, target []u8) void ! InstallError {
+    bin :: parent_path(paths.launcher)
+    staging :: try install_temp_directory(allocator, bin, ".honey-activate.XXXXXX")
+    defer free_text(allocator, staging)
+    defer install_remove_tree(allocator, staging) catch |_| {}
+    launcher :: try join(allocator, staging, "launcher")
+    defer free_text(allocator, launcher)
+    if (c.symlink(ptrcast!(target.ptr), ptrcast!(launcher.ptr)) != 0) return .install_io
+    if (current.len != 0) {
+        previous :: try join(allocator, paths.lock, "previous")
+        defer free_text(allocator, previous)
+        if (c.symlink(ptrcast!(current.ptr), ptrcast!(previous.ptr)) != 0) return .install_io
+        if (c.rename(ptrcast!(previous.ptr), ptrcast!(paths.previous.ptr)) != 0) return .install_io
+    }
+    if (c.rename(ptrcast!(launcher.ptr), ptrcast!(paths.launcher.ptr)) != 0) return .install_io
+    io.print("Active executable: {s}\nLauncher: {s}\n", io.stdout(runtime), {target, paths.launcher}) catch |_| {}
+}
+
+@hide:file
+install_build proc(allocator mem.Allocator, compiler, source, output []u8, optimization [;0]u8) void ! InstallError {
+    arguments [6][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", source.ptr[..source.len;0], "-o", output.ptr[..output.len;0], optimization]
+    status :: process.run(allocator, arguments[..]) catch |_| { return .install_build_failed }
+    if (status != 0) return .install_build_failed
+    if (try install_kind(output) != .file) return .install_build_failed
+    try install_executable_mode(output)
+}
+
+@hide:file
+install_self_path proc(allocator mem.Allocator) []mut u8 ! InstallError {
+    buffer [4096]mut u8 := undefined
+    length :: proc_pidpath(c.getpid(), buffer[..].ptr, c_uint(buffer.len))
+    if (length <= 0 or usize(length) >= buffer.len) return .install_io
+    end := usize(0)
+    while (end < usize(length) and buffer[end] != 0) end += 1
+    return try terminated(allocator, buffer[..end])
+}
+
+@hide:file
+install_project proc(allocator mem.Allocator, runtime io.Io, config @Config, optimization [;0]u8) void ! InstallError {
+    if (mem.eql(config.name, "honey") and !config.install_self_hosted) return .invalid_install
+    paths :: try install_paths(allocator, config.name)
+    defer install_close_paths(allocator, &paths)
+    current :: try install_pointer(allocator, paths.versions, config.name, paths.launcher)
+    defer free_text(allocator, current)
+    previous :: try install_pointer(allocator, paths.versions, config.name, paths.previous)
+    defer free_text(allocator, previous)
+    release :: try install_release(allocator, paths.versions, config.install_version)
+    defer free_text(allocator, release)
+    activated := false
+    defer { if (!activated) install_remove_tree(allocator, release) catch |_| {} }
+    bin :: try join(allocator, release, "bin")
+    defer free_text(allocator, bin)
+    try ensure_directory(allocator, bin)
+    target :: try join(allocator, bin, config.name)
+    defer free_text(allocator, target)
+    if (config.install_self_hosted) try install_self_host(allocator, runtime, config, release, target, optimization)
+    else {
+        compiler :: try install_self_path(allocator)
+        defer free_text(allocator, compiler)
+        try install_build(allocator, compiler, config.source, target, optimization)
+    }
+    try install_activate(allocator, runtime, &paths, current, target)
+    activated = true
+}
+
+@hide:file
+install_rollback proc(allocator mem.Allocator, runtime io.Io, name []u8) void ! InstallError {
+    paths :: try install_paths(allocator, name)
+    defer install_close_paths(allocator, &paths)
+    current :: try install_pointer(allocator, paths.versions, name, paths.launcher)
+    defer free_text(allocator, current)
+    previous :: try install_pointer(allocator, paths.versions, name, paths.previous)
+    defer free_text(allocator, previous)
+    if (current.len == 0 or previous.len == 0) return .no_previous_install
+    try install_activate(allocator, runtime, &paths, current, previous)
+}
+
+@hide:file
+install_self_host proc(allocator mem.Allocator, runtime io.Io, config @Config, release, target []u8, optimization [;0]u8) void ! InstallError {
+    override :: install_environment("BOOTSTRAP")
+    bootstrap_input :: if (override.len != 0) try terminated(allocator, override) else try terminated(allocator, config.install_bootstrap)
+    defer free_text(allocator, bootstrap_input)
+    if (bootstrap_input.len == 0 or try fs.kind(allocator, bootstrap_input) != .file or c.access(ptrcast!(bootstrap_input.ptr), 1) != 0) return .invalid_install
+    bootstrap_dir :: try join(allocator, release, "bootstrap")
+    defer free_text(allocator, bootstrap_dir)
+    try ensure_directory(allocator, bootstrap_dir)
+    bootstrap :: try join(allocator, bootstrap_dir, config.name)
+    defer free_text(allocator, bootstrap)
+    try install_copy_file(bootstrap_input, bootstrap)
+    try install_executable_mode(bootstrap)
+    original :: try fs.canonical(allocator, config.source)
+    defer mem.free(allocator, original)
+    root :: try fs.canonical(allocator, config.root)
+    defer mem.free(allocator, root)
+    if (original.len <= root.len or !mem.eql(original[..root.len], root)) return .invalid_install
+    root_is_slash :: mem.eql(root, "/")
+    if (!root_is_slash and original[root.len] != '/') return .invalid_install
+    source_start :: if (root_is_slash) root.len else root.len + 1
+    source_relative :: original[source_start..]
+    first_end := usize(0)
+    while (first_end < source_relative.len and source_relative[first_end] != '/') first_end += 1
+    first :: source_relative[..first_end]
+    reserved [5][]u8 :: ["std", "ffi", "build.hon", "bin", "bootstrap"]
+    for (reserved) |component| {
+        if (mem.eql(first, component)) return .invalid_install
+    }
+    source :: try join(allocator, release, source_relative)
+    defer free_text(allocator, source)
+    try ensure_directory(allocator, parent_path(source))
+    try install_copy_tree(allocator, config.source, source)
+    payload [3][]u8 :: ["std", "ffi/c", "build.hon"]
+    for (payload) |relative| {
+        input :: try join(allocator, config.root, relative)
+        defer free_text(allocator, input)
+        output :: try join(allocator, release, relative)
+        defer free_text(allocator, output)
+        try ensure_directory(allocator, parent_path(output))
+        try install_copy_tree(allocator, input, output)
+    }
+    stage1 :: try join(allocator, release, "bin/honey-stage1")
+    defer free_text(allocator, stage1)
+    io.print("Building two compiler generations in {s}\n", io.stdout(runtime), {release}) catch |_| {}
+    try install_build(allocator, bootstrap, source, stage1, optimization)
+    try install_build(allocator, stage1, source, target, optimization)
+    tests [3][;0]u8 :: [target.ptr[..target.len;0], "test", source.ptr[..source.len;0]]
+    test_status :: process.run(allocator, tests[..]) catch |_| { return .install_check_failed }
+    if (test_status != 0) return .install_check_failed
+    # remove compiler-only snapshot inputs before testing installed template discovery.
+    try install_remove_tree(allocator, source)
+    build_config :: try join(allocator, release, "build.hon")
+    defer free_text(allocator, build_config)
+    try install_remove_tree(allocator, build_config)
+    try install_remove_tree(allocator, stage1)
+    try install_smoke(allocator, target, optimization)
+}
+
+@hide:file
+install_smoke proc(allocator mem.Allocator, compiler []u8, optimization [;0]u8) void ! InstallError {
+    # /tmp keeps the smoke project outside the checkout, regardless of PREFIX.
+    temporary :: try install_temp_directory(allocator, "/tmp", "honey-install-smoke.XXXXXX")
+    defer free_text(allocator, temporary)
+    defer install_remove_tree(allocator, temporary) catch |_| {}
+    smoke :: try join(allocator, temporary, "smoke")
+    defer free_text(allocator, smoke)
+    new_arguments [3][;0]u8 :: [compiler.ptr[..compiler.len;0], "new", smoke.ptr[..smoke.len;0]]
+    new_status :: process.run(allocator, new_arguments[..]) catch |_| { return .install_check_failed }
+    if (new_status != 0) return .install_check_failed
+    build_arguments [4][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", smoke.ptr[..smoke.len;0], optimization]
+    build_status :: process.run(allocator, build_arguments[..]) catch |_| { return .install_check_failed }
+    if (build_status != 0) return .install_check_failed
+    executable :: try join(allocator, smoke, "build/app")
+    defer free_text(allocator, executable)
+    native_arguments [1][;0]u8 :: [executable.ptr[..executable.len;0]]
+    try install_check_output(allocator, native_arguments[..])
+    source :: try join(allocator, smoke, "source")
+    defer free_text(allocator, source)
+    run_arguments [3][;0]u8 :: [compiler.ptr[..compiler.len;0], "run", source.ptr[..source.len;0]]
+    try install_check_output(allocator, run_arguments[..])
+}
+
+# capture stdout without a shell or mutating the parent's descriptors or working directory.
+@hide:file
+install_check_output proc(allocator mem.Allocator, arguments [][;0]u8) void ! InstallError {
+    descriptors :: try mem.alloc(?*mut c_char, allocator, arguments.len + 1)
+    defer mem.free(allocator, descriptors)
+    for (arguments) |argument, index| descriptors[index] = ptrcast!(constcast!(argument).ptr)
+    descriptors[arguments.len] = null
+    pipes [2]mut c_int := undefined
+    if (c.pipe(pipes[..].ptr) != 0) return .install_io
+    defer _ = c.close(pipes[0])
+    write_closed := false
+    defer { if (!write_closed) _ = c.close(pipes[1]) }
+    actions [1]mut c.posix_spawn_file_actions_t := [null]
+    if (posix_spawn_file_actions_init(actions[..].ptr) != 0) return .install_io
+    defer _ = posix_spawn_file_actions_destroy(actions[..].ptr)
+    if (posix_spawn_file_actions_adddup2(actions[..].ptr, pipes[1], 1) != 0) return .install_io
+    if (posix_spawn_file_actions_addclose(actions[..].ptr, pipes[1]) != 0) return .install_io
+    if (posix_spawn_file_actions_addclose(actions[..].ptr, pipes[0]) != 0) return .install_io
+    pid [1]mut c_int := [0]
+    if (c.posix_spawnp(pid[..].ptr, ptrcast!(arguments[0].ptr), actions[..].ptr, null, descriptors.ptr, c._NSGetEnviron()?^) != 0) return .install_check_failed
+    _ = c.close(pipes[1])
+    write_closed = true
+    expected :: "0\n"
+    length := usize(0)
+    valid := true
+    buffer [256]mut u8 := undefined
+    while true {
+        count :: c.read(pipes[0], buffer[..].ptr, c_ulong(buffer.len))
+        if (count < 0 and c.__error()?^ == c.EINTR) continue
+        if (count < 0) {
+            valid = false
+            break
+        }
+        if (count == 0) break
+        for (buffer[..usize(count)]) |byte| {
+            if (length >= expected.len) valid = false
+            else if (byte != expected[length]) valid = false
+            if (length < expected.len + 1) length += 1
+        }
+    }
+    status [1]mut c_int := undefined
+    while (c.waitpid(pid[0], status[..].ptr, 0) < 0) {
+        if (c.__error()?^ != c.EINTR) return .install_check_failed
+    }
+    if (!valid or (length != 1 and length != 2) or status[0] != 0) return .install_check_failed
 }

@@ -2,7 +2,7 @@
 #! paths are relative to the project root; builds never refresh vendored sources.
 #! list fields accept an address-of array literal, such as `&["raylib"]`.
 #! config values may use Honey helpers; evaluation cannot call foreign functions.
-#! test without a path selects source; install.sh, when present, owns explicit installation.
+#! test without a path selects source; install evaluates optional top-level installation settings.
 Linkage :: enum { automatic, static, shared }
 
 BuildConfig :: struct {
@@ -19,4 +19,14 @@ BuildConfig :: struct {
     rpaths [][]u8 = &[]
     # automatic uses the platform linker search; static/shared select matching library files.
     linkage Linkage = .automatic
+}
+
+#! optional top-level `installation :: build.InstallConfig{...}` settings for honey install.
+#! bootstrap is project-relative or absolute; it is used only for self-hosted builds.
+#! version is a declared label; installation appends its own sequence without changing it.
+#! self_hosted builds and validates two Honey compiler generations with matching vendored libraries.
+InstallConfig :: struct {
+    version []u8 = "0.0.0-dev"
+    self_hosted bool = false
+    bootstrap []u8 = ""
 }

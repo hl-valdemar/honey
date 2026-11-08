@@ -12,7 +12,6 @@ active_target proc(context @mut support.Context, launcher [;0]u8) [;0]u8 ! suppo
 installation_preserves_bootstrap_and_recovers_from_failed_upgrades test {
     context := try support.init("user install")
     defer support.deinit(&context)
-    installer :: try support.path(&context, context.root, "install.sh")
     prefix :: try support.path(&context, context.temporary, "user prefix")
     prefix_environment :: try support.concat(&context, &["PREFIX=", prefix])
     bootstrap_environment :: try support.concat(&context, &["BOOTSTRAP=", context.compiler])
@@ -24,15 +23,16 @@ installation_preserves_bootstrap_and_recovers_from_failed_upgrades test {
     try support.expect(&context, first_install.status == 0, first_install.stderr)
     first :: try active_target(&context, launcher)
     second_bootstrap :: try support.concat(&context, &["BOOTSTRAP=", launcher])
-    upgraded :: try support.run(&context, &["/usr/bin/env", prefix_environment, second_bootstrap, "/bin/sh", installer], { timeout_seconds = 300 })
+    upgraded :: try support.run(&context, &["/usr/bin/env", prefix_environment, second_bootstrap, launcher, "install", context.root], { timeout_seconds = 300 })
     try support.expect(&context, upgraded.status == 0, upgraded.stderr)
     second :: try active_target(&context, launcher)
     try support.expect(&context, !mem.eql(first, second) and try fs.kind(context.allocator, first) == .file, "upgrade keeps the previous compiler in a separate installation")
     try support.expect(&context, mem.eql(try active_target(&context, previous), first), "upgrade records the previous installation")
-    failed :: try support.run(&context, &["/usr/bin/env", prefix_environment, "BOOTSTRAP=/usr/bin/false", "/bin/sh", installer], {})
+    failed :: try support.run(&context, &["/usr/bin/env", prefix_environment, "BOOTSTRAP=/usr/bin/false", context.compiler, "install", context.root], {})
     try support.expect(&context, failed.status != 0, "invalid bootstrap unexpectedly installed a compiler")
     try support.expect(&context, mem.eql(try active_target(&context, launcher), second) and mem.eql(try active_target(&context, previous), first), "failed upgrade changes neither active nor rollback compiler")
-    restored :: try support.run(&context, &["/usr/bin/env", prefix_environment, "/bin/sh", installer, "rollback"], {})
+    try support.write(&context, second, "broken compiler payload\n")
+    restored :: try support.run(&context, &["/usr/bin/env", prefix_environment, first, "install", "--rollback", "honey"], { cwd = context.temporary })
     try support.expect(&context, restored.status == 0, restored.stderr)
     try support.expect(&context, mem.eql(try active_target(&context, launcher), first) and mem.eql(try active_target(&context, previous), second), "rollback restores the previous compiler and retains the newer one")
     project :: try support.path(&context, context.temporary, "installed project")
@@ -55,11 +55,10 @@ installation_preserves_bootstrap_and_recovers_from_failed_upgrades test {
 installation_refuses_unmanaged_executables test {
     context := try support.init("unmanaged install")
     defer support.deinit(&context)
-    installer :: try support.path(&context, context.root, "install.sh")
     prefix :: try support.path(&context, context.temporary, "existing user prefix")
     launcher :: try support.put(&context, prefix, "bin/honey", "user-owned executable\n")
     prefix_environment :: try support.concat(&context, &["PREFIX=", prefix])
-    refused :: try support.run(&context, &["/usr/bin/env", prefix_environment, "/bin/sh", installer], {})
+    refused :: try support.run(&context, &["/usr/bin/env", prefix_environment, context.compiler, "install", context.root], {})
     try support.expect(&context, refused.status != 0, "installer replaced an unmanaged executable")
     try support.expect(&context, mem.eql(try support.read(&context, launcher), "user-owned executable\n"), "unmanaged executable contents changed")
 }
@@ -70,17 +69,23 @@ project_install_builds_upgrades_and_rolls_back test {
     root :: try support.path(&context, context.temporary, "project ' ; $")
     created :: try support.run(&context, &[context.compiler, "new", root], {})
     try support.expect_result(&context, created, 0, "", "")
-    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"installed-app\", source = \"source\" }\n")
+    build_file :: try support.put(&context, root, "build.hon",
+        `import "@std/build"
+        `config :: build.BuildConfig{ name = "installed-app", source = "source" }
+        `settings proc() build.InstallConfig { return build.InstallConfig{ version = "0.3.0-dev" } }
+        `installation :: $settings()
+        `
+    )
+    original_config :: try support.read(&context, build_file)
     source :: try support.put(&context, root, "source/main.hon", "main proc() i32 { return 41 }\n")
     prefix :: try support.path(&context, context.temporary, "prefix ' ; $")
     environment :: try support.concat(&context, &["PREFIX=", prefix])
     launcher :: try support.path(&context, prefix, "bin/installed-app")
     previous :: try support.path(&context, prefix, "opt/installed-app/previous")
-    installer :: try support.path(&context, context.root, "install-project.sh")
     installed :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root, "-O0"], { cwd = context.temporary, timeout_seconds = 300 })
     try support.expect(&context, installed.status == 0, installed.stderr)
     first :: try active_target(&context, launcher)
-    try support.expect(&context, support.has_prefix(first, try support.path(&context, prefix, "opt/installed-app/release.")) and support.has_suffix(first, "/bin/installed-app"), "project installs a versioned executable")
+    try support.expect(&context, support.has_suffix(first, "/0.3.0-dev-install.1/bin/installed-app"), "first installation has the helper-produced version and sequence")
     ran_first :: try support.run(&context, &[launcher], {})
     try support.expect_result(&context, ran_first, 0, "41\n", "")
     try support.write(&context, source, "main proc() i32 { return 42 }\n")
@@ -88,6 +93,8 @@ project_install_builds_upgrades_and_rolls_back test {
     try support.expect(&context, upgraded.status == 0, upgraded.stderr)
     second :: try active_target(&context, launcher)
     try support.expect(&context, !mem.eql(first, second) and mem.eql(try active_target(&context, previous), first), "project upgrade preserves previous release")
+    try support.expect(&context, support.has_suffix(second, "/0.3.0-dev-install.2/bin/installed-app"), "upgrades advance installation number without changing the declared version")
+    try support.expect(&context, mem.eql(try support.read(&context, build_file), original_config), "installation never mutates the declared release version")
     ran_second :: try support.run(&context, &[launcher], {})
     try support.expect_result(&context, ran_second, 0, "42\n", "")
     try support.write(&context, source, "main proc( invalid syntax\n")
@@ -96,47 +103,96 @@ project_install_builds_upgrades_and_rolls_back test {
     try support.expect(&context, mem.eql(try active_target(&context, launcher), second) and mem.eql(try active_target(&context, previous), first), "failed build preserves active and previous release")
     still_active :: try support.run(&context, &[launcher], {})
     try support.expect_result(&context, still_active, 0, "42\n", "")
-    restored :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "rollback", "installed-app"], {})
+    restored :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", "--rollback", "installed-app"], { cwd = context.temporary })
     try support.expect(&context, restored.status == 0, restored.stderr)
     try support.expect(&context, mem.eql(try active_target(&context, launcher), first) and mem.eql(try active_target(&context, previous), second), "generic rollback exchanges releases")
     ran_restored :: try support.run(&context, &[launcher], {})
     try support.expect_result(&context, ran_restored, 0, "41\n", "")
-    toggled :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "rollback", "installed-app"], {})
+    toggled :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", "--rollback", "installed-app"], { cwd = context.temporary })
     try support.expect(&context, toggled.status == 0 and mem.eql(try active_target(&context, launcher), second), "rollback can restore the newer release")
 }
 
-generic_installer_validates_and_never_runs_candidates test {
-    context := try support.init("generic installer safety")
+native_installer_preserves_unmanaged_paths_and_never_runs_applications test {
+    context := try support.init("native installer safety")
     defer support.deinit(&context)
-    installer :: try support.path(&context, context.root, "install-project.sh")
+    root :: try support.path(&context, context.temporary, "application")
+    created :: try support.run(&context, &[context.compiler, "new", root], {})
+    try support.expect_result(&context, created, 0, "", "")
+    _ = try support.put(&context, root, "source/main.hon", "main proc() i32 { unreachable }\n")
+    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"safe-app\", source = \"source\" }\n")
+    # an older vendored build package has no InstallConfig declaration.
+    _ = try support.put(&context, root, "std/build/build.hon",
+        `Linkage :: enum { automatic, static, shared }
+        `BuildConfig :: struct {
+        `    name []u8
+        `    source []u8
+        `    macos_deployment_target []u8 = "11.0"
+        `    libraries [][]u8 = &[]
+        `    lib_paths [][]u8 = &[]
+        `    includes [][]u8 = &[]
+        `    defines [][]u8 = &[]
+        `    links [][]u8 = &[]
+        `    frameworks [][]u8 = &[]
+        `    rpaths [][]u8 = &[]
+        `    linkage Linkage = .automatic
+        `}
+        `
+    )
+    _ = try support.put(&context, root, "install.sh", "#!/bin/sh\nexit 99\n")
     prefix :: try support.path(&context, context.temporary, "isolated prefix")
     environment :: try support.concat(&context, &["PREFIX=", prefix])
-    candidate :: try support.put(&context, context.temporary, "candidate", "#!/bin/sh\nexit 97\n")
-    executable :: try support.run(&context, &["chmod", "+x", candidate], {})
-    try support.expect_result(&context, executable, 0, "", "")
-    for ([".", "..", "nested/name", "-option", "honey", "rollback"]) |name| {
-        rejected :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, name, candidate], {})
-        try support.expect(&context, rejected.status != 0, "generic installer rejects unsafe and reserved names")
-    }
-    installed :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "safe-app", candidate], {})
+    installed :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
     try support.expect(&context, installed.status == 0, installed.stderr)
     launcher :: try support.path(&context, prefix, "bin/safe-app")
     first :: try active_target(&context, launcher)
-    try support.expect(&context, mem.eql(try support.read(&context, first), try support.read(&context, candidate)), "installer copies candidate without executing it")
-    try support.write(&context, candidate, "#!/bin/sh\nexit 98\n")
-    try support.expect(&context, mem.eql(try support.read(&context, first), "#!/bin/sh\nexit 97\n"), "release is independent of the build output")
     lock :: try support.path(&context, prefix, "opt/safe-app/.install-lock")
     try support.directory(&context, lock)
-    locked :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "safe-app", candidate], {})
+    locked :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
     try support.expect(&context, locked.status != 0 and mem.eql(try active_target(&context, launcher), first), "installation lock preserves launcher")
     removed :: try support.run(&context, &["rmdir", lock], {})
     try support.expect_result(&context, removed, 0, "", "")
+    unrelated :: try support.put(&context, context.temporary, "unrelated", "user-owned file\n")
     previous :: try support.path(&context, prefix, "opt/safe-app/previous")
-    try support.symlink(&context, candidate, previous)
-    refused_previous :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "safe-app", candidate], {})
-    try support.expect(&context, refused_previous.status != 0 and mem.eql(try active_target(&context, previous), candidate) and mem.eql(try active_target(&context, launcher), first), "unrelated rollback symlink is preserved")
-    unrelated :: try support.path(&context, prefix, "bin/unrelated")
-    try support.symlink(&context, candidate, unrelated)
-    refused_launcher :: try support.run(&context, &["/usr/bin/env", environment, "/bin/sh", installer, "unrelated", candidate], {})
-    try support.expect(&context, refused_launcher.status != 0 and mem.eql(try active_target(&context, unrelated), candidate), "unrelated launcher symlink is preserved")
+    try support.symlink(&context, unrelated, previous)
+    refused :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
+    try support.expect(&context, refused.status != 0 and mem.eql(try active_target(&context, previous), unrelated) and mem.eql(try active_target(&context, launcher), first), "unmanaged rollback symlink is preserved")
+    try support.expect(&context, mem.eql(try support.read(&context, unrelated), "user-owned file\n"), "unrelated contents are untouched")
+}
+
+installation_settings_reject_effects_and_unsafe_versions test {
+    context := try support.init("installation config")
+    defer support.deinit(&context)
+    root :: try support.path(&context, context.temporary, "application")
+    created :: try support.run(&context, &[context.compiler, "new", root], {})
+    try support.expect_result(&context, created, 0, "", "")
+    prefix :: try support.path(&context, context.temporary, "prefix")
+    environment :: try support.concat(&context, &["PREFIX=", prefix])
+    for (["", "../escape", "1.0/other", "-option"]) |version| {
+        text :: try support.concat(&context, &["import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"app\", source = \"source\" }\ninstallation :: build.InstallConfig{ version = \"", version, "\" }\n"])
+        _ = try support.put(&context, root, "build.hon", text)
+        rejected :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
+        try support.expect(&context, rejected.status != 0, "unsafe installation version rejected")
+    }
+    _ = try support.put(&context, root, "build.hon",
+        `import "@std/build"
+        `config :: build.BuildConfig{ name = "app", source = "source" }
+        `system c_func(command ?*c_char) c_int
+        `settings proc() build.InstallConfig {
+        `    result :: system("touch installation-executed")
+        `    return build.InstallConfig{ version = if (result == 0) "executed" else "failed" }
+        `}
+        `installation :: $settings()
+        `
+    )
+    rejected :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install"], { cwd = root })
+    marker :: try support.path(&context, root, "installation-executed")
+    launcher :: try support.path(&context, prefix, "bin/app")
+    try support.expect(&context, rejected.status != 0 and try fs.kind(context.allocator, marker) == .missing and try fs.kind(context.allocator, launcher) == .missing, "installation configuration cannot execute foreign commands or activate a candidate")
+    outside :: try support.put(&context, context.temporary, "outside/main.hon", "main proc() i32 { return 9 }\n")
+    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"app\", source = \"../outside\" }\ninstallation :: build.InstallConfig{ self_hosted = true, bootstrap = \"/usr/bin/false\" }\n")
+    escaped :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
+    try support.expect(&context, escaped.status != 0 and mem.eql(try support.read(&context, outside), "main proc() i32 { return 9 }\n"), "self-host snapshots cannot copy or remove sources outside the project")
+    _ = try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"honey\", source = \"source\" }\n")
+    reserved :: try support.run(&context, &["/usr/bin/env", environment, context.compiler, "install", root], {})
+    try support.expect(&context, reserved.status != 0, "compiler name requires validated self-hosted installation")
 }

@@ -26,21 +26,31 @@ install a validated compiler for the current user, or restore the previous insta
 
 ```sh
 ./build/honey install
-sh install.sh rollback
+./build/honey install --rollback honey
 ```
 
-the installer defaults to `~/.local`: each installation gets a fresh `opt/honey/release.*/` directory containing `bin/honey`, matching `std/` and `ffi/c/`, and a preserved input compiler at `bootstrap/honey`. it builds two compiler generations against copied sources/libraries, runs the compiler unit suite, then builds and runs a standalone project outside the checkout before atomically switching `bin/honey`. failed builds/checks leave the active compiler unchanged; upgrades retain older directories, and rollback swaps the current and previous compilers. unrelated executables are never overwritten. an install lock prevents concurrent activation; after a forced interruption, verify no installer is running before removing the reported lock directory.
+the native installer defaults to `~/.local`: each installation gets a fresh `opt/honey/0.0.0-dev-install.<N>/` directory containing `bin/honey`, matching `std/` and `ffi/c/`, and a preserved input compiler at `bootstrap/honey`. it builds two compiler generations against copied sources/libraries, runs the compiler unit suite, then builds and runs a standalone project outside the checkout before atomically switching `bin/honey`. failed builds/checks leave the active compiler unchanged; upgrades retain older directories, and rollback swaps the current and previous compilers. unrelated executables are never overwritten. an install lock prevents concurrent activation; after a forced interruption, verify no installer is running before removing `$PREFIX/opt/<name>/.install-lock`.
 
-the default bootstrap is this checkout's `build/honey`, which is never overwritten. select a different working compiler or installation prefix explicitly:
+the compiler's `build.hon` declares its bootstrap and validation recipe in Honey:
+
+```hon
+installation :: build.InstallConfig{
+    version = "0.0.0-dev",
+    self_hosted = true,
+    bootstrap = "build/honey",
+}
+```
+
+`self_hosted` selects Honey's two-generation compiler recipe, rather than ordinary executable installation. the configured bootstrap path is project-relative or absolute, and the input binary is never overwritten. select another working bootstrap or prefix explicitly:
 
 ```sh
-BOOTSTRAP="$PWD/build/honey-bootstrap" PREFIX="$HOME/.local" sh install.sh
+BOOTSTRAP="$PWD/build/honey-bootstrap" PREFIX="$HOME/.local" ./build/honey install
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 the installer does not edit shell configuration or publish a release. Clang must remain on `PATH` for native builds. installation and rollback regression checks run with `./build/honey test tests/install`, using isolated temporary prefixes.
 
-`honey install` runs the compiler checkout's external `install.sh` recipe, which owns bootstrap selection, optimization and validation. `sh install.sh` remains usable without invoking Honey, including for recovery.
+installation and rollback are implemented in Honey, without shell-script dispatch or filesystem utility subprocesses. if the active compiler is broken, invoke the retained compiler directly: `~/.local/opt/honey/previous install --rollback honey`. rollback needs neither project configuration nor Clang. retain a working compiler; no self-hosted executable can recover itself if every retained executable has been removed or corrupted.
 
 create a standalone sibling project, with editable vendored libraries:
 
@@ -79,13 +89,15 @@ configuration runs in the bounded interpreter, not as a native program; foreign 
 honey build -O2
 honey test
 PREFIX="$HOME/.local" honey install -O2
-# recovery does not require a working Honey executable:
-PREFIX="$HOME/.local" sh /path/to/toolchain/install-project.sh rollback app
+# if the active Honey compiler is broken, use the retained compiler directly:
+PREFIX="$HOME/.local" ~/.local/opt/honey/previous install --rollback app
 ```
 
-ordinary installation builds first, then copies the executable into a fresh `$PREFIX/opt/<name>/release.*/bin/<name>` and atomically switches `$PREFIX/bin/<name>`. older releases remain available; failed builds leave activation and rollback pointers unchanged. the installer never launches the application, overwrites unrelated executables or edits shell configuration. names use ASCII letters, digits, `_`, `.` and `-`, cannot begin with `-`, and cannot be `.`, `..`, `honey` or `rollback`; `honey` is reserved for the validated compiler recipe.
+ordinary installation builds directly into a fresh `$PREFIX/opt/<name>/<version>-install.<N>/bin/<name>` and atomically switches `$PREFIX/bin/<name>`. install defaults to `-O2`; build defaults to `-O0`. optional `installation :: build.InstallConfig{ version = "0.3.0-dev" }` supplies the declared version; its default is `"0.0.0-dev"`. the installation number advances across existing numbered bundles under the per-name lock, independently of release versions. builds never bump versions or rewrite configuration.
 
-a project-root `install.sh`, when present, replaces ordinary installation and is run only by an explicit `honey install`. treat it as trusted executable project code, not configuration; it owns its build/validation and must not be passed `-O0`/`-O2`. the compiler uses this convention for its two-generation validated installation. generic installations copy only the executable: assets and native runtime libraries remain the project's responsibility. matching toolchain distributions must retain `install-project.sh` beside their `std/`; compiler installations do so automatically. no plugins, package resolution, multiple-artifact configuration or public task graph are introduced.
+older releases remain available; failed builds leave activation and rollback pointers unchanged. ordinary installation never launches the application, overwrites unrelated executables or edits shell configuration. names and version labels use ASCII letters, digits, `_`, `.`, `+` and `-`, cannot begin with `-`, and cannot be `.` or `..`. the name `honey` requires the validated self-hosted recipe. self-hosted sources must be inside the project and separate from bundle payload directories.
+
+installation settings use the same bounded configuration evaluator as build settings. projects without an `installation` declaration still work with older vendored build packages; add the `InstallConfig` declaration to your vendored `std/build` explicitly before using the new settings. project shell scripts are not installation hooks. generic installations contain only the executable: assets and native runtime libraries remain the project's responsibility. no plugins, package resolution, multiple-artifact configuration or public task graph are introduced.
 
 `macos_deployment_target = "15.0"` sets a project's minimum macOS version for LLVM emission, compilation and linking. new projects record the host version; omitted fields and unconfigured builds retain the legacy `"11.0"` fallback. use numeric `major.minor` or `major.minor.patch`, at least 11.0, and match native dependencies' requirements. older vendored `std/build/build.hon` files need the `macos_deployment_target []u8 = "11.0"` field added explicitly to `BuildConfig`; builds never upgrade that file automatically. `emit-llvm` honors the project target without resolving native libraries.
 

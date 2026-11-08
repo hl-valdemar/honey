@@ -99,7 +99,12 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
         if (mem.eql(verb, "new") or mem.eql(verb, "init")) return project.command(allocator, runtime, args)
         if (mem.eql(verb, "translate-c")) return cimport.command(allocator, runtime, args)
         if (mem.eql(verb, "build") and args.values.len <= 4) return try build_project(allocator, runtime, args)
-        if (mem.eql(verb, "install") and args.values.len <= 4) return try build_project(allocator, runtime, args)
+        if (mem.eql(verb, "install") and args.values.len <= 4) {
+            if (args.values.len == 4 and mem.eql(args.values[2], "--rollback")) {
+                return project.rollback_command(allocator, runtime, args.values[3])
+            }
+            return try build_project(allocator, runtime, args)
+        }
     }
     if (args.values.len == 3) {
         if (mem.eql(args.values[1], "run")) return try run_file(allocator, runtime, args.values[2])
@@ -133,8 +138,9 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
 
 @hide:file
 build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {
+    installing :: mem.eql(args.values[1], "install")
     root [;0]u8 := "."
-    optimization [;0]u8 := "-O0"
+    optimization [;0]u8 := if (installing) "-O2" else "-O0"
     has_root := false
     has_optimization := false
     for (args.values[2..]) |option| {
@@ -154,19 +160,14 @@ build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i3
         return 2
     }
     defer project.deinit_config(&config)
-    installing :: mem.eql(args.values[1], "install")
-    if (installing) {
-        if (project.run_install_recipe(allocator, runtime, config.root, has_optimization)) |status| return status
-    }
+    if (installing) return project.install_command(allocator, runtime, &config, optimization)
     project.prepare_output(&config) catch |_| {
         try io.write_all(io.stderr(runtime), "honey build: cannot create output directory for ")
         try io.write_all(io.stderr(runtime), config.output)
         try io.write_all(io.stderr(runtime), "\n")
         return 2
     }
-    status :: try build_file(allocator, runtime, config.source, config.output, optimization, config.arguments.items, config.target)
-    if (status != 0 or !installing) return status
-    return project.install_executable(allocator, runtime, &config)
+    return try build_file(allocator, runtime, config.source, config.output, optimization, config.arguments.items, config.target)
 }
 
 @hide:file
@@ -176,6 +177,7 @@ usage proc(output io.Writer) void ! io.WriteError {
     try io.write_all(output, "       honey build <file-or-directory> -o <executable> [-O0|-O2]\n")
     try io.write_all(output, "       honey build [project-directory] [-O0|-O2]\n")
     try io.write_all(output, "       honey install [project-directory] [-O0|-O2]\n")
+    try io.write_all(output, "       honey install --rollback <name>\n")
     try io.write_all(output, "       honey test [file-or-directory]\n")
     try io.write_all(output, "       honey new <project-path>\n")
     try io.write_all(output, "       honey init\n")
