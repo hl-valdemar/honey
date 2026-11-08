@@ -172,3 +172,55 @@ installed_bundle_discovery_and_missing_template_errors test {
     created :: try support.run(&context, &[compiler, "new", destination], { cwd = context.temporary })
     try support.expect(&context, created.status == 0, "bin/honey discovers ../share/honey without cwd dependencies")
 }
+
+test_uses_evaluated_config_source_from_nested_directory test {
+    context := try support.init("configured tests")
+    defer support.deinit(&context)
+    root :: try support.path(&context, context.temporary, "configured project")
+    created :: try support.run(&context, &[context.compiler, "new", root], {})
+    try support.expect_result(&context, created, 0, "", "")
+    _ = try support.put(&context, root, "build.hon",
+        `import "@std/build"
+        `settings proc() build.BuildConfig {
+        `    return build.BuildConfig{ name = "configured", source = "custom checks" }
+        `}
+        `config :: $settings()
+        `
+    )
+    _ = try support.put(&context, root, "source/ignored.test.hon", "ignored test { unreachable }\n")
+    checks :: try support.put(&context, root, "custom checks/configured.test.hon",
+        "import \"@std/testing\"\nconfigured test { try testing.expect(true) }\n")
+    nested :: try support.path(&context, root, "nested/working directory")
+    try support.directory(&context, nested)
+    passing :: try support.run(&context, &[context.compiler, "test"], { cwd = nested, timeout_seconds = 300 })
+    try support.expect(&context, passing.status == 0 and support.contains(passing.stderr, "configured.test.hon:configured ... ok") and support.contains(passing.stderr, "1 passed, 0 failed\n"), "test resolves evaluated config.source from ancestor project rather than cwd or source")
+    try support.write(&context, checks, "import \"@std/testing\"\nconfigured test { try testing.expect(false) }\n")
+    failing :: try support.run(&context, &[context.compiler, "test"], { cwd = nested, timeout_seconds = 300 })
+    try support.expect(&context, failing.status == 1 and support.contains(failing.stderr, "0 passed, 1 failed\n"), "configured tests propagate failures")
+}
+
+configuration_cannot_execute_foreign_commands test {
+    context := try support.init("configuration effects")
+    defer support.deinit(&context)
+    root :: try support.path(&context, context.temporary, "effect check")
+    created :: try support.run(&context, &[context.compiler, "new", root], {})
+    try support.expect_result(&context, created, 0, "", "")
+    _ = try support.put(&context, root, "install.sh", "#!/bin/sh\ntouch recipe-executed\n")
+    built :: try support.run(&context, &[context.compiler, "build"], { cwd = root })
+    try support.expect_result(&context, built, 0, "", "")
+    recipe_marker :: try support.path(&context, root, "recipe-executed")
+    try support.expect(&context, try fs.kind(context.allocator, recipe_marker) == .missing, "ordinary builds do not execute installation recipes")
+    _ = try support.put(&context, root, "build.hon",
+        `import "@std/build"
+        `system c_func(command ?*c_char) c_int
+        `settings proc() build.BuildConfig {
+        `    result :: system("touch configuration-executed")
+        `    return build.BuildConfig{ name = if (result == 0) "executed" else "failed", source = "source" }
+        `}
+        `config :: $settings()
+        `
+    )
+    rejected :: try support.run(&context, &[context.compiler, "build"], { cwd = root })
+    marker :: try support.path(&context, root, "configuration-executed")
+    try support.expect(&context, rejected.status != 0 and try fs.kind(context.allocator, marker) == .missing, "configuration rejects foreign execution instead of running commands")
+}

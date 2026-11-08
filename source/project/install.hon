@@ -1,0 +1,42 @@
+import "@std/mem"
+import "@std/io"
+import "@std/fs"
+import "@std/process"
+
+#! an explicit install command may run the project's external recipe; config evaluation never does.
+#! null means no recipe exists and the ordinary executable installation should be used.
+run_install_recipe proc(allocator mem.Allocator, runtime io.Io, root []u8, has_optimization bool) ?i32 {
+    recipe :: join(allocator, root, "install.sh") catch |_| { return 2 }
+    defer free_text(allocator, recipe)
+    kind :: fs.kind(allocator, recipe) catch |_| { return 2 }
+    if (kind == .missing) return null
+    if (has_optimization) {
+        io.write_all(io.stderr(runtime), "honey install: project install.sh controls optimization; omit -O0/-O2\n") catch |_| {}
+        return 2
+    }
+    if (kind != .file) {
+        io.write_all(io.stderr(runtime), "honey install: install.sh must be a regular file\n") catch |_| {}
+        return 2
+    }
+    arguments [2][;0]u8 :: ["/bin/sh", recipe.ptr[..recipe.len;0]]
+    return process.run(allocator, arguments[..]) catch |_| {
+        io.write_all(io.stderr(runtime), "honey install: cannot run project install.sh\n") catch |_| {}
+        return 2
+    }
+}
+
+#! installs only after a successful build; the external script retains recovery without Honey.
+install_executable proc(allocator mem.Allocator, runtime io.Io, config @Config) i32 {
+    distribution :: find_templates(allocator) catch |_| {
+        io.write_all(io.stderr(runtime), "honey install: matching toolchain distribution not found\n") catch |_| {}
+        return 2
+    }
+    defer free_text(allocator, distribution)
+    installer :: join(allocator, distribution, "install-project.sh") catch |_| { return 2 }
+    defer free_text(allocator, installer)
+    arguments [4][;0]u8 :: ["/bin/sh", installer.ptr[..installer.len;0], config.name, config.output]
+    return process.run(allocator, arguments[..]) catch |_| {
+        io.write_all(io.stderr(runtime), "honey install: cannot run toolchain installer\n") catch |_| {}
+        return 2
+    }
+}

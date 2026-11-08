@@ -25,7 +25,7 @@ bootstrap compatibility: compiler feature adoption and releases MUST follow the 
 install a validated compiler for the current user, or restore the previous installation:
 
 ```sh
-sh install.sh
+./build/honey install
 sh install.sh rollback
 ```
 
@@ -40,6 +40,8 @@ export PATH="$HOME/.local/bin:$PATH"
 
 the installer does not edit shell configuration or publish a release. Clang must remain on `PATH` for native builds. installation and rollback regression checks run with `./build/honey test tests/install`, using isolated temporary prefixes.
 
+`honey install` runs the compiler checkout's external `install.sh` recipe, which owns bootstrap selection, optimization and validation. `sh install.sh` remains usable without invoking Honey, including for recovery.
+
 create a standalone sibling project, with editable vendored libraries:
 
 ```sh
@@ -52,6 +54,38 @@ create a standalone sibling project, with editable vendored libraries:
 the distribution must include matching `std/` and `ffi/c/` templates beside the executable, in its parent directory (the development `build/honey` layout), or under `../share/honey`. missing templates fail explicitly rather than falling back to another checkout in the current directory.
 
 `build.hon` supplies a `config :: build.BuildConfig{ ... }` with `name` and `source`. native dependencies use `libraries`, `lib_paths`, `links` (C sources, objects, archives or native linker options), `includes`, `defines`, `frameworks` and `rpaths`. paths are project-relative unless absolute; dyld `@loader_path`/`@executable_path` runtime paths remain unchanged. `linkage = .automatic`, `.static` or `.shared` selects the dependency library form, not the program's output kind. explicit `build <source> -o <output>` and `test <source>` also use project link settings when a config exists; marker-only `build.hon` files remain valid for those commands.
+
+### project toolchain
+
+`honey build`, `honey test` and `honey install` discover `build.hon` from the current directory or its ancestors. build and install also accept a project directory. the same `BuildConfig` describes the executable and native inputs; no step registration is needed. configuration values may use ordinary Honey helpers and conditionals:
+
+```hon
+import "@std/build"
+
+settings proc(minimum []u8) build.BuildConfig {
+    return build.BuildConfig{
+        name = "app",
+        source = "source",
+        macos_deployment_target = minimum,
+    }
+}
+
+config :: $settings("15.0")
+```
+
+configuration runs in the bounded interpreter, not as a native program; foreign calls cannot execute commands, download dependencies or install files. the supported native target remains Darwin arm64; deployment choices are explicit values, not build-time host detection. `links` can name existing generated C/object/archive inputs, but generation tasks and dependency tracking are deferred.
+
+```sh
+honey build -O2
+honey test
+PREFIX="$HOME/.local" honey install -O2
+# recovery does not require a working Honey executable:
+PREFIX="$HOME/.local" sh /path/to/toolchain/install-project.sh rollback app
+```
+
+ordinary installation builds first, then copies the executable into a fresh `$PREFIX/opt/<name>/release.*/bin/<name>` and atomically switches `$PREFIX/bin/<name>`. older releases remain available; failed builds leave activation and rollback pointers unchanged. the installer never launches the application, overwrites unrelated executables or edits shell configuration. names use ASCII letters, digits, `_`, `.` and `-`, cannot begin with `-`, and cannot be `.`, `..`, `honey` or `rollback`; `honey` is reserved for the validated compiler recipe.
+
+a project-root `install.sh`, when present, replaces ordinary installation and is run only by an explicit `honey install`. treat it as trusted executable project code, not configuration; it owns its build/validation and must not be passed `-O0`/`-O2`. the compiler uses this convention for its two-generation validated installation. generic installations copy only the executable: assets and native runtime libraries remain the project's responsibility. matching toolchain distributions must retain `install-project.sh` beside their `std/`; compiler installations do so automatically. no plugins, package resolution, multiple-artifact configuration or public task graph are introduced.
 
 `macos_deployment_target = "15.0"` sets a project's minimum macOS version for LLVM emission, compilation and linking. new projects record the host version; omitted fields and unconfigured builds retain the legacy `"11.0"` fallback. use numeric `major.minor` or `major.minor.patch`, at least 11.0, and match native dependencies' requirements. older vendored `std/build/build.hon` files need the `macos_deployment_target []u8 = "11.0"` field added explicitly to `BuildConfig`; builds never upgrade that file automatically. `emit-llvm` honors the project target without resolving native libraries.
 
@@ -129,7 +163,7 @@ run the Honey-owned suite after bootstrapping:
 ./build/honey test tests/install
 ```
 
-`test` defaults to `source`; an explicit file or directory selects another entry package. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
+`test` without a path uses the discovered project's `config.source`; an explicit file or directory selects that entry package instead. outside a configured project, supply a path explicitly. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
 
 assertions use `@std/testing`: `try testing.expect(condition)`, `try testing.expect_equal(expected, actual)` and `try testing.expect_type(Expected, actual)`. Honey supplies omitted `SourceLocation` arguments at the assertion call site, including through aliased imports; explicit locations remain unchanged. helpers still declare their ordinary fallible return types.
 

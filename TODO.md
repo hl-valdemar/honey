@@ -22,13 +22,13 @@ goal: build a small raylib game in a sibling project, using Honey's stdlib and d
 
 goal: ordinary Honey configuration with a small interface; describe artifacts rather than manually wiring a public step graph.
 
-- [ ] evolve the existing `build.BuildConfig` rather than introducing a builder framework. describe sources, native dependencies and generated inputs; keep compilation, linking and ordering internal.
-- [ ] provide conventional `honey build`, `honey test` and `honey install` project commands without requiring explicit step registration or repeated artifact declarations.
-- [ ] allow ordinary Honey helpers and platform choices to produce configuration values. configuration evaluation must not execute commands, download dependencies or install files.
-- [ ] integrate the validated, versioned user-local installation flow: preserve bootstraps and older installations, validate candidates before atomic activation, and retain rollback. keep compiler bootstrap/validation as a compiler-specific recipe and recovery available outside the compiler executable.
+- [x] retain `build.BuildConfig` for a single executable's source and native inputs; keep compilation/linking internal. existing generated C/object/archive files may be supplied through `links`; generation and tracked output references stay with the deferred tasks below.
+- [x] provide conventional `honey build`, `honey test` and `honey install` project commands without explicit step registration or repeated artifact declarations. pathless test selects `config.source`, including from a nested working directory.
+- [x] evaluate ordinary Honey helpers and explicit deployment choices as configuration values, with foreign execution blocked. configuration evaluation does not execute installation recipes or commands; native platform support remains Darwin arm64.
+- [x] integrate validated, versioned user-local installation: preserve bootstraps and older installations, validate compiler candidates before atomic activation, and retain rollback. an explicit install command uses a project-root `install.sh` recipe when present; ordinary projects build and copy only their executable. external scripts retain recovery without a working compiler, and generic installation reserves `honey` for the compiler recipe.
 - [ ] add multiple-artifact configuration when a real project needs it; keep single-artifact projects simple.
 - [ ] add custom generation/asset tasks when needed, with explicit inputs and outputs. infer dependencies from artifact/output references, not declaration order or shell-command inspection; do not cache undeclared effects as if they were tracked.
 
-initial scope: existing declarative configuration, conventional commands and safe installation. defer plugins, package resolution and a public step graph. preserve project-vendored library control and the required bootstrap rollout policy.
+initial scope implemented: existing declarative configuration, conventional commands and safe installation. multiple artifacts, custom generation, plugins, package resolution and a public step graph remain deferred. preserve project-vendored library control and the required bootstrap rollout policy.
 
 See [README.md](README.md) for implemented features, current compiler boundaries and verification commands.

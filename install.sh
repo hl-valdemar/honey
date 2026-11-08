@@ -63,6 +63,7 @@ else
     cp -RL "$repo/source" "$repo/std" "$release/"
     cp -RL "$repo/ffi/c" "$release/ffi/c"
     cp "$repo/build.hon" "$release/build.hon"
+    cp "$repo/install-project.sh" "$release/install-project.sh"
     printf 'Building two compiler generations in %s\n' "$release"
     "$release/bootstrap/honey" build "$release/source" -o "$release/bin/honey-stage1" -O2
     "$release/bin/honey-stage1" build "$release/source" -o "$release/bin/honey" -O2
