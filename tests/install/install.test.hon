@@ -1,0 +1,60 @@
+import "@std/mem"
+import "@std/fs"
+import "@tests/support"
+
+@hide:file
+active_target proc(context @mut support.Context, launcher [;0]u8) [;0]u8 ! support.Error {
+    result :: try support.run(context, &["readlink", launcher], {})
+    try support.expect(context, result.status == 0 and result.stdout.len > 1, result.stderr)
+    return try support.concat(context, &[result.stdout[..result.stdout.len - 1]])
+}
+
+installation_preserves_bootstrap_and_recovers_from_failed_upgrades test {
+    context := try support.init("user install")
+    defer support.deinit(&context)
+    installer :: try support.path(&context, context.root, "install.sh")
+    prefix :: try support.path(&context, context.temporary, "user prefix")
+    prefix_environment :: try support.concat(&context, &["PREFIX=", prefix])
+    bootstrap_environment :: try support.concat(&context, &["BOOTSTRAP=", context.compiler])
+    launcher :: try support.path(&context, prefix, "bin/honey")
+    previous :: try support.path(&context, prefix, "opt/honey/previous")
+    original :: try support.run(&context, &["cksum", context.compiler], {})
+    try support.expect(&context, original.status == 0, original.stderr)
+    first_install :: try support.run(&context, &["/usr/bin/env", prefix_environment, bootstrap_environment, "/bin/sh", installer], { timeout_seconds = 300 })
+    try support.expect(&context, first_install.status == 0, first_install.stderr)
+    first :: try active_target(&context, launcher)
+    second_bootstrap :: try support.concat(&context, &["BOOTSTRAP=", launcher])
+    upgraded :: try support.run(&context, &["/usr/bin/env", prefix_environment, second_bootstrap, "/bin/sh", installer], { timeout_seconds = 300 })
+    try support.expect(&context, upgraded.status == 0, upgraded.stderr)
+    second :: try active_target(&context, launcher)
+    try support.expect(&context, !mem.eql(first, second) and try fs.kind(context.allocator, first) == .file, "upgrade keeps the previous compiler in a separate installation")
+    try support.expect(&context, mem.eql(try active_target(&context, previous), first), "upgrade records the previous installation")
+    failed :: try support.run(&context, &["/usr/bin/env", prefix_environment, "BOOTSTRAP=/usr/bin/false", "/bin/sh", installer], {})
+    try support.expect(&context, failed.status != 0, "invalid bootstrap unexpectedly installed a compiler")
+    try support.expect(&context, mem.eql(try active_target(&context, launcher), second) and mem.eql(try active_target(&context, previous), first), "failed upgrade changes neither active nor rollback compiler")
+    restored :: try support.run(&context, &["/usr/bin/env", prefix_environment, "/bin/sh", installer, "rollback"], {})
+    try support.expect(&context, restored.status == 0, restored.stderr)
+    try support.expect(&context, mem.eql(try active_target(&context, launcher), first) and mem.eql(try active_target(&context, previous), second), "rollback restores the previous compiler and retains the newer one")
+    project :: try support.path(&context, context.temporary, "installed project")
+    created :: try support.run(&context, &[launcher, "new", project], { cwd = context.temporary })
+    try support.expect_result(&context, created, 0, "", "")
+    built :: try support.run(&context, &[launcher, "build", project], {})
+    try support.expect_result(&context, built, 0, "", "")
+    executable :: try support.path(&context, project, "build/app")
+    ran :: try support.run(&context, &[executable], {})
+    try support.expect_result(&context, ran, 0, "0\n", "")
+    unchanged :: try support.run(&context, &["cksum", context.compiler], {})
+    try support.expect_result(&context, unchanged, 0, original.stdout, "")
+}
+
+installation_refuses_unmanaged_executables test {
+    context := try support.init("unmanaged install")
+    defer support.deinit(&context)
+    installer :: try support.path(&context, context.root, "install.sh")
+    prefix :: try support.path(&context, context.temporary, "existing user prefix")
+    launcher :: try support.put(&context, prefix, "bin/honey", "user-owned executable\n")
+    prefix_environment :: try support.concat(&context, &["PREFIX=", prefix])
+    refused :: try support.run(&context, &["/usr/bin/env", prefix_environment, "/bin/sh", installer], {})
+    try support.expect(&context, refused.status != 0, "installer replaced an unmanaged executable")
+    try support.expect(&context, mem.eql(try support.read(&context, launcher), "user-owned executable\n"), "unmanaged executable contents changed")
+}

@@ -22,6 +22,24 @@ the check copies production sources without test-only imports or the testing pac
 
 bootstrap compatibility: compiler feature adoption and releases MUST follow the [required two-release policy](AGENTS.md#bootstrap-compatibility-required).
 
+install a validated compiler for the current user, or restore the previous installation:
+
+```sh
+sh install.sh
+sh install.sh rollback
+```
+
+the installer defaults to `~/.local`: each installation gets a fresh `opt/honey/release.*/` directory containing `bin/honey`, matching `std/` and `ffi/c/`, and a preserved input compiler at `bootstrap/honey`. it builds two compiler generations against copied sources/libraries, runs the compiler unit suite, then builds and runs a standalone project outside the checkout before atomically switching `bin/honey`. failed builds/checks leave the active compiler unchanged; upgrades retain older directories, and rollback swaps the current and previous compilers. unrelated executables are never overwritten. an install lock prevents concurrent activation; after a forced interruption, verify no installer is running before removing the reported lock directory.
+
+the default bootstrap is this checkout's `build/honey`, which is never overwritten. select a different working compiler or installation prefix explicitly:
+
+```sh
+BOOTSTRAP="$PWD/build/honey-bootstrap" PREFIX="$HOME/.local" sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+the installer does not edit shell configuration or publish a release. Clang must remain on `PATH` for native builds. installation and rollback regression checks run with `./build/honey test tests/install`, using isolated temporary prefixes.
+
 create a standalone sibling project, with editable vendored libraries:
 
 ```sh
@@ -108,6 +126,7 @@ run the Honey-owned suite after bootstrapping:
 ./build/honey test tests/abi
 ./build/honey test tests/project
 ./build/honey test tests/cimport
+./build/honey test tests/install
 ```
 
 `test` defaults to `source`; an explicit file or directory selects another entry package. directory inputs include `.hon`/`.bro` and `.test.hon`/`.test.bro` files. file inputs remain file-scoped. `name test { ... }` declarations are parameterless, infer their propagated error sets, and succeed on bare return or fallthrough. `test import "@package"` includes that package's tests and test-only dependencies without binding an ordinary namespace; ordinary dependencies remain production-only unless explicitly selected by a test import. production commands exclude test declarations, test files and test-only imports.
