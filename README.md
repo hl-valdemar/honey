@@ -101,16 +101,20 @@ installation settings use the same bounded configuration evaluator as build sett
 
 `macos_deployment_target = "15.0"` sets a project's minimum macOS version for LLVM emission, compilation and linking. new projects record the host version; omitted fields and unconfigured builds retain the legacy `"11.0"` fallback. use numeric `major.minor` or `major.minor.patch`, at least 11.0, and match native dependencies' requirements. older vendored `std/build/build.hon` files need the `macos_deployment_target []u8 = "11.0"` field added explicitly to `BuildConfig`; builds never upgrade that file automatically. `emit-llvm` honors the project target without resolving native libraries.
 
-generate only the C declarations a project needs, using the installed Clang frontend:
+generate bindings for a whole selected header using the installed Clang frontend:
 
 ```sh
 ./build/honey translate-c raylib --project ../my-game \
     --header /opt/homebrew/opt/raylib/include/raylib.h \
     --target arm64-apple-macos15 \
-    --symbol InitWindow --symbol CloseWindow --symbol DrawCircle
+    --all
 ```
 
 repeat `--header`/`--symbol` for additional inputs; `-I`, `-D`, `--sysroot` and `--clang` select preprocessing settings and the frontend executable. the project must contain `source/` and a `build.hon`/`build.bro` root marker. generation creates `ffi/raylib/bindings.hon`, transitive shared nominal types under `ffi/__c_types/`, and ownership/recipe snapshots. import the result with `import "@ffi/raylib"`. generation does not link raylib, install libraries or generate C bridges; configure the actual native library separately.
+
+`--all` exports supported declarations and value macros from the explicitly selected headers, together with their complete transitive type dependencies. required types from included headers remain usable from Honey; unrelated included-header functions, constants and types are not exported automatically. declarations are generated before any Honey caller exists, ready for imports and future editor tooling.
+
+unsupported declarations/macros and declarations depending on unsupported types are reported individually and omitted; supported bindings are still generated with exit status 0. dependency failures cannot leave partial aliases or records in the output. read the diagnostics before using a library. to generate a strict subset instead, replace `--all` with repeated `--symbol <name>` options; an unsupported explicit selection fails without installing partial bindings. the two selection modes cannot be combined. exporting every unrelated declaration in the include tree is deferred.
 
 binding packages isolate unrelated C names, while shared declarations retain one nominal identity. unsupported requested constructs are diagnosed rather than silently skipped. regeneration is deterministic and refuses to overwrite modified generated files or unrelated outputs; keep handwritten helpers in separate files. regenerate deliberately when headers, target or preprocessor settings change. a single binding package can be retargeted; other generated packages must use the same target, and conflicts leave outputs unchanged. C declarations do not establish ownership, callback lifetime, thread affinity or initialization contracts.
 

@@ -172,3 +172,67 @@ retargeting_regenerates_types_without_mixing_package_targets test {
     try support.expect(&context, rejected.status == 1, "mixed binding targets were accepted")
     try support.expect(&context, mem.eql(bindings, try support.read(&context, bindings_path)) and mem.eql(common, try support.read(&context, common_path)), "target conflict changed generated bindings")
 }
+
+all_selected_headers_exports_and_transitive_layouts test {
+    context := try support.init("cimport_all")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/all.h")
+    arguments [10][;0]u8 :: [context.compiler, "translate-c", "everything", "--project", project, "--target", "arm64-apple-macos11", "--header", header, "--all"]
+    generated :: try support.run(&context, arguments[..], {})
+    try support.expect(&context, generated.status == 0, generated.stderr)
+    unsupported [6][;0]u8 :: ["all_global", "all_inline", "ALL_APPLY", "all_long_double", "AllUnsupported", "all_unsupported_record"]
+    for (unsupported) |selection| {
+        try support.expect(&context, support.contains(generated.stderr, selection), "unsupported --all item was silently skipped")
+    }
+    bindings_path :: try support.path(&context, project, "ffi/everything/bindings.hon")
+    common_path :: try support.path(&context, project, "ffi/__c_types/bindings.hon")
+    manifest_path :: try support.path(&context, project, "ffi/everything/.honey-cimport")
+    original :: try support.read(&context, bindings_path)
+    common :: try support.read(&context, common_path)
+    recipe :: try support.read(&context, manifest_path)
+    try support.expect(&context, support.contains(recipe, "\"all\":true"), "manifest omitted --all selection mode")
+    fixture :: try support.path(&context, context.root, "tests/cimport/fixtures/all.hon")
+    source :: try support.put(&context, project, "source/main.hon", try support.read(&context, fixture))
+    emitted :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+    try support.expect(&context, emitted.status == 0, emitted.stderr)
+    llvm :: try support.put(&context, context.temporary, "all.ll", emitted.stdout)
+    implementation :: try support.path(&context, context.root, "tests/cimport/fixtures/all.c")
+    linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx11.0.0", "-O2", llvm, implementation, "-o", context.executable], {})
+    try support.expect_result(&context, linked, 0, "", "")
+    executed :: try support.run(&context, &[context.executable], {})
+    try support.expect_result(&context, executed, 0, "42\n", "")
+    for (["unrelated_included_function()", "UNRELATED_INCLUDED_VALUE"]) |expression| {
+        text :: try support.concat(&context, &["binding :: import \"@ffi/everything\"\nmain proc() i32 { return i32(binding.", expression, ") }\n"])
+        try support.write(&context, source, text)
+        excluded :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+        try support.expect(&context, excluded.status == 1, "unrelated included-header export was visible to Honey")
+    }
+    again :: try support.run(&context, arguments[..], {})
+    try support.expect(&context, again.status == 0, again.stderr)
+    try support.expect(&context, mem.eql(original, try support.read(&context, bindings_path)), "--all regeneration changed bindings")
+    try support.expect(&context, mem.eql(common, try support.read(&context, common_path)), "--all regeneration changed transitive types")
+    try support.expect(&context, mem.eql(recipe, try support.read(&context, manifest_path)), "--all regeneration changed recipe")
+    for (unsupported) |selection| {
+        rejected :: try translate(&context, project, "strict", header, &[selection])
+        try support.expect(&context, rejected.status == 1 and support.contains(rejected.stderr, selection), "explicit unsupported selection was not strict")
+        try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi/strict/bindings.hon")), "strict selection wrote partial bindings")
+    }
+    invalid :: try support.run(&context, &[context.compiler, "translate-c", "invalid", "--project", project, "--target", "arm64-apple-macos11", "--header", header, "--all", "--symbol", "all_unused_function"], {})
+    try support.expect(&context, invalid.status != 0 and support.contains(invalid.stderr, "--all") and support.contains(invalid.stderr, "--symbol"), "--all and --symbol were accepted together")
+    try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi/invalid/bindings.hon")), "invalid selection mode wrote bindings")
+    selected :: try translate(&context, project, "selected", header, &["all_unused_function"])
+    try support.expect_result(&context, selected, 0, "", "")
+    selected_recipe :: try support.read(&context, try support.path(&context, project, "ffi/selected/.honey-cimport"))
+    try support.write(&context, source, "binding :: import \"@ffi/selected\"\nmain proc() i32 { return i32(binding.ALL_NUMBER) }\n")
+    unselected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+    try support.expect(&context, unselected.status == 1, "explicit selection unexpectedly exposed an unselected constant")
+    try support.expect(&context, support.contains(selected_recipe, "\"all\":false"), "manifest omitted explicit selection mode")
+    try support.write(&context, bindings_path, "handwritten :: 123\n")
+    refused :: try support.run(&context, arguments[..], {})
+    try support.expect(&context, refused.status == 1 and support.contains(refused.stderr, "refusing to overwrite"), "--all overwrote edited bindings")
+    try support.expect(&context, mem.eql("handwritten :: 123\n", try support.read(&context, bindings_path)), "--all destroyed edited output")
+    try support.expect(&context, mem.eql(common, try support.read(&context, common_path)) and mem.eql(recipe, try support.read(&context, manifest_path)), "failed --all regeneration changed generated metadata")
+}
