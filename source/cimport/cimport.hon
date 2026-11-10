@@ -5,6 +5,7 @@ import "@std/fs"
 import "@std/io"
 import "@std/process"
 import "@std/strconv"
+import "@source/project"
 
 Failure :: enum { invalid_options, clang_failed, invalid_clang_output, unsupported_declaration, conflicting_declaration, unsafe_output, filesystem_failed }
 Error :: alias (Failure | mem.AllocError | fs.ReadFileError | io.WriteError | io.OpenError | io.CloseError | process.RunError)
@@ -334,7 +335,8 @@ kind proc(json @Json, node usize, expected []u8) bool { return mem.eql(json_text
 @hide:file
 qual_type proc(json @Json, node usize) []u8 { return json_text(json, property(json, node, "type"), "qualType") }
 
-#! borrows strings for the duration of generate. target is required; initially Darwin arm64 only.
+#! borrows strings for the duration of generate. API callers supply a resolved Darwin arm64 target.
+#! the CLI defaults an omitted --target to the configured project target.
 #! `all` selects declarations and macros from the selected headers plus required types;
 #! it is mutually exclusive with `symbols` and reports unsupported roots without failing.
 Options :: struct {
@@ -358,7 +360,7 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 {
     defer storage_deinit(&storage)
     return command_inner(&storage, runtime, args) catch |err| {
         message []u8 :: match err {
-            .invalid_options: "invalid options; use: honey translate-c <name> --header <header> (--all | --symbol <declaration>) --target arm64-apple-macos11 [--project <directory>] [-I <directory>] [-D <definition>] [--sysroot <directory>] [--clang <executable>] (repeat header/symbol/-I/-D)"
+            .invalid_options: "invalid options; use: honey translate-c <name> --header <header> (--all | --symbol <declaration>) [--target <target>] [--project <directory>] [-I <directory>] [-D <definition>] [--sysroot <directory>] [--clang <executable>] (repeat header/symbol/-I/-D)"
             .clang_failed: "Clang rejected the headers or selected constant; see its diagnostic above"
             .invalid_clang_output: "cannot decode Clang output; use a Clang installation supporting -ast-dump=json"
             .unsupported_declaration: "selected declaration or required type is unsupported; see diagnostic above"
@@ -378,6 +380,7 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 {
 command_inner proc(storage @mut Storage, runtime io.Io, args process.Args) i32 ! Error {
     if (args.values.len < 3) return .invalid_options
     options := Options{ name = args.values[2] }
+    has_target := false
     headers := arraylist.init([]u8, storage.allocator)
     defer arraylist.deinit(&headers)
     symbols := arraylist.init([]u8, storage.allocator)
@@ -402,8 +405,11 @@ command_inner proc(storage @mut Storage, runtime io.Io, args process.Args) i32 !
         else if (mem.eql(flag, "-I")) try arraylist.append(&includes, argument)
         else if (mem.eql(flag, "-D")) try arraylist.append(&defines, argument)
         else if (mem.eql(flag, "--project")) options.project = argument
-        else if (mem.eql(flag, "--target")) options.target = argument
-        else if (mem.eql(flag, "--clang")) options.clang = argument
+        else if (mem.eql(flag, "--target")) {
+            if (argument.len == 0) return .invalid_options
+            options.target = argument
+            has_target = true
+        } else if (mem.eql(flag, "--clang")) options.clang = argument
         else if (mem.eql(flag, "--sysroot")) options.sysroot = argument
         else return .invalid_options
     }
@@ -411,6 +417,15 @@ command_inner proc(storage @mut Storage, runtime io.Io, args process.Args) i32 !
     options.symbols = symbols.items
     options.includes = includes.items
     options.defines = defines.items
+    if (!has_target) {
+        config := project.load_config(storage.allocator, runtime, options.project, true, false) catch |_| {
+            try io.write_all(io.stderr(runtime), "translate-c: cannot determine project target; fix build.hon or supply --target explicitly\n")
+            return .invalid_options
+        }
+        defer project.deinit_config(&config)
+        parts [1][]u8 :: [config.target]
+        options.target = try join(storage, parts[..])
+    }
     try generate_inner(storage, runtime, options)
     return 0
 }
@@ -474,7 +489,7 @@ generate_inner proc(storage @mut Storage, runtime io.Io, options Options) void !
     if (!identifier(options.name) or mem.eql(options.name, "c") or mem.eql(options.name, "__c_types")) return .invalid_options
     if (options.headers.len == 0 or options.target.len == 0 or (options.all and options.symbols.len != 0) or (!options.all and options.symbols.len == 0)) return .invalid_options
     if (!(prefix(options.target, "arm64-apple-") or prefix(options.target, "aarch64-apple-")) or (find(options.target, "macos") == null and find(options.target, "darwin") == null)) {
-        try io.write_all(io.stderr(runtime), "translate-c: only explicit Darwin arm64 targets are supported\n")
+        try io.write_all(io.stderr(runtime), "translate-c: only Darwin arm64 targets are supported\n")
         return .invalid_options
     }
     source_parts [2][]u8 :: [options.project, "/source"]

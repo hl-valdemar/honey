@@ -236,3 +236,43 @@ all_selected_headers_exports_and_transitive_layouts test {
     try support.expect(&context, mem.eql("handwritten :: 123\n", try support.read(&context, bindings_path)), "--all destroyed edited output")
     try support.expect(&context, mem.eql(common, try support.read(&context, common_path)) and mem.eql(recipe, try support.read(&context, manifest_path)), "failed --all regeneration changed generated metadata")
 }
+
+omitted_target_uses_project_configuration_and_override_is_independent test {
+    context := try support.init("cimport project target")
+    defer support.deinit(&context)
+    root :: try support.path(&context, context.temporary, "project")
+    created :: try support.run(&context, &[context.compiler, "new", root], {})
+    try support.expect_result(&context, created, 0, "", "")
+    config :: try support.put(&context, root, "build.hon", "import \"@std/build\"\nconfig :: build.BuildConfig{ name = \"app\", source = \"source\", macos_deployment_target = \"15.0\", libraries = &[\"not_installed\"], linkage = .static }\n")
+    header :: try support.put(&context, root, "version.h", "#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ == 150000\ntypedef long Version;\n#else\ntypedef int Version;\n#endif\n")
+    source :: try support.put(&context, root, "source/main.hon", "binding :: import \"@ffi/versioned\"\nmain proc() i32 { return i32(sizeof!(binding.Version)) }\n")
+    for ([false, true]) |override| {
+        arguments := arraylist.init([;0]u8, context.allocator)
+        defer arraylist.deinit(&arguments)
+        initial [8][;0]u8 :: [context.compiler, "translate-c", "versioned", "--project", root, "--header", header, "--all"]
+        for (initial) |argument| try arraylist.append(&arguments, argument)
+        if (override) {
+            try arraylist.append(&arguments, "--target")
+            try arraylist.append(&arguments, "arm64-apple-macos11")
+        }
+        generated :: try support.run(&context, arguments.items, { cwd = context.temporary })
+        try support.expect_result(&context, generated, 0, "", "")
+        emitted :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+        try support.expect(&context, emitted.status == 0, emitted.stderr)
+        llvm :: try support.put(&context, context.temporary, "version.ll", emitted.stdout)
+        linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macos15", llvm, "-o", context.executable], {})
+        try support.expect_result(&context, linked, 0, "", "")
+        result :: try support.run(&context, &[context.executable], {})
+        expected :: if (override) "4\n" else "8\n"
+        try support.expect_result(&context, result, 0, expected, "")
+    }
+    bindings :: try support.path(&context, root, "ffi/versioned/bindings.hon")
+    original :: try support.read(&context, bindings)
+    try support.write(&context, config, "config ::\n")
+    rejected :: try support.run(&context, &[context.compiler, "translate-c", "versioned", "--project", root, "--header", header, "--symbol", "Version"], {})
+    try support.expect(&context, rejected.status == 2 and mem.eql(original, try support.read(&context, bindings)), "invalid configuration must not silently choose a target or change bindings")
+    explicit :: try translate(&context, root, "versioned", header, &["Version"])
+    try support.expect_result(&context, explicit, 0, "", "")
+    empty :: try support.run(&context, &[context.compiler, "translate-c", "versioned", "--project", root, "--header", header, "--symbol", "Version", "--target", ""], {})
+    try support.expect(&context, empty.status == 2, "empty explicit target must not fall back to project configuration")
+}

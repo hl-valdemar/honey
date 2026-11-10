@@ -106,11 +106,12 @@ generate bindings for a whole selected header using the installed Clang frontend
 ```sh
 ./build/honey translate-c raylib --project ../my-game \
     --header /opt/homebrew/opt/raylib/include/raylib.h \
-    --target arm64-apple-macos15 \
     --all
 ```
 
 repeat `--header`/`--symbol` for additional inputs; `-I`, `-D`, `--sysroot` and `--clang` select preprocessing settings and the frontend executable. the project must contain `source/` and a `build.hon`/`build.bro` root marker. generation creates `ffi/raylib/bindings.hon`, transitive shared nominal types under `ffi/__c_types/`, and ownership/recipe snapshots. import the result with `import "@ffi/raylib"`. generation does not link raylib, install libraries or generate C bridges; configure the actual native library separately.
+
+`translate-c` defaults to the target from the selected project's `build.hon`, including its configured macOS deployment minimum, just like `honey build`. `--project` chooses that project independently of the current directory. target discovery does not require native libraries to be installed or create a build directory. an explicit `--target <triple>` overrides discovery and remains usable for marker-only projects; an omitted target requires a valid project configuration and never falls back silently to the host. generated recipes record the resolved target, so regeneration and cross-package target checks remain explicit.
 
 `--all` exports supported declarations and value macros from the explicitly selected headers, together with their complete transitive type dependencies. required types from included headers remain usable from Honey; unrelated included-header functions, constants and types are not exported automatically. declarations are generated before any Honey caller exists, ready for imports and future editor tooling.
 
