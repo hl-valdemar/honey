@@ -18,6 +18,8 @@ goal: build a small raylib game in a sibling project, using Honey's stdlib and d
 
 whole-header generation: `translate-c --all` exports supported declarations/macros from selected headers and all required transitive types, reporting each unsupported root while retaining usable bindings. the CLI defaults to the project's configured target without resolving native libraries; `--target` remains an explicit override. strict `--symbol` selection remains available. exporting unrelated declarations from the entire include tree is deferred until needed.
 
+generated record signatures use C aliases; shared records have stable, readable C-name/origin-qualified identifiers. anonymous records derive names from typedefs or containing fields where possible. manifest v2 prevents mixed old/new naming schemes; migrate generated packages together after backing up local edits.
+
 `../honey-pong` builds without warnings with a macOS 15.0 minimum; its physics check passes, and user-confirmed graphical execution clears the displayless-host acceptance blocker. compiler unit/native/ABI/project/binding suites and two-generation self-hosting pass, with no new feature syntax adopted in compiler production sources. the required two-release bootstrap rollout remains a release/adoption gate: publish compiler support, then pin that published release before adopting new features in compiler or production dependencies.
 
 ## language-native build toolchain

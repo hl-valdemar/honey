@@ -15,6 +15,41 @@ translate proc(context @mut support.Context, project [;0]u8, package [;0]u8, hea
     return try support.run(context, arguments.items, support.RunOptions{})
 }
 
+@hide:file
+expect_native_answer proc(context @mut support.Context, source [;0]u8, implementations [][;0]u8) void ! support.Error {
+    emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], {})
+    try support.expect(context, emitted.status == 0, emitted.stderr)
+    llvm :: try support.put(context, context.temporary, "consumer.ll", emitted.stdout)
+    arguments := arraylist.init([;0]u8, context.allocator)
+    defer arraylist.deinit(&arguments)
+    initial [5][;0]u8 :: ["clang", "-target", "arm64-apple-macosx11.0.0", "-O2", llvm]
+    for (initial) |argument| try arraylist.append(&arguments, argument)
+    for (implementations) |implementation| try arraylist.append(&arguments, implementation)
+    try arraylist.append(&arguments, "-o")
+    try arraylist.append(&arguments, context.executable)
+    linked :: try support.run(context, arguments.items, {})
+    try support.expect_result(context, linked, 0, "", "")
+    executed :: try support.run(context, &[context.executable], {})
+    try support.expect_result(context, executed, 0, "42\n", "")
+}
+
+@hide:file
+expect_readable_alias proc(context @mut support.Context, bindings []u8, public_name, origin, c_name []u8) void ! support.Error {
+    prefix :: try support.concat(context, &[public_name, " :: alias "])
+    shared_prefix :: try support.concat(context, &[".", c_name])
+    start := usize(0)
+    for (0..(bindings.len + 1)) |end| {
+        if (end != bindings.len and bindings[end] != '\n') continue
+        line :: bindings[start..end]
+        start = end + 1
+        if (line.len < prefix.len or !mem.eql(line[..prefix.len], prefix)) continue
+        reference :: line[prefix.len..]
+        try support.expect(context, support.contains(reference, origin) and support.contains(reference, shared_prefix), "shared record alias does not begin with its readable C name and include its origin")
+        return
+    }
+    try support.expect(context, false, "public record alias was omitted")
+}
+
 selected_declarations_shared_identity_and_regeneration test {
     context := try support.init("cimport_selected")
     defer support.deinit(&context)
@@ -30,9 +65,9 @@ selected_declarations_shared_identity_and_regeneration test {
     original :: try support.read(&context, bindings_path)
     original_common :: try support.read(&context, common_path)
     original_manifest :: try support.read(&context, manifest_path)
-    try support.expect(&context, support.contains(original, "move_point c_func("), "external function spelling was changed")
-    try support.expect(&context, support.contains(original, "c_float"), "C float was not preserved")
-    try support.expect(&context, support.contains(original, "Callback :: alias ?*c_func("), "callback typedef was omitted")
+    try support.expect(&context, support.contains(original, "move_point c_func(_ Point, _ c_float) Point"), "public function signature does not use readable local C aliases")
+    try support.expect(&context, support.contains(original, "Callback :: alias ?*c_func(_ Point,"), "callback signature does not use its local record alias")
+    try expect_readable_alias(&context, original, "Point", "bindings", "Point")
     try support.expect(&context, support.contains(original, "MODE_DONE c_int :: 8"), "implicit enumerator was not evaluated")
     try support.expect(&context, support.contains(original, "ANSWER c_int :: 42"), "Clang constant evaluation was not used")
     try support.expect(&context, support.contains(original, "LABEL :: \"honey\""), "string macro was not emitted")
@@ -48,9 +83,9 @@ selected_declarations_shared_identity_and_regeneration test {
     try support.expect_result(&context, second, 0, "", "")
     shared :: try support.read(&context, common_path)
     try support.expect(&context, support.count(shared, "c_struct {") == 1, "shared C record was duplicated nominally")
-    source :: try support.put(&context, project, "source/main.hon", "a :: import \"@ffi/first\"\nb :: import \"@ffi/second\"\nconvert proc(point a.Point) b.Point { return point }\nmain proc() i32 { return 0 }\n")
-    checked :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
-    try support.expect(&context, checked.status == 0, checked.stderr)
+    source :: try support.put(&context, project, "source/main.hon", "a :: import \"@ffi/first\"\nb :: import \"@ffi/second\"\nconvert proc(point a.Point) b.Point { return point }\nmain proc() i32 {\n    point a.Point :: { x = 6, y = 15 }\n    result :: b.move_point(convert(point), 2)\n    return i32(result.x + result.y)\n}\n")
+    implementation :: try support.put(&context, context.temporary, "bindings.c", try support.concat(&context, &["#include \"", header, "\"\nPoint move_point(Point point, float scale) { point.x *= scale; point.y *= scale; return point; }\n"]))
+    try expect_native_answer(&context, source, &[implementation])
     trimmed :: try translate(&context, project, "first", header, &["open_handle"])
     try support.expect_result(&context, trimmed, 0, "", "")
     try support.expect(&context, !support.contains(try support.read(&context, bindings_path), "move_point"), "obsolete generated declarations survived regeneration")
@@ -275,4 +310,133 @@ omitted_target_uses_project_configuration_and_override_is_independent test {
     try support.expect_result(&context, explicit, 0, "", "")
     empty :: try support.run(&context, &[context.compiler, "translate-c", "versioned", "--project", root, "--header", header, "--symbol", "Version", "--target", ""], {})
     try support.expect(&context, empty.status == 2, "empty explicit target must not fall back to project configuration")
+}
+
+same_named_records_from_distinct_origins_remain_nominal test {
+    context := try support.init("cimport_record_origins")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    first_header :: try support.put(&context, project, "left/types.h", "typedef struct Point { int value; } Point;\nextern int first_read(Point);\n")
+    first :: try translate(&context, project, "first", first_header, &["first_read"])
+    try support.expect_result(&context, first, 0, "", "")
+    first_path :: try support.path(&context, project, "ffi/first/bindings.hon")
+    original :: try support.read(&context, first_path)
+    try expect_readable_alias(&context, original, "Point", "types", "Point")
+    second_header :: try support.put(&context, project, "right/types.h", "typedef struct Point { double value; } Point;\nextern int second_read(Point);\n")
+    second :: try translate(&context, project, "second", second_header, &["second_read"])
+    try support.expect_result(&context, second, 0, "", "")
+    third_header :: try support.put(&context, project, "other.h", "typedef struct Point { long long value; } Point;\nextern int third_read(Point);\n")
+    third :: try translate(&context, project, "third", third_header, &["third_read"])
+    try support.expect_result(&context, third, 0, "", "")
+    repeated :: try translate(&context, project, "repeated", first_header, &["first_read"])
+    try support.expect_result(&context, repeated, 0, "", "")
+    regenerated :: try translate(&context, project, "first", first_header, &["first_read"])
+    try support.expect_result(&context, regenerated, 0, "", "")
+    try support.expect(&context, mem.eql(original, try support.read(&context, first_path)), "adding same-named records renamed an existing package's shared type")
+    try expect_readable_alias(&context, try support.read(&context, try support.path(&context, project, "ffi/second/bindings.hon")), "Point", "types", "Point")
+    try expect_readable_alias(&context, try support.read(&context, try support.path(&context, project, "ffi/third/bindings.hon")), "Point", "other", "Point")
+    first_c :: try support.put(&context, project, "left/implementation.c", "#include \"types.h\"\nint first_read(Point point) { return point.value; }\n")
+    second_c :: try support.put(&context, project, "right/implementation.c", "#include \"types.h\"\nint second_read(Point point) { return (int)point.value; }\n")
+    third_c :: try support.put(&context, project, "implementation.c", "#include \"other.h\"\nint third_read(Point point) { return (int)point.value; }\n")
+    source :: try support.put(&context, project, "source/main.hon", "a :: import \"@ffi/first\"\naa :: import \"@ffi/repeated\"\nb :: import \"@ffi/second\"\nc :: import \"@ffi/third\"\nconvert proc(point a.Point) aa.Point { return point }\nmain proc() i32 {\n    first a.Point :: { value = 11 }\n    second b.Point :: { value = 13 }\n    third c.Point :: { value = 18 }\n    return a.first_read(convert(first)) + b.second_read(second) + c.third_read(third)\n}\n")
+    try expect_native_answer(&context, source, &[first_c, second_c, third_c])
+    left_packages [3][;0]u8 :: ["first", "first", "second"]
+    right_packages [3][;0]u8 :: ["second", "third", "third"]
+    for (left_packages) |left, index| {
+        text :: try support.concat(&context, &["a :: import \"@ffi/", left, "\"\nb :: import \"@ffi/", right_packages[index], "\"\nconvert proc(point a.Point) b.Point { return point }\nmain proc() i32 { return 0 }\n"])
+        try support.write(&context, source, text)
+        rejected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+        try support.expect(&context, rejected.status == 1, "same-named C records from different headers acquired the same nominal identity")
+    }
+}
+
+opaque_records_complete_in_another_header_without_renaming test {
+    context := try support.init("cimport_complete_record")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    forward_header :: try support.put(&context, project, "forward.h", "#ifndef HONEY_FORWARD_HANDLE\n#define HONEY_FORWARD_HANDLE\ntypedef struct Handle Handle;\nextern Handle *open_handle(void);\n#endif\n")
+    opaque_generation :: try translate(&context, project, "opaque", forward_header, &["open_handle"])
+    try support.expect_result(&context, opaque_generation, 0, "", "")
+    opaque_path :: try support.path(&context, project, "ffi/opaque/bindings.hon")
+    original_opaque :: try support.read(&context, opaque_path)
+    try expect_readable_alias(&context, original_opaque, "Handle", "forward", "Handle")
+    complete_header :: try support.put(&context, project, "complete.h", "#include \"forward.h\"\nstruct Handle { int value; };\nextern int read_handle(const Handle *);\n")
+    complete :: try translate(&context, project, "complete", complete_header, &["read_handle"])
+    try support.expect_result(&context, complete, 0, "", "")
+    complete_path :: try support.path(&context, project, "ffi/complete/bindings.hon")
+    complete_bindings :: try support.read(&context, complete_path)
+    try expect_readable_alias(&context, complete_bindings, "Handle", "forward", "Handle")
+    common_path :: try support.path(&context, project, "ffi/__c_types/bindings.hon")
+    common_manifest_path :: try support.path(&context, project, "ffi/__c_types/.honey-cimport")
+    common :: try support.read(&context, common_path)
+    source :: try support.put(&context, project, "source/main.hon", "a :: import \"@ffi/opaque\"\nb :: import \"@ffi/complete\"\nconvert proc(handle a.Handle) b.Handle { return handle }\nmain proc() i32 {\n    local a.Handle :: { value = 21 }\n    copy :: convert(local)\n    return copy.value + b.read_handle(a.open_handle())\n}\n")
+    implementation :: try support.put(&context, project, "handle.c", "#include \"complete.h\"\nstatic Handle handle = {21};\nHandle *open_handle(void) { return &handle; }\nint read_handle(const Handle *value) { return value->value; }\n")
+    try expect_native_answer(&context, source, &[implementation])
+    regenerated_opaque :: try translate(&context, project, "opaque", forward_header, &["open_handle"])
+    try support.expect_result(&context, regenerated_opaque, 0, "", "")
+    regenerated_complete :: try translate(&context, project, "complete", complete_header, &["read_handle"])
+    try support.expect_result(&context, regenerated_complete, 0, "", "")
+    try support.expect(&context, mem.eql(original_opaque, try support.read(&context, opaque_path)), "completion changed an existing opaque package alias")
+    try support.expect(&context, mem.eql(complete_bindings, try support.read(&context, complete_path)) and mem.eql(common, try support.read(&context, common_path)), "opaque/complete regeneration changed shared identity or discarded the complete layout")
+    try expect_native_answer(&context, source, &[implementation])
+    common_manifest :: try support.read(&context, common_manifest_path)
+    complete_manifest_path :: try support.path(&context, project, "ffi/complete/.honey-cimport")
+    complete_manifest :: try support.read(&context, complete_manifest_path)
+    edited :: try support.concat(&context, &[common, "\nhandwritten :: 123\n"])
+    try support.write(&context, common_path, edited)
+    refused :: try translate(&context, project, "complete", complete_header, &["read_handle"])
+    try support.expect(&context, refused.status == 1 and support.contains(refused.stderr, "refusing to overwrite"), "regeneration overwrote edited readable shared types")
+    try support.expect(&context, mem.eql(edited, try support.read(&context, common_path)), "edited shared output was destroyed")
+    try support.expect(&context, mem.eql(complete_bindings, try support.read(&context, complete_path)) and mem.eql(common_manifest, try support.read(&context, common_manifest_path)) and mem.eql(complete_manifest, try support.read(&context, complete_manifest_path)), "edited-output refusal partially changed package output or manifests")
+}
+
+anonymous_typedef_and_contained_records_have_readable_shared_names test {
+    context := try support.init("cimport_readable_anonymous")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/readable.h")
+    paint :: try translate(&context, project, "paint", header, &["paint_rectangle"])
+    try support.expect_result(&context, paint, 0, "", "")
+    paint_path :: try support.path(&context, project, "ffi/paint/bindings.hon")
+    paint_bindings :: try support.read(&context, paint_path)
+    try support.expect(&context, support.contains(paint_bindings, "paint_rectangle c_func(_ Rectangle, _ Color) Rectangle"), "record-valued signature exposes shared implementation names instead of C aliases")
+    try expect_readable_alias(&context, paint_bindings, "Color", "readable", "Color")
+    try expect_readable_alias(&context, paint_bindings, "Rectangle", "readable", "Rectangle")
+    colors :: try translate(&context, project, "colors", header, &["rectangle_color"])
+    try support.expect_result(&context, colors, 0, "", "")
+    common_path :: try support.path(&context, project, "ffi/__c_types/bindings.hon")
+    common :: try support.read(&context, common_path)
+    try support.expect(&context, support.contains(common, "Rectangle_position") and support.contains(common, "Rectangle_payload"), "contained anonymous records were not named after their containing record and field")
+    regenerated :: try translate(&context, project, "paint", header, &["paint_rectangle"])
+    try support.expect_result(&context, regenerated, 0, "", "")
+    try support.expect(&context, mem.eql(paint_bindings, try support.read(&context, paint_path)) and mem.eql(common, try support.read(&context, common_path)), "anonymous record regeneration changed aliases or duplicated shared declarations")
+    fixture :: try support.path(&context, context.root, "tests/cimport/fixtures/readable.hon")
+    source :: try support.put(&context, project, "source/main.hon", try support.read(&context, fixture))
+    implementation :: try support.path(&context, context.root, "tests/cimport/fixtures/readable.c")
+    try expect_native_answer(&context, source, &[implementation])
+}
+
+local_record_aliases_preserve_distinct_c_namespaces test {
+    context := try support.init("cimport_tag_alias_collision")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.put(&context, project, "names.h", "struct Item { int value; };\ntypedef struct Other { int value; } Item;\nextern struct Item make_tag(void);\nextern Item make_typedef(void);\nextern int read_tag(struct Item);\nextern int read_typedef(Item);\n")
+    generated :: try translate(&context, project, "names", header, &["make_tag", "make_typedef", "read_tag", "read_typedef"])
+    try support.expect_result(&context, generated, 0, "", "")
+    bindings :: try support.read(&context, try support.path(&context, project, "ffi/names/bindings.hon"))
+    try support.expect(&context, support.contains(bindings, "make_typedef c_func() Item") and support.contains(bindings, "read_typedef c_func(_ Item) c_int"), "ordinary C typedef alias was shadowed by a different same-named record tag")
+    source :: try support.put(&context, project, "source/main.hon", "binding :: import \"@ffi/names\"\nmain proc() i32 {\n    tag :: binding.make_tag()\n    ordinary binding.Item :: binding.make_typedef()\n    return binding.read_tag(tag) + binding.read_typedef(ordinary)\n}\n")
+    implementation :: try support.put(&context, project, "names.c", "#include \"names.h\"\nstruct Item make_tag(void) { return (struct Item){17}; }\nItem make_typedef(void) { return (Item){25}; }\nint read_tag(struct Item item) { return item.value; }\nint read_typedef(Item item) { return item.value; }\n")
+    try expect_native_answer(&context, source, &[implementation])
+    try support.write(&context, source, "binding :: import \"@ffi/names\"\nmain proc() i32 { return binding.read_tag(binding.make_typedef()) }\n")
+    rejected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
+    try support.expect(&context, rejected.status == 1, "local alias rendering collapsed the C tag and ordinary type namespaces")
 }

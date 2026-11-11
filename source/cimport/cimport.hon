@@ -571,6 +571,10 @@ Declaration :: struct {
     file []u8
     name []u8
     identity []u8 = ""
+    record_origin []u8 = ""
+    record_label []u8 = ""
+    record_spelling []u8 = ""
+    canonical_name []u8 = ""
     exported bool = false
     enum_type []u8 = ""
     required bool = false
@@ -590,6 +594,7 @@ Context :: struct {
     common arraylist.ArrayList(Entry)
     symbols arraylist.ArrayList(Entry)
     shared bool = false
+    defining_typedef []u8 = ""
     namespace []u8 = "c_types"
     input []u8 = ""
     unit_source []u8 = ""
@@ -628,6 +633,24 @@ context_init proc(storage @mut Storage, runtime io.Io, json @Json, options Optio
         try collect_declaration(&context, node, "")
         node = json.nodes.items[node].next
     }
+    for (context.declarations.items) |declaration, index| {
+        if (!kind(json, declaration.node, "RecordDecl")) continue
+        context.declarations.items[index].record_label = try record_label(&context, index, 0)
+    }
+    for (context.declarations.items) |declaration, index| {
+        if (!kind(json, declaration.node, "RecordDecl")) continue
+        label := declaration.record_label
+        for (context.declarations.items) |other| {
+            if (mem.eql(other.identity, declaration.identity) or !mem.eql(other.record_origin, declaration.record_origin)) continue
+            if (mem.eql(other.record_label, label)) {
+                parts [3][]u8 :: [label, "__", try number(storage, hash(declaration.identity))]
+                label = try join(storage, parts[..])
+                break
+            }
+        }
+        parts [3][]u8 :: [label, "_T_", try name_component(storage, declaration.record_origin)]
+        context.declarations.items[index].canonical_name = try join(storage, parts[..])
+    }
     while true {
         collision := false
         for (context.declarations.items) |declaration| {
@@ -659,18 +682,24 @@ collect_declaration proc(context @mut Context, node usize, file []u8) void ! Err
     if (kind(json, node, "RecordDecl") or kind(json, node, "TypedefDecl") or kind(json, node, "EnumDecl") or kind(json, node, "FunctionDecl") or kind(json, node, "VarDecl") or kind(json, node, "EnumConstantDecl")) {
         name :: json_text(json, node, "name")
         identity []u8 := ""
+        record_origin := origin
         if (kind(json, node, "RecordDecl")) {
-            identity_parts [5][]u8 :: [origin, ":", json_text(json, location, "offset"), ":", json_text(json, node, "tagUsed")]
+            # named identity does not depend on offsets changing between opaque and complete inputs.
+            identity_location :: if (name.len == 0) json_text(json, location, "offset") else name
+            identity_parts [5][]u8 :: [origin, ":", json_text(json, node, "tagUsed"), ":", identity_location]
             identity = try join(context.storage, identity_parts[..])
             # redeclarations share the first declaration's identity, including forward declarations.
             previous :: json_text(json, node, "previousDecl")
             if (previous.len != 0) {
                 for (context.declarations.items) |declaration| {
-                    if (mem.eql(json_text(json, declaration.node, "id"), previous)) identity = declaration.identity
+                    if (mem.eql(json_text(json, declaration.node, "id"), previous)) {
+                        identity = declaration.identity
+                        record_origin = declaration.record_origin
+                    }
                 }
             }
         }
-        try arraylist.append(&context.declarations, Declaration{ node = node, name = name, file = origin, identity = identity, exported = selected_file(context, origin) })
+        try arraylist.append(&context.declarations, Declaration{ node = node, name = name, file = origin, identity = identity, record_origin = record_origin, exported = selected_file(context, origin) })
     }
     if (kind(json, node, "RecordDecl") or kind(json, node, "EnumDecl")) {
         child := inner(json, node)
@@ -694,7 +723,7 @@ entry_put proc(context @Context, entries @mut arraylist.ArrayList(Entry), key, t
     for (entries.items) |entry, index| {
         if (!mem.eql(entry.key, key)) continue
         if (mem.eql(entry.text, text)) return
-        if (prefix(key, "R_")) {
+        if (prefix(entry.text, "# C record identity: ") and prefix(text, "# C record identity: ")) {
             previous_end :: find(entry.text, "\n") orelse usize(0)
             current_end :: find(text, "\n") orelse usize(0)
             if (previous_end != 0 and mem.eql(entry.text[..previous_end], text[..current_end])) {
@@ -721,13 +750,66 @@ lookup_type proc(context @Context, name []u8, expected []u8) ?usize {
     return result
 }
 @hide:file
-record_name proc(context @Context, index usize) []u8 ! Error {
-    parts [2][]u8 :: ["R_", try number(context.storage, hash(context.declarations.items[index].identity))]
+name_component proc(storage @mut Storage, text []u8) []u8 ! Error {
+    result := arraylist.init(u8, storage.allocator)
+    defer arraylist.deinit(&result)
+    # reversible escapes keep distinct paths distinct, including punctuation and underscores.
+    for (text) |byte| {
+        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9')) {
+            try arraylist.append(&result, byte)
+        } else {
+            code []u8 :: if (byte == '/') "_s" else if (byte == '_') "_u" else if (byte == '.') "_d" else if (byte == '-') "_h" else ""
+            if (code.len != 0) try append_parts(&result, &[code])
+            else try append_parts(&result, &["_n", try number(storage, u64(byte)), "z"])
+        }
+    }
+    return try retain_list(storage, &result)
+}
+@hide:file
+record_label proc(context @mut Context, index, depth usize) []u8 ! Error {
+    if (depth > 64) return .unsupported_declaration
+    record :: context.declarations.items[index]
+    if (record.name.len != 0) return record.name
+    label []u8 := ""
+    for (context.declarations.items) |declaration| {
+        if (!kind(context.json, declaration.node, "TypedefDecl")) continue
+        if (owned_record(context, declaration.node)) |owned| {
+            if (owned == index and (label.len == 0 or before(declaration.name, label))) label = declaration.name
+        }
+    }
+    if (label.len != 0) return label
+    offset :: json_text(context.json, property(context.json, record.node, "loc"), "offset")
+    for (context.declarations.items) |parent, parent_index| {
+        if (!kind(context.json, parent.node, "RecordDecl") or !mem.eql(parent.file, record.file) or parent_index == index) continue
+        field := inner(context.json, parent.node)
+        while (field != 0) {
+            begin :: property(context.json, property(context.json, field, "range"), "begin")
+            if (kind(context.json, field, "FieldDecl") and mem.eql(json_text(context.json, begin, "offset"), offset)) {
+                spelling :: qual_type(context.json, field)
+                if (find(spelling, ")")) |closing| context.declarations.items[index].record_spelling = spelling[..closing + 1]
+                field_name :: json_text(context.json, field, "name")
+                if (field_name.len != 0) {
+                    parts [3][]u8 :: [try record_label(context, parent_index, depth + 1), "_", field_name]
+                    return try join(context.storage, parts[..])
+                }
+            }
+            field = context.json.nodes.items[field].next
+        }
+    }
+    parts [2][]u8 :: ["Anonymous_", try number(context.storage, hash(record.identity))]
     return try join(context.storage, parts[..])
+}
+@hide:file
+record_name proc(context @Context, index usize) []u8 ! Error {
+    return context.declarations.items[index].canonical_name
 }
 @hide:file
 require_record proc(context @mut Context, index usize) []u8 ! Error {
     context.declarations.items[index].required = true
+    if (!context.shared and context.declarations.items[index].name.len != 0) {
+        public_name :: try record_public_name(context, index)
+        if (!mem.eql(public_name, context.defining_typedef)) return try escaped(context.storage, public_name)
+    }
     name :: try record_name(context, index)
     namespace_parts [2][]u8 :: [context.namespace, "."]
     namespace_prefix []u8 :: if (context.shared) "" else try join(context.storage, namespace_parts[..])
@@ -840,6 +922,11 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
         pointer_parts [2][]u8 :: [pointer_prefix, pointee]
         return try join(context.storage, pointer_parts[..])
     }
+    for (context.declarations.items) |declaration, index| {
+        if (declaration.record_spelling.len != 0 and mem.eql(text, declaration.record_spelling)) {
+            return try render_record_reference(context, index, indirect)
+        }
+    }
     if (find(text, "(*")) |opening| {
         found_closing :: find(text[opening + 2..], ")")
         if (found_closing == null) return .unsupported_declaration
@@ -877,7 +964,11 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
         context.declarations.items[index].required = true
         node :: context.declarations.items[index].node
         tag :: owned_record(context, node)
-        if (tag) |record| return try render_record_reference(context, record, indirect)
+        if (tag) |record| {
+            rendered :: try render_record_reference(context, record, indirect)
+            if (!context.shared and !mem.eql(text, context.defining_typedef)) return try escaped(context.storage, text)
+            return rendered
+        }
         type_node :: inner(context.json, node)
         enum_tag :: property(context.json, type_node, "ownedTagDecl")
         if (kind(context.json, enum_tag, "EnumDecl")) {
@@ -888,7 +979,9 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
                 }
             }
         }
-        return try render_type_inner(context, qual_type(context.json, node), depth + 1, indirect)
+        rendered :: try render_type_inner(context, qual_type(context.json, node), depth + 1, indirect)
+        if (!context.shared and !mem.eql(text, context.defining_typedef)) return try escaped(context.storage, text)
+        return rendered
     }
     try report(context, spelling, "unsupported or unresolved C type (long double, vectors and platform extensions are not guessed)")
     return .unsupported_declaration
@@ -1177,6 +1270,8 @@ emit_declaration proc(context @mut Context, index usize) void ! Error {
         return
     }
     if (kind(json, node, "TypedefDecl")) {
+        context.defining_typedef = name
+        defer context.defining_typedef = ""
         rendered :: try render_type_inner(context, name, 0, true)
         typedef_parts [4][]u8 :: [try escaped(context.storage, name), " :: alias ", rendered, "\n"]
         try entry_put(context, &context.bindings, name, try join(context.storage, typedef_parts[..]))
@@ -1597,6 +1692,9 @@ llvm_token proc(text []u8, cursor @mut usize) []u8 {
 constant_record proc(context @Context, spelling []u8, depth usize) ?usize {
     if (depth > 64) return null
     text :: strip_qualifiers(spelling)
+    for (context.declarations.items) |declaration, index| {
+        if (declaration.record_spelling.len != 0 and mem.eql(text, declaration.record_spelling)) return index
+    }
     if (prefix(text, "struct ")) return lookup_type(context, text[7..], "RecordDecl")
     if (prefix(text, "union ")) return lookup_type(context, text[6..], "RecordDecl")
     if (lookup_type(context, text, "TypedefDecl")) |index| {
@@ -1773,7 +1871,7 @@ recipe proc(storage @mut Storage, options Options, includes, version, dependenci
     environment = try join(storage, closing_parts[..])
     all_text []u8 :: if (options.all) "true" else "false"
     recipe_parts [29][]u8 :: [
-        "{\"generator\":\"honey translate-c format 1 (development)\",\"cwd\":", try json_quote(storage, cwd),
+        "{\"generator\":\"honey translate-c format 2 (development)\",\"cwd\":", try json_quote(storage, cwd),
         ",\"name\":", try json_quote(storage, options.name), ",\"target\":", try json_quote(storage, options.target),
         ",\"clang\":", try json_quote(storage, options.clang), ",\"clang_version\":", try json_quote(storage, version),
         ",\"language\":\"c11\",\"flags\":[\"-Werror=implicit-function-declaration\"],\"constant_flags\":[\"-Werror=date-time\"],\"sysroot\":", try json_quote(storage, options.sysroot),
@@ -1819,9 +1917,9 @@ entries_json proc(storage @mut Storage, entries []mut Entry) []u8 ! Error {
 }
 @hide:file
 manifest proc(context @Context, name, source []u8, common, symbols []mut Entry) []u8 ! Error {
-    package_recipe []u8 :: if (mem.eql(name, "__c_types")) "{\"generator\":\"honey shared C declarations format 1\",\"inputs\":\"sibling binding packages' .honey-cimport recipes\"}" else context.recipe
+    package_recipe []u8 :: if (mem.eql(name, "__c_types")) "{\"generator\":\"honey shared C declarations format 2\",\"inputs\":\"sibling binding packages' .honey-cimport recipes\"}" else context.recipe
     parts [13][]u8 :: [
-        "{\"generator\":\"honey-cimport-1\",\"name\":", try json_quote(context.storage, name),
+        "{\"generator\":\"honey-cimport-2\",\"name\":", try json_quote(context.storage, name),
         ",\"target\":", try json_quote(context.storage, context.options.target), ",\"source\":", try json_quote(context.storage, source),
         ",\"recipe\":", package_recipe, ",\"common\":", try entries_json(context.storage, common),
         ",\"symbols\":", try entries_json(context.storage, symbols), "}\n",
@@ -1873,7 +1971,10 @@ read_manifest proc(context @Context, directory []u8) ?Json ! Error {
         return .unsafe_output
     }
     errdefer arraylist.deinit(&parsed.nodes)
-    if (!mem.eql(json_text(&parsed, 1, "generator"), "honey-cimport-1")) return .unsafe_output
+    if (!mem.eql(json_text(&parsed, 1, "generator"), "honey-cimport-2")) {
+        try report(context, path, "incompatible generator manifest; back up edited output, remove only bindings.hon and .honey-cimport from every generated ffi package (including __c_types), then regenerate all packages with this generator; preserve handwritten files")
+        return .unsafe_output
+    }
     return parsed
 }
 @hide:file
