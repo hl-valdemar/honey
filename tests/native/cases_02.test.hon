@@ -523,7 +523,7 @@ generic_contextual_literals_use_rigid_arguments_in_either_order test {
     try support.check_text(
         &context,
         "generic_contextual_literals_use_rigid_arguments_in_either_order",
-        "Key :: enum { first, last }\nchoose proc($T type, value T, anchor @T) T { return value }\npayload proc($T type, anchor @T, value struct { item T }) T { return value.item }\nmain proc() i16 {\n    key Key :: .first\n    selected :: choose(.last, &key)\n    other :: payload(&key, { item = .first })\n    return match selected { .last: match other { .first: 42, else: 0 }, else: 0 }\n}\n",
+        "Key :: enum { first, last }\nchoose proc($T type, value T, anchor @T) T {\n    _ = anchor\n return value }\npayload proc($T type, anchor @T, value struct { item T }) T {\n    _ = anchor\n return value.item }\nmain proc() i16 {\n    key Key :: .first\n    selected :: choose(.last, &key)\n    other :: payload(&key, { item = .first })\n    return match selected { .last: match other { .first: 42, else: 0 }, else: 0 }\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -622,7 +622,7 @@ expected_result_inference_cleanup_comptime_and_expression_contexts test {
     try support.check_text(
         &context,
         "expected_result_inference_cleanup_comptime_and_expression_contexts",
-        "Error :: enum { failed }\nanswer proc($T type) T { return 21 }\nfail proc($T type) T ! Error { return .failed }\nrecover proc() i16 { return fail() catch |error| { yield answer() } }\npropagate proc() i16 ! Error { return try fail() }\nDefault :: struct { value i16 = answer() }\nmain proc() [7]i16 {\n    value ?i16 :: some!(answer())\n    constant i16 :: $(answer())\n    defaults Default :: {}\n    return [answer() + answer(), -answer(), ~answer(), fail() catch answer(),\n        recover(), (value?), constant + defaults.value]\n}\n",
+        "Error :: enum { failed }\nanswer proc($T type) T { return 21 }\nfail proc($T type) T ! Error { return .failed }\nrecover proc() i16 { return fail() catch |_| { yield answer() } }\npropagate proc() i16 ! Error { return try fail() }\nDefault :: struct { value i16 = answer() }\nmain proc() [7]i16 {\n    value ?i16 :: some!(answer())\n    constant i16 :: $(answer())\n    defaults Default :: {}\n    return [answer() + answer(), -answer(), ~answer(), fail() catch answer(),\n        recover(), (value?), constant + defaults.value]\n}\n",
         support.Expected{ stdout = "[42, -21, -22, 21, 21, 21, 42]\n", diagnostic = null },
     )
 }

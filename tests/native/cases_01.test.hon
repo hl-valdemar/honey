@@ -6,7 +6,7 @@ sentinel_arrays_keep_logical_lengths_and_physical_storage test {
     try support.check_text(
         &context,
         "sentinel_arrays_keep_logical_lengths_and_physical_storage",
-        "main proc() [10]usize {\n    values [2;7]mut u8 := [19, 23]\n    copy := values\n    copy[0] = 1\n    empty [0;7]u8 :: []\n    inferred [_;9]u8 :: [3, 4, 5]\n    nested [2][1;7]u16 :: [[11], [13]]\n    total usize := 0\n    for (values) |value| total += usize(value)\n    return [\n        values.len, sizeof!([2;7]u8), usize(values[2]),\n        usize(copy[0]), usize(values[0]), total,\n        empty.len, usize(empty[0]), inferred.len, sizeof!([2][1;7]u16),\n    ]\n}\n",
+        "main proc() [10]usize {\n    values [2;7]mut u8 := [19, 23]\n    copy := values\n    copy[0] = 1\n    empty [0;7]u8 :: []\n    inferred [_;9]u8 :: [3, 4, 5]\n    _ [2][1;7]u16 :: [[11], [13]]\n    total usize := 0\n    for (values) |value| total += usize(value)\n    return [\n        values.len, sizeof!([2;7]u8), usize(values[2]),\n        usize(copy[0]), usize(values[0]), total,\n        empty.len, usize(empty[0]), inferred.len, sizeof!([2][1;7]u16),\n    ]\n}\n",
         support.Expected{ stdout = "[2, 3, 7, 1, 19, 42, 0, 7, 3, 8]\n", diagnostic = null },
     )
 }
@@ -853,7 +853,7 @@ metadata_only_main_keeps_runtime_entrypoint test {
     try support.check_text(
         &context,
         "metadata_only_main_keeps_runtime_entrypoint",
-        "fallback proc() i16 { return -99 }\nmain proc() i16 {\n    types := [i16, bool]\n    return 42\n}\n",
+        "fallback proc() i16 { return -99 }\nmain proc() i16 {\n    _ := [i16, bool]\n    return 42\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -963,7 +963,7 @@ explicit_metadata_locals_allow_independent_runtime_inputs test {
     try support.check_text(
         &context,
         "explicit_metadata_locals_allow_independent_runtime_inputs",
-        "count proc(value usize) usize {\n    T type :: i16\n    return value\n}\nruntime proc(value usize) usize { return count(value) }\nmain proc() usize { return runtime(42) }\n",
+        "count proc(value usize) usize {\n    _ type :: i16\n    return value\n}\nruntime proc(value usize) usize { return count(value) }\nmain proc() usize { return runtime(42) }\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -1249,7 +1249,7 @@ bitwise_constants_and_type_producer_updates test {
     try support.check_text(
         &context,
         "bitwise_constants_and_type_producer_updates",
-        "Fixed proc() type {\n    counts [2]mut usize := [1, 2]\n    counts[0] <<= 2\n    counts[1] |= 1\n    total usize := counts[0]\n    total += counts[1]\n    return struct { values [total]i16, answer i16 = i16(~u8(213)) }\n}\ncompute proc() u8 {\n    value u8 := 21\n    value <<= 1\n    return value\n}\nchoose proc($value u8) i16 {\n    if ((value & 3) == 2) return 42\n    else return missing_member(value)\n}\nmain proc() [4]i16 {\n    generated Fixed() :: { values = [0, 0, 0, 0, 0, 0, 0] }\n    array [(usize(1) << 2)]i16 :: [0, 0, 0, 0]\n    return [generated.answer, i16($(compute())), choose($(u8(21) << 1)),\n        i16(generated.values.len + array.len)]\n}\nmissing_member proc(value u8) bool { return true }\n",
+        "Fixed proc() type {\n    counts [2]mut usize := [1, 2]\n    counts[0] <<= 2\n    counts[1] |= 1\n    total usize := counts[0]\n    total += counts[1]\n    return struct { values [total]i16, answer i16 = i16(~u8(213)) }\n}\ncompute proc() u8 {\n    value u8 := 21\n    value <<= 1\n    return value\n}\nchoose proc($value u8) i16 {\n    if ((value & 3) == 2) return 42\n    else return missing_member(value)\n}\nmain proc() [4]i16 {\n    generated Fixed() :: { values = [0, 0, 0, 0, 0, 0, 0] }\n    array [(usize(1) << 2)]i16 :: [0, 0, 0, 0]\n    return [generated.answer, i16($(compute())), choose($(u8(21) << 1)),\n        i16(generated.values.len + array.len)]\n}\nmissing_member proc(value u8) bool {\n    _ = value\n return true }\n",
         support.Expected{ stdout = "[42, 42, 42, 11]\n", diagnostic = null },
     )
 }

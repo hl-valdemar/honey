@@ -246,7 +246,10 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `        results = [40, .failed { code = 2, text = "owned" }],
             `    }
             `}
-            `Token proc($value Packet) type { return struct {} }
+            `Token proc($value Packet) type {
+            `    _ = value
+            `    return struct {}
+            `}
             `Captured proc(choice Choice) type {
             `    match choice {
             `        .payload |detail|: return struct {
@@ -409,6 +412,7 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
             `main proc() i16 {
             `    if $(i16 != i16) { return $(i8(128)) }
             `    values :: $(data())
+            `    _ = values
             `    box Box(i16) :: make_box()
             `    inferred i16 :: identity(40)
             `    if (inferred != box.value) return 0

@@ -2,7 +2,7 @@
 
 - [x] honey-owned test framework.
 - [x] migrate Python acceptance suites to Honey.
-- [ ] make unused local declarations an error.
+- [x] make unused local declarations an error.
 - [ ] make debug/release build flags more obvious, e.g. `--debug` and `--release` for starters, instead of opaque `-O<N>` options.
 - [ ] allow main function signature to be fallible.
     - `main proc(...) void ! SomeError { ... }` would enable using `try` here, which is really nice, and failure could simply coerce to a non-zero exit status.

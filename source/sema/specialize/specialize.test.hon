@@ -132,26 +132,30 @@ preserves_runtime_guards_with_constant_arguments_or_type_dependent_effects test 
         `main proc() i16 { return choose(i16(42)) }
         ,
         `enabled := true
-        `predicate proc($T type) bool { return enabled }
+        `predicate proc($T type) bool { _ = T
+        `    return enabled }
         `choose proc($T type, value T) T {
         `    if predicate(T) { return value } else { return value }
         `}
         `main proc() i16 { return choose(i16(42)) }
         ,
         `observe c_func() bool
-        `predicate proc($T type) bool { return observe() }
+        `predicate proc($T type) bool { _ = T
+        `    return observe() }
         `choose proc($T type, value T) T {
         `    if predicate(T) { return value } else { return value }
         `}
         `main proc() i16 { return choose(i16(42)) }
         ,
-        `predicate proc($T type) bool { unreachable }
+        `predicate proc($T type) bool { _ = T
+        `    unreachable }
         `choose proc($T type, value T) T {
         `    if predicate(T) { return value } else { return value }
         `}
         `main proc() i16 { return choose(i16(42)) }
         ,
-        `predicate proc($T type, flag bool) bool { return flag }
+        `predicate proc($T type, flag bool) bool { _ = T
+        `    return flag }
         `choose proc($T type, value T) T {
         `    if predicate(T, true) { return value } else { return value }
         `}
@@ -185,7 +189,7 @@ demands_inline_iterable_calls_before_expanding_their_bodies test {
         `    if N == 2 { compile_error!("reached failure") }
         `    return [1, 2]
         `}
-        `main proc() void { inline for (produce(2)) |value| {} }
+        `main proc() void { inline for (produce(2)) |_| {} }
         , .compile_error, 1,
     )
 }
@@ -249,7 +253,7 @@ keeps_borrowed_snapshots_owned_and_explicit_numeric_annotations_rigid test {
         `    if value == 0 { compile_error!("unselected typed guard") }
         `    return value
         `}
-        `main proc() void { value :: $(produce()) }
+        `main proc() void { _ = $(produce()) }
         , .type_mismatch, 1,
     )
 }
@@ -341,14 +345,15 @@ infers_nested_nominal_pointer_parameters_and_readonly_slice_views test {
 
 rejects_conflicting_rigid_types_and_unrelated_nominal_generators test {
     try expect_specialization(
-        `same proc($T type, left, right T) void {}
+        `same proc($T type, left, right T) void { _ = left
+        `    _ = right }
         `main proc() void { same(i16(1), u8(2)) }
         , .cannot_infer_generic, 1,
     )
     try expect_specialization(
         `Box proc($T type) type { return struct { value T } }
         `Other proc($T type) type { return struct { value T } }
-        `read proc($T type, value @Box(T)) void {}
+        `read proc($T type, value @Box(T)) void { _ = value }
         `main proc() void {
         `    value Other(i16) :: { value = 1 }
         `    read(&value)
@@ -356,7 +361,8 @@ rejects_conflicting_rigid_types_and_unrelated_nominal_generators test {
         , .cannot_infer_generic, 1,
     )
     try expect_specialization(
-        `unknown proc($T type, value usize) void {}
+        `unknown proc($T type, value usize) void { _ = T
+        `    _ = value }
         `main proc() void { unknown(1) }
         , .cannot_infer_generic, 1,
     )
@@ -364,7 +370,8 @@ rejects_conflicting_rigid_types_and_unrelated_nominal_generators test {
 
 preserves_rigid_inference_before_contextual_literals test {
     try expect_specialization(
-        `same proc($T type, left, right T) T { return right }
+        `same proc($T type, left, right T) T { _ = left
+        `    return right }
         `main proc() i16 { return same(i16(1), 2) }
         , .cannot_infer_generic, 0,
     )
@@ -372,7 +379,8 @@ preserves_rigid_inference_before_contextual_literals test {
 
 infers_integer_builtin_results_from_their_type_or_rigid_operand test {
     try expect_specialization(
-        `same proc($T type, left, right T) T { return right }
+        `same proc($T type, left, right T) T { _ = left
+        `    return right }
         `main proc() i16 {
         `    upper :: same(maxval!(i16), i16(1))
         `    lower :: same(minval!(i16), i16(2))
@@ -432,6 +440,8 @@ propagates_expected_results_through_nested_aggregates_and_success_channels test 
         `    record.rows[0] = make()
         `    maybe ?i16 :: make()
         `    result i16 ! Error :: make()
+        `    _ = maybe
+        `    _ = result
         `    return { value = make(), rows = [make(), make()] }
         `}
         , .cannot_infer_generic, 0,
@@ -478,7 +488,8 @@ rejects_unrelated_nominal_results_and_unresolved_compile_time_arguments test {
         , .cannot_infer_generic, 1,
     )
     try expect_specialization(
-        `make proc($T type, $N usize) T { return T(7) }
+        `make proc($T type, $N usize) T { _ = N
+        `    return T(7) }
         `main proc() i16 { return make() }
         , .cannot_infer_generic, 1,
     )
@@ -503,7 +514,8 @@ preserves_explicit_arguments_and_explicit_type_procedure_inputs test {
     )
     try expect_specialization(
         `Box proc($T type) type { return struct { value T } }
-        `main proc() void { value Box() :: { value = 7 } }
+        `main proc() void { value Box() :: { value = 7 }
+        `    _ = value }
         , .argument_count_mismatch, 1,
     )
 }
@@ -515,7 +527,7 @@ rejects_integer_forged_and_incomplete_materialized_pointers test {
         `    value Overlay :: { bits = 0 }
         `    return value.pointer
         `}
-        `main proc() void { pointer :: $(forge()) }
+        `main proc() void { _ = $(forge()) }
         , .invalid_pointer_access, 1,
     )
     try expect_specialization(
@@ -523,7 +535,7 @@ rejects_integer_forged_and_incomplete_materialized_pointers test {
         `    value i16 := 19
         `    return ptrcast!(@mut [2]i16, &value)
         `}
-        `main proc() void { pointer :: $(produce()) }
+        `main proc() void { _ = $(produce()) }
         , .invalid_pointer_access, 1,
     )
 }
@@ -561,7 +573,7 @@ promotes_owned_pointer_and_slice_defaults_into_optional_parameters test {
 infers_helpers_from_pointer_collection_and_catch_captures test {
     try expect_specialization(
         `Box proc($T type) type { return struct { value T, bytes []u8 } }
-        `observe proc($T type, value T) void {}
+        `observe proc($T type, value T) void { _ = value }
         `release proc($T type, value @mut Box(T)) void { observe(value.bytes) }
         `Error :: union(enum) { failed struct { code i16 }, empty void }
         `fail proc() void ! Error { return .failed{code = 7} }
@@ -626,6 +638,8 @@ substitutes_generic_annotations_before_evaluating_comptime_values test {
 infers_dependent_callbacks_from_nominal_inputs_and_results test {
     try expect_specialization(
         `Map proc($K, $V type, $hash ?proc(key K) usize, $equal ?proc(left, right K) bool) type {
+        `    _ = hash
+        `    _ = equal
         `    return struct { value V }
         `}
         `init proc($K, $V type, $hash ?proc(key K) usize, $equal ?proc(left, right K) bool) Map(K, V, hash, equal) {
@@ -664,6 +678,7 @@ executes_closed_zero_runtime_calls_and_retains_returned_views test {
         `main proc() i16 {
         `    map Map(i16) :: init([i16(19), i16(23)])
         `    empty Map(i16) :: init([])
+        `    _ = empty
         `    return map.values[0] + map.values[1]
         `}
         , .compile_error, 0, 0,
@@ -684,7 +699,8 @@ infers_array_lengths_from_contextually_typed_storage_initializers test {
         `Kind :: enum { first, second }
         `Entry :: struct { name []u8, kind Kind }
         `entries [_]Entry :: [{name = "a", kind = .first}, {name = "b", kind = .second}]
-        `length proc($N usize, values @[N]Entry) usize { return N }
+        `length proc($N usize, values @[N]Entry) usize { _ = values
+        `    return N }
         `main proc() usize { return length(&entries) }
         , .cannot_infer_generic, 0,
     )

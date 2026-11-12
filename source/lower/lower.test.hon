@@ -151,6 +151,7 @@ executes_forward_lazy_globals_and_function_aliases test {
         `later :: 18
         `add proc(left int, right int) int {
         `    local_alias :: forwarded
+        `    _ = local_alias
         `    return left + right
         `}
         `main proc() int {
@@ -258,6 +259,7 @@ preserves_demanded_diagnostic_identity_and_source_location test {
         `}
         `main proc() int {
         `    before :: 1 + 2
+        `    _ = before
         `    return bad()
         `}
     module := try compile_owned(source, &diagnostic_store)
@@ -1056,7 +1058,7 @@ invalid_assignments_and_loop_conditions_preserve_original_diagnostics test {
         "main proc() int {\n unknown = 1\n return 42\n}\n",
         "main proc() int {\n value := 0\n value = unknown\n return value\n}\n",
         "main proc() int {\n value := 0\n value = 1.5\n return value\n}\n",
-        "first proc(value int) int { return value }\nsecond proc(value bool) int { return 42 }\nmain proc() int {\n invoke := first\n invoke = second\n return 42\n}\n",
+        "first proc(value int) int { return value }\nsecond proc(_ bool) int { return 42 }\nmain proc() int {\n invoke := first\n invoke = second\n return 42\n}\n",
         "main proc() int {\n while 1 { return 42 }\n return 0\n}\n",
         "main proc() int {\n while unknown { return 42 }\n return 0\n}\n",
     ]
@@ -1132,8 +1134,8 @@ terminal_true_loops_and_assignment_arithmetic_preserve_runtime_behavior test {
 
 bounded_pure_loops_do_not_allocate_per_iteration_and_release_runtime_storage test {
     sources [2][]u8 :: [
-        "main proc() int {\n n := 0\n while (n < 1 and !(n == 1)) or false {\n local :: n\n n = local + 1\n if (n == 1) break\n continue\n later :: 0\n }\n return n\n}\n",
-        "main proc() int {\n n := 0\n while (n < 10000 and !(n == 10000)) or false {\n local :: n\n n = local + 1\n if (n == 10000) break\n continue\n later :: 0\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 1 and !(n == 1)) or false {\n local :: n\n n = local + 1\n if (n == 1) break\n continue\n later :: 0\n _ = later\n }\n return n\n}\n",
+        "main proc() int {\n n := 0\n while (n < 10000 and !(n == 10000)) or false {\n local :: n\n n = local + 1\n if (n == 10000) break\n continue\n later :: 0\n _ = later\n }\n return n\n}\n",
     ]
     expected [2]i64 :: [1, 10000]
     allocations := usize(0)
@@ -1586,9 +1588,9 @@ owned_integer_ranges_execute_exclusive_inclusive_empty_signed_and_discard_forms 
         "main proc() int {\n sum := 0\n for 7..=7 |i| { sum = sum + i }\n return sum\n}\n",
         "main proc() int {\n count := 0\n for 7..2 |_| { count = count + 1 }\n for 7..=2 |_| { count = count + 1 }\n return count\n}\n",
         "main proc() int {\n count := 0\n for (0..4) |_| count = count + 1\n return count\n}\n",
-        "main proc() int {\n count := 0\n for 9223372036854775807..=9223372036854775807 |i| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 9223372036854775807..=9223372036854775807 |_| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
         "main proc() int {\n count := 0\n for 9223372036854775806..=9223372036854775807 |_| {\n count = count + 1\n if (count > 3) break\n continue\n }\n return count\n}\n",
-        "main proc() int {\n count := 0\n for 9223372036854775806..9223372036854775807 |i| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 9223372036854775806..9223372036854775807 |_| {\n count = count + 1\n if (count > 2) break\n continue\n }\n return count\n}\n",
         "main proc() int {\n for (-9223372036854775808)..(-9223372036854775807) |i| { return i }\n return 0\n}\n",
         "main proc() int {\n sum := 0\n for 0..(3 + 1) |i| { sum = sum + i }\n return sum\n}\n",
     ]
@@ -1688,16 +1690,16 @@ range_body_and_arm_locals_reset_before_continued_later_declarations test {
 
 untaken_range_errors_and_errors_after_controls_remain_diagnostic_only test {
     sources [10][]u8 :: [
-        "main proc() int {\n for 0..0 |i| { return unknown }\n return 42\n}\n",
+        "main proc() int {\n for 0..0 |_| { return unknown }\n return 42\n}\n",
         "main proc() int {\n for 3..2 |i| { i = 1 }\n return 42\n}\n",
-        "main proc() int {\n i :: 0\n for 0..0 |i| {}\n return 42\n}\n",
-        "main proc() int {\n for 0..3 |i| {\n continue\n missing\n }\n return 42\n}\n",
-        "main proc() int {\n for 0..3 |i| {\n break\n missing\n }\n return 42\n}\n",
-        "main proc() int {\n for 0..3 |i| {\n return 42\n break\n continue\n missing\n }\n return 0\n}\n",
-        "unused proc() int {\n for 0..1 |i| { return unknown }\n return 0\n}\nmain proc() int { return 42 }\n",
-        "main proc() int {\n if false { for true..1 |i| {} }\n return 42\n}\n",
+        "main proc() int {\n i :: 0\n _ = i\n for 0..0 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |_| {\n continue\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |_| {\n break\n missing\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..3 |_| {\n return 42\n break\n continue\n missing\n }\n return 0\n}\n",
+        "unused proc() int {\n for 0..1 |_| { return unknown }\n return 0\n}\nmain proc() int { return 42 }\n",
+        "main proc() int {\n if false { for true..1 |_| {} }\n return 42\n}\n",
         "main proc() int {\n for 0..0 |int| {}\n return 42\n}\n",
-        "unsupported :: 0..1\nmain proc() int {\n for 0..0 |_| { local :: 0..1 }\n return 42\n}\n",
+        "unsupported :: 0..1\nmain proc() int {\n for 0..0 |_| { local :: 0..1\n _ = local }\n return 42\n}\n",
     ]
     for (sources) |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -1716,16 +1718,16 @@ untaken_range_errors_and_errors_after_controls_remain_diagnostic_only test {
 
 demanded_range_header_capture_and_body_errors_keep_original_diagnostic_identity test {
     sources [10][]u8 :: [
-        "main proc() int {\n for true..1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for true..1 |_| {}\n return 42\n}\n",
         "main proc() int {\n for 0..1 |i| { i = 1 }\n return 42\n}\n",
-        "main proc() int {\n i :: 0\n for 0..1 |i| {}\n return 42\n}\n",
-        "main proc() int {\n for 0..1 |i| {\n missing\n continue\n }\n return 42\n}\n",
-        "main proc() int {\n for 0..1 |i| {\n missing\n break\n }\n return 42\n}\n",
-        "main proc() int {\n for 1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n i :: 0\n _ = i\n for 0..1 |i| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |_| {\n missing\n continue\n }\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |_| {\n missing\n break\n }\n return 42\n}\n",
+        "main proc() int {\n for 1 |_| {}\n return 42\n}\n",
         "main proc() int {\n 0..1\n return 42\n}\n",
-        "main proc() int {\n for 0..1 |@i| {}\n return 42\n}\n",
-        "main proc() int {\n for 0..1 |i, _| {}\n return 42\n}\n",
-        "main proc() int {\n local :: 0..1\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |@_| {}\n return 42\n}\n",
+        "main proc() int {\n for 0..1 |_, _| {}\n return 42\n}\n",
+        "main proc() int {\n local :: 0..1\n _ = local\n return 42\n}\n",
     ]
     codes [10]diagnostics.Code :: [
         .invalid_range_bound, .invalid_assignment_target, .duplicate_name,
@@ -1749,10 +1751,10 @@ demanded_range_header_capture_and_body_errors_keep_original_diagnostic_identity 
 
 range_bounds_evaluate_left_to_right_before_header_errors_and_body_overflow_keeps_span test {
     sources [4][]u8 :: [
-        "first :: fail()\nsecond :: absent\nfail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for first..second |i| {}\n return 42\n}\n",
-        "fail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for fail()..1 |@i| {}\n return 42\n}\n",
+        "first :: fail()\nsecond :: absent\nfail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for first..second |_| {}\n return 42\n}\n",
+        "fail proc() int { return 9223372036854775807 + 1 }\nmain proc() int {\n for fail()..1 |@_| {}\n return 42\n}\n",
         "main proc() int {\n for 0..1 |i| { return 9223372036854775807 + i + 1 }\n return 0\n}\n",
-        "main proc() int {\n for first_absent..second_absent |i| {}\n return 42\n}\n",
+        "main proc() int {\n for first_absent..second_absent |_| {}\n return 42\n}\n",
     ]
     for (sources) |source, index| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -1779,8 +1781,8 @@ range_bounds_evaluate_left_to_right_before_header_errors_and_body_overflow_keeps
 
 range_runtime_allocations_do_not_grow_with_iterations test {
     sources [2][]u8 :: [
-        "main proc() int {\n count := 0\n for 0..1 |i| {\n local :: i\n count = count + 1\n if (count > 1) break\n if (local >= 0) continue\n later :: 0\n }\n return count\n}\n",
-        "main proc() int {\n count := 0\n for 0..10000 |i| {\n local :: i\n count = count + 1\n if (count > 10000) break\n if (local >= 0) continue\n later :: 0\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 0..1 |i| {\n local :: i\n count = count + 1\n if (count > 1) break\n if (local >= 0) continue\n later :: 0\n _ = later\n }\n return count\n}\n",
+        "main proc() int {\n count := 0\n for 0..10000 |i| {\n local :: i\n count = count + 1\n if (count > 10000) break\n if (local >= 0) continue\n later :: 0\n _ = later\n }\n return count\n}\n",
     ]
     expected [2]i64 :: [1, 10000]
     allocations := usize(0)
@@ -1845,13 +1847,13 @@ array_mutation_copies_rows_wholes_and_by_value_calls test {
 array_context_inference_empty_shapes_and_scalar_leaf_families test {
     sources [8][]u8 :: [
         "main proc() bool {\n a [_]mut i64 := [1, 2, 3]\n a[1] = 9\n return a[1] == 9\n}\n",
-        "main proc() bool {\n a [0]bool :: []\n b :: []\n return true\n}\n",
+        "main proc() bool {\n a [0]bool :: []\n b :: []\n _ = a\n _ = b\n return true\n}\n",
         "main proc() bool {\n a [2]mut f64 := [1, 2.5]\n a[0] = 3.5\n return a[0] + a[1] == 6.0\n}\n",
         "main proc() bool {\n a [2]mut bool := [false or true, true and false]\n a[1] = true\n return a[0] and a[1]\n}\n",
         "main proc() string {\n a [2]mut string := [\"one\", \"two\"]\n b := a\n a[1] = \"three\"\n return b[1]\n}\n",
         "plus proc(n int) int { return n + 1 }\nminus proc(n int) int { return n - 1 }\nmain proc() bool {\n a :: [plus, minus]\n return a[0](41) == 42 and a[1](43) == 42\n}\n",
         "make proc() [2]i64 { return [20, 22] }\nmain proc() bool {\n return make()[0] + ([20, 22])[1] == 42\n}\n",
-        "count :: forwarded + 1\nforwarded :: 1\nmain proc() bool {\n a [count][0]bool :: [[], []]\n return true\n}\n",
+        "count :: forwarded + 1\nforwarded :: 1\nmain proc() bool {\n a [count][0]bool :: [[], []]\n _ = a\n return true\n}\n",
     ]
     for (sources) |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
@@ -1948,7 +1950,7 @@ usize_arithmetic_and_guarded_ranges_use_unsigned_full_width test {
     sources [5][]u8 :: [
         "main proc() bool {\n max usize :: 18446744073709551615\n n := 0\n for max..=max |i| {\n if (i != max) return false\n n = n + 1\n continue\n }\n return n == 1\n}\n",
         "main proc() bool {\n max usize :: 18446744073709551615\n zero usize :: 0\n n := 0\n for max..max |_| { n = n + 1 }\n for zero..=zero |_| { n = n + 1 }\n return n == 1\n}\n",
-        "main proc() bool {\n start usize :: 18446744073709551614\n end usize :: 18446744073709551615\n n := 0\n for start..=end |i| {\n n = n + 1\n continue\n }\n return n == 2\n}\n",
+        "main proc() bool {\n start usize :: 18446744073709551614\n end usize :: 18446744073709551615\n n := 0\n for start..=end |_| {\n n = n + 1\n continue\n }\n return n == 2\n}\n",
         "main proc() bool {\n a usize :: 9223372036854775808\n return a > 9223372036854775807 and a * 1 + 1 - 1 == a\n}\n",
         "main proc() bool {\n end usize :: 3\n sum usize := 0\n for 0..end |i| { sum = sum + i }\n return sum == 3\n}\n",
     ]
@@ -1967,8 +1969,8 @@ usize_arithmetic_and_guarded_ranges_use_unsigned_full_width test {
 
 aggregate_loop_frames_allocate_once_and_reset_local_freshness test {
     sources [2][]u8 :: [
-        "main proc() int {\n end usize :: 1\n count := 0\n a [1]mut i64 := [0]\n for 0..end |i| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
-        "main proc() int {\n end usize :: 10000\n count := 0\n a [1]mut i64 := [0]\n for 0..end |i| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
+        "main proc() int {\n end usize :: 1\n count := 0\n a [1]mut i64 := [0]\n for 0..end |_| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
+        "main proc() int {\n end usize :: 10000\n count := 0\n a [1]mut i64 := [0]\n for 0..end |_| {\n row [1]mut i64 := [a[0]]\n row[0] = row[0] + 1\n a = row\n count = count + 1\n }\n return count + a[0]\n}\n",
     ]
     expected [2]i64 :: [2, 20000]
     allocations := usize(0)

@@ -171,7 +171,7 @@ specialization_infers_generated_record_type_and_length test {
     try support.check_text(
         &context,
         "specialization_infers_generated_record_type_and_length",
-        "Fixed proc($T type, $N usize) type {\n    return struct { values [N]mut T }\n}\nfirst proc($T type, $N usize, value @Fixed(T, N)) T {\n    return value.values[0]\n}\nlength proc($T type, $N usize, value @Fixed(T, N)) usize {\n    return N\n}\nmain proc() i16 {\n    fixed Fixed(i16, 2) :: { values = [40, 1] }\n    return first(&fixed) + i16(length(&fixed))\n}\n",
+        "Fixed proc($T type, $N usize) type {\n    return struct { values [N]mut T }\n}\nfirst proc($T type, $N usize, value @Fixed(T, N)) T {\n    return value.values[0]\n}\nlength proc($T type, $N usize, value @Fixed(T, N)) usize {\n    _ = value\n\n    return N\n}\nmain proc() i16 {\n    fixed Fixed(i16, 2) :: { values = [40, 1] }\n    return first(&fixed) + i16(length(&fixed))\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -457,7 +457,7 @@ specialization_cached_phantom_type_canonical_builtin_alias test {
     try support.check_text(
         &context,
         "specialization_cached_phantom_type_canonical_builtin_alias",
-        "Phantom proc($T type) type { return struct { value i16 } }\nElement :: alias i64\nmain proc() i16 {\n    first Phantom(int) :: { value = 42 }\n    second Phantom(i64) :: first\n    third Phantom(Element) :: second\n    return third.value\n}\n",
+        "Phantom proc($T type) type {\n    _ = T\n return struct { value i16 } }\nElement :: alias i64\nmain proc() i16 {\n    first Phantom(int) :: { value = 42 }\n    second Phantom(i64) :: first\n    third Phantom(Element) :: second\n    return third.value\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -479,7 +479,7 @@ specialization_string_cache_uses_decoded_value test {
     try support.check_text(
         &context,
         "specialization_string_cache_uses_decoded_value",
-        "Tag proc($text string) type { return struct { value i16 } }\nmain proc() i16 {\n    first Tag(\"a\") :: { value = 42 }\n    second Tag(\"\\x61\") :: first\n    return second.value\n}\n",
+        "Tag proc($text string) type {\n    _ = text\n return struct { value i16 } }\nmain proc() i16 {\n    first Tag(\"a\") :: { value = 42 }\n    second Tag(\"\\x61\") :: first\n    return second.value\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -501,7 +501,7 @@ specialization_contextual_literal_after_typed_argument test {
     try support.check_text(
         &context,
         "specialization_contextual_literal_after_typed_argument",
-        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(value, 0)\n    return result\n}\n",
+        "first proc($T type, left T, right T) T {\n    _ = right\n return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(value, 0)\n    return result\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -512,7 +512,7 @@ specialization_contextual_literal_before_typed_argument test {
     try support.check_text(
         &context,
         "specialization_contextual_literal_before_typed_argument",
-        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(0, value)\n    return result + 42\n}\n",
+        "first proc($T type, left T, right T) T {\n    _ = right\n return left }\nmain proc() i16 {\n    value i16 :: 42\n    result i16 :: first(0, value)\n    return result + 42\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -523,7 +523,7 @@ specialization_contextual_nested_integer_literal_expressions test {
     try support.check_text(
         &context,
         "specialization_contextual_nested_integer_literal_expressions",
-        "first proc($T type, left T, right T) T { return left }\nmain proc() i16 {\n    value i16 :: 40\n    left i16 :: first(-(1 + 1), value)\n    right i16 :: first(value, (3 * 4) + 2)\n    return left + right + 4\n}\n",
+        "first proc($T type, left T, right T) T {\n    _ = right\n return left }\nmain proc() i16 {\n    value i16 :: 40\n    left i16 :: first(-(1 + 1), value)\n    right i16 :: first(value, (3 * 4) + 2)\n    return left + right + 4\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -721,7 +721,7 @@ cleanup_errdefer_skip_on_success_and_scope_exit test {
     try support.check_text(
         &context,
         "cleanup_errdefer_skip_on_success_and_scope_exit",
-        "Error :: enum { failed }\ngood proc(value @mut i64) int ! Error {\n    errdefer value^ = 0\n    { errdefer value^ = 0 }\n    defer value^ = value^ + 2\n    return 1\n}\nmain proc() int { value := 40\nignored :: good(&value) catch 0\nreturn value }\n",
+        "Error :: enum { failed }\ngood proc(value @mut i64) int ! Error {\n    errdefer value^ = 0\n    { errdefer value^ = 0 }\n    defer value^ = value^ + 2\n    return 1\n}\nmain proc() int { value := 40\n_ :: good(&value) catch 0\nreturn value }\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -743,7 +743,7 @@ cleanup_direct_fallible_return_and_expired_scope test {
     try support.check_text(
         &context,
         "cleanup_direct_fallible_return_and_expired_scope",
-        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() i16 ! Second { return .second }\nforward proc(value @mut i64) i16 ! (First | Second) {\n    { errdefer value^ = 0 }\n    errdefer value^ = value^ + 40\n    defer value^ = value^ + 2\n    return leaf()\n}\nmain proc() int { value := 0\nignored :: forward(&value) catch 0\nreturn value }\n",
+        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() i16 ! Second { return .second }\nforward proc(value @mut i64) i16 ! (First | Second) {\n    { errdefer value^ = 0 }\n    errdefer value^ = value^ + 40\n    defer value^ = value^ + 2\n    return leaf()\n}\nmain proc() int { value := 0\n_ :: forward(&value) catch 0\nreturn value }\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }

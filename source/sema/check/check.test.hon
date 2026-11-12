@@ -268,7 +268,7 @@ checks_forward_alias_calls_grouped_parameters_and_mutual_recursion test {
         `    (forwarded)(a, b)
         `    beta(a + b, seed)
         `}
-        `beta proc(total int, amount float) void {
+        `beta proc(total int, _ float) void {
         `    alpha(total, 2)
         `}
         `seed := 3
@@ -341,11 +341,11 @@ separates_type_annotations_from_values_and_restricts_void_storage test {
         `value :: 1
         `bad value :: -"x"
         `builtin :: int
-        `grouped proc(a, b value) value {}
-        `void_params proc(a, b void) void {}
+        `grouped proc(_, _ value) value {}
+        `void_params proc(_, _ void) void {}
         `storage void :: 1
         `noop proc() void {}
-        `sink proc(p int) void {}
+        `sink proc(_ int) void {}
         `holder :: noop()
         `operand :: noop() + 1
         `main proc() void {
@@ -481,7 +481,7 @@ checks_arguments_even_for_wrong_arity_noncallable_and_chained_callees test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `sink proc(a int, b float) void {}
+        `sink proc(_ int, _ float) void {}
         `noop proc() void {}
         `fixed int :: 1
         `main proc() void {
@@ -766,6 +766,7 @@ return_errors_preserve_identity_check_unreachable_code_and_suppress_missing_retu
         `recovered proc() int {
         `    return 1 stray
         `    valid :: 2
+        `    _ = valid
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -910,10 +911,10 @@ rejects_bool_numeric_mixing_and_preserves_invalid_condition_identity test {
         `wrong_bool bool :: 1
         `wrong_int int :: false
         `main proc() void {
-        `    if (1) { okay :: true }
-        `    if "text" { okay :: false }
-        `    if absent { okay :: true }
-        `    if true + false { okay :: false }
+        `    if (1) { _ :: true }
+        `    if "text" { _ :: false }
+        `    if absent { _ :: true }
+        `    if true + false { _ :: false }
         `    if true { return } else { -"bad" }
         `}
     scan_state := lexer.init(mem.c_allocator)
@@ -1064,7 +1065,7 @@ assignments_preserve_established_types_and_contextualize_numeric_values test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `take_float proc(value float) int { return 1 }
+        `take_float proc(_ float) int { return 1 }
         `main proc() void {
         `    number := 0
         `    number = 1.5
@@ -1082,6 +1083,8 @@ assignments_preserve_established_types_and_contextualize_numeric_values test {
         `    flag = false
         `    text := "before"
         `    text = "after"
+        `    _ = observed
+        `    _ = context
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -1220,8 +1223,8 @@ function_assignment_checks_complete_signatures_without_retargeting_calls test {
     source ::
         `first proc(a int) int { return a }
         `same proc(renamed int) int { return renamed + 1 }
-        `wrong_parameter proc(a float) int { return 1 }
-        `wrong_result proc(a int) bool { return true }
+        `wrong_parameter proc(_ float) int { return 1 }
+        `wrong_result proc(_ int) bool { return true }
         `wrong_count proc() int { return 2 }
         `main proc() int {
         `    chosen := first
@@ -1428,6 +1431,7 @@ logical_operand_errors_are_independent_and_skipped_rhs_preserves_bool test {
         `    if true or 1 { value = true }
         `    while false and 1 { value = false }
         `    return false and absent_return
+        `    _ = local
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -1504,7 +1508,7 @@ logical_external_mismatches_and_always_demanded_not_preserve_errors test {
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `accept_bool proc(value bool) bool { return value }
-        `accept_int proc(value int) bool { return true }
+        `accept_int proc(_ int) bool { return true }
         `noop proc() void {}
         `wrong_decl int :: true or 1
         `wrong_return proc() int { return false and absent_return }
@@ -1583,7 +1587,10 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
     defer diagnostics.deinit(&diagnostic_store)
     source ::
         `expression proc() int { false and missing_expression }
-        `declaration proc() int { local :: true or 1 }
+        `declaration proc() int {
+        `    local :: true or 1
+        `    _ = local
+        `}
         `assignment proc() int {
         `    value := false
         `    value = false and missing_assignment
@@ -1597,7 +1604,7 @@ short_circuit_skip_paths_do_not_guarantee_a_return test {
         `}
         `demanded proc() int { missing_left or true }
         `successful proc() bool { return true or missing_return }
-        `take proc(value bool) void {}
+        `take proc(_ bool) void {}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
     try lexer.scan(&scan_state, source, &strings, &diagnostic_store)
@@ -1789,7 +1796,7 @@ range_bounds_receive_integer_context_without_joining_the_range_or_capture test {
         `limit :: seed
         `seed := 3
         `endpoint proc() int { return 4 }
-        `consume proc(value int) void {}
+        `consume proc(_ int) void {}
         `main proc() void {
         `    for (-2)..(limit + 1) |item| {
         `        consume(item)
@@ -1855,7 +1862,9 @@ range_checks_both_bounds_and_preserves_fixed_declarations_and_source_errors test
         `    for nothing..nothing() |_| {}
         `    for real..3 |_| {}
         `    for absent_start..absent_end |_| {}
-        `    for 0..1 |_| { sibling :: 7 }
+        `    for 0..1 |_| { sibling :: 7
+        `        _ = sibling
+        `    }
         `    for flexible..floating_alias |_| {}
         `}
         `floating float :: floating_alias
@@ -1920,7 +1929,7 @@ range_values_nonrange_iterables_and_capture_modes_have_explicit_errors test {
     source ::
         `stored :: 0..3
         `produced proc() int { return 0..3 }
-        `consume proc(value int) void {}
+        `consume proc(_ int) void {}
         `scalar proc() int { return 2 }
         `main proc() void {
         `    0..3
@@ -1935,6 +1944,7 @@ range_values_nonrange_iterables_and_capture_modes_have_explicit_errors test {
         `    for 0..3 |item, index| { item + index }
         `    for 0..3 |_, _| {}
         `    for 0..3 |@item, _| {}
+        `    _ = local
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -1993,7 +2003,7 @@ range_captures_are_fixed_readonly_and_assignment_values_do_not_retarget_bounds t
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
     source ::
-        `consume proc(value float) void {}
+        `consume proc(_ float) void {}
         `returned proc() float {
         `    for 0..2 |item| { return item }
         `    return 1
@@ -2509,6 +2519,7 @@ indexed_writes_require_mutable_local_root_and_each_array_level_but_copies_are_va
         `    (both[0])[0] = 11
         `    both[0] = [12]
         `    mismatch [1]mut i64 := inner_readonly[0]
+        `    _ = mismatch
         `}
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)
@@ -2612,6 +2623,7 @@ array_assignment_rhs_is_contextual_but_does_not_retarget_established_sources tes
         `    unknown [1]mut i64 := [absent]
         `    unknown[0] = 9
         `    good := 10
+        `    _ = good
         `}
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)
@@ -2641,14 +2653,14 @@ array_assignment_rhs_is_contextual_but_does_not_retarget_established_sources tes
 array_signature_identity_includes_recursive_counts_and_mutability test {
     source ::
         `accept proc(value [1]mut i64) [1]mut i64 { return value }
-        `different_count proc(value [2]mut i64) [1]mut i64 { return [1] }
-        `different_mutability proc(value [1]i64) [1]mut i64 { return [1] }
+        `different_count proc(_ [2]mut i64) [1]mut i64 { return [1] }
+        `different_mutability proc(_ [1]i64) [1]mut i64 { return [1] }
         `functions :: [accept, different_count, different_mutability]
         `wrong_return proc() [1]mut i64 {
         `    value [1]i64 :: [1]
         `    return value
         `}
-        `take proc(value [2]i64) void {}
+        `take proc(_ [2]i64) void {}
         `caller proc() void {
         `    take([1])
         `    take([true, false])
@@ -2694,6 +2706,7 @@ inferred_counts_follow_forward_fixed_aliases_empty_shapes_and_reject_local_count
         `    unsupported [local_count]i64 :: [1, 2]
         `    values [2]i64 :: [1, 2]
         `    for 0..(unsigned + 1) |index| { values[index] }
+        `    _ = unsupported
         `}
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)
@@ -2728,7 +2741,7 @@ borrowing_fixed_arrays_refreshes_counts_resolved_by_earlier_references test {
         `Entry :: struct { value u8 }
         `entries [_]Entry :: [{ value = 1 }, { value = 2 }]
         `count :: entries.len
-        `take proc(values @[2]Entry) void {}
+        `take proc(_ @[2]Entry) void {}
         `main proc() void { take(&entries) }
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)
@@ -2796,8 +2809,8 @@ enum_match_aliases_preserve_conflicting_rigid_contexts_and_fixed_boundaries test
         `B :: enum { a, b }
         `SA :: struct { kind A }
         `SB :: struct { kind B }
-        `take_a proc(value A) void {}
-        `take_b proc(value B) void {}
+        `take_a proc(_ A) void {}
+        `take_b proc(_ B) void {}
         `conflicting proc(flag bool) void {
         `    value :: if (flag) .a else .b
         `    take_a(value)
@@ -2811,6 +2824,8 @@ enum_match_aliases_preserve_conflicting_rigid_contexts_and_fixed_boundaries test
         `    value :: match flag { true: .a, false: .b }
         `    first SA :: { kind = value }
         `    second SB :: { kind = value }
+        `    _ = first
+        `    _ = second
         `}
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)
@@ -2873,7 +2888,7 @@ conditional_aliases_keep_payload_types_in_fallible_and_optional_return_contexts 
         `Id :: distinct u32
         `Error :: enum { failed }
         `make proc() Id ! Error { return Id(1) }
-        `take proc(value Id) void {}
+        `take proc(_ Id) void {}
         `fallible proc(flag bool) Id ! Error {
         `    value := if (flag) {
         `        yield try make()
@@ -2949,7 +2964,7 @@ conditional_offsets_in_nested_range_bodies_keep_the_resolved_bound_family test {
 integer_widening_is_value_only_and_preserves_rigid_source_types test {
     source ::
         `Wide :: struct { value u64 }
-        `take proc(value u64) void {}
+        `take proc(_ u64) void {}
         `widen proc(small u8, start u32, end u16, bytes []u8) u64 {
         `    copy u64 := small
         `    record Wide :: { value = small }
@@ -2958,11 +2973,19 @@ integer_widening_is_value_only_and_preserves_rigid_source_types test {
         `    take(small)
         `    signed i64 :: start
         `    return small
+        `    _ = copy
+        `    _ = record
+        `    _ = view
+        `    _ = element
+        `    _ = signed
         `}
         `reject proc(wide u64, signed i8, pointer @u8) void {
         `    narrow u8 :: wide
         `    unsigned u64 :: signed
         `    borrowed @u64 :: pointer
+        `    _ = narrow
+        `    _ = unsigned
+        `    _ = borrowed
         `}
     fixture := try array_fixture(source)
     defer deinit_array_fixture(&fixture)

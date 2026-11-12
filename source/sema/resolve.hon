@@ -118,6 +118,9 @@ Scope :: struct {
 }
 
 @hide:file
+LocalUse :: enum { none, declared, used }
+
+@hide:file
 State :: struct {
     tree @ast.Tree
     diagnostics @mut diagnostics.Store
@@ -127,6 +130,7 @@ State :: struct {
     namespaces hashmap.AutoHashMap(ast.NodeId, Scope)
     aliases []mut ast.NodeId
     selections arraylist.ArrayList(ast.NodeId)
+    usage []mut LocalUse
 }
 
 #! borrows `tree`, its identifier `pool`, and `diagnostic_store` during resolution.
@@ -169,6 +173,9 @@ resolve_packages proc(
     aliases :: try mem.alloc(ast.NodeId, allocator, ast.node_count(tree))
     defer mem.free(allocator, aliases)
     mem.set(aliases, maxval!(ast.NodeId))
+    usage :: try mem.alloc(LocalUse, allocator, ast.node_count(tree))
+    defer mem.free(allocator, usage)
+    mem.set(usage, LocalUse.none)
 
     state := State{
         tree = tree,
@@ -179,6 +186,7 @@ resolve_packages proc(
         namespaces = hashmap.init(allocator),
         aliases = aliases,
         selections = arraylist.init(allocator),
+        usage = usage,
     }
     defer arraylist.deinit(&state.selections)
     defer {
@@ -231,6 +239,18 @@ resolve_packages proc(
     }
     for (imports) |imported| try resolve_import(&state, &file_scopes[usize(ast.node_span(tree, imported.node).source)], imported)
     for (roots) |root| try resolve_package(&state, root, file_scopes)
+    # check source bindings before aliases are canonicalized or specialization erases uses.
+    for (usage) |status, index| {
+        if (status != .declared) continue
+        id :: ast.NodeId(index)
+        if (bindings[index].kind != .declaration) continue
+        span :: match ast.node_class(tree, id) {
+            .statement: ast.statement_decl(tree, id).name
+            .parameter: ast.param(tree, id).name
+            else: ast.node_span(tree, id)
+        }
+        _ = try diagnostics.add(diagnostic_store, .unused_local, span)
+    }
     try canonicalize_aliases(&state)
 
     return Resolution{ storage = Storage{
@@ -398,6 +418,8 @@ predeclare proc(
     }
     try put_name(scope, name, value)
     state.bindings[usize(id)] = value
+    # a compile-time parameter may already have uses in dependent signature annotations.
+    if (scope.local and state.usage[usize(id)] == .none) state.usage[usize(id)] = .declared
 }
 
 @hide:file
@@ -420,7 +442,7 @@ resolve_function proc(
     scope := Scope{
         names = hashmap.init(state.allocator),
         parent = package_scope,
-        local = true,
+        local = !ast.function_external(tree, id),
     }
     defer hashmap.deinit(&scope.names)
     for (0..ast.function_param_count(tree, id)) |i| {
@@ -660,6 +682,7 @@ resolve_expr proc(
             name :: ast.name_id(tree, id)
             if lookup(state, scope, name) |found| {
                 state.bindings[usize(id)] = found
+                if (found.kind == .declaration) state.usage[usize(found.data.declaration)] = .used
             } else {
                 diagnostic :: try diagnostics.add(state.diagnostics, .unknown_name, span)
                 state.bindings[usize(id)] = Binding{

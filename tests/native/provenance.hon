@@ -321,7 +321,7 @@ check_dependency_provenance proc(context @mut support.Context) void ! support.Er
     try support.rename(context, hidden15, project)
     try support.remove(context, context.executable)
     }
-    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    text :: \"é\" return missing\n}\n"))
+    (try support.write(context, source, "\n# utf8: é\nfail proc() int {\n    text :: \"é\" return missing\n    _ = text\n}\n"))
     location4 :: (try support.concat(context, &[(try support.canonical(context, source)), ":", "4", ":", "25", ": "]))
     (try support.write(context, main, "import \"../bridge\"\nmain proc() int {\n    if (false) return bridge.fail()\n    return 42\n}\n"))
     interpreted8 :: (try support.run(context, &[context.compiler, "run", app], {}))

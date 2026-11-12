@@ -314,7 +314,7 @@ collection_iteration_aggregate_copies_nested_and_zero_cell_shapes test {
     try support.check_text(
         &context,
         "collection_iteration_aggregate_copies_nested_and_zero_cell_shapes",
-        "Empty :: struct {}\nItem :: struct { values [2]mut i16 }\nmain proc() [3]i16 {\n    items [2]mut Item := [{ values = [19, 21] }, { values = [0, 0] }]\n    total i16 := 0\n    for items |item, index| {\n        copied := item\n        copied.values[0] = copied.values[0] + 1\n        for copied.values |value| { total = total + value }\n        if (index == 0) items[1].values[1] = 0\n    }\n    empty [0]i16 :: []\n    for empty |_| { return [-1, -1, -1] }\n    cells [2]Empty :: [{}, {}]\n    count i16 := 0\n    for cells |cell, index| {\n        saved Empty :: cell\n        count = count + i16(index) + 1\n    }\n    return [total, items[0].values[0], count]\n}\n",
+        "Empty :: struct {}\nItem :: struct { values [2]mut i16 }\nmain proc() [3]i16 {\n    items [2]mut Item := [{ values = [19, 21] }, { values = [0, 0] }]\n    total i16 := 0\n    for items |item, index| {\n        copied := item\n        copied.values[0] = copied.values[0] + 1\n        for copied.values |value| { total = total + value }\n        if (index == 0) items[1].values[1] = 0\n    }\n    empty [0]i16 :: []\n    for empty |_| { return [-1, -1, -1] }\n    cells [2]Empty :: [{}, {}]\n    count i16 := 0\n    for cells |cell, index| {\n        _ Empty :: cell\n        count = count + i16(index) + 1\n    }\n    return [total, items[0].values[0], count]\n}\n",
         support.Expected{ stdout = "[42, 19, 3]\n", diagnostic = null },
     )
 }
@@ -798,7 +798,7 @@ generic_match_runtime_subject_runs_once test {
     try support.check_text(
         &context,
         "generic_match_runtime_subject_runs_once",
-        "selected proc(count @mut i16) bool {\n    count^ = count^ + 1\n    return true\n}\nread proc($unused bool, count @mut i16) i16 {\n    return match selected(count) { true: 41, false: 0 }\n}\nmain proc() i16 {\n    count i16 := 0\n    value :: read(true, &count)\n    return value + count\n}\n",
+        "selected proc(count @mut i16) bool {\n    count^ = count^ + 1\n    return true\n}\nread proc($unused bool, count @mut i16) i16 {\n    _ = unused\n\n    return match selected(count) { true: 41, false: 0 }\n}\nmain proc() i16 {\n    count i16 := 0\n    value :: read(true, &count)\n    return value + count\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }
@@ -886,7 +886,7 @@ type_match_tagged_capture_nested_expressions_and_storage test {
     try support.check_text(
         &context,
         "type_match_tagged_capture_nested_expressions_and_storage",
-        "Inner :: union(enum) { count usize, empty void }\nDetail :: struct { inner Inner, wide bool, bias i16, text string }\nChoice :: union(enum) { detail Detail, unused i8 }\nBox proc(T type) type { return struct { value T } }\nStorage proc(input Choice) type {\n    Element :: match input {\n        .detail |detail|: match detail.wide { true: i16, false: i8 },\n        .unused |small|: [small]bool,\n    }\n    return struct {\n        values [match input {\n            .detail |detail|: match detail.inner { .count |n|: n, .empty: usize(0) },\n            .unused |small|: usize(small),\n        }]Element\n        boxed Box(match input { .detail |detail|: Element, .unused: bool })\n        bias i16 = match input { .detail |detail|: detail.bias, .unused: i8(128) }\n        label string = match input { .detail |detail|: detail.text, .unused: \"\" }\n    }\n}\nmain proc() i16 {\n    value Storage(.detail{ inner = .count{2}, wide = true, bias = 2, text = \"owned\" }) :: {\n        values = [19, 21], boxed = { value = 0 },\n    }\n    if (value.label.len != 5 or value.label[0] != 111) return -1\n    return value.values[0] + value.values[1] + value.boxed.value + value.bias\n}\n",
+        "Inner :: union(enum) { count usize, empty void }\nDetail :: struct { inner Inner, wide bool, bias i16, text string }\nChoice :: union(enum) { detail Detail, unused i8 }\nBox proc(T type) type { return struct { value T } }\nStorage proc(input Choice) type {\n    Element :: match input {\n        .detail |detail|: match detail.wide { true: i16, false: i8 },\n        .unused |small|: [small]bool,\n    }\n    return struct {\n        values [match input {\n            .detail |detail|: match detail.inner { .count |n|: n, .empty: usize(0) },\n            .unused |small|: usize(small),\n        }]Element\n        boxed Box(match input { .detail |_|: Element, .unused: bool })\n        bias i16 = match input { .detail |detail|: detail.bias, .unused: i8(128) }\n        label string = match input { .detail |detail|: detail.text, .unused: \"\" }\n    }\n}\nmain proc() i16 {\n    value Storage(.detail{ inner = .count{2}, wide = true, bias = 2, text = \"owned\" }) :: {\n        values = [19, 21], boxed = { value = 0 },\n    }\n    if (value.label.len != 5 or value.label[0] != 111) return -1\n    return value.values[0] + value.values[1] + value.boxed.value + value.bias\n}\n",
         support.Expected{ stdout = "42\n", diagnostic = null },
     )
 }

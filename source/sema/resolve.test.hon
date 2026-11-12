@@ -39,6 +39,9 @@ resolves_forward_references_recursion_and_builtin_signatures test {
         `alpha proc(p int, q float, s string) void {
         `    before :: -after * p + beta(after)
         `    after :: later
+        `    _ = before
+        `    _ = q
+        `    _ = s
         `}
         `beta proc(p int) void {
         `    after :: p
@@ -262,6 +265,11 @@ preserves_syntax_diagnostics_and_resolves_shared_unknown_types_once test {
         `    valid :: later
         `    later :: 1
         `    discarded(1 2)
+        `    _ = a
+        `    _ = b
+        `    _ = empty
+        `    _ = bad
+        `    _ = valid
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -331,12 +339,17 @@ resolves_conditional_arm_scopes_without_leaks_or_shadowing test {
         `    if flag {
         `        before :: later
         `        later :: value
-        `        if before == value { nested :: later }
+        `        if before == value { nested :: later
+        `            _ = nested
+        `        }
         `    } else {
         `        later :: value
+        `        _ = later
         `    }
         `    later
-        `    if later { later :: 1 }
+        `    if later { later :: 1
+        `        _ = later
+        `    }
         `    if flag {
         `        value :: 2
         `        bool :: false
@@ -403,10 +416,13 @@ resolves_loop_assignments_in_lexical_scopes_with_forward_local_bindings test {
         `        while later > 0 {
         `            outer = later
         `            inner := later
+        `            _ = inner
         `        }
         `        inner
         `    }
-        `    while flag { later := 3 }
+        `    while flag { later := 3
+        `        _ = later
+        `    }
         `    later = unknown_rhs
         `    while flag {
         `        outer := 1
@@ -479,8 +495,10 @@ resolves_all_code_and_preserves_scopes_after_loop_controls test {
         `            continue
         `            private :: later
         `            int :: 2
+        `            _ = private
         `        }
         `        private
+        `        _ = before
         `    }
         `    later
         `}
@@ -520,6 +538,7 @@ range_bounds_use_outer_scope_and_captures_are_body_declarations test {
         `        later :: item
         `        continue
         `        item
+        `        _ = before
         `    }
         `    for lower..upper |item| { item }
         `    lower :: 0
@@ -581,7 +600,7 @@ range_captures_preserve_duplicate_builtin_and_discard_errors test {
         `        _
         `        missing
         `    }
-        `    for missing_start..missing_end |i| {}
+        `    for missing_start..missing_end |i| { _ = i }
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -639,6 +658,7 @@ resolves_array_counts_elements_indices_and_unreachable_targets test {
         `    later f64 :: 1.0
         `    (dead[index])[0] = later
         `    index usize :: 0
+        `    _ = second
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -700,6 +720,10 @@ array_signature_counts_use_package_scope_and_local_counts_see_parameters test {
         `    body_size :: size
         `    local [n]i64 :: []
         `    return []
+        `    _ = a
+        `    _ = b
+        `    _ = body_size
+        `    _ = local
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -741,6 +765,8 @@ resolves_every_array_child_error_and_preserves_lexer_diagnostics test {
         `    data [missing_count]MissingElement :: [absent, missing_element]
         `    (missing_base[missing_index])[missing_outer] = missing_rhs
         `    malformed [%]i64 :: [%]
+        `    _ = data
+        `    _ = malformed
         `}
     scan_state := lexer.init(mem.c_allocator)
     defer lexer.deinit(&scan_state)
@@ -841,8 +867,12 @@ resolves_match_capture_scopes_without_looking_up_member_names test {
         `Value :: union(Tag) { if i32, else void }
         `inspect proc(value Value) void {
         `    match value {
-        `        .if |payload|: { local :: payload }
-        `        .else: { local :: 1 }
+        `        .if |payload|: { local :: payload
+        `            _ = local
+        `        }
+        `        .else: { local :: 1
+        `            _ = local
+        `        }
         `    }
         `    payload
         `    local
@@ -966,7 +996,9 @@ resolves_inline_match_captures_and_all_bodies test {
         `        tag
         `    } }
         `    match value { inline |same, same|: same }
-        `    match value { inline |payload, value|: value }
+        `    match value { inline |payload, value|: { value
+        `        _ = payload
+        `    } }
         `    match value { .if: 1, inline |_|: missing }
         `}
     scan_state := lexer.init(mem.c_allocator)
@@ -1095,6 +1127,8 @@ capture_scopes_do_not_conflict_with_later_outer_locals test {
         `        }
         `        item :: 1
         `        index :: 0
+        `        _ = item
+        `        _ = index
         `    }
         `}
     scan_state := lexer.init(mem.c_allocator)
@@ -1143,6 +1177,9 @@ captures_still_reject_visible_names test {
         `    if value |global| { global }
         `    if value |string| { string }
         `    if value |u8| { u8 }
+        `    _ = id
+        `    _ = type
+        `    _ = string
         `}
         `global :: 1
     scan_state := lexer.init(mem.c_allocator)
@@ -1178,6 +1215,7 @@ ordinary_inner_locals_allow_later_ancestors_and_preserve_forward_lookup test {
         `            before :: root
         `            root :: later
         `            root
+        `            _ = before
         `        }
         `        root :: later
         `        root
@@ -1221,4 +1259,99 @@ ordinary_inner_locals_allow_later_ancestors_and_preserve_forward_lookup test {
     forward :: ast.statement_decl(&tree, before).initializer
     try testing.expect_equal(BindingKind.declaration, binding(&resolution, forward).kind)
     try testing.expect_equal(roots[0], binding(&resolution, forward).data.declaration)
+}
+
+reports_unused_locals_parameters_and_captures_at_their_names test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `Error :: enum { failed }
+        `Choice :: union(enum) { number int }
+        `global :: 1
+        `inspect proc(parameter int, $Generic type, optional ?int, choice Choice) void ! Error {
+        `    constant :: 1
+        `    variable := 2
+        `    LocalType :: alias int
+        `    if optional |if_payload| {}
+        `    while optional |while_payload| { break }
+        `    for [1] |element, index| {}
+        `    match choice { .number |match_payload|: {} }
+        `    match choice { inline |inline_payload, tag|: {} }
+        `    _ = failing() catch |caught| {}
+        `    errdefer |deferred| {}
+        `    defer { cleanup_local :: 1 }
+        `    _ = { block_local :: 1
+        `        yield 0
+        `    }
+        `    if (false) { unreachable_local :: 1 }
+        `}
+        `failing proc() void ! Error { return .failed }
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    expected [_][]u8 :: [
+        "parameter", "Generic", "constant", "variable", "LocalType",
+        "if_payload", "while_payload", "element", "index", "match_payload",
+        "inline_payload", "tag", "caught", "deferred", "cleanup_local",
+        "block_local", "unreachable_local",
+    ]
+    try testing.expect_equal(expected.len, diagnostics.count(&diagnostic_store))
+    for (expected) |name| {
+        found usize := 0
+        for (diagnostic_store.list.items) |diagnostic| {
+            try testing.expect_equal(diagnostics.Code.unused_local, diagnostic.code)
+            if (mem.eql(ast.source_text(&tree, diagnostic.span), name)) found += 1
+        }
+        try testing.expect_equal(1, found)
+    }
+}
+
+counts_source_references_before_alias_erasure_and_allows_explicit_discards test {
+    pool := strpool.init(mem.c_allocator)
+    defer strpool.deinit(&pool)
+    diagnostic_store := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostic_store)
+    source ::
+        `external c_func(named c_int) c_int
+        `Callback :: alias @proc(named int) int
+        `global :: 1
+        `dependent proc($T type, $N usize, values [N]T) T { return values[0] }
+        `ignored proc(_ int, _ int) void {}
+        `inspect proc(value ?int) int {
+        `    forward :: later
+        `    Alias :: alias int
+        `    later Alias := 1
+        `    later = 2
+        `    defer { _ = forward }
+        `    _ :: 0
+        `    _ :: 1
+        `    _ = value
+        `    if value |_| {}
+        `    while value |_| { break }
+        `    for [1] |_, _| {}
+        `    if (false) { _ = later }
+        `    return 42
+        `}
+        `poisoned proc() void {
+        `    collision :: 1
+        `    collision :: 2
+        `    _ = collision
+        `}
+    scan_state := lexer.init(mem.c_allocator)
+    defer lexer.deinit(&scan_state)
+    try lexer.scan(&scan_state, source, &pool, &diagnostic_store)
+    tree := try parser.parse(mem.c_allocator, scan_state.tokens.items, source, &diagnostic_store)
+    defer ast.deinit(&tree)
+    try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+    resolution := try resolve(mem.c_allocator, &tree, &pool, &diagnostic_store)
+    defer deinit(&resolution)
+    try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
+    try testing.expect_equal(diagnostics.Code.duplicate_name, diagnostic_store.list.items[0].code)
 }
