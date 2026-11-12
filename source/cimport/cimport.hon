@@ -571,7 +571,6 @@ Declaration :: struct {
     file []u8
     name []u8
     identity []u8 = ""
-    record_origin []u8 = ""
     record_label []u8 = ""
     record_spelling []u8 = ""
     canonical_name []u8 = ""
@@ -635,22 +634,11 @@ context_init proc(storage @mut Storage, runtime io.Io, json @Json, options Optio
     }
     for (context.declarations.items) |declaration, index| {
         if (!kind(json, declaration.node, "RecordDecl")) continue
-        context.declarations.items[index].record_label = try record_label(&context, index, 0)
+        label :: try record_label(&context, index, 0)
+        context.declarations.items[index].record_label = label
+        context.declarations.items[index].canonical_name = try escaped(storage, label)
     }
-    for (context.declarations.items) |declaration, index| {
-        if (!kind(json, declaration.node, "RecordDecl")) continue
-        label := declaration.record_label
-        for (context.declarations.items) |other| {
-            if (mem.eql(other.identity, declaration.identity) or !mem.eql(other.record_origin, declaration.record_origin)) continue
-            if (mem.eql(other.record_label, label)) {
-                parts [3][]u8 :: [label, "__", try number(storage, hash(declaration.identity))]
-                label = try join(storage, parts[..])
-                break
-            }
-        }
-        parts [3][]u8 :: [label, "_T_", try name_component(storage, declaration.record_origin)]
-        context.declarations.items[index].canonical_name = try join(storage, parts[..])
-    }
+    try assign_record_names(&context)
     while true {
         collision := false
         for (context.declarations.items) |declaration| {
@@ -682,7 +670,6 @@ collect_declaration proc(context @mut Context, node usize, file []u8) void ! Err
     if (kind(json, node, "RecordDecl") or kind(json, node, "TypedefDecl") or kind(json, node, "EnumDecl") or kind(json, node, "FunctionDecl") or kind(json, node, "VarDecl") or kind(json, node, "EnumConstantDecl")) {
         name :: json_text(json, node, "name")
         identity []u8 := ""
-        record_origin := origin
         if (kind(json, node, "RecordDecl")) {
             # named identity does not depend on offsets changing between opaque and complete inputs.
             identity_location :: if (name.len == 0) json_text(json, location, "offset") else name
@@ -694,12 +681,11 @@ collect_declaration proc(context @mut Context, node usize, file []u8) void ! Err
                 for (context.declarations.items) |declaration| {
                     if (mem.eql(json_text(json, declaration.node, "id"), previous)) {
                         identity = declaration.identity
-                        record_origin = declaration.record_origin
                     }
                 }
             }
         }
-        try arraylist.append(&context.declarations, Declaration{ node = node, name = name, file = origin, identity = identity, record_origin = record_origin, exported = selected_file(context, origin) })
+        try arraylist.append(&context.declarations, Declaration{ node = node, name = name, file = origin, identity = identity, exported = selected_file(context, origin) })
     }
     if (kind(json, node, "RecordDecl") or kind(json, node, "EnumDecl")) {
         child := inner(json, node)
@@ -750,20 +736,61 @@ lookup_type proc(context @Context, name []u8, expected []u8) ?usize {
     return result
 }
 @hide:file
-name_component proc(storage @mut Storage, text []u8) []u8 ! Error {
-    result := arraylist.init(u8, storage.allocator)
-    defer arraylist.deinit(&result)
-    # reversible escapes keep distinct paths distinct, including punctuation and underscores.
-    for (text) |byte| {
-        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9')) {
-            try arraylist.append(&result, byte)
-        } else {
-            code []u8 :: if (byte == '/') "_s" else if (byte == '_') "_u" else if (byte == '.') "_d" else if (byte == '-') "_h" else ""
-            if (code.len != 0) try append_parts(&result, &[code])
-            else try append_parts(&result, &["_n", try number(storage, u64(byte)), "z"])
+assign_record_names proc(context @mut Context) void ! Error {
+    storage :: context.storage
+    shared_parts [2][]u8 :: [context.options.project, "/ffi/__c_types"]
+    previous :: try read_manifest(context, try join(storage, shared_parts[..]))
+    defer {
+        if (previous) |saved| {
+            parsed := saved
+            arraylist.deinit(&parsed.nodes)
         }
     }
-    return try retain_list(storage, &result)
+    names := arraylist.init(Entry, storage.allocator)
+    defer arraylist.deinit(&names)
+    if (previous) |saved| {
+        parsed :: saved
+        child := parsed.nodes.items[property(&parsed, 1, "common")].first
+        while (child != 0) {
+            try arraylist.append(&names, Entry{ key = json_text(&parsed, child, "key"), text = json_text(&parsed, child, "text") })
+            child = parsed.nodes.items[child].next
+        }
+    }
+    for (context.declarations.items) |declaration, index| {
+        if (!kind(context.json, declaration.node, "RecordDecl")) continue
+        marker :: try join(storage, &["# C record identity: ", try json_quote(storage, declaration.identity), "\n"])
+        name := declaration.canonical_name
+        # Shared identities keep their assigned name when another package adds a collision.
+        found := false
+        for (names.items) |entry| {
+            if (!prefix(entry.text, marker)) continue
+            name = entry.key
+            found = true
+            break
+        }
+        if (!found) {
+            suffixed := false
+            while (record_name_conflicts(context, names.items, declaration.identity, marker, name)) {
+                if (!suffixed) {
+                    name = try join(storage, &[declaration.record_label, "__", try number(storage, hash(declaration.identity))])
+                    suffixed = true
+                } else name = try join(storage, &[name, "_"])
+            }
+            try arraylist.append(&names, Entry{ key = name, text = marker })
+        }
+        context.declarations.items[index].canonical_name = name
+    }
+}
+@hide:file
+record_name_conflicts proc(context @Context, names []Entry, identity, marker, name []u8) bool {
+    for (names) |entry| {
+        if (mem.eql(entry.key, name) and !prefix(entry.text, marker)) return true
+    }
+    for (context.declarations.items) |other| {
+        if (!kind(context.json, other.node, "RecordDecl") or mem.eql(other.identity, identity)) continue
+        if (mem.eql(other.record_label, name) or mem.eql(other.canonical_name, name)) return true
+    }
+    return false
 }
 @hide:file
 record_label proc(context @mut Context, index, depth usize) []u8 ! Error {
@@ -1340,9 +1367,10 @@ record_public_name proc(context @Context, index usize) []u8 ! Error {
         if (kind(context.json, declaration.node, "TypedefDecl")) {
             if (owned_record(context, declaration.node)) |other| {
                 if (mem.eql(context.declarations.items[other].identity, record.identity)) continue
+            } else {
+                spelling_parts [3][]u8 :: [json_text(context.json, record.node, "tagUsed"), " ", record.name]
+                if (mem.eql(qual_type(context.json, declaration.node), try join(context.storage, spelling_parts[..]))) continue
             }
-            spelling_parts [3][]u8 :: [json_text(context.json, record.node, "tagUsed"), " ", record.name]
-            if (mem.eql(qual_type(context.json, declaration.node), try join(context.storage, spelling_parts[..]))) continue
         }
         tag_parts [2][]u8 :: ["__c_tag_", record.name]
         return try join(context.storage, tag_parts[..])
@@ -1972,7 +2000,7 @@ read_manifest proc(context @Context, directory []u8) ?Json ! Error {
     }
     errdefer arraylist.deinit(&parsed.nodes)
     if (!mem.eql(json_text(&parsed, 1, "generator"), "honey-cimport-2")) {
-        try report(context, path, "incompatible generator manifest; back up edited output, remove only bindings.hon and .honey-cimport from every generated ffi package (including __c_types), then regenerate all packages with this generator; preserve handwritten files")
+        try report(context, path, "incompatible generator manifest")
         return .unsafe_output
     }
     return parsed
