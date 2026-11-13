@@ -339,6 +339,50 @@ same_named_records_from_distinct_origins_remain_nominal test {
     }
 }
 
+colliding_records_use_shortest_available_parent_suffix test {
+    context := try support.init("cimport_parent_suffixes")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    paths [5][;0]u8 :: ["plain/types.h", "right/types.h", "another/right/types.h", "backend-v2/types.h", "backend_v2/types.h"]
+    packages [5][;0]u8 :: ["plain", "right", "nested", "punctuated", "normalized"]
+    for (paths) |path, index| {
+        header :: try support.put(&context, project, path, "typedef struct Point { int value; } Point;\n")
+        generated :: try translate(&context, project, packages[index], header, &["Point"])
+        try support.expect_result(&context, generated, 0, "", "")
+    }
+    # Refer to the generated names as a consumer, rather than inspecting source text.
+    source :: try support.put(&context, project, "source/main.hon",
+        `shared :: import "@ffi/__c_types"
+        `plain :: import "@ffi/plain"
+        `right :: import "@ffi/right"
+        `nested :: import "@ffi/nested"
+        `punctuated :: import "@ffi/punctuated"
+        `normalized :: import "@ffi/normalized"
+        `plain_value proc(value shared.Point) plain.Point { return value }
+        `right_value proc(value shared.Point__right) right.Point { return value }
+        `nested_value proc(value shared.Point__another__right) nested.Point { return value }
+        `punctuated_value proc(value shared.Point__backend_v2) punctuated.Point { return value }
+        `normalized_value proc(value shared.Point__project__backend_v2) normalized.Point { return value }
+        `main proc() i32 {
+        `    return (
+        `        plain_value({ value = 2 }).value + right_value({ value = 3 }).value
+        `        + nested_value({ value = 5 }).value + punctuated_value({ value = 13 }).value
+        `        + normalized_value({ value = 19 }).value
+        `    )
+        `}
+        `
+    )
+    try expect_native_answer(&context, source, &[])
+    for (paths) |path, index| {
+        header :: try support.path(&context, project, path)
+        regenerated :: try translate(&context, project, packages[index], header, &["Point"])
+        try support.expect_result(&context, regenerated, 0, "", "")
+    }
+    try expect_native_answer(&context, source, &[])
+}
+
 opaque_records_complete_in_another_header_without_renaming test {
     context := try support.init("cimport_complete_record")
     defer support.deinit(&context)

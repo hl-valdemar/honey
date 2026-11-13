@@ -769,12 +769,39 @@ assign_record_names proc(context @mut Context) void ! Error {
             break
         }
         if (!found) {
-            suffixed := false
+            origin :: declaration.file
+            end := origin.len
+            while (end != 0 and origin[end - 1] != '/') end -= 1
+            header_start :: end
+            path_suffix []u8 := ""
+            discriminator := u64(0)
             while (record_name_conflicts(context, names.items, declaration.identity, marker, name)) {
-                if (!suffixed) {
-                    name = try join(storage, &[declaration.record_label, "__", try number(storage, hash(declaration.identity))])
-                    suffixed = true
-                } else name = try join(storage, &[name, "_"])
+                while (end != 0 and origin[end - 1] == '/') end -= 1
+                if (end != 0) {
+                    start := end
+                    while (start != 0 and origin[start - 1] != '/') start -= 1
+                    component :: try path_label(storage, origin[start..end])
+                    path_suffix = if (path_suffix.len == 0) component else try join(storage, &[component, "__", path_suffix])
+                    name = try escaped(storage, try join(storage, &[declaration.record_label, "__", path_suffix]))
+                    end = start
+                } else {
+                    if (discriminator == 0) {
+                        stem_end := origin.len
+                        cursor := origin.len
+                        while (cursor > header_start) {
+                            cursor -= 1
+                            if (origin[cursor] == '.') {
+                                stem_end = cursor
+                                break
+                            }
+                        }
+                        path_suffix = try path_label(storage, origin[header_start..stem_end])
+                        name = try escaped(storage, try join(storage, &[declaration.record_label, "__", path_suffix]))
+                    } else {
+                        name = try escaped(storage, try join(storage, &[declaration.record_label, "__", path_suffix, "__", try number(storage, discriminator)]))
+                    }
+                    discriminator += 1
+                }
             }
             try arraylist.append(&names, Entry{ key = name, text = marker })
         }
@@ -791,6 +818,18 @@ record_name_conflicts proc(context @Context, names []Entry, identity, marker, na
         if (mem.eql(other.record_label, name) or mem.eql(other.canonical_name, name)) return true
     }
     return false
+}
+@hide:file
+path_label proc(storage @mut Storage, component []u8) []u8 ! Error {
+    if (identifier(component)) return component
+    bytes :: try keep(storage, try mem.alloc(u8, storage.allocator, component.len))
+    for (component) |byte, index| {
+        bytes[index] = if (
+            (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z')
+            or (byte >= '0' and byte <= '9') or byte == '_'
+        ) byte else '_'
+    }
+    return bytes
 }
 @hide:file
 record_label proc(context @mut Context, index, depth usize) []u8 ! Error {
