@@ -24,8 +24,9 @@ check_self_host proc() void ! support.Error {
     for (usize(1)..usize(3)) |generation| {
         relative :: try support.concat(&context, &["build/honey-stage", try support.number(&context, generation)])
         output :: try support.path(&context, context.root, relative)
+        mode :: if (generation == 1) "--debug" else "--release"
         built :: try support.run(&context,
-            &[context.compiler, "build", source, "-o", output, "-O2"],
+            &[context.compiler, "build", source, "-o", output, mode],
             support.RunOptions{ cwd = project, timeout_seconds = 3600 })
         try support.expect_result(&context, built, 0, "", "")
         context.compiler = output

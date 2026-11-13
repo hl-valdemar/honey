@@ -116,10 +116,10 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
     }
     if (args.values.len == 5 or args.values.len == 6) {
         if (mem.eql(args.values[1], "build") and mem.eql(args.values[3], "-o") and args.values[4].len != 0) {
-            optimization [;0]u8 := "-O0"
+            mode [;0]u8 := "--debug"
             if (args.values.len == 6) {
-                optimization = args.values[5]
-                if (!mem.eql(optimization, "-O0") and !mem.eql(optimization, "-O2")) {
+                mode = args.values[5]
+                if (!mem.eql(mode, "--debug") and !mem.eql(mode, "--release")) {
                     try usage(io.stderr(runtime))
                     return 2
                 }
@@ -129,7 +129,7 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
                 return 2
             }
             defer project.deinit_config(&config)
-            return try build_file(allocator, runtime, args.values[2], args.values[4], optimization, config.arguments.items, config.target)
+            return try build_file(allocator, runtime, args.values[2], args.values[4], mode, config.arguments.items, config.target)
         }
     }
     try usage(io.stderr(runtime))
@@ -140,13 +140,13 @@ command proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! Dr
 build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i32 ! DriverError {
     installing :: mem.eql(args.values[1], "install")
     root [;0]u8 := "."
-    optimization [;0]u8 := if (installing) "-O2" else "-O0"
+    mode [;0]u8 := if (installing) "--release" else "--debug"
     has_root := false
-    has_optimization := false
+    has_mode := false
     for (args.values[2..]) |option| {
-        if (!has_optimization and (mem.eql(option, "-O0") or mem.eql(option, "-O2"))) {
-            optimization = option
-            has_optimization = true
+        if (!has_mode and (mem.eql(option, "--debug") or mem.eql(option, "--release"))) {
+            mode = option
+            has_mode = true
         } else if (!has_root and option.len != 0 and option[0] != '-') {
             root = option
             has_root = true
@@ -160,28 +160,29 @@ build_project proc(allocator mem.Allocator, runtime io.Io, args process.Args) i3
         return 2
     }
     defer project.deinit_config(&config)
-    if (installing) return project.install_command(allocator, runtime, &config, optimization)
+    if (installing) return project.install_command(allocator, runtime, &config, mode)
     project.prepare_output(&config) catch |_| {
         try io.write_all(io.stderr(runtime), "honey build: cannot create output directory for ")
         try io.write_all(io.stderr(runtime), config.output)
         try io.write_all(io.stderr(runtime), "\n")
         return 2
     }
-    return try build_file(allocator, runtime, config.source, config.output, optimization, config.arguments.items, config.target)
+    return try build_file(allocator, runtime, config.source, config.output, mode, config.arguments.items, config.target)
 }
 
 @hide:file
 usage proc(output io.Writer) void ! io.WriteError {
     try io.write_all(output, "usage: honey run <file-or-directory>\n")
     try io.write_all(output, "       honey emit-llvm <file-or-directory>\n")
-    try io.write_all(output, "       honey build <file-or-directory> -o <executable> [-O0|-O2]\n")
-    try io.write_all(output, "       honey build [project-directory] [-O0|-O2]\n")
-    try io.write_all(output, "       honey install [project-directory] [-O0|-O2]\n")
+    try io.write_all(output, "       honey build <file-or-directory> -o <executable> [--debug|--release]\n")
+    try io.write_all(output, "       honey build [project-directory] [--debug|--release]\n")
+    try io.write_all(output, "       honey install [project-directory] [--debug|--release]\n")
     try io.write_all(output, "       honey install --rollback <name>\n")
     try io.write_all(output, "       honey test [file-or-directory]\n")
     try io.write_all(output, "       honey new <project-path>\n")
     try io.write_all(output, "       honey init\n")
     try io.write_all(output, "       honey translate-c <name> --header <header> (--all | --symbol <name>) [--target <target>] [options]\n")
+    try io.write_all(output, "build modes: --debug (unoptimized, build default), --release (optimized, install default)\n")
 }
 
 @hide:file
@@ -211,7 +212,7 @@ build_file proc(
     runtime io.Io,
     path [;0]u8,
     output [;0]u8,
-    optimization [;0]u8,
+    mode [;0]u8,
     native_arguments [][;0]u8,
     target [;0]u8,
 ) i32 ! DriverError {
@@ -222,6 +223,7 @@ build_file proc(
     root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
+    optimization [;0]u8 :: if (mem.eql(mode, "--release")) "-O2" else "-O0"
     return try build_module(allocator, runtime, &session, root, &module, &diagnostic_store, output, optimization, native_arguments, target)
 }
 

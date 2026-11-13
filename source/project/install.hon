@@ -17,8 +17,8 @@ posix_spawn_file_actions_addclose c_func(actions ?*mut c.posix_spawn_file_action
 
 #! builds and validates a private bundle before atomically replacing the managed launcher.
 #! reports failures to stderr and returns 2; a failed candidate never removes an active bundle.
-install_command proc(allocator mem.Allocator, runtime io.Io, config @Config, optimization [;0]u8) i32 {
-    install_project(allocator, runtime, config, optimization) catch |err| {
+install_command proc(allocator mem.Allocator, runtime io.Io, config @Config, mode [;0]u8) i32 {
+    install_project(allocator, runtime, config, mode) catch |err| {
         install_report(runtime, err)
         return 2
     }
@@ -234,9 +234,9 @@ install_activate proc(allocator mem.Allocator, runtime io.Io, paths @InstallPath
 }
 
 @hide:file
-install_build proc(allocator mem.Allocator, compiler, source, output []u8, optimization [;0]u8) void ! InstallError {
-    arguments [6][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", source.ptr[..source.len;0], "-o", output.ptr[..output.len;0], optimization]
-    status :: process.run(allocator, arguments[..]) catch |_| { return .install_build_failed }
+install_build proc(allocator mem.Allocator, compiler, source, output []u8, mode [;0]u8) void ! InstallError {
+    arguments [6][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", source.ptr[..source.len;0], "-o", output.ptr[..output.len;0], mode]
+    status :: process.run(allocator, arguments[..if (mode.len == 0) 5 else 6]) catch |_| { return .install_build_failed }
     if (status != 0) return .install_build_failed
     if (try install_kind(output) != .file) return .install_build_failed
     try install_executable_mode(output)
@@ -253,7 +253,7 @@ install_self_path proc(allocator mem.Allocator) []mut u8 ! InstallError {
 }
 
 @hide:file
-install_project proc(allocator mem.Allocator, runtime io.Io, config @Config, optimization [;0]u8) void ! InstallError {
+install_project proc(allocator mem.Allocator, runtime io.Io, config @Config, mode [;0]u8) void ! InstallError {
     if (mem.eql(config.name, "honey") and !config.install_self_hosted) return .invalid_install
     paths :: try install_paths(allocator, config.name)
     defer install_close_paths(allocator, &paths)
@@ -270,11 +270,11 @@ install_project proc(allocator mem.Allocator, runtime io.Io, config @Config, opt
     try ensure_directory(allocator, bin)
     target :: try join(allocator, bin, config.name)
     defer free_text(allocator, target)
-    if (config.install_self_hosted) try install_self_host(allocator, runtime, config, release, target, optimization)
+    if (config.install_self_hosted) try install_self_host(allocator, runtime, config, release, target, mode)
     else {
         compiler :: try install_self_path(allocator)
         defer free_text(allocator, compiler)
-        try install_build(allocator, compiler, config.source, target, optimization)
+        try install_build(allocator, compiler, config.source, target, mode)
     }
     try install_activate(allocator, runtime, &paths, current, target)
     activated = true
@@ -293,7 +293,7 @@ install_rollback proc(allocator mem.Allocator, runtime io.Io, name []u8) void ! 
 }
 
 @hide:file
-install_self_host proc(allocator mem.Allocator, runtime io.Io, config @Config, release, target []u8, optimization [;0]u8) void ! InstallError {
+install_self_host proc(allocator mem.Allocator, runtime io.Io, config @Config, release, target []u8, mode [;0]u8) void ! InstallError {
     override :: install_environment("BOOTSTRAP")
     bootstrap_input :: if (override.len != 0) try terminated(allocator, override) else try terminated(allocator, config.install_bootstrap)
     defer free_text(allocator, bootstrap_input)
@@ -337,8 +337,9 @@ install_self_host proc(allocator mem.Allocator, runtime io.Io, config @Config, r
     stage1 :: try join(allocator, release, "bin/honey-stage1")
     defer free_text(allocator, stage1)
     io.print("Building two compiler generations in {s}\n", io.stdout(runtime), {release}) catch |_| {}
-    try install_build(allocator, bootstrap, source, stage1, optimization)
-    try install_build(allocator, stage1, source, target, optimization)
+    # omit the mode for stage 1 so both older and current bootstraps use their debug default.
+    try install_build(allocator, bootstrap, source, stage1, "")
+    try install_build(allocator, stage1, source, target, mode)
     tests [3][;0]u8 :: [target.ptr[..target.len;0], "test", source.ptr[..source.len;0]]
     test_status :: process.run(allocator, tests[..]) catch |_| { return .install_check_failed }
     if (test_status != 0) return .install_check_failed
@@ -348,11 +349,11 @@ install_self_host proc(allocator mem.Allocator, runtime io.Io, config @Config, r
     defer free_text(allocator, build_config)
     try install_remove_tree(allocator, build_config)
     try install_remove_tree(allocator, stage1)
-    try install_smoke(allocator, target, optimization)
+    try install_smoke(allocator, target, mode)
 }
 
 @hide:file
-install_smoke proc(allocator mem.Allocator, compiler []u8, optimization [;0]u8) void ! InstallError {
+install_smoke proc(allocator mem.Allocator, compiler []u8, mode [;0]u8) void ! InstallError {
     # /tmp keeps the smoke project outside the checkout, regardless of PREFIX.
     temporary :: try install_temp_directory(allocator, "/tmp", "honey-install-smoke.XXXXXX")
     defer free_text(allocator, temporary)
@@ -362,7 +363,7 @@ install_smoke proc(allocator mem.Allocator, compiler []u8, optimization [;0]u8) 
     new_arguments [3][;0]u8 :: [compiler.ptr[..compiler.len;0], "new", smoke.ptr[..smoke.len;0]]
     new_status :: process.run(allocator, new_arguments[..]) catch |_| { return .install_check_failed }
     if (new_status != 0) return .install_check_failed
-    build_arguments [4][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", smoke.ptr[..smoke.len;0], optimization]
+    build_arguments [4][;0]u8 :: [compiler.ptr[..compiler.len;0], "build", smoke.ptr[..smoke.len;0], mode]
     build_status :: process.run(allocator, build_arguments[..]) catch |_| { return .install_check_failed }
     if (build_status != 0) return .install_check_failed
     executable :: try join(allocator, smoke, "build/app")

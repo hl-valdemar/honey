@@ -56,7 +56,7 @@ create a standalone sibling project, with editable vendored libraries:
 
 ```sh
 ./build/honey new ../my-game
-./build/honey build ../my-game -O2
+./build/honey build ../my-game --release
 ```
 
 `honey init` initializes the current directory instead. both commands place `std/` and core `ffi/c/` beside `source/`, preserving existing files and existing library trees. when creating `build.hon`, they record the host's current macOS product version as an explicit `macos_deployment_target`; existing configurations are never rewritten. builds use that recorded value without querying the host, and users may lower it for older Macs. `@std` and `@ffi/c` resolve from the project. `.honey-origin` records the originating distribution, not an integrity lock; local edits are allowed, and builds never refresh vendored code. preserve compiler-required contracts such as `process.Init` and metadata declarations when modifying those libraries.
@@ -86,14 +86,14 @@ config :: $settings("15.0")
 configuration runs in the bounded interpreter, not as a native program; foreign calls cannot execute commands, download dependencies or install files. the supported native target remains Darwin arm64; deployment choices are explicit values, not build-time host detection. `links` can name existing generated C/object/archive inputs, but generation tasks and dependency tracking are deferred.
 
 ```sh
-honey build -O2
+honey build --release
 honey test
-PREFIX="$HOME/.local" honey install -O2
+PREFIX="$HOME/.local" honey install --release
 # if the active Honey compiler is broken, use the retained compiler directly:
 PREFIX="$HOME/.local" ~/.local/opt/honey/previous install --rollback app
 ```
 
-ordinary installation builds directly into a fresh `$PREFIX/opt/<name>/<version>-install.<N>/bin/<name>` and atomically switches `$PREFIX/bin/<name>`. install defaults to `-O2`; build defaults to `-O0`. optional `installation :: build.InstallConfig{ version = "0.3.0-dev" }` supplies the declared version; its default is `"0.0.0-dev"`. the installation number advances across existing numbered bundles under the per-name lock, independently of release versions. builds never bump versions or rewrite configuration.
+ordinary installation builds directly into a fresh `$PREFIX/opt/<name>/<version>-install.<N>/bin/<name>` and atomically switches `$PREFIX/bin/<name>`. install defaults to `--release`; build defaults to `--debug`. optional `installation :: build.InstallConfig{ version = "0.3.0-dev" }` supplies the declared version; its default is `"0.0.0-dev"`. the installation number advances across existing numbered bundles under the per-name lock, independently of release versions. builds never bump versions or rewrite configuration.
 
 older releases remain available; failed builds leave activation and rollback pointers unchanged. ordinary installation never launches the application, overwrites unrelated executables or edits shell configuration. names and version labels use ASCII letters, digits, `_`, `.`, `+` and `-`, cannot begin with `-`, and cannot be `.` or `..`. the name `honey` requires the validated self-hosted recipe. self-hosted sources must be inside the project and separate from bundle payload directories.
 
@@ -153,11 +153,11 @@ this prints `42` from a parameterless runtime entry. nonvoid results from this e
 compile the same supported language subset to a standalone Apple Silicon macOS executable:
 
 ```sh
-./build/honey build programs/factorial.hon -o build/factorial -O2
+./build/honey build programs/factorial.hon -o build/factorial --release
 ./build/factorial
 ```
 
-this prints `120`. `build` requires `-o <executable>` and accepts `-O0` (the default) or `-O2` as its final option. Honey emits textual LLVM IR and invokes `clang` from `PATH` without a shell, targeting `arm64-apple-macosx11.0.0` by default or the project's configured macOS minimum. Apple Clang 21 is the verified toolchain; LLVM libraries, LLVM bindings and a C emission stage are not required. the temporary IR file is private and removed after compilation, including on failure.
+this prints `120`. explicit-source `build` requires `-o <executable>` and accepts `--debug` (the default) or `--release` as its final option. project `build` and `install` accept either mode before or after the optional project directory. `--debug` disables optimization (Clang `-O0`); `--release` optimizes with Clang `-O2`. neither mode changes runtime safety checks or emits source-level debugger metadata. legacy Honey `-O<N>` options, unknown modes and repeated/conflicting mode flags are rejected. the self-hosted installer builds stage 1 with the bootstrap's default debug mode for compatibility with older compilers; stage 2 uses the selected mode. Honey emits textual LLVM IR and invokes `clang` from `PATH` without a shell, targeting `arm64-apple-macosx11.0.0` by default or the project's configured macOS minimum. Apple Clang 21 is the verified toolchain; LLVM libraries, LLVM bindings and a C emission stage are not required. the temporary IR file is private and removed after compilation, including on failure.
 
 inspect or compile the LLVM text separately:
 
@@ -190,7 +190,7 @@ assertions use `@std/testing`: `try testing.expect(condition)`, `try testing.exp
 
 Honey compiles one private native runner with Clang at `-O0`, then runs each test in a separate child process. assertion errors and runtime traps fail that test without suppressing later tests. each test starts with fresh globals; scoped cleanup runs on ordinary success/error returns, not process-ending traps. results and the passed/failed summary go to stderr. statuses are `0` for success (including no tests), `1` for source diagnostics or failed tests, and `2` for usage/infrastructure failure. temporary runner and LLVM files are removed on success and failure.
 
-`bro test` remains the bootstrap compatibility check. `tests/framework` checks Honey's discovery, assertion locations, error propagation, cleanup, trap isolation and production exclusion. `tests/native` checks executable-level interpreter comparisons at both `-O0` and `-O2`, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling. the acceptance suites use shared Honey fixture/process helpers in `tests/support`; Python is not required.
+`bro test` remains the bootstrap compatibility check. `tests/framework` checks Honey's discovery, assertion locations, error propagation, cleanup, trap isolation and production exclusion. `tests/native` checks executable-level interpreter comparisons in both `--debug` and `--release` modes, including traps, source diagnostics, array ownership, calling conventions, and CLI error handling. the acceptance suites use shared Honey fixture/process helpers in `tests/support`; Python is not required.
 
 the scalar-function package acceptance gate is verified by the native suite: root and dependency sibling files, transitive/shared imports, same-spelled declarations with distinct signatures, file-local aliases and conflicts, missing packages/members, argument errors and dependency-file diagnostics. file-command checks cover `run`, `emit-llvm` and `build`, loading dependency siblings while excluding root siblings.
 
@@ -200,7 +200,7 @@ Honey-generated executables accept either a no-argument `main` or `main proc(ini
 
 native startup supplies `init.io` through the unchanged `std/io.system()` backend and `init.args` from `argc`/`argv`. startup scans each argument once into a heap-allocated array of borrowed zero-terminated slices (`process.Args.values: [][;0]u8`), without copying strings. descriptors and borrowed strings remain valid until `main` returns; startup frees the descriptors on successful and fallible returns. allocation failure exits with status `2`. `init.args.values.len` includes the executable name. callers can supply their own `process.Args { values = slices[..] }` for testing.
 
-the native-driver acceptance check runs generated executables at `-O0`/`-O2` with empty/Unicode/metacharacter arguments, binary stdin and separate stdout/stderr. unchanged filesystem and process libraries resolve symlinks, enumerate directories, read files, write private temporary LLVM files and spawn Clang through `PATH` without a shell. child exit/signal statuses and missing executables are checked; temporary files are removed on success and spawn failure. `tests/self_host` verifies the production compiler's two-generation rebuild separately.
+the native-driver acceptance check runs generated executables in both `--debug` and `--release` modes with empty/Unicode/metacharacter arguments, binary stdin and separate stdout/stderr. unchanged filesystem and process libraries resolve symlinks, enumerate directories, read files, write private temporary LLVM files and spawn Clang through `PATH` without a shell. child exit/signal statuses and missing executables are checked; temporary files are removed on success and spawn failure. `tests/self_host` verifies the production compiler's two-generation rebuild separately.
 
 `process.run(allocator, arguments)` starts a child synchronously using Darwin `posix_spawnp`, searches `PATH`, and inherits the environment and standard streams. argument strings are borrowed zero-terminated slices; no shell parsing occurs. it releases temporary argument descriptors on every return, retries interrupted waits, and returns the exit code or `128 + signal` for signal termination.
 

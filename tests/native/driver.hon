@@ -121,8 +121,8 @@ check_native_driver proc(context @mut support.Context) void ! support.Error {
     input [8971]mut u8 := undefined
     for (0..usize(8960)) |index| input[index] = u8(rem!(index, 256))
     memcopy!(input[8960..], "\nstdin end\n")
-    for ["-O0", "-O2"] |optimization| {
-        built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, optimization], support.RunOptions{})
+    for ["--debug", "--release"] |mode, mode_index| {
+        built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, mode], support.RunOptions{})
         try support.expect_result(context, built, 0, "", "")
         defer support.remove(context, context.executable) catch |_| {}
         arguments [107]mut [;0]u8 := undefined
@@ -132,7 +132,7 @@ check_native_driver proc(context @mut support.Context) void ! support.Error {
         arguments[3] = value
         arguments[4] = template
         arguments[5] = child
-        arguments[6] = optimization
+        arguments[6] = if (mode_index == 0) "-O0" else "-O2"
         arguments[7] = ""
         arguments[8] = "héllø 世界"
         arguments[9] = " \t\n"
@@ -175,8 +175,8 @@ check_native_driver proc(context @mut support.Context) void ! support.Error {
         try support.write(context, source, try support.concat(context, &[
             "import \"@std/process\"\nError :: enum { failed }\nmain proc(_ process.Init) ", entry.result, " { ", entry.body, " }\n",
         ]))
-        for ["-O0", "-O2"] |optimization| {
-            built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, optimization], support.RunOptions{})
+        for ["--debug", "--release"] |mode| {
+            built :: try support.run(context, &[context.compiler, "build", app, "-o", context.executable, mode], support.RunOptions{})
             try support.expect_result(context, built, 0, "", "")
             defer support.remove(context, context.executable) catch |_| {}
             native :: try support.run(context, &[context.executable], support.RunOptions{})
@@ -236,8 +236,8 @@ check_variadic_libc proc(context @mut support.Context) void ! support.Error {
     try support.expect(context, interpreted.status == 1 and interpreted.stdout.len == 0, "variadic libc is native-only")
     try support.expect(context, support.contains(interpreted.stderr, "foreign function calls are unsupported by the interpreter"), "variadic libc interpreter diagnostic")
     try support.expect(context, support.line_count(interpreted.stderr) == 1, "variadic libc emits one diagnostic")
-    for ["-O0", "-O2"] |optimization| {
-        built :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, optimization], support.RunOptions{})
+    for ["--debug", "--release"] |mode| {
+        built :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, mode], support.RunOptions{})
         try support.expect_result(context, built, 0, "", "")
         defer support.remove(context, context.executable) catch |_| {}
         native :: try support.run(context, &[context.executable], support.RunOptions{})
@@ -272,6 +272,30 @@ check_cli_errors proc(context @mut support.Context, full bool) void ! support.Er
     failed :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable], support.RunOptions{ path = context.temporary })
     try support.expect(context, failed.status == 2 and support.contains(failed.stderr, "cannot start native compiler"), "CLI reports missing native compiler")
     try support.expect(context, !try support.exists(context, context.executable), "missing native compiler leaves no executable")
-    invalid :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, "-O3"], support.RunOptions{})
-    try support.expect(context, invalid.status == 2 and support.contains(invalid.stderr, "usage:"), "CLI rejects invalid optimization flag")
+    for ["-O0", "-O2", "-O3", "--unknown"] |flag| {
+        invalid_file :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, flag], {})
+        try support.expect(context, invalid_file.status == 2 and support.contains(invalid_file.stderr, "usage:"), "file build rejects legacy and unknown flags")
+        for ["build", "install"] |command| {
+            invalid_project :: try support.run(context, &[context.compiler, command, context.temporary, flag], {})
+            try support.expect(context, invalid_project.status == 2 and support.contains(invalid_project.stderr, "usage:"), "project commands reject legacy and unknown flags after the root")
+            invalid_before_root :: try support.run(context, &[context.compiler, command, flag, context.temporary], {})
+            try support.expect(context, invalid_before_root.status == 2 and support.contains(invalid_before_root.stderr, "usage:"), "project commands reject legacy and unknown flags before the root")
+            invalid_implicit_root :: try support.run(context, &[context.compiler, command, flag], { cwd = context.temporary })
+            try support.expect(context, invalid_implicit_root.status == 2 and support.contains(invalid_implicit_root.stderr, "usage:"), "project commands reject legacy and unknown flags without an explicit root")
+        }
+    }
+    for ["--debug", "--release"] |first| {
+        misplaced :: try support.run(context, &[context.compiler, "build", source, first, "-o", context.executable], {})
+        try support.expect(context, misplaced.status == 2 and support.contains(misplaced.stderr, "usage:"), "file build requires its mode after the output")
+        for ["--debug", "--release"] |second| {
+            duplicate_file :: try support.run(context, &[context.compiler, "build", source, "-o", context.executable, first, second], {})
+            try support.expect(context, duplicate_file.status == 2 and support.contains(duplicate_file.stderr, "usage:"), "file build rejects duplicate and conflicting modes")
+            for ["build", "install"] |command| {
+                duplicate_project :: try support.run(context, &[context.compiler, command, first, context.temporary, second], {})
+                try support.expect(context, duplicate_project.status == 2 and support.contains(duplicate_project.stderr, "usage:"), "project commands reject duplicate and conflicting modes around the root")
+                duplicate_implicit_root :: try support.run(context, &[context.compiler, command, first, second], { cwd = context.temporary })
+                try support.expect(context, duplicate_implicit_root.status == 2 and support.contains(duplicate_implicit_root.stderr, "usage:"), "project commands reject duplicate and conflicting modes without an explicit root")
+            }
+        }
+    }
 }

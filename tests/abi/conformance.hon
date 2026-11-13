@@ -49,9 +49,9 @@ check_external_symbols proc(context @mut support.Context) void ! support.Error {
         `    return 42
         `}
     )
-    for ["-O0", "-O2"] |optimization| {
+    for ["--debug", "--release"] |mode| {
         built :: try support.run(context, &[context.compiler, "build", source,
-            "-o", context.executable, optimization], support.RunOptions{})
+            "-o", context.executable, mode], support.RunOptions{})
         try support.expect_result(context, built, 0, "", "")
         result :: try support.run(context, &[context.executable], support.RunOptions{})
         try support.expect_result(context, result, 0, "42\n", "")
