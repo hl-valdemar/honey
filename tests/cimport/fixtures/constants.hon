@@ -1,0 +1,28 @@
+binding :: import "@ffi/constants"
+
+main proc() i32 {
+    statuses [7]u8 :: [
+        binding.PW_SUCCESS,
+        binding.PW_ERR_NOT_MAIN_THREAD,
+        binding.PW_ERR_APPKIT_EXCEPTION,
+        binding.PW_ERR_WINDOW_CREATION_ARGS,
+        binding.PW_ERR_WINDOW_CREATION_FAILURE,
+        binding.PW_ERR_WINDOW_HANDLE_NULL,
+        binding.PW_ERR_NO_GRAPHICAL_SESSION,
+    ]
+    for (statuses) |status, index| {
+        if (usize(status) != index) return -1
+    }
+    maximum u8 :: binding.PW_MAX
+    width u16 :: binding.WIDTH
+    minimum i8 :: binding.MINIMUM
+    wide u64 :: binding.MAXIMUM
+    enabled bool :: binding.ENABLED
+    fraction f32 :: binding.FRACTION
+    if (maximum != 255 or width != 65535 or minimum != -128 or wide != maxval!(u64)) return -2
+    if (!enabled or fraction != 0.125 or binding.DEFINED != 42) return -3
+    if (sizeof!(binding.pw_status) != 1) return -4
+    raw binding.Mode :: binding.Mode(37)
+    if (raw != 37 or binding.CURRENT_MODE + 1 != 7) return -5
+    return 42
+}

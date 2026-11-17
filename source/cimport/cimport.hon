@@ -918,13 +918,13 @@ strip_type_qualifiers proc(text []u8) []u8 {
     return strip_qualifiers(text)
 }
 @hide:file
-contains_const proc(text []u8) bool {
+contains_qualifier proc(text, qualifier []u8) bool {
     cursor := usize(0)
     while (cursor < text.len) {
         start :: cursor
         while (cursor < text.len and ((text[cursor] >= 'a' and text[cursor] <= 'z') or (text[cursor] >= 'A' and text[cursor] <= 'Z') or (text[cursor] >= '0' and text[cursor] <= '9') or text[cursor] == '_')) cursor += 1
         word :: text[start..cursor]
-        if (mem.eql(word, "const") or mem.eql(word, "__const")) return true
+        if (mem.eql(word, qualifier) or (mem.eql(qualifier, "const") and mem.eql(word, "__const"))) return true
         if (start == cursor) cursor += 1
     }
     return false
@@ -936,13 +936,13 @@ top_const proc(context @Context, spelling []u8, depth usize) bool ! Error {
     if (find(text, "(*")) |opening| {
         closing :: find(text[opening + 2..], ")")
         if (closing == null) return .unsupported_declaration
-        return contains_const(text[opening + 2..opening + 2 + closing?])
+        return contains_qualifier(text[opening + 2..opening + 2 + closing?], "const")
     }
     if (find(text, "(") != null) return false
     last_pointer ?usize := null
     for (text) |byte, index| { if (byte == '*') last_pointer = index }
-    if (last_pointer) |pointer| return contains_const(text[pointer + 1..])
-    if (contains_const(text)) return true
+    if (last_pointer) |pointer| return contains_qualifier(text[pointer + 1..], "const")
+    if (contains_qualifier(text, "const")) return true
     name :: strip_qualifiers(text)
     if (lookup_type(context, name, "TypedefDecl")) |index| {
         return try top_const(context, qual_type(context.json, context.declarations.items[index].node), depth + 1)
@@ -1394,7 +1394,33 @@ emit_declaration proc(context @mut Context, index usize) void ! Error {
         try entry_put(context, &context.bindings, name, try join(context.storage, function_parts[..]))
         return
     }
-    try report(context, name, "C globals are unsupported; select a callable external function or a constant instead")
+    if (kind(json, node, "VarDecl")) {
+        definition := node
+        if (json_text(json, definition, "init").len == 0) {
+            definition = 0
+            for (context.declarations.items) |candidate| {
+                if (
+                    kind(json, candidate.node, "VarDecl") and mem.eql(candidate.name, name)
+                    and json_text(json, candidate.node, "init").len != 0
+                ) {
+                    definition = candidate.node
+                    break
+                }
+            }
+        }
+        if (definition != 0) {
+            spelling :: qual_type(json, definition)
+            canonical := json_text(json, property(json, definition, "type"), "desugaredQualType")
+            if (canonical.len == 0) canonical = spelling
+            if (try top_const(context, canonical, 0) and !contains_qualifier(canonical, "volatile")) {
+                try select_constant(context, name, spelling)
+                return
+            }
+        }
+        try report(context, name, "only initialized, non-volatile const scalar objects can be imported as values; mutable and external-only C globals are unsupported")
+        return .unsupported_declaration
+    }
+    try report(context, name, "unsupported C declaration")
     return .unsupported_declaration
 }
 
@@ -1640,16 +1666,15 @@ contextual_macro proc(text []u8) bool {
     return false
 }
 @hide:file
-capture_macro proc(context @Context, name []u8, arguments [][;0]u8) []u8 ! Error {
+capture_constant proc(context @Context, name []u8, arguments [][;0]u8) []u8 ! Error {
     return capture(context.storage, context.runtime, arguments) catch |err| {
         if (!context.options.all or err != .clang_failed) return err
-        try report(context, name, "macro is not a supported constant C expression; see Clang diagnostic above")
+        try report(context, name, "not a supported constant C expression; see Clang diagnostic above")
         return .unsupported_declaration
     }
 }
 @hide:file
 select_macro proc(context @mut Context, name, definition []u8) void ! Error {
-    storage :: context.storage
     if (prefix(definition, "(")) {
         try report(context, name, "function-like macros are not declarations and cannot be bound; no C bridge is generated")
         return .unsupported_declaration
@@ -1662,9 +1687,14 @@ select_macro proc(context @mut Context, name, definition []u8) void ! Error {
         try report(context, name, "context-dependent macros are not stable binding constants")
         return .unsupported_declaration
     }
+    try select_constant(context, name, "")
+}
+@hide:file
+select_constant proc(context @mut Context, name, declared_type []u8) void ! Error {
+    storage :: context.storage
     probe :: try temporary(storage)
     defer remove_temporary(probe)
-    probe_parts [6][]u8 :: [context.unit_source, "\n#line 1 \"honey-translate-c-selected-macro\"\n__attribute__((used)) const __typeof__((", name, ")) __honey_constant = (", name, ");\n"]
+    probe_parts [6][]u8 :: [context.unit_source, "\n#line 1 \"honey-translate-c-selected-constant\"\n__attribute__((used)) const __typeof__((", name, ")) __honey_constant = (", name, ");\n"]
     text :: try join(storage, probe_parts[..])
     try write_text(context.runtime, probe.path, text)
     args := try clang_arguments(storage, context.options, probe.path)
@@ -1673,7 +1703,7 @@ select_macro proc(context @mut Context, name, definition []u8) void ! Error {
     try arraylist.append(&args, "-fsyntax-only")
     try arraylist.append(&args, "-Xclang")
     try arraylist.append(&args, "-ast-dump=json")
-    parsed := try json_parse(storage, try capture_macro(context, name, args.items))
+    parsed := try json_parse(storage, try capture_constant(context, name, args.items))
     defer arraylist.deinit(&parsed.nodes)
     node := inner(&parsed, 1)
     spelling []u8 := ""
@@ -1686,8 +1716,15 @@ select_macro proc(context @mut Context, name, definition []u8) void ! Error {
         node = parsed.nodes.items[node].next
     }
     if (spelling.len == 0 or prefix(spelling, "typeof")) {
-        try report(context, name, "Clang did not expose a constant macro type")
+        try report(context, name, "Clang did not expose a constant type")
         return .unsupported_declaration
+    }
+    if (declared_type.len != 0) {
+        rendered :: try render_type(context, spelling, 0)
+        if (prefix(rendered, "?*") or prefix(rendered, "[") or constant_record(context, spelling, 0) != null) {
+            try report(context, name, "only scalar const objects are supported; C object storage and addresses are not imported")
+            return .unsupported_declaration
+        }
     }
     # Asking Clang to emit an IR constant performs C's typed constant evaluation,
     # including integer promotions and aggregate compound literals. This is never
@@ -1695,7 +1732,7 @@ select_macro proc(context @mut Context, name, definition []u8) void ! Error {
     args.items = args.items[..args.items.len - 3]
     llvm_arguments [4][;0]u8 :: ["-S", "-emit-llvm", "-o", "-"]
     for (llvm_arguments) |argument| try arraylist.append(&args, argument)
-    llvm :: try capture_macro(context, name, args.items)
+    llvm :: try capture_constant(context, name, args.items)
     found_global :: find(llvm, "@__honey_constant =")
     if (found_global == null) return .invalid_clang_output
     global_start :: found_global?
@@ -1707,10 +1744,11 @@ select_macro proc(context @mut Context, name, definition []u8) void ! Error {
     initializer :: trim(line[initializer_start + 10..])
     cursor := usize(0)
     literal :: llvm_constant(context, spelling, initializer, &cursor, 0) catch |err| {
-        try report(context, name, "unsupported constant macro initializer (addresses, unions, non-finite floats and nonconstant expressions are not guessed)")
+        try report(context, name, "unsupported constant initializer (addresses, unions, non-finite floats and nonconstant expressions are not guessed)")
         return err
     }
-    rendered_type :: try render_type(context, spelling, 0)
+    public_type :: if (declared_type.len == 0) spelling else declared_type
+    rendered_type :: try render_type(context, public_type, 0)
     string_constant :: prefix(literal, "\"")
     separator []u8 :: if (string_constant) "" else " "
     annotation []u8 :: if (string_constant) "" else rendered_type

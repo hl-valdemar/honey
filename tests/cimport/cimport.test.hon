@@ -162,6 +162,37 @@ pointer_qualifiers_and_scientific_constants test {
     try support.expect(&context, rejected.status == 1, "immutable string was accepted as a mutable C pointer")
 }
 
+const_objects_preserve_values_widths_and_integer_enum_semantics test {
+    context := try support.init("cimport_constants")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/constants.h")
+    selections [17][;0]u8 :: [
+        "PW_SUCCESS", "PW_ERR_NOT_MAIN_THREAD", "PW_ERR_APPKIT_EXCEPTION",
+        "PW_ERR_WINDOW_CREATION_ARGS", "PW_ERR_WINDOW_CREATION_FAILURE",
+        "PW_ERR_WINDOW_HANDLE_NULL", "PW_ERR_NO_GRAPHICAL_SESSION", "PW_MAX",
+        "WIDTH", "MINIMUM", "MAXIMUM", "ENABLED", "FRACTION", "DEFINED",
+        "Mode", "CURRENT_MODE", "pw_status",
+    ]
+    selected :: try translate(&context, project, "constants", header, selections[..])
+    try support.expect_result(&context, selected, 0, "", "")
+    fixture :: try support.path(&context, context.root, "tests/cimport/fixtures/constants.hon")
+    source :: try support.put(&context, project, "source/main.hon", try support.read(&context, fixture))
+    try expect_native_answer(&context, source, &[])
+    generated :: try support.run(&context, &[context.compiler, "translate-c", "constants", "--project", project, "--target", "arm64-apple-macos11", "--header", header, "--all"], {})
+    try support.expect(&context, generated.status == 0, generated.stderr)
+    try expect_native_answer(&context, source, &[])
+    unsupported [6][;0]u8 :: ["MUTABLE", "EXTERNAL_ONLY", "DEVICE_STATUS", "DEVICE_ALIAS", "MUTABLE_POINTER", "ADDRESS"]
+    for (unsupported) |selection| {
+        try support.expect(&context, support.contains(generated.stderr, selection), "unsupported global was silently skipped")
+        rejected :: try translate(&context, project, "rejected", header, &[selection])
+        try support.expect(&context, rejected.status == 1 and support.contains(rejected.stderr, selection), "unsupported global was imported as a constant")
+        try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi/rejected/bindings.hon")), "unsupported global installed partial bindings")
+    }
+}
+
 retargeting_regenerates_types_without_mixing_package_targets test {
     context := try support.init("cimport_retarget")
     defer support.deinit(&context)
