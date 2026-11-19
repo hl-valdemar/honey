@@ -6,8 +6,8 @@ struct_type_empty_auto_and_nested_c_layout test {
     try support.check_text(
         &context,
         "struct_type_empty_auto_and_nested_c_layout",
-        "Layout :: enum { auto, c }\nTag :: enum(u8) { ready = 7 }\nEmpty :: struct_type!(.auto, [], [], [])\nInner :: struct_type!(.c, [\"value\"], [i16], [null])\nPacket :: struct_type!(\n    Layout.c,\n    {\"tag\", \"items\", \"pointer\", \"maybe\"},\n    {Tag, [2]Inner, @i16, ?@i16},\n    {.ready, null, null, null},\n)\nidentity proc(value Empty) Empty { return value }\nmain proc() i16 {\n    _ Empty :: identity({})\n    if (sizeof!(Packet) != 24 or alignof!(Packet) != 8) return -3\n    extra i16 :: 2\n    packet Packet :: {\n        items = [{ value = 19 }, { value = 21 }],\n        pointer = &extra,\n        maybe = null,\n    }\n    if (packet.tag != .ready) return -1\n    if packet.maybe |_| return -2\n    return packet.items[0].value + packet.items[1].value + packet.pointer^\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Layout :: enum { auto, c }\nTag :: enum(u8) { ready = 7 }\nEmpty :: struct_type!(.auto, [], [], [])\nInner :: struct_type!(.c, [\"value\"], [i16], [null])\nPacket :: struct_type!(\n    Layout.c,\n    {\"tag\", \"items\", \"pointer\", \"maybe\"},\n    {Tag, [2]Inner, @i16, ?@i16},\n    {.ready, null, null, null},\n)\nidentity proc(value Empty) Empty { return value }\nevaluate proc() i16 {\n    _ Empty :: identity({})\n    if (sizeof!(Packet) != 24 or alignof!(Packet) != 8) return -3\n    extra i16 :: 2\n    packet Packet :: {\n        items = [{ value = 19 }, { value = 21 }],\n        pointer = &extra,\n        maybe = null,\n    }\n    if (packet.tag != .ready) return -1\n    if packet.maybe |_| return -2\n    return packet.items[0].value + packet.items[1].value + packet.pointer^\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -17,7 +17,7 @@ struct_type_required_optional_is_not_a_null_default test {
     try support.check_text(
         &context,
         "struct_type_required_optional_is_not_a_null_default",
-        "Record :: struct_type!(.auto, [\"required\"], [?i16], [null])\nmain proc() i16 {\n    value Record :: {}\n    return 42\n}\n",
+        "Record :: struct_type!(.auto, [\"required\"], [?i16], [null])\nevaluate proc() i16 {\n    value Record :: {}\n    return 42\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "missing a required field" },
     )
 }
@@ -28,7 +28,7 @@ struct_type_default_preserves_narrow_field_arithmetic test {
     try support.check_text(
         &context,
         "struct_type_default_preserves_narrow_field_arithmetic",
-        "Record :: struct_type!(.auto, [\"value\"], [i8], [127])\nmain proc() i16 {\n    value Record := {}\n    value.value = value.value + 1\n    return i16(value.value)\n}\n",
+        "Record :: struct_type!(.auto, [\"value\"], [i8], [127])\nevaluate proc() i16 {\n    value Record := {}\n    value.value = value.value + 1\n    return i16(value.value)\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
     )
 }
@@ -39,7 +39,7 @@ struct_type_runtime_dependencies_are_not_captured test {
     try support.check_text(
         &context,
         "struct_type_runtime_dependencies_are_not_captured",
-        "read proc(value i16) i16 {\n    Record :: struct_type!(.auto, [\"value\"], [i16], [value])\n    result Record :: {}\n    return result.value\n}\nmain proc() i16 { return read(42) }\n",
+        "read proc(value i16) i16 {\n    Record :: struct_type!(.auto, [\"value\"], [i16], [value])\n    result Record :: {}\n    return result.value\n}\nevaluate proc() i16 { return read(42) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -50,7 +50,7 @@ struct_type_incomplete_array_snapshot_stays_incomplete test {
     try support.check_text(
         &context,
         "struct_type_incomplete_array_snapshot_stays_incomplete",
-        "Generated proc() type {\n    types [2]mut type := undefined\n    types[0] = i16\n    saved :: types\n    types[1] = i16\n    return struct_type!(.auto, [\"first\", \"second\"], saved, [null, null])\n}\nmain proc() i16 {\n    value Generated() :: { first = 19, second = 23 }\n    return value.first + value.second\n}\n",
+        "Generated proc() type {\n    types [2]mut type := undefined\n    types[0] = i16\n    saved :: types\n    types[1] = i16\n    return struct_type!(.auto, [\"first\", \"second\"], saved, [null, null])\n}\nevaluate proc() i16 {\n    value Generated() :: { first = 19, second = 23 }\n    return value.first + value.second\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "initialization" },
     )
 }
@@ -61,8 +61,8 @@ tagged_metadata_active_payload_updates_own_saved_copies test {
     try support.check_text(
         &context,
         "tagged_metadata_active_payload_updates_own_saved_copies",
-        "Detail :: struct { child type, rows [2]mut struct { child type, count usize } }\nChoice :: union(enum) { child type, detail Detail, empty void }\nStorage proc() type {\n    direct Choice := .child{bool}\n    direct_saved :: direct\n    direct.child = i16\n    if (direct_saved.child != bool or direct.child != i16) return bool\n    value Choice := .detail{\n        child = i8,\n        rows = [{ child = bool, count = 1 }, { child = i16, count = 2 }],\n    }\n    saved :: value\n    value.detail.child = bool\n    value.detail.rows[1].child = u8\n    value.detail.rows[1].count = 3\n    if (saved.detail.child != i8 or saved.detail.rows[1].child != i16) return bool\n    if (value.detail.rows[1].child != u8 or value.detail.rows[1].count != 3) return bool\n    value = .child{i8}\n    if (value.child != i8) return bool\n    value = .empty\n    return match value {\n        .empty: [saved.detail.rows[1].count]saved.detail.rows[1].child,\n        .child, .detail: bool,\n    }\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Detail :: struct { child type, rows [2]mut struct { child type, count usize } }\nChoice :: union(enum) { child type, detail Detail, empty void }\nStorage proc() type {\n    direct Choice := .child{bool}\n    direct_saved :: direct\n    direct.child = i16\n    if (direct_saved.child != bool or direct.child != i16) return bool\n    value Choice := .detail{\n        child = i8,\n        rows = [{ child = bool, count = 1 }, { child = i16, count = 2 }],\n    }\n    saved :: value\n    value.detail.child = bool\n    value.detail.rows[1].child = u8\n    value.detail.rows[1].count = 3\n    if (saved.detail.child != i8 or saved.detail.rows[1].child != i16) return bool\n    if (value.detail.rows[1].child != u8 or value.detail.rows[1].count != 3) return bool\n    value = .child{i8}\n    if (value.child != i8) return bool\n    value = .empty\n    return match value {\n        .empty: [saved.detail.rows[1].count]saved.detail.rows[1].child,\n        .child, .detail: bool,\n    }\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -72,8 +72,8 @@ tagged_metadata_undefined_storage_whole_replacement test {
     try support.check_text(
         &context,
         "tagged_metadata_undefined_storage_whole_replacement",
-        "Choice :: union(enum) { child type, empty void }\nContainer :: struct { choice Choice }\nselected proc() type {\n    local Choice := undefined\n    record Container := undefined\n    values [2]mut Choice := undefined\n    local = .child{bool}\n    record.choice = .child{i16}\n    values[0] = local\n    values[1] = record.choice\n    saved :: values\n    local = .empty\n    record.choice = .empty\n    values[1] = .child{u8}\n    if (saved[0].child != bool or values[1].child != u8) return bool\n    return saved[1].child\n}\nmain proc() selected() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Choice :: union(enum) { child type, empty void }\nContainer :: struct { choice Choice }\nselected proc() type {\n    local Choice := undefined\n    record Container := undefined\n    values [2]mut Choice := undefined\n    local = .child{bool}\n    record.choice = .child{i16}\n    values[0] = local\n    values[1] = record.choice\n    saved :: values\n    local = .empty\n    record.choice = .empty\n    values[1] = .child{u8}\n    if (saved[0].child != bool or values[1].child != u8) return bool\n    return saved[1].child\n}\nevaluate proc() selected() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -83,8 +83,8 @@ tagged_metadata_procedure_capture_erasure_generated_defaults_and_cache test {
     try support.check_text(
         &context,
         "tagged_metadata_procedure_capture_erasure_generated_defaults_and_cache",
-        "Id :: distinct i16\nOther :: distinct i16\nDetail :: struct { child type, count usize, bias i16 }\nChoice :: union(enum) { detail Detail, child type, empty void }\nmake proc(T type) Choice { return .detail{ child = T, count = 2, bias = 2 } }\npass proc(input Choice) Choice {\n    match input {\n        .detail |payload|: {\n            copied := payload\n            copied.child = bool\n            copied.count = 3\n            return .detail{payload}\n        },\n        .child |T|: return .child{T},\n        .empty: return .empty,\n    }\n}\nStorage proc(input Choice) type {\n    return match input {\n        .detail |payload|: struct {\n            values [payload.count]payload.child\n            bias i16 = payload.bias\n        },\n        .child |T|: struct { value T },\n        .empty: struct {},\n    }\n}\nscore proc($input Choice, value Storage(input)) i16 {\n    return i16(value.values[0]) + i16(value.values[1]) + value.bias\n}\nmain proc() i16 {\n    Selected :: alias Storage(pass(make(Id)))\n    if (Selected != Storage(make(Id))) return -1\n    if (Selected == Storage(make(Other))) return -2\n    if (Selected == Storage(.child{Id})) return -3\n    value Selected :: { values = [Id(19), Id(21)] }\n    same Storage(make(Id)) :: value\n    return score(pass(make(Id)), same)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Id :: distinct i16\nOther :: distinct i16\nDetail :: struct { child type, count usize, bias i16 }\nChoice :: union(enum) { detail Detail, child type, empty void }\nmake proc(T type) Choice { return .detail{ child = T, count = 2, bias = 2 } }\npass proc(input Choice) Choice {\n    match input {\n        .detail |payload|: {\n            copied := payload\n            copied.child = bool\n            copied.count = 3\n            return .detail{payload}\n        },\n        .child |T|: return .child{T},\n        .empty: return .empty,\n    }\n}\nStorage proc(input Choice) type {\n    return match input {\n        .detail |payload|: struct {\n            values [payload.count]payload.child\n            bias i16 = payload.bias\n        },\n        .child |T|: struct { value T },\n        .empty: struct {},\n    }\n}\nscore proc($input Choice, value Storage(input)) i16 {\n    return i16(value.values[0]) + i16(value.values[1]) + value.bias\n}\nevaluate proc() i16 {\n    Selected :: alias Storage(pass(make(Id)))\n    if (Selected != Storage(make(Id))) return -1\n    if (Selected == Storage(make(Other))) return -2\n    if (Selected == Storage(.child{Id})) return -3\n    value Selected :: { values = [Id(19), Id(21)] }\n    same Storage(make(Id)) :: value\n    return score(pass(make(Id)), same)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -94,8 +94,8 @@ tagged_metadata_sparse_explicit_tags_match_variants_not_unused_tags test {
     try support.check_text(
         &context,
         "tagged_metadata_sparse_explicit_tags_match_variants_not_unused_tags",
-        "Tag :: enum(i16) { unused = -90, empty = -7, child = 42 }\nChoice :: union(Tag) { child type, empty void }\nchoose proc(present bool) Choice {\n    if (present) return .child{i16}\n    return .empty\n}\nSelected proc(input Choice) type {\n    return match input { .child |T|: T, .empty: bool }\n}\nmain proc() i16 {\n    empty Selected(choose(false)) :: true\n    value Selected(choose(true)) :: 42\n    if (!empty) return 0\n    return value\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Tag :: enum(i16) { unused = -90, empty = -7, child = 42 }\nChoice :: union(Tag) { child type, empty void }\nchoose proc(present bool) Choice {\n    if (present) return .child{i16}\n    return .empty\n}\nSelected proc(input Choice) type {\n    return match input { .child |T|: T, .empty: bool }\n}\nevaluate proc() i16 {\n    empty Selected(choose(false)) :: true\n    value Selected(choose(true)) :: 42\n    if (!empty) return 0\n    return value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -105,7 +105,7 @@ tagged_metadata_reject_inactive_payload_write test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_inactive_payload_write",
-        "Choice :: union(enum) { child type, empty void }\nBad proc() type {\n    value Choice := .empty\n    value.child = i16\n    return value.child\n}\nmain proc() Bad() { return 42 }\n",
+        "Choice :: union(enum) { child type, empty void }\nBad proc() type {\n    value Choice := .empty\n    value.child = i16\n    return value.child\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "tagged union field is not active" },
     )
 }
@@ -116,7 +116,7 @@ tagged_metadata_reject_inactive_payload_read test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_inactive_payload_read",
-        "Choice :: union(enum) { child type, empty void }\nBad proc() type { value Choice :: .empty\n    return value.child }\nmain proc() Bad() { return 42 }\n",
+        "Choice :: union(enum) { child type, empty void }\nBad proc() type { value Choice :: .empty\n    return value.child }\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "tagged union field is not active" },
     )
 }
@@ -127,7 +127,7 @@ tagged_metadata_reject_wrong_nominal_union_literal test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_wrong_nominal_union_literal",
-        "Choice :: union(enum) { child type }\nOther :: union(enum) { child type }\nmake proc() Choice { return Other { child = i16 } }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(enum) { child type }\nOther :: union(enum) { child type }\nmake proc() Choice { return Other { child = i16 } }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -138,7 +138,7 @@ tagged_metadata_reject_unknown_member test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_unknown_member",
-        "Choice :: union(enum) { child type }\nmake proc() Choice { return Choice { missing = i16 } }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(enum) { child type }\nmake proc() Choice { return Choice { missing = i16 } }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "record has no such field" },
     )
 }
@@ -149,7 +149,7 @@ tagged_metadata_reject_zero_initializers test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_zero_initializers",
-        "Choice :: union(enum) { child type, empty void }\nmake proc() Choice { return Choice {} }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(enum) { child type, empty void }\nmake proc() Choice { return Choice {} }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "union construction requires exactly one member" },
     )
 }
@@ -160,7 +160,7 @@ tagged_metadata_reject_multiple_initializers test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_multiple_initializers",
-        "Choice :: union(enum) { child type, other type }\nmake proc() Choice { return Choice { child = i16, other = bool } }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(enum) { child type, other type }\nmake proc() Choice { return Choice { child = i16, other = bool } }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "union construction requires exactly one member" },
     )
 }
@@ -171,7 +171,7 @@ tagged_metadata_reject_explicit_tag_missing_variant test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_explicit_tag_missing_variant",
-        "Tag :: enum { other }\nChoice :: union(Tag) { child type }\nmake proc() Choice { return .child{i16} }\nmain proc() make().child { return 42 }\n",
+        "Tag :: enum { other }\nChoice :: union(Tag) { child type }\nmake proc() Choice { return .child{i16} }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "union tag must be an enum containing every union variant" },
     )
 }
@@ -182,7 +182,7 @@ tagged_metadata_reject_non_enum_tag test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_non_enum_tag",
-        "Choice :: union(i16) { child type }\nmake proc() Choice { return .child{i16} }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(i16) { child type }\nmake proc() Choice { return .child{i16} }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "union tag must be an enum containing every union variant" },
     )
 }
@@ -193,7 +193,7 @@ tagged_metadata_reject_untagged_overlapping_layout test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_untagged_overlapping_layout",
-        "Choice :: union { detail struct { children [1]type }, count usize }\nmake proc() Choice { return Choice { detail = { children = [i16] } } }\nmain proc() make().detail.children[0] { return 42 }\n",
+        "Choice :: union { detail struct { children [1]type }, count usize }\nmake proc() Choice { return Choice { detail = { children = [i16] } } }\nevaluate proc() make().detail.children[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "record fields require a concrete value type" },
     )
 }
@@ -204,7 +204,7 @@ tagged_metadata_reject_undefined_result test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_undefined_result",
-        "Choice :: union(enum) { child type, empty void }\nmake proc() Choice { value Choice := undefined\n    return value }\nmain proc() make().child { return 42 }\n",
+        "Choice :: union(enum) { child type, empty void }\nmake proc() Choice { value Choice := undefined\n    return value }\nevaluate proc() make().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -215,7 +215,7 @@ tagged_metadata_reject_undefined_payload_read test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_undefined_payload_read",
-        "Choice :: union(enum) { child type, empty void }\nBad proc() type { value Choice := undefined\n    return value.child }\nmain proc() Bad() { return 42 }\n",
+        "Choice :: union(enum) { child type, empty void }\nBad proc() type { value Choice := undefined\n    return value.child }\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -226,7 +226,7 @@ tagged_metadata_preserve_narrow_ordinary_payload_overflow test {
     try support.check_text(
         &context,
         "tagged_metadata_preserve_narrow_ordinary_payload_overflow",
-        "Choice :: union(enum) { child type, small i8 }\nBad proc() type {\n    value Choice := .small{127}\n    value.small = value.small + 1\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Choice :: union(enum) { child type, small i8 }\nBad proc() type {\n    value Choice := .small{127}\n    value.small = value.small + 1\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
     )
 }
@@ -237,7 +237,7 @@ tagged_metadata_reject_mutating_match_capture test {
     try support.check_text(
         &context,
         "tagged_metadata_reject_mutating_match_capture",
-        "Choice :: union(enum) { detail struct { child type }, empty void }\nBad proc() type {\n    value Choice :: .detail{ child = i16 }\n    match value {\n        .detail |payload|: { payload.child = bool\n            return payload.child },\n        .empty: return bool,\n    }\n}\nmain proc() Bad() { return 42 }\n",
+        "Choice :: union(enum) { detail struct { child type }, empty void }\nBad proc() type {\n    value Choice :: .detail{ child = i16 }\n    match value {\n        .detail |payload|: { payload.child = bool\n            return payload.child },\n        .empty: return bool,\n    }\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
     )
 }
@@ -248,8 +248,8 @@ metadata_slices_direct_literal_views_start_bounded_evaluation test {
     try support.check_text(
         &context,
         "metadata_slices_direct_literal_views_start_bounded_evaluation",
-        "Selected proc($items []type) type { return items[0] }\nmain proc() [2]usize {\n    value Selected(([i16, bool])[..1]) :: 42\n    return [usize(value), $(([i16, bool])[1..].len)]\n}\n",
-        support.Expected{ stdout = "[42, 1]\n", diagnostic = null },
+        "Selected proc($items []type) type { return items[0] }\nevaluate proc() [2]usize {\n    value Selected(([i16, bool])[..1]) :: 42\n    return [usize(value), $(([i16, bool])[1..].len)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 1) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -259,8 +259,8 @@ metadata_slices_contextual_literals_inputs_results_and_erased_inputs test {
     try support.check_text(
         &context,
         "metadata_slices_contextual_literals_inputs_results_and_erased_inputs",
-        "Id :: distinct i16\ntypes proc() []type { return [Id, i16] }\npass proc(values []type) []type { return values }\nwindow proc(values []type, start usize, end usize) []type { return values[start..end] }\nSelected proc(values []type) type { return values[0] }\nexact proc($values []type, value Selected(values)) Selected(values) { return value }\nStorage proc() type {\n    empty []type :: []\n    if (pass(empty).len != 0 or types().len != 2) return bool\n    return Selected(window(pass([bool, Id]), 1, 2))\n}\nmain proc() i16 {\n    value Storage() :: 40\n    return i16(exact(types(), value)) + 2\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Id :: distinct i16\ntypes proc() []type { return [Id, i16] }\npass proc(values []type) []type { return values }\nwindow proc(values []type, start usize, end usize) []type { return values[start..end] }\nSelected proc(values []type) type { return values[0] }\nexact proc($values []type, value Selected(values)) Selected(values) { return value }\nStorage proc() type {\n    empty []type :: []\n    if (pass(empty).len != 0 or types().len != 2) return bool\n    return Selected(window(pass([bool, Id]), 1, 2))\n}\nevaluate proc() i16 {\n    value Storage() :: 40\n    return i16(exact(types(), value)) + 2\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -270,8 +270,8 @@ metadata_slices_cache_keys_preserve_nominal_leaves_order_and_length test {
     try support.check_text(
         &context,
         "metadata_slices_cache_keys_preserve_nominal_leaves_order_and_length",
-        "Id :: distinct i16\nOther :: distinct i16\nToken proc($values []type) type {\n    _ = values\n return struct {} }\ntypes proc() []type {\n    backing [4]type :: [bool, Id, i16, u8]\n    return backing[1..3]\n}\nStorage proc() type {\n    if (Token(types()) != Token([Id, i16])) return bool\n    if (Token(types()) == Token([Other, i16])) return bool\n    if (Token(types()) == Token([i16, Id])) return bool\n    if (Token(types()) == Token([Id])) return bool\n    if (Token([]) != Token([])) return bool\n    return types()[0]\n}\nmain proc() i16 {\n    value Storage() :: 42\n    return i16(value)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Id :: distinct i16\nOther :: distinct i16\nToken proc($values []type) type {\n    _ = values\n return struct {} }\ntypes proc() []type {\n    backing [4]type :: [bool, Id, i16, u8]\n    return backing[1..3]\n}\nStorage proc() type {\n    if (Token(types()) != Token([Id, i16])) return bool\n    if (Token(types()) == Token([Other, i16])) return bool\n    if (Token(types()) == Token([i16, Id])) return bool\n    if (Token(types()) == Token([Id])) return bool\n    if (Token([]) != Token([])) return bool\n    return types()[0]\n}\nevaluate proc() i16 {\n    value Storage() :: 42\n    return i16(value)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -281,8 +281,8 @@ metadata_record_slices_nested_leaves_and_exact_cache_identity test {
     try support.check_text(
         &context,
         "metadata_record_slices_nested_leaves_and_exact_cache_identity",
-        "Id :: distinct i16\nOther :: distinct i16\nInfo :: struct { child type, count usize, name string }\nRow :: struct { types []type, fields []Info }\nToken proc($values []Info) type {\n    _ = values\n return struct {} }\nfields proc() []Info { return [{ child = Id, count = 2, name = \"value\" }] }\nrows proc() []Row {\n    return [{ types = [Id, i16], fields = fields() }]\n}\nStorage proc() type {\n    empty []Info :: []\n    if (empty.len != 0 or rows()[0].types[1] != i16) return bool\n    source :: rows()[0].fields\n    copied := source[0]\n    copied.child = bool\n    copied.count = 3\n    if (source[0].child != Id or source[0].count != 2) return bool\n    if (Token(source) != Token(fields())) return bool\n    if (Token(source) == Token([{ child = Other, count = 2, name = \"value\" }])) return bool\n    if (Token(source) == Token([{ child = Id, count = 3, name = \"value\" }])) return bool\n    if (Token(source) == Token([{ child = Id, count = 2, name = \"other\" }])) return bool\n    return [source[0].count]source[0].child\n}\nmain proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(values[0]) + i16(values[1])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Id :: distinct i16\nOther :: distinct i16\nInfo :: struct { child type, count usize, name string }\nRow :: struct { types []type, fields []Info }\nToken proc($values []Info) type {\n    _ = values\n return struct {} }\nfields proc() []Info { return [{ child = Id, count = 2, name = \"value\" }] }\nrows proc() []Row {\n    return [{ types = [Id, i16], fields = fields() }]\n}\nStorage proc() type {\n    empty []Info :: []\n    if (empty.len != 0 or rows()[0].types[1] != i16) return bool\n    source :: rows()[0].fields\n    copied := source[0]\n    copied.child = bool\n    copied.count = 3\n    if (source[0].child != Id or source[0].count != 2) return bool\n    if (Token(source) != Token(fields())) return bool\n    if (Token(source) == Token([{ child = Other, count = 2, name = \"value\" }])) return bool\n    if (Token(source) == Token([{ child = Id, count = 3, name = \"value\" }])) return bool\n    if (Token(source) == Token([{ child = Id, count = 2, name = \"other\" }])) return bool\n    return [source[0].count]source[0].child\n}\nevaluate proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(values[0]) + i16(values[1])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -292,8 +292,8 @@ metadata_slices_nested_slices_by_value_and_inline_iteration test {
     try support.check_text(
         &context,
         "metadata_slices_nested_slices_by_value_and_inline_iteration",
-        "Info :: struct { child type, count usize }\nrows proc() [][]type { return [[i8, i16], [], [bool]] }\nfields proc() []Info { return [{ child = i16, count = 2 }] }\nStorage proc() type {\n    total usize := 0\n    for rows() |row, index| {\n        total += row.len + index\n        for row |T| {\n            if (T == i16) total += 1\n        }\n    }\n    inline for rows() |row| {\n        inline for row |T| {\n            if (T == bool) total += 1\n        }\n    }\n    for fields() |field| {\n        copied := field\n        copied.child = bool\n        copied.count = 99\n    }\n    inline for fields() |field| {\n        if (field.child != i16 or field.count != 2) return bool\n    }\n    if (total != 8) return bool\n    return [fields()[0].count]fields()[0].child\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Info :: struct { child type, count usize }\nrows proc() [][]type { return [[i8, i16], [], [bool]] }\nfields proc() []Info { return [{ child = i16, count = 2 }] }\nStorage proc() type {\n    total usize := 0\n    for rows() |row, index| {\n        total += row.len + index\n        for row |T| {\n            if (T == i16) total += 1\n        }\n    }\n    inline for rows() |row| {\n        inline for row |T| {\n            if (T == bool) total += 1\n        }\n    }\n    for fields() |field| {\n        copied := field\n        copied.child = bool\n        copied.count = 99\n    }\n    inline for fields() |field| {\n        if (field.child != i16 or field.count != 2) return bool\n    }\n    if (total != 8) return bool\n    return [fields()[0].count]fields()[0].child\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -303,8 +303,8 @@ metadata_slices_subviews_empty_boundaries_and_readonly_backing_replacement test 
     try support.check_text(
         &context,
         "metadata_slices_subviews_empty_boundaries_and_readonly_backing_replacement",
-        "types proc() []type {\n    backing [3]type := [bool, i16, u8]\n    frozen :: backing\n    saved :: frozen[1..2]\n    backing = [u8, bool, bool]\n    if (saved[0] != i16 or backing[1] != bool) return []\n    return saved\n}\nStorage proc() type {\n    source :: types()\n    full :: source[..]\n    nested :: full[0..full.len][..1]\n    if (nested.len != 1 or nested[0] != i16) return bool\n    if (source[0..0].len != 0 or source[1..1].len != 0) return bool\n    empty []type :: []\n    if (empty[..].len != 0 or empty[0..0].len != 0) return bool\n    return nested[0]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "types proc() []type {\n    backing [3]type := [bool, i16, u8]\n    frozen :: backing\n    saved :: frozen[1..2]\n    backing = [u8, bool, bool]\n    if (saved[0] != i16 or backing[1] != bool) return []\n    return saved\n}\nStorage proc() type {\n    source :: types()\n    full :: source[..]\n    nested :: full[0..full.len][..1]\n    if (nested.len != 1 or nested[0] != i16) return bool\n    if (source[0..0].len != 0 or source[1..1].len != 0) return bool\n    empty []type :: []\n    if (empty[..].len != 0 or empty[0..0].len != 0) return bool\n    return nested[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -314,8 +314,8 @@ metadata_slices_optional_fallible_parameters_results_and_captures test {
     try support.check_text(
         &context,
         "metadata_slices_optional_fallible_parameters_results_and_captures",
-        "Failure :: struct { types []type }\nInfo :: struct { child type, count usize }\nchoose proc(present bool, failed bool) ?[]Info ! Failure {\n    if (failed) return Failure { types = [i16] }\n    if (present) return some!([{ child = i16, count = 2 }])\n    return null\n}\npass proc(value ?[]Info ! Failure) ?[]Info ! Failure { return value }\nToken proc($value ?[]Info ! Failure) type {\n    _ = value\n return struct {} }\nStorage proc() type {\n    original :: pass(choose(true, false))\n    if (Token(original) != Token(choose(true, false))) return bool\n    if (Token(original) == Token(choose(false, false))) return bool\n    if (Token(original) == Token(choose(false, true))) return bool\n    missing :: pass(choose(false, false)) catch null\n    if (missing != null) return bool\n    pass(choose(false, true)) catch |err| {\n        if (err.types[0] != i16) return bool\n        yield null\n    }\n    selected :: original catch null\n    if selected |fields| {\n        return [fields[0].count]fields[0].child\n    }\n    return bool\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Failure :: struct { types []type }\nInfo :: struct { child type, count usize }\nchoose proc(present bool, failed bool) ?[]Info ! Failure {\n    if (failed) return Failure { types = [i16] }\n    if (present) return some!([{ child = i16, count = 2 }])\n    return null\n}\npass proc(value ?[]Info ! Failure) ?[]Info ! Failure { return value }\nToken proc($value ?[]Info ! Failure) type {\n    _ = value\n return struct {} }\nStorage proc() type {\n    original :: pass(choose(true, false))\n    if (Token(original) != Token(choose(true, false))) return bool\n    if (Token(original) == Token(choose(false, false))) return bool\n    if (Token(original) == Token(choose(false, true))) return bool\n    missing :: pass(choose(false, false)) catch null\n    if (missing != null) return bool\n    pass(choose(false, true)) catch |err| {\n        if (err.types[0] != i16) return bool\n        yield null\n    }\n    selected :: original catch null\n    if selected |fields| {\n        return [fields[0].count]fields[0].child\n    }\n    return bool\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -325,8 +325,8 @@ metadata_pointers_scalar_aliases_helpers_and_uncached_effects test {
     try support.check_text(
         &context,
         "metadata_pointers_scalar_aliases_helpers_and_uncached_effects",
-        "replace proc(value @mut type) void { value^ = i16 }\nread proc(value @type) bool { return value^ == i16 }\nInfo :: struct { child type, count usize }\nupdate proc(left, right @mut Info) void {\n    left.child = i16\n    left.count += 1\n    right.count += 1\n}\nStorage proc() type {\n    T type := bool\n    pointer :: &T\n    replace(pointer)\n    if (!read(pointer)) return bool\n    info Info := { child = bool, count = 0 }\n    saved :: info\n    reference :: &info\n    update(reference, reference)\n    if (info.child != i16 or info.count != 2) return bool\n    info = saved\n    update(reference, reference)\n    update(reference, reference)\n    if (info.count != 4 or saved.child != bool or saved.count != 0) return bool\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "replace proc(value @mut type) void { value^ = i16 }\nread proc(value @type) bool { return value^ == i16 }\nInfo :: struct { child type, count usize }\nupdate proc(left, right @mut Info) void {\n    left.child = i16\n    left.count += 1\n    right.count += 1\n}\nStorage proc() type {\n    T type := bool\n    pointer :: &T\n    replace(pointer)\n    if (!read(pointer)) return bool\n    info Info := { child = bool, count = 0 }\n    saved :: info\n    reference :: &info\n    update(reference, reference)\n    if (info.child != i16 or info.count != 2) return bool\n    info = saved\n    update(reference, reference)\n    update(reference, reference)\n    if (info.count != 4 or saved.child != bool or saved.count != 0) return bool\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -336,8 +336,8 @@ metadata_pointers_sequences_arithmetic_slices_and_identity test {
     try support.check_text(
         &context,
         "metadata_pointers_sequences_arithmetic_slices_and_identity",
-        "fill proc(pointer *mut type) void { pointer[0] = i16\npointer[1] = i16 }\nStorage proc() type {\n    values [3]mut type := [bool, i8, u8]\n    pointer :: values.ptr + usize(1)\n    fill(pointer)\n    if (values[1] != i16 or values[2] != i16) return bool\n    if (pointer != &values[1] or pointer == &values[0]) return bool\n    tail :: pointer[0..2]\n    tail[1] = bool\n    if (values[2] != bool) return bool\n    saved :: tail.ptr\n    values = [u8, i16, i8]\n    if (saved[1] != i8) return bool\n    end :: values.ptr + values.len\n    if (end != values[3..3].ptr or end[0..0].len != 0) return bool\n    return pointer[0]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "fill proc(pointer *mut type) void { pointer[0] = i16\npointer[1] = i16 }\nStorage proc() type {\n    values [3]mut type := [bool, i8, u8]\n    pointer :: values.ptr + usize(1)\n    fill(pointer)\n    if (values[1] != i16 or values[2] != i16) return bool\n    if (pointer != &values[1] or pointer == &values[0]) return bool\n    tail :: pointer[0..2]\n    tail[1] = bool\n    if (values[2] != bool) return bool\n    saved :: tail.ptr\n    values = [u8, i16, i8]\n    if (saved[1] != i8) return bool\n    end :: values.ptr + values.len\n    if (end != values[3..3].ptr or end[0..0].len != 0) return bool\n    return pointer[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -347,8 +347,8 @@ metadata_pointer_captures_initialize_live_storage_and_cleanup test {
     try support.check_text(
         &context,
         "metadata_pointer_captures_initialize_live_storage_and_cleanup",
-        "Error :: enum { failed }\ninitialize proc(items []mut type) void {\n    for items |@T, index| {\n        defer T^ = i16\n        if (index == 0) continue\n        T^ = bool\n        break\n    }\n}\nfail proc(value @mut type) void ! Error {\n    errdefer value^ = i16\n    return .failed\n}\ntypes proc() []type {\n    backing [2]mut type := undefined\n    initialize(backing[..])\n    fail(&backing[0]) catch {}\n    defer backing[0] = bool\n    return backing[..]\n}\nmain proc() [2]types()[0] { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Error :: enum { failed }\ninitialize proc(items []mut type) void {\n    for items |@T, index| {\n        defer T^ = i16\n        if (index == 0) continue\n        T^ = bool\n        break\n    }\n}\nfail proc(value @mut type) void ! Error {\n    errdefer value^ = i16\n    return .failed\n}\ntypes proc() []type {\n    backing [2]mut type := undefined\n    initialize(backing[..])\n    fail(&backing[0]) catch {}\n    defer backing[0] = bool\n    return backing[..]\n}\nevaluate proc() [2]types()[0] { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -358,8 +358,8 @@ metadata_pointers_nested_places_frozen_indices_and_array_pointees test {
     try support.check_text(
         &context,
         "metadata_pointers_nested_places_frozen_indices_and_array_pointees",
-        "Info :: struct { children [2]mut type }\nStorage proc() type {\n    rows [2]mut Info := [{ children = [bool, u8] }, { children = [i8, bool] }]\n    index := usize(0)\n    pointer :: &rows[index].children[1]\n    index = 1\n    pointer^ = i16\n    array :: &rows[0].children\n    view :: array[..]\n    view[0] = i16\n    if (rows[1].children[0] != i8 or rows[1].children[1] != bool) return bool\n    for view |@T| { if (T^ != i16) return bool }\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Info :: struct { children [2]mut type }\nStorage proc() type {\n    rows [2]mut Info := [{ children = [bool, u8] }, { children = [i8, bool] }]\n    index := usize(0)\n    pointer :: &rows[index].children[1]\n    index = 1\n    pointer^ = i16\n    array :: &rows[0].children\n    view :: array[..]\n    view[0] = i16\n    if (rows[1].children[0] != i8 or rows[1].children[1] != bool) return bool\n    for view |@T| { if (T^ != i16) return bool }\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -369,8 +369,8 @@ metadata_pointers_mixed_runtime_inputs_and_effects test {
     try support.check_text(
         &context,
         "metadata_pointers_mixed_runtime_inputs_and_effects",
-        "replace proc(value @mut type) void { value^ = i16 }\ncompute proc(value i16, calls @mut i16) i16 {\n    T type := bool\n    pointer :: &T\n    replace(pointer)\n    Selected :: pointer^\n    local Selected :: value\n    calls^ += 1\n    return local\n}\nmain proc() i16 {\n    calls := i16(0)\n    result :: compute(41, &calls)\n    return result + calls\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "replace proc(value @mut type) void { value^ = i16 }\ncompute proc(value i16, calls @mut i16) i16 {\n    T type := bool\n    pointer :: &T\n    replace(pointer)\n    Selected :: pointer^\n    local Selected :: value\n    calls^ += 1\n    return local\n}\nevaluate proc() i16 {\n    calls := i16(0)\n    result :: compute(41, &calls)\n    return result + calls\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -380,8 +380,8 @@ metadata_pointers_contextual_many_addresses_and_pointer_array_indexing test {
     try support.check_text(
         &context,
         "metadata_pointers_contextual_many_addresses_and_pointer_array_indexing",
-        "fill proc(items *mut type) void { items[0] = i16\nitems[1] = i16 }\nStorage proc() type {\n    items [3]mut type := [bool, u8, i8]\n    pointer *mut type :: &items[1]\n    fill(&items[1])\n    if (pointer[0] != i16 or pointer[1] != i16) return bool\n    array :: &items\n    array[0] = i16\n    if (array[0] != i16 or array.len != 3) return bool\n    return array[1]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "fill proc(items *mut type) void { items[0] = i16\nitems[1] = i16 }\nStorage proc() type {\n    items [3]mut type := [bool, u8, i8]\n    pointer *mut type :: &items[1]\n    fill(&items[1])\n    if (pointer[0] != i16 or pointer[1] != i16) return bool\n    array :: &items\n    array[0] = i16\n    if (array[0] != i16 or array.len != 3) return bool\n    return array[1]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -391,8 +391,8 @@ metadata_pointer_captures_record_fields_and_mixed_runtime_effects test {
     try support.check_text(
         &context,
         "metadata_pointer_captures_record_fields_and_mixed_runtime_effects",
-        "Info :: struct { child type, count usize }\nreplace proc(value @mut type) void { value^ = i16 }\ncompute proc(value i16, calls @mut i16) i16 {\n    items [2]mut Info := [{ child = bool, count = 0 }, { child = u8, count = 1 }]\n    for items |@item| {\n        replace(&item.child)\n        item.count += 1\n        calls^ += 1\n    }\n    Selected :: items[1].child\n    result Selected :: value\n    return result\n}\nmain proc() i16 {\n    calls := i16(0)\n    result :: compute(40, &calls)\n    return result + calls\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Info :: struct { child type, count usize }\nreplace proc(value @mut type) void { value^ = i16 }\ncompute proc(value i16, calls @mut i16) i16 {\n    items [2]mut Info := [{ child = bool, count = 0 }, { child = u8, count = 1 }]\n    for items |@item| {\n        replace(&item.child)\n        item.count += 1\n        calls^ += 1\n    }\n    Selected :: items[1].child\n    result Selected :: value\n    return result\n}\nevaluate proc() i16 {\n    calls := i16(0)\n    result :: compute(40, &calls)\n    return result + calls\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -402,8 +402,8 @@ metadata_pointers_optional_aggregate_aliases_and_partial_record_initialization t
     try support.check_text(
         &context,
         "metadata_pointers_optional_aggregate_aliases_and_partial_record_initialization",
-        "Info :: struct { child type, count usize }\nHolder :: struct { value ?@mut Info }\nStorage proc() type {\n    info Info := undefined\n    pointer :: &info\n    pointer.child = i16\n    copied :: info\n    holder Holder :: { value = some!(pointer) }\n    if holder.value |shared| { shared.count = 2 }\n    if (pointer.child != i16 or copied.child != i16) return bool\n    return [pointer.count]pointer.child\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Info :: struct { child type, count usize }\nHolder :: struct { value ?@mut Info }\nStorage proc() type {\n    info Info := undefined\n    pointer :: &info\n    pointer.child = i16\n    copied :: info\n    holder Holder :: { value = some!(pointer) }\n    if holder.value |shared| { shared.count = 2 }\n    if (pointer.child != i16 or copied.child != i16) return bool\n    return [pointer.count]pointer.child\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -413,7 +413,7 @@ metadata_pointers_reject_single_value_as_many_pointer test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_single_value_as_many_pointer",
-        "fill proc(items *mut type) void { items[0] = i16 }\nStorage proc() type {\n    items [1]mut type := [bool]\n    pointer :: &items[0]\n    fill(pointer)\n    return items[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "fill proc(items *mut type) void { items[0] = i16 }\nStorage proc() type {\n    items [1]mut type := [bool]\n    pointer :: &items[0]\n    fill(pointer)\n    return items[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible" },
     )
 }
@@ -424,7 +424,7 @@ metadata_pointers_reject_readonly_scalar_write test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_readonly_scalar_write",
-        "Storage proc() type {\n    T type :: i16\n    pointer :: &T\n    pointer^ = bool\n    return T\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    T type :: i16\n    pointer :: &T\n    pointer^ = bool\n    return T\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -435,7 +435,7 @@ metadata_pointers_reject_readonly_reversal test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_readonly_reversal",
-        "replace proc(value @mut type) void { value^ = bool }\nStorage proc() type {\n    T type :: i16\n    replace(&T)\n    return T\n}\nmain proc() Storage() { return 42 }\n",
+        "replace proc(value @mut type) void { value^ = bool }\nStorage proc() type {\n    T type :: i16\n    replace(&T)\n    return T\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible" },
     )
 }
@@ -446,7 +446,7 @@ metadata_pointer_captures_reject_readonly_elements test {
     try support.check_text(
         &context,
         "metadata_pointer_captures_reject_readonly_elements",
-        "Storage proc() type {\n    backing [1]type := [i16]\n    for backing |@T| { T^ = bool }\n    return backing[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [1]type := [i16]\n    for backing |@T| { T^ = bool }\n    return backing[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -457,7 +457,7 @@ metadata_pointers_reject_uninitialized_pointee_read test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_uninitialized_pointee_read",
-        "Storage proc() type {\n    values [1]mut type := undefined\n    pointer :: values.ptr\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    values [1]mut type := undefined\n    pointer :: values.ptr\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -468,7 +468,7 @@ metadata_pointers_reject_one_past_dereference test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_one_past_dereference",
-        "Storage proc() type {\n    values [1]mut type := [i16]\n    pointer :: values.ptr + values.len\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    values [1]mut type := [i16]\n    pointer :: values.ptr + values.len\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "index out of bounds" },
     )
 }
@@ -479,7 +479,7 @@ metadata_pointers_reject_wrong_offset_type test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_wrong_offset_type",
-        "Storage proc() type {\n    values [1]mut type := [i16]\n    pointer :: values.ptr + u8(0)\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    values [1]mut type := [i16]\n    pointer :: values.ptr + u8(0)\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "usize" },
     )
 }
@@ -490,7 +490,7 @@ metadata_pointers_reject_expired_scope test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_expired_scope",
-        "Storage proc() type {\n    T type := i16\n    pointer @type := &T\n    {\n        inner type := bool\n        pointer = &inner\n    }\n    return pointer^\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    T type := i16\n    pointer @type := &T\n    {\n        inner type := bool\n        pointer = &inner\n    }\n    return pointer^\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "cannot escape evaluation" },
     )
 }
@@ -501,7 +501,7 @@ metadata_pointers_reject_local_pointer_result test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_local_pointer_result",
-        "make proc() @type { T type := i16\nreturn &T }\nStorage proc() type { return make()^ }\nmain proc() Storage() { return 42 }\n",
+        "make proc() @type { T type := i16\nreturn &T }\nStorage proc() type { return make()^ }\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "cannot escape evaluation" },
     )
 }
@@ -512,7 +512,7 @@ metadata_pointers_reject_runtime_controlled_mutation test {
     try support.check_text(
         &context,
         "metadata_pointers_reject_runtime_controlled_mutation",
-        "replace proc(value @mut type) void { value^ = i16 }\ncompute proc(take bool) usize {\n    T type := i8\n    pointer :: &T\n    if (take) replace(pointer)\n    return sizeof!(T)\n}\nmain proc() usize { return compute(true) }\n",
+        "replace proc(value @mut type) void { value^ = i16 }\ncompute proc(take bool) usize {\n    T type := i8\n    pointer :: &T\n    if (take) replace(pointer)\n    return sizeof!(T)\n}\nevaluate proc() usize { return compute(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -523,8 +523,8 @@ metadata_slices_live_aliases_saved_bounds_rebinding_and_array_copies test {
     try support.check_text(
         &context,
         "metadata_slices_live_aliases_saved_bounds_rebinding_and_array_copies",
-        "Storage proc() type {\n    backing [3]mut type := [i8, bool, u8]\n    copied :: backing\n    start := usize(1)\n    finish := usize(2)\n    view []mut type := backing[..]\n    saved :: view[start..finish]\n    shared :: saved\n    start = 0\n    finish = 3\n    saved[0] = i16\n    if (backing[1] != i16 or copied[1] != bool) return bool\n    backing = [bool, i8, bool]\n    if (shared.len != 1 or shared[0] != i8) return bool\n    other [1]mut type := [u8]\n    view = other[..]\n    view[0] = i16\n    shared[0] = i16\n    if (other[0] != i16 or backing[1] != i16) return bool\n    return shared[0]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Storage proc() type {\n    backing [3]mut type := [i8, bool, u8]\n    copied :: backing\n    start := usize(1)\n    finish := usize(2)\n    view []mut type := backing[..]\n    saved :: view[start..finish]\n    shared :: saved\n    start = 0\n    finish = 3\n    saved[0] = i16\n    if (backing[1] != i16 or copied[1] != bool) return bool\n    backing = [bool, i8, bool]\n    if (shared.len != 1 or shared[0] != i8) return bool\n    other [1]mut type := [u8]\n    view = other[..]\n    view[0] = i16\n    shared[0] = i16\n    if (other[0] != i16 or backing[1] != i16) return bool\n    return shared[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -534,8 +534,8 @@ metadata_record_slices_borrow_helpers_nested_writes_and_uncached_effects test {
     try support.check_text(
         &context,
         "metadata_record_slices_borrow_helpers_nested_writes_and_uncached_effects",
-        "Info :: struct { child type, nested struct { children [2]mut type, count usize } }\nupdate proc(items []mut Info) void {\n    items[0].child = i16\n    items[0].nested.children[1] = i16\n    items[0].nested.count += 1\n}\nread proc(items []Info) usize { return items[0].nested.count }\nStorage proc() type {\n    backing [1]mut Info := [{ child = bool, nested = { children = [i8, bool], count = 0 } }]\n    copied :: backing\n    view :: backing[..]\n    update(view)\n    if (read(view) != 1) return bool\n    backing[0] = copied[0]\n    update(view)\n    if (read(view) != 1) return bool\n    update(view)\n    if (read(view) != 2 or copied[0].nested.count != 0) return bool\n    if (view[0].child != i16 or view[0].nested.children[1] != i16) return bool\n    if (copied[0].child != bool or copied[0].nested.children[1] != bool) return bool\n    return [read(view)]view[0].child\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Info :: struct { child type, nested struct { children [2]mut type, count usize } }\nupdate proc(items []mut Info) void {\n    items[0].child = i16\n    items[0].nested.children[1] = i16\n    items[0].nested.count += 1\n}\nread proc(items []Info) usize { return items[0].nested.count }\nStorage proc() type {\n    backing [1]mut Info := [{ child = bool, nested = { children = [i8, bool], count = 0 } }]\n    copied :: backing\n    view :: backing[..]\n    update(view)\n    if (read(view) != 1) return bool\n    backing[0] = copied[0]\n    update(view)\n    if (read(view) != 1) return bool\n    update(view)\n    if (read(view) != 2 or copied[0].nested.count != 0) return bool\n    if (view[0].child != i16 or view[0].nested.children[1] != i16) return bool\n    if (copied[0].child != bool or copied[0].nested.children[1] != bool) return bool\n    return [read(view)]view[0].child\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -545,8 +545,8 @@ metadata_slices_borrow_cleanup_initialization_and_return_snapshot test {
     try support.check_text(
         &context,
         "metadata_slices_borrow_cleanup_initialization_and_return_snapshot",
-        "Error :: enum { failed }\ninitialize proc(items []mut type) void {\n    defer items[1] = i16\n    items[0] = bool\n}\nfail proc(items []mut type) void ! Error {\n    errdefer items[0] = i16\n    return .failed\n}\ntypes proc() []type {\n    backing [2]mut type := undefined\n    view :: backing[..]\n    initialize(view)\n    fail(view) catch {}\n    defer view[0] = bool\n    return view\n}\nmain proc() [2]types()[0] { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Error :: enum { failed }\ninitialize proc(items []mut type) void {\n    defer items[1] = i16\n    items[0] = bool\n}\nfail proc(items []mut type) void ! Error {\n    errdefer items[0] = i16\n    return .failed\n}\ntypes proc() []type {\n    backing [2]mut type := undefined\n    view :: backing[..]\n    initialize(view)\n    fail(view) catch {}\n    defer view[0] = bool\n    return view\n}\nevaluate proc() [2]types()[0] { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -556,7 +556,7 @@ metadata_slices_reject_immutable_backing_write test {
     try support.check_text(
         &context,
         "metadata_slices_reject_immutable_backing_write",
-        "Storage proc() type {\n    backing [1]mut type :: [i16]\n    view :: backing[..]\n    view[0] = bool\n    return view[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [1]mut type :: [i16]\n    view :: backing[..]\n    view[0] = bool\n    return view[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -567,7 +567,7 @@ metadata_slices_reject_readonly_array_to_mutable_view test {
     try support.check_text(
         &context,
         "metadata_slices_reject_readonly_array_to_mutable_view",
-        "Storage proc() type {\n    backing [1]type := [i16]\n    view []mut type :: backing[..]\n    view[0] = bool\n    return view[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [1]type := [i16]\n    view []mut type :: backing[..]\n    view[0] = bool\n    return view[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible" },
     )
 }
@@ -578,7 +578,7 @@ metadata_slices_reject_incomplete_borrow_snapshot test {
     try support.check_text(
         &context,
         "metadata_slices_reject_incomplete_borrow_snapshot",
-        "types proc() []type {\n    backing [2]mut type := undefined\n    view :: backing[..]\n    view[0] = i16\n    return view\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    backing [2]mut type := undefined\n    view :: backing[..]\n    view[0] = i16\n    return view\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -589,7 +589,7 @@ metadata_slices_reject_runtime_branch_borrow_mutation test {
     try support.check_text(
         &context,
         "metadata_slices_reject_runtime_branch_borrow_mutation",
-        "update proc(items []mut type) void { items[0] = i16 }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (take) update(view)\n    return sizeof!(view[0])\n}\nmain proc() usize { return compute(true) }\n",
+        "update proc(items []mut type) void { items[0] = i16 }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (take) update(view)\n    return sizeof!(view[0])\n}\nevaluate proc() usize { return compute(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -600,7 +600,7 @@ metadata_slices_reject_mutable_view_index_type test {
     try support.check_text(
         &context,
         "metadata_slices_reject_mutable_view_index_type",
-        "Storage proc() type {\n    backing [1]mut type := [i16]\n    view :: backing[..]\n    view[u8(0)] = bool\n    return i16\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [1]mut type := [i16]\n    view :: backing[..]\n    view[u8(0)] = bool\n    return i16\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "usize" },
     )
 }
@@ -611,7 +611,7 @@ metadata_slices_reject_mutable_subview_write_at_length test {
     try support.check_text(
         &context,
         "metadata_slices_reject_mutable_subview_write_at_length",
-        "Storage proc() type {\n    backing [2]mut type := [i16, bool]\n    view :: backing[1..2]\n    view[1] = i8\n    return i16\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [2]mut type := [i16, bool]\n    view :: backing[1..2]\n    view[1] = i8\n    return i16\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "index out of bounds" },
     )
 }
@@ -622,8 +622,8 @@ metadata_slices_nested_places_iteration_optional_aliases_and_empty_shapes test {
     try support.check_text(
         &context,
         "metadata_slices_nested_places_iteration_optional_aliases_and_empty_shapes",
-        "Info :: struct { children [2]mut type }\nChoice :: union(enum) { types []mut type, empty void }\nStorage proc() type {\n    first [1]mut Info := [{ children = [i8, bool] }]\n    second [1]mut Info := [{ children = [bool, u8] }]\n    rows := first[..]\n    children :: field!(rows[0], \"children\")[..]\n    rows = second[..]\n    selected ?[]mut type :: some!(children)\n    if selected |chosen| { chosen[0] = i16 }\n    choice Choice :: .types {children}\n    match choice { .types |captured|: captured[1] = i16, .empty: {} }\n    if (children[1] != i16) return bool\n    for children |T, index| {\n        if (index == 0) children[1] = T\n        if (index == 1 and T != i16) return bool\n    }\n    if (second[0].children[0] != bool) return bool\n    empty [0]mut type := []\n    view :: empty[..]\n    for view |T| { return T }\n    if (view[..].len != 0) return bool\n    return first[0].children[1]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Info :: struct { children [2]mut type }\nChoice :: union(enum) { types []mut type, empty void }\nStorage proc() type {\n    first [1]mut Info := [{ children = [i8, bool] }]\n    second [1]mut Info := [{ children = [bool, u8] }]\n    rows := first[..]\n    children :: field!(rows[0], \"children\")[..]\n    rows = second[..]\n    selected ?[]mut type :: some!(children)\n    if selected |chosen| { chosen[0] = i16 }\n    choice Choice :: .types {children}\n    match choice { .types |captured|: captured[1] = i16, .empty: {} }\n    if (children[1] != i16) return bool\n    for children |T, index| {\n        if (index == 0) children[1] = T\n        if (index == 1 and T != i16) return bool\n    }\n    if (second[0].children[0] != bool) return bool\n    empty [0]mut type := []\n    view :: empty[..]\n    for view |T| { return T }\n    if (view[..].len != 0) return bool\n    return first[0].children[1]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -633,8 +633,8 @@ metadata_slices_local_fallible_captures_preserve_aliases test {
     try support.check_text(
         &context,
         "metadata_slices_local_fallible_captures_preserve_aliases",
-        "Failure :: struct { types []mut type }\nStorage proc() type {\n    backing [1]mut type := [i8]\n    value void ! Failure :: Failure { types = backing[..] }\n    value catch |failure| { failure.types[0] = i16 }\n    return backing[0]\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Failure :: struct { types []mut type }\nStorage proc() type {\n    backing [1]mut type := [i8]\n    value void ! Failure :: Failure { types = backing[..] }\n    value catch |failure| { failure.types[0] = i16 }\n    return backing[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -644,7 +644,7 @@ metadata_slices_reject_readonly_enclosing_array_place test {
     try support.check_text(
         &context,
         "metadata_slices_reject_readonly_enclosing_array_place",
-        "Info :: struct { children [1]mut type }\nStorage proc() type {\n    rows [1]Info := [{ children = [i8] }]\n    children :: rows[0].children[..]\n    children[0] = i16\n    return rows[0].children[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "Info :: struct { children [1]mut type }\nStorage proc() type {\n    rows [1]Info := [{ children = [i8] }]\n    children :: rows[0].children[..]\n    children[0] = i16\n    return rows[0].children[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -655,8 +655,8 @@ metadata_slices_mixed_execution_and_readonly_generator_cache test {
     try support.check_text(
         &context,
         "metadata_slices_mixed_execution_and_readonly_generator_cache",
-        "Token proc(types []type) type {\n    _ = types\n return struct {} }\nupdate proc(items []mut type) void { items[0] = i16 }\ncompute proc(value i16) i16 {\n    backing [1]mut type := [i8]\n    update(backing[..])\n    view :: backing[..]\n    if (Token(view) != Token([i16])) return -1\n    local view[0] :: value\n    return local\n}\nmain proc() i16 { return compute(42) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Token proc(types []type) type {\n    _ = types\n return struct {} }\nupdate proc(items []mut type) void { items[0] = i16 }\ncompute proc(value i16) i16 {\n    backing [1]mut type := [i8]\n    update(backing[..])\n    view :: backing[..]\n    if (Token(view) != Token([i16])) return -1\n    local view[0] :: value\n    return local\n}\nevaluate proc() i16 { return compute(42) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -666,7 +666,7 @@ metadata_slices_reject_dangling_nested_scope test {
     try support.check_text(
         &context,
         "metadata_slices_reject_dangling_nested_scope",
-        "Storage proc() type {\n    backing [1]mut type := [i16]\n    view []type := backing[..]\n    {\n        inner [1]mut type := [bool]\n        view = inner[..]\n    }\n    return view[0]\n}\nmain proc() Storage() { return 42 }\n",
+        "Storage proc() type {\n    backing [1]mut type := [i16]\n    view []type := backing[..]\n    {\n        inner [1]mut type := [bool]\n        view = inner[..]\n    }\n    return view[0]\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time result cannot escape evaluation as a source value" },
     )
 }
@@ -677,7 +677,7 @@ metadata_slices_reject_runtime_short_circuit_mutation test {
     try support.check_text(
         &context,
         "metadata_slices_reject_runtime_short_circuit_mutation",
-        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (take and update(view)) return sizeof!(view[0])\n    return sizeof!(view[0])\n}\nmain proc() usize { return compute(false) }\n",
+        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (take and update(view)) return sizeof!(view[0])\n    return sizeof!(view[0])\n}\nevaluate proc() usize { return compute(false) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -688,7 +688,7 @@ metadata_slices_reject_runtime_conditional_expression_mutation test {
     try support.check_text(
         &context,
         "metadata_slices_reject_runtime_conditional_expression_mutation",
-        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    selected :: if (take) update(view) else false\n    if (selected) return sizeof!(view[0])\n    return sizeof!(view[0])\n}\nmain proc() usize { return compute(false) }\n",
+        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\ncompute proc(take bool) usize {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    selected :: if (take) update(view) else false\n    if (selected) return sizeof!(view[0])\n    return sizeof!(view[0])\n}\nevaluate proc() usize { return compute(false) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -699,8 +699,8 @@ metadata_slices_skip_short_circuited_borrowed_effects test {
     try support.check_text(
         &context,
         "metadata_slices_skip_short_circuited_borrowed_effects",
-        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\nStorage proc() type {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (false and update(view)) return bool\n    return view[0]\n}\ncompute proc(value Storage()) i16 {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (true or update(view)) return i16(value)\n    return -1\n}\nmain proc() i16 { return compute(42) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "update proc(items []mut type) bool { items[0] = i16\nreturn true }\nStorage proc() type {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (false and update(view)) return bool\n    return view[0]\n}\ncompute proc(value Storage()) i16 {\n    backing [1]mut type := [i8]\n    view :: backing[..]\n    if (true or update(view)) return i16(value)\n    return -1\n}\nevaluate proc() i16 { return compute(42) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -710,7 +710,7 @@ metadata_slices_reject_mutable_slice_annotation test {
     try support.check_text(
         &context,
         "metadata_slices_reject_mutable_slice_annotation",
-        "types proc() []mut type { return [i16] }\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []mut type { return [i16] }\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time result cannot escape evaluation as a source value" },
     )
 }
@@ -721,8 +721,8 @@ metadata_slices_snapshot_mutable_array_backing test {
     try support.check_text(
         &context,
         "metadata_slices_snapshot_mutable_array_backing",
-        "types proc() []type {\n    backing [1]mut type := [i16]\n    return backing[..]\n}\nmain proc() types()[0] { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "types proc() []type {\n    backing [1]mut type := [i16]\n    return backing[..]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -732,8 +732,8 @@ metadata_slices_snapshot_mutable_binding_with_readonly_array_elements test {
     try support.check_text(
         &context,
         "metadata_slices_snapshot_mutable_binding_with_readonly_array_elements",
-        "types proc() []type {\n    backing [1]type := [i16]\n    return backing[..]\n}\nmain proc() types()[0] { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "types proc() []type {\n    backing [1]type := [i16]\n    return backing[..]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -743,8 +743,8 @@ metadata_record_slices_snapshot_mutable_array_backing test {
     try support.check_text(
         &context,
         "metadata_record_slices_snapshot_mutable_array_backing",
-        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    backing [1]mut Info := [{ child = i16, count = 2 }]\n    return backing[..]\n}\nmain proc() fields()[0].child { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    backing [1]mut Info := [{ child = i16, count = 2 }]\n    return backing[..]\n}\nevaluate proc() fields()[0].child { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -754,7 +754,7 @@ metadata_slices_reject_sentinel_annotation test {
     try support.check_text(
         &context,
         "metadata_slices_reject_sentinel_annotation",
-        "types proc() [;0]type { return [i16] }\nmain proc() types()[0] { return 42 }\n",
+        "types proc() [;0]type { return [i16] }\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
     )
 }
@@ -765,7 +765,7 @@ metadata_slices_reject_sentinel_subview test {
     try support.check_text(
         &context,
         "metadata_slices_reject_sentinel_subview",
-        "types proc() []type {\n    backing [2]type :: [i16, bool]\n    return backing[..1;0]\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    backing [2]type :: [i16, bool]\n    return backing[..1;0]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
     )
 }
@@ -776,7 +776,7 @@ metadata_slices_reject_reversed_bounds test {
     try support.check_text(
         &context,
         "metadata_slices_reject_reversed_bounds",
-        "types proc() []type {\n    backing [2]type :: [i16, bool]\n    return backing[2..1]\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    backing [2]type :: [i16, bool]\n    return backing[2..1]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "slice bounds are invalid" },
     )
 }
@@ -787,7 +787,7 @@ metadata_slices_reject_excessive_array_bounds test {
     try support.check_text(
         &context,
         "metadata_slices_reject_excessive_array_bounds",
-        "types proc() []type {\n    backing [1]type :: [i16]\n    return backing[..2]\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    backing [1]type :: [i16]\n    return backing[..2]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "slice bounds are invalid" },
     )
 }
@@ -798,7 +798,7 @@ metadata_slices_reject_excessive_subview_bounds test {
     try support.check_text(
         &context,
         "metadata_slices_reject_excessive_subview_bounds",
-        "types proc() []type { return [i16, bool] }\nbad proc() []type { return types()[1..2][..2] }\nmain proc() bad()[0] { return 42 }\n",
+        "types proc() []type { return [i16, bool] }\nbad proc() []type { return types()[1..2][..2] }\nevaluate proc() bad()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "slice bounds are invalid" },
     )
 }
@@ -809,7 +809,7 @@ metadata_slices_reject_start_beyond_empty_boundary test {
     try support.check_text(
         &context,
         "metadata_slices_reject_start_beyond_empty_boundary",
-        "types proc() []type { return [] }\nbad proc() []type { return types()[1..1] }\nmain proc() bad()[0] { return 42 }\n",
+        "types proc() []type { return [] }\nbad proc() []type { return types()[1..1] }\nevaluate proc() bad()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "slice bounds are invalid" },
     )
 }
@@ -820,7 +820,7 @@ metadata_slices_reject_non_usize_start test {
     try support.check_text(
         &context,
         "metadata_slices_reject_non_usize_start",
-        "types proc() []type { return [i16] }\nbad proc() []type { return types()[u8(0)..] }\nmain proc() bad()[0] { return 42 }\n",
+        "types proc() []type { return [i16] }\nbad proc() []type { return types()[u8(0)..] }\nevaluate proc() bad()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
     )
 }
@@ -831,7 +831,7 @@ metadata_slices_reject_non_usize_end test {
     try support.check_text(
         &context,
         "metadata_slices_reject_non_usize_end",
-        "types proc() []type { return [i16] }\nbad proc() []type { return types()[..i16(1)] }\nmain proc() bad()[0] { return 42 }\n",
+        "types proc() []type { return [i16] }\nbad proc() []type { return types()[..i16(1)] }\nevaluate proc() bad()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
     )
 }
@@ -842,7 +842,7 @@ metadata_slices_reject_non_usize_element_index test {
     try support.check_text(
         &context,
         "metadata_slices_reject_non_usize_element_index",
-        "types proc() []type { return [i16] }\nmain proc() types()[u8(0)] { return 42 }\n",
+        "types proc() []type { return [i16] }\nevaluate proc() types()[u8(0)] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "array index must have type usize" },
     )
 }
@@ -853,7 +853,7 @@ metadata_slices_reject_element_index_at_length test {
     try support.check_text(
         &context,
         "metadata_slices_reject_element_index_at_length",
-        "types proc() []type { return [i16] }\nmain proc() types()[types().len] { return 42 }\n",
+        "types proc() []type { return [i16] }\nevaluate proc() types()[types().len] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "index out of bounds" },
     )
 }
@@ -864,7 +864,7 @@ metadata_slices_reject_empty_element_index test {
     try support.check_text(
         &context,
         "metadata_slices_reject_empty_element_index",
-        "types proc() []type { return [] }\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type { return [] }\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "index out of bounds" },
     )
 }
@@ -875,7 +875,7 @@ metadata_slices_reject_non_type_literal_leaf test {
     try support.check_text(
         &context,
         "metadata_slices_reject_non_type_literal_leaf",
-        "types proc() []type { return [42] }\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type { return [42] }\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -886,7 +886,7 @@ metadata_record_slices_reject_incompatible_literal_field test {
     try support.check_text(
         &context,
         "metadata_record_slices_reject_incompatible_literal_field",
-        "Info :: struct { child type, count usize }\nfields proc() []Info { return [{ child = i16, count = false }] }\nmain proc() fields()[0].child { return 42 }\n",
+        "Info :: struct { child type, count usize }\nfields proc() []Info { return [{ child = i16, count = false }] }\nevaluate proc() fields()[0].child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -897,7 +897,7 @@ metadata_slices_reject_readonly_element_assignment test {
     try support.check_text(
         &context,
         "metadata_slices_reject_readonly_element_assignment",
-        "types proc() []type {\n    values []type := [i16]\n    values[0] = bool\n    return values\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    values []type := [i16]\n    values[0] = bool\n    return values\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -908,7 +908,7 @@ metadata_record_slices_reject_readonly_field_assignment test {
     try support.check_text(
         &context,
         "metadata_record_slices_reject_readonly_field_assignment",
-        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    values []Info := [{ child = i16, count = 2 }]\n    values[0].count = 3\n    return values\n}\nmain proc() fields()[0].child { return 42 }\n",
+        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    values []Info := [{ child = i16, count = 2 }]\n    values[0].count = 3\n    return values\n}\nevaluate proc() fields()[0].child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable" },
     )
 }
@@ -919,7 +919,7 @@ metadata_slices_reject_uninitialized_type_leaf test {
     try support.check_text(
         &context,
         "metadata_slices_reject_uninitialized_type_leaf",
-        "types proc() []type {\n    backing [1]type := undefined\n    frozen :: backing\n    return frozen[..]\n}\nmain proc() types()[0] { return 42 }\n",
+        "types proc() []type {\n    backing [1]type := undefined\n    frozen :: backing\n    return frozen[..]\n}\nevaluate proc() types()[0] { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -930,7 +930,7 @@ metadata_record_slices_reject_uninitialized_value_leaf test {
     try support.check_text(
         &context,
         "metadata_record_slices_reject_uninitialized_value_leaf",
-        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    partial Info := undefined\n    partial.child = i16\n    return [partial]\n}\nmain proc() fields()[0].child { return 42 }\n",
+        "Info :: struct { child type, count usize }\nfields proc() []Info {\n    partial Info := undefined\n    partial.child = i16\n    return [partial]\n}\nevaluate proc() fields()[0].child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -941,7 +941,7 @@ metadata_slices_reject_runtime_producer_dependencies test {
     try support.check_text(
         &context,
         "metadata_slices_reject_runtime_producer_dependencies",
-        "types proc(wide bool) []type {\n    if (wide) return [i16]\n    return [i8]\n}\nread proc(wide bool) i16 {\n    value types(wide)[0] :: 42\n    return i16(value)\n}\nmain proc() i16 { return read(true) }\n",
+        "types proc(wide bool) []type {\n    if (wide) return [i16]\n    return [i8]\n}\nread proc(wide bool) i16 {\n    value types(wide)[0] :: 42\n    return i16(value)\n}\nevaluate proc() i16 { return read(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -952,8 +952,8 @@ metadata_slices_inline_captures_specialize_runtime_bodies test {
     try support.check_text(
         &context,
         "metadata_slices_inline_captures_specialize_runtime_bodies",
-        "types proc() []type { return [i16, u8] }\nadd proc(value i16) i16 { return value + 1 }\nmain proc() i16 {\n    total i16 := 0\n    inline for types() |T, index| {\n        value T :: 19\n        total += add(i16(value)) + i16(index + 1)\n    }\n    return total - 1\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "types proc() []type { return [i16, u8] }\nadd proc(value i16) i16 { return value + 1 }\nevaluate proc() i16 {\n    total i16 := 0\n    inline for types() |T, index| {\n        value T :: 19\n        total += add(i16(value)) + i16(index + 1)\n    }\n    return total - 1\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -963,8 +963,8 @@ optional_types_procedure_boundaries_copies_and_static_captures test {
     try support.check_text(
         &context,
         "optional_types_procedure_boundaries_copies_and_static_captures",
-        "Token :: distinct i16\nchoose proc(present bool) ?type {\n    if (present) return Token\n    return null\n}\npass proc(value ?type) ?type { return value }\nBox proc(value ?type) type {\n    T :: if value |Child| Child else bool\n    return struct { item T }\n}\nSelected proc(value ?type) type { return value? }\nexact proc($value ?type, input Selected(value)) Selected(value) { return input }\nStorage proc() type {\n    selected ?type := pass(choose(true))\n    saved :: selected\n    selected = null\n    if (selected != null or null == saved) return bool\n    if (Box(saved) != Box(choose(true))) return bool\n    if (Box(null) == Box(saved)) return bool\n    while saved |T| {\n        return [2]T\n    }\n    return bool\n}\nmain proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(exact(choose(true), values[0])) + i16(values[1])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Token :: distinct i16\nchoose proc(present bool) ?type {\n    if (present) return Token\n    return null\n}\npass proc(value ?type) ?type { return value }\nBox proc(value ?type) type {\n    T :: if value |Child| Child else bool\n    return struct { item T }\n}\nSelected proc(value ?type) type { return value? }\nexact proc($value ?type, input Selected(value)) Selected(value) { return input }\nStorage proc() type {\n    selected ?type := pass(choose(true))\n    saved :: selected\n    selected = null\n    if (selected != null or null == saved) return bool\n    if (Box(saved) != Box(choose(true))) return bool\n    if (Box(null) == Box(saved)) return bool\n    while saved |T| {\n        return [2]T\n    }\n    return bool\n}\nevaluate proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(exact(choose(true), values[0])) + i16(values[1])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -974,8 +974,8 @@ optional_metadata_records_nested_presence_and_owned_updates test {
     try support.check_text(
         &context,
         "optional_metadata_records_nested_presence_and_owned_updates",
-        "Config :: struct { child type, count usize }\nconfig proc() ?Config { return { child = i16, count = 2 } }\nnested proc(present bool) ??type {\n    if (present) return some!(null)\n    return null\n}\nStorage proc() type {\n    outer :: nested(true)\n    if outer |inner| {\n        if (inner != null or nested(false) != null) return bool\n    } else return bool\n    values [2]mut ?Config := [config(), null]\n    saved :: values\n    values[0] = null\n    values[1] = { child = bool, count = 3 }\n    if (values[0] != null or saved[1] != null) return bool\n    info :: saved[0]?\n    return [info.count]info.child\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\nconfig proc() ?Config { return { child = i16, count = 2 } }\nnested proc(present bool) ??type {\n    if (present) return some!(null)\n    return null\n}\nStorage proc() type {\n    outer :: nested(true)\n    if outer |inner| {\n        if (inner != null or nested(false) != null) return bool\n    } else return bool\n    values [2]mut ?Config := [config(), null]\n    saved :: values\n    values[0] = null\n    values[1] = { child = bool, count = 3 }\n    if (values[0] != null or saved[1] != null) return bool\n    info :: saved[0]?\n    return [info.count]info.child\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -985,8 +985,8 @@ optional_types_fill_undefined_fields_and_yield_before_cleanup test {
     try support.check_text(
         &context,
         "optional_types_fill_undefined_fields_and_yield_before_cleanup",
-        "Config :: struct { child ?type = bool, count usize }\nmake proc() ?Config {\n    config Config := undefined\n    config.child = i16\n    config.count = 2\n    return some!(config)\n}\nStorage proc() type {\n    value ?type := undefined\n    value = null\n    selected ?type :: {\n        defer value = bool\n        yield make()?.child\n    }\n    if (value? != bool) return bool\n    T :: selected?\n    return [make()?.count]T\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Config :: struct { child ?type = bool, count usize }\nmake proc() ?Config {\n    config Config := undefined\n    config.child = i16\n    config.count = 2\n    return some!(config)\n}\nStorage proc() type {\n    value ?type := undefined\n    value = null\n    selected ?type :: {\n        defer value = bool\n        yield make()?.child\n    }\n    if (value? != bool) return bool\n    T :: selected?\n    return [make()?.count]T\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -996,7 +996,7 @@ optional_types_reject_null_unwrap test {
     try support.check_text(
         &context,
         "optional_types_reject_null_unwrap",
-        "empty proc() ?type { return null }\nBad proc() type { return empty()? }\nmain proc() Bad() { return 42 }\n",
+        "empty proc() ?type { return null }\nBad proc() type { return empty()? }\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "cannot unwrap a null optional" },
     )
 }
@@ -1007,7 +1007,7 @@ optional_types_reject_non_type_payload test {
     try support.check_text(
         &context,
         "optional_types_reject_non_type_payload",
-        "Bad proc() ?type { return some!(42) }\nSelected proc() type { return Bad()? }\nmain proc() Selected() { return 42 }\n",
+        "Bad proc() ?type { return some!(42) }\nSelected proc() type { return Bad()? }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1018,7 +1018,7 @@ optional_types_reject_incomplete_payload_result test {
     try support.check_text(
         &context,
         "optional_types_reject_incomplete_payload_result",
-        "Config :: struct { child type, count usize }\nbad proc() ?Config {\n    value Config := undefined\n    value.child = i16\n    return some!(value)\n}\nSelected proc() type { return bad()?.child }\nmain proc() Selected() { return 42 }\n",
+        "Config :: struct { child type, count usize }\nbad proc() ?Config {\n    value Config := undefined\n    value.child = i16\n    return some!(value)\n}\nSelected proc() type { return bad()?.child }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1029,7 +1029,7 @@ optional_types_reject_uninitialized_presence test {
     try support.check_text(
         &context,
         "optional_types_reject_uninitialized_presence",
-        "Bad proc() type {\n    value ?type := undefined\n    if value |_| return i16\n    return bool\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value ?type := undefined\n    if value |_| return i16\n    return bool\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1040,7 +1040,7 @@ optional_types_reject_capture_mutation test {
     try support.check_text(
         &context,
         "optional_types_reject_capture_mutation",
-        "Bad proc() type {\n    value ?type :: i16\n    if value |T| { T = bool }\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value ?type :: i16\n    if value |T| { T = bool }\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "mutable local binding" },
     )
 }
@@ -1051,7 +1051,7 @@ optional_types_reject_runtime_dependency test {
     try support.check_text(
         &context,
         "optional_types_reject_runtime_dependency",
-        "choose proc(present bool) ?type {\n    if (present) return i16\n    return null\n}\nmain proc() i16 {\n    present := true\n    return if choose(present) |_| 42 else 0\n}\n",
+        "choose proc(present bool) ?type {\n    if (present) return i16\n    return null\n}\nevaluate proc() i16 {\n    present := true\n    return if choose(present) |_| 42 else 0\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -1062,8 +1062,8 @@ fallible_types_record_channels_select_runtime_storage test {
     try support.check_text(
         &context,
         "fallible_types_record_channels_select_runtime_storage",
-        "Config :: struct { child ?type, count usize }\nFailure :: struct { child type, count usize }\nmake proc(failed bool) Config ! Failure {\n    if (failed) return Failure { child = bool, count = 2 }\n    return Config { child = i16, count = 2 }\n}\nSelected proc(failed bool) type {\n    config :: make(failed) catch |err| Config { child = err.child, count = err.count }\n    T :: config.child?\n    return [config.count]T\n}\nmain proc() [2]i16 {\n    values Selected(false) :: [40, 2]\n    flags Selected(true) :: [true, false]\n    if (!flags[0] or flags[1]) return [0, 0]\n    return [values[0] + values[1], i16(flags.len)]\n}\n",
-        support.Expected{ stdout = "[42, 2]\n", diagnostic = null },
+        "Config :: struct { child ?type, count usize }\nFailure :: struct { child type, count usize }\nmake proc(failed bool) Config ! Failure {\n    if (failed) return Failure { child = bool, count = 2 }\n    return Config { child = i16, count = 2 }\n}\nSelected proc(failed bool) type {\n    config :: make(failed) catch |err| Config { child = err.child, count = err.count }\n    T :: config.child?\n    return [config.count]T\n}\nevaluate proc() [2]i16 {\n    values Selected(false) :: [40, 2]\n    flags Selected(true) :: [true, false]\n    if (!flags[0] or flags[1]) return [0, 0]\n    return [values[0] + values[1], i16(flags.len)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1073,8 +1073,8 @@ fallible_types_optional_success_try_and_composed_errors test {
     try support.check_text(
         &context,
         "fallible_types_optional_success_try_and_composed_errors",
-        "First :: enum { first }\nSecond :: enum { second }\nchoose proc(present bool, failed bool) ?type ! First {\n    if (failed) return .first\n    if (present) return i16\n    return null\n}\nforward proc(present bool, failed bool) ?type ! (First | Second) {\n    selected :: try choose(present, failed)\n    return selected\n}\nSelected proc(present bool, failed bool) type {\n    selected :: forward(present, failed) catch |err| match err {\n        .first: some!(bool),\n        .second: some!(u16),\n    }\n    return if selected |T| T else u8\n}\nmain proc() [2]i16 {\n    value Selected(true, false) :: 40\n    missing Selected(false, false) :: 2\n    recovered Selected(true, true) :: true\n    if (!recovered) return [0, 0]\n    return [value + i16(missing), i16(sizeof!(Selected(false, true)))]\n}\n",
-        support.Expected{ stdout = "[42, 1]\n", diagnostic = null },
+        "First :: enum { first }\nSecond :: enum { second }\nchoose proc(present bool, failed bool) ?type ! First {\n    if (failed) return .first\n    if (present) return i16\n    return null\n}\nforward proc(present bool, failed bool) ?type ! (First | Second) {\n    selected :: try choose(present, failed)\n    return selected\n}\nSelected proc(present bool, failed bool) type {\n    selected :: forward(present, failed) catch |err| match err {\n        .first: some!(bool),\n        .second: some!(u16),\n    }\n    return if selected |T| T else u8\n}\nevaluate proc() [2]i16 {\n    value Selected(true, false) :: 40\n    missing Selected(false, false) :: 2\n    recovered Selected(true, true) :: true\n    if (!recovered) return [0, 0]\n    return [value + i16(missing), i16(sizeof!(Selected(false, true)))]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 1) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1084,8 +1084,8 @@ fallible_types_copies_procedure_inputs_and_erased_cache_identity test {
     try support.check_text(
         &context,
         "fallible_types_copies_procedure_inputs_and_erased_cache_identity",
-        "Config :: struct { child type, count usize }\nFailure :: struct { child type, count usize }\ngood proc() Config ! Failure { return Config { child = i16, count = 2 } }\nbad proc() Config ! Failure { return Failure { child = bool, count = 2 } }\npass proc(value Config ! Failure) Config ! Failure { return value }\nToken proc($value Config ! Failure) type {\n    _ = value\n return struct {} }\nSelected proc(value Config ! Failure) type {\n    config :: value catch |err| Config { child = err.child, count = err.count }\n    return [config.count]config.child\n}\nexact proc($value Config ! Failure, input Selected(value)) Selected(value) { return input }\nStorage proc() type {\n    value Config ! Failure := pass(good())\n    saved :: value\n    copied := pass(value)\n    value = bad()\n    copied = Config { child = u8, count = 3 }\n    if (Token(saved) != Token(good())) return bool\n    if (Token(value) != Token(bad())) return bool\n    if (Token(saved) == Token(value) or Token(saved) == Token(copied)) return bool\n    if (Token(saved) != Token(Config { child = i16, count = 2 })) return bool\n    if (Token(value) == Token(Failure { child = u8, count = 2 })) return bool\n    if (Token(value) == Token(Failure { child = bool, count = 3 })) return bool\n    if (Token(saved) == Token(Failure { child = i16, count = 2 })) return bool\n    return Selected(saved)\n}\nmain proc() i16 {\n    values Storage() :: exact(good(), [40, 2])\n    flags :: exact(bad(), [true, false])\n    if (!flags[0] or flags[1]) return 0\n    return values[0] + values[1]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\nFailure :: struct { child type, count usize }\ngood proc() Config ! Failure { return Config { child = i16, count = 2 } }\nbad proc() Config ! Failure { return Failure { child = bool, count = 2 } }\npass proc(value Config ! Failure) Config ! Failure { return value }\nToken proc($value Config ! Failure) type {\n    _ = value\n return struct {} }\nSelected proc(value Config ! Failure) type {\n    config :: value catch |err| Config { child = err.child, count = err.count }\n    return [config.count]config.child\n}\nexact proc($value Config ! Failure, input Selected(value)) Selected(value) { return input }\nStorage proc() type {\n    value Config ! Failure := pass(good())\n    saved :: value\n    copied := pass(value)\n    value = bad()\n    copied = Config { child = u8, count = 3 }\n    if (Token(saved) != Token(good())) return bool\n    if (Token(value) != Token(bad())) return bool\n    if (Token(saved) == Token(value) or Token(saved) == Token(copied)) return bool\n    if (Token(saved) != Token(Config { child = i16, count = 2 })) return bool\n    if (Token(value) == Token(Failure { child = u8, count = 2 })) return bool\n    if (Token(value) == Token(Failure { child = bool, count = 3 })) return bool\n    if (Token(saved) == Token(Failure { child = i16, count = 2 })) return bool\n    return Selected(saved)\n}\nevaluate proc() i16 {\n    values Storage() :: exact(good(), [40, 2])\n    flags :: exact(bad(), [true, false])\n    if (!flags[0] or flags[1]) return 0\n    return values[0] + values[1]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1095,8 +1095,8 @@ fallible_types_nested_optional_arrays_preserve_owned_replacements test {
     try support.check_text(
         &context,
         "fallible_types_nested_optional_arrays_preserve_owned_replacements",
-        "Config :: struct { child type, count usize }\nFailure :: struct { child ?type, count usize }\nPacket :: struct { rows [2]mut (?Config ! Failure) }\nmake proc() Packet {\n    return { rows = [\n        some!(Config { child = i16, count = 2 }),\n        Failure { child = bool, count = 3 },\n    ] }\n}\npass proc(value Packet) Packet { return value }\nStorage proc() type {\n    value := make()\n    saved :: pass(value)\n    copied := saved\n    value.rows[0] = null\n    value.rows[1] = some!(Config { child = u8, count = 4 })\n    copied.rows[0] = Failure { child = null, count = 5 }\n    if ((value.rows[0] catch null) != null) return bool\n    changed :: value.rows[1] catch null\n    if (changed?.child != u8 or changed?.count != 4) return bool\n    copied.rows[0] catch |err| {\n        if (err.child != null or err.count != 5) return bool\n        yield null\n    }\n    config :: (saved.rows[0] catch null)?\n    saved.rows[1] catch |err| {\n        if (err.child? != bool or err.count != 3) return bool\n        return [config.count]config.child\n    }\n    return bool\n}\nmain proc() Storage() { return [40, 2] }\n",
-        support.Expected{ stdout = "[40, 2]\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\nFailure :: struct { child ?type, count usize }\nPacket :: struct { rows [2]mut (?Config ! Failure) }\nmake proc() Packet {\n    return { rows = [\n        some!(Config { child = i16, count = 2 }),\n        Failure { child = bool, count = 3 },\n    ] }\n}\npass proc(value Packet) Packet { return value }\nStorage proc() type {\n    value := make()\n    saved :: pass(value)\n    copied := saved\n    value.rows[0] = null\n    value.rows[1] = some!(Config { child = u8, count = 4 })\n    copied.rows[0] = Failure { child = null, count = 5 }\n    if ((value.rows[0] catch null) != null) return bool\n    changed :: value.rows[1] catch null\n    if (changed?.child != u8 or changed?.count != 4) return bool\n    copied.rows[0] catch |err| {\n        if (err.child != null or err.count != 5) return bool\n        yield null\n    }\n    config :: (saved.rows[0] catch null)?\n    saved.rows[1] catch |err| {\n        if (err.child? != bool or err.count != 3) return bool\n        return [config.count]config.child\n    }\n    return bool\n}\nevaluate proc() Storage() { return [40, 2] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 40) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1106,8 +1106,8 @@ fallible_types_return_snapshots_and_cleanup_order test {
     try support.check_text(
         &context,
         "fallible_types_return_snapshots_and_cleanup_order",
-        "Config :: struct { child type, count usize, trace usize }\nFailure :: struct { child type, count usize, trace usize }\nmake proc(failed bool) Config ! Failure {\n    trace usize := 0\n    value Config ! Failure := undefined\n    defer {\n        if (trace != (if (failed) 321 else 31)) unreachable\n        value catch |err| {\n            if (err.child != u8 or err.count != 9 or err.trace != 9) unreachable\n            yield Config { child = u8, count = 9, trace = 9 }\n        }\n    }\n    defer value = Failure { child = u8, count = 9, trace = 9 }\n    defer trace = trace * 10 + 1\n    errdefer |err| {\n        if (err.child != bool or err.count != 2 or err.trace != 3) unreachable\n        trace = trace * 10 + 2\n    }\n    { defer trace = trace * 10 + 3 }\n    value = Config { child = i16, count = 2, trace = trace }\n    if (failed) value = Failure { child = bool, count = 2, trace = trace }\n    return value\n}\nStorage proc() type {\n    config :: make(false) catch { return bool }\n    make(true) catch |err| {\n        if (err.child != bool or err.count != 2) return bool\n        if (config.child != i16 or config.count != 2) return bool\n        return struct {\n            values [config.count]config.child\n            success usize = config.trace\n            failure usize = err.trace\n        }\n    }\n    return bool\n}\nmain proc() [3]i16 {\n    storage Storage() :: { values = [40, 2] }\n    return [storage.values[0] + storage.values[1], i16(storage.success), i16(storage.failure)]\n}\n",
-        support.Expected{ stdout = "[42, 3, 3]\n", diagnostic = null },
+        "Config :: struct { child type, count usize, trace usize }\nFailure :: struct { child type, count usize, trace usize }\nmake proc(failed bool) Config ! Failure {\n    trace usize := 0\n    value Config ! Failure := undefined\n    defer {\n        if (trace != (if (failed) 321 else 31)) unreachable\n        value catch |err| {\n            if (err.child != u8 or err.count != 9 or err.trace != 9) unreachable\n            yield Config { child = u8, count = 9, trace = 9 }\n        }\n    }\n    defer value = Failure { child = u8, count = 9, trace = 9 }\n    defer trace = trace * 10 + 1\n    errdefer |err| {\n        if (err.child != bool or err.count != 2 or err.trace != 3) unreachable\n        trace = trace * 10 + 2\n    }\n    { defer trace = trace * 10 + 3 }\n    value = Config { child = i16, count = 2, trace = trace }\n    if (failed) value = Failure { child = bool, count = 2, trace = trace }\n    return value\n}\nStorage proc() type {\n    config :: make(false) catch { return bool }\n    make(true) catch |err| {\n        if (err.child != bool or err.count != 2) return bool\n        if (config.child != i16 or config.count != 2) return bool\n        return struct {\n            values [config.count]config.child\n            success usize = config.trace\n            failure usize = err.trace\n        }\n    }\n    return bool\n}\nevaluate proc() [3]i16 {\n    storage Storage() :: { values = [40, 2] }\n    return [storage.values[0] + storage.values[1], i16(storage.success), i16(storage.failure)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 3) return 1\n    if (value[2] != 3) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1117,7 +1117,7 @@ fallible_types_reject_incomplete_success_payload test {
     try support.check_text(
         &context,
         "fallible_types_reject_incomplete_success_payload",
-        "Config :: struct { child type, count usize }\nError :: enum { failed }\nbad proc() Config ! Error {\n    value Config := undefined\n    value.child = i16\n    return value\n}\nSelected proc() type { return (bad() catch { return bool }).child }\nmain proc() Selected() { return 42 }\n",
+        "Config :: struct { child type, count usize }\nError :: enum { failed }\nbad proc() Config ! Error {\n    value Config := undefined\n    value.child = i16\n    return value\n}\nSelected proc() type { return (bad() catch { return bool }).child }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1128,7 +1128,7 @@ fallible_types_reject_incomplete_error_payload test {
     try support.check_text(
         &context,
         "fallible_types_reject_incomplete_error_payload",
-        "Failure :: struct { child type, count usize }\nbad proc() type ! Failure {\n    value Failure := undefined\n    value.child = i16\n    return value\n}\nSelected proc() type { return bad() catch |err| err.child }\nmain proc() Selected() { return 42 }\n",
+        "Failure :: struct { child type, count usize }\nbad proc() type ! Failure {\n    value Failure := undefined\n    value.child = i16\n    return value\n}\nSelected proc() type { return bad() catch |err| err.child }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1139,7 +1139,7 @@ fallible_types_reject_uninitialized_channel test {
     try support.check_text(
         &context,
         "fallible_types_reject_uninitialized_channel",
-        "Error :: enum { failed }\nSelected proc() type {\n    value type ! Error := undefined\n    return value catch bool\n}\nmain proc() Selected() { return 42 }\n",
+        "Error :: enum { failed }\nSelected proc() type {\n    value type ! Error := undefined\n    return value catch bool\n}\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1150,7 +1150,7 @@ fallible_types_reject_non_type_payload test {
     try support.check_text(
         &context,
         "fallible_types_reject_non_type_payload",
-        "Error :: enum { failed }\nbad proc() type ! Error { return 42 }\nSelected proc() type { return bad() catch bool }\nmain proc() Selected() { return 42 }\n",
+        "Error :: enum { failed }\nbad proc() type ! Error { return 42 }\nSelected proc() type { return bad() catch bool }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1161,7 +1161,7 @@ fallible_types_reject_incompatible_error_propagation test {
     try support.check_text(
         &context,
         "fallible_types_reject_incompatible_error_propagation",
-        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() type ! First { return .first }\nbad proc() type ! Second { return try leaf() }\nSelected proc() type { return bad() catch i16 }\nmain proc() Selected() { return 42 }\n",
+        "First :: enum { first }\nSecond :: enum { second }\nleaf proc() type ! First { return .first }\nbad proc() type ! Second { return try leaf() }\nSelected proc() type { return bad() catch i16 }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "propagated errors are not a subset" },
     )
 }
@@ -1172,7 +1172,7 @@ fallible_types_reject_catch_capture_mutation test {
     try support.check_text(
         &context,
         "fallible_types_reject_catch_capture_mutation",
-        "Failure :: struct { child type }\nbad proc() type ! Failure { return Failure { child = i16 } }\nSelected proc() type {\n    return bad() catch |err| {\n        err.child = bool\n        yield err.child\n    }\n}\nmain proc() Selected() { return 42 }\n",
+        "Failure :: struct { child type }\nbad proc() type ! Failure { return Failure { child = i16 } }\nSelected proc() type {\n    return bad() catch |err| {\n        err.child = bool\n        yield err.child\n    }\n}\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable array element" },
     )
 }
@@ -1183,7 +1183,7 @@ fallible_types_reject_errdefer_capture_mutation test {
     try support.check_text(
         &context,
         "fallible_types_reject_errdefer_capture_mutation",
-        "Failure :: struct { child type }\nbad proc() type ! Failure {\n    errdefer |err| { err.child = bool }\n    return Failure { child = i16 }\n}\nSelected proc() type { return bad() catch |err| err.child }\nmain proc() Selected() { return 42 }\n",
+        "Failure :: struct { child type }\nbad proc() type ! Failure {\n    errdefer |err| { err.child = bool }\n    return Failure { child = i16 }\n}\nSelected proc() type { return bad() catch |err| err.child }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "writable array element" },
     )
 }
@@ -1194,7 +1194,7 @@ fallible_types_reject_runtime_dependency test {
     try support.check_text(
         &context,
         "fallible_types_reject_runtime_dependency",
-        "Error :: enum { failed }\nchoose proc(failed bool) type ! Error {\n    if (failed) return .failed\n    return i16\n}\nmain proc() i16 {\n    failed := false\n    T :: choose(failed) catch bool\n    value T :: 42\n    return value\n}\n",
+        "Error :: enum { failed }\nchoose proc(failed bool) type ! Error {\n    if (failed) return .failed\n    return i16\n}\nevaluate proc() i16 {\n    failed := false\n    T :: choose(failed) catch bool\n    value T :: 42\n    return value\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -1205,8 +1205,8 @@ fallible_types_direct_catches_select_types_and_runtime_handlers test {
     try support.check_text(
         &context,
         "fallible_types_direct_catches_select_types_and_runtime_handlers",
-        "Error :: enum { failed }\nFailure :: struct { child type }\nchoose proc(failed bool) type ! Error {\n    if (failed) return .failed\n    return i16\n}\ncompute proc() i16 ! Failure { return Failure { child = i16 } }\nrecover proc(input i16) i16 {\n    return compute() catch |err| {\n        value err.child :: input\n        yield value + 2\n    }\n}\nmain proc() [2]i16 {\n    Selected :: choose(false) catch bool\n    Recovered :: choose(true) catch i16\n    first Selected :: 40\n    second Recovered :: 2\n    return [first + second, recover(40)]\n}\n",
-        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+        "Error :: enum { failed }\nFailure :: struct { child type }\nchoose proc(failed bool) type ! Error {\n    if (failed) return .failed\n    return i16\n}\ncompute proc() i16 ! Failure { return Failure { child = i16 } }\nrecover proc(input i16) i16 {\n    return compute() catch |err| {\n        value err.child :: input\n        yield value + 2\n    }\n}\nevaluate proc() [2]i16 {\n    Selected :: choose(false) catch bool\n    Recovered :: choose(true) catch i16\n    first Selected :: 40\n    second Recovered :: 2\n    return [first + second, recover(40)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1216,8 +1216,8 @@ fallible_types_composed_metadata_errors_preserve_payloads_and_nominals test {
     try support.check_text(
         &context,
         "fallible_types_composed_metadata_errors_preserve_payloads_and_nominals",
-        "Child :: distinct i16\nFailure :: struct { child type, count usize }\nOther :: enum { missing }\nleaf proc(failed bool) type ! Failure {\n    if (failed) return Failure { child = Child, count = 2 }\n    return bool\n}\nforward proc(failed bool) type ! (Failure | Other) { return try leaf(failed) }\nStorage proc() type {\n    return forward(true) catch |err| match err {\n        .Failure |info|: [info.count]info.child,\n        .missing: bool,\n    }\n}\nmain proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(values[0]) + i16(values[1])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Child :: distinct i16\nFailure :: struct { child type, count usize }\nOther :: enum { missing }\nleaf proc(failed bool) type ! Failure {\n    if (failed) return Failure { child = Child, count = 2 }\n    return bool\n}\nforward proc(failed bool) type ! (Failure | Other) { return try leaf(failed) }\nStorage proc() type {\n    return forward(true) catch |err| match err {\n        .Failure |info|: [info.count]info.child,\n        .missing: bool,\n    }\n}\nevaluate proc() i16 {\n    values Storage() :: [40, 2]\n    return i16(values[0]) + i16(values[1])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1227,7 +1227,7 @@ fallible_types_reject_invalid_direct_catch_result test {
     try support.check_text(
         &context,
         "fallible_types_reject_invalid_direct_catch_result",
-        "Error :: enum { failed }\nchoose proc() type ! Error { return .failed }\nmain proc() i16 {\n    Selected :: choose() catch 42\n    return 42\n}\n",
+        "Error :: enum { failed }\nchoose proc() type ! Error { return .failed }\nevaluate proc() i16 {\n    Selected :: choose() catch 42\n    return 42\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1238,8 +1238,8 @@ fallible_types_void_completion_and_success_precedence test {
     try support.check_text(
         &context,
         "fallible_types_void_completion_and_success_precedence",
-        "Success :: enum { same, good }\nFailure :: union(enum) { same type, bad type }\nwork proc(mode usize) void ! Failure {\n    errdefer |err| {\n        if (mode != 2) unreachable\n        match err { .same |T|: if (T != i16) unreachable, .bad: unreachable }\n    }\n    if (mode == 0) return\n    if (mode == 2) return Failure { same = i16 }\n}\nchoose proc() Success ! Failure { return .same }\nStorage proc() type {\n    work(0) catch { return bool }\n    work(1) catch { return bool }\n    tag :: choose() catch { return bool }\n    if (tag != .same) return bool\n    work(2) catch |err| {\n        return match err { .same |T|: T, .bad: bool }\n    }\n    return bool\n}\nmain proc() Storage() { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Success :: enum { same, good }\nFailure :: union(enum) { same type, bad type }\nwork proc(mode usize) void ! Failure {\n    errdefer |err| {\n        if (mode != 2) unreachable\n        match err { .same |T|: if (T != i16) unreachable, .bad: unreachable }\n    }\n    if (mode == 0) return\n    if (mode == 2) return Failure { same = i16 }\n}\nchoose proc() Success ! Failure { return .same }\nStorage proc() type {\n    work(0) catch { return bool }\n    work(1) catch { return bool }\n    tag :: choose() catch { return bool }\n    if (tag != .same) return bool\n    work(2) catch |err| {\n        return match err { .same |T|: T, .bad: bool }\n    }\n    return bool\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1249,7 +1249,7 @@ fallible_types_reject_backed_enum_metadata_composition test {
     try support.check_text(
         &context,
         "fallible_types_reject_backed_enum_metadata_composition",
-        "Failure :: struct { child type }\nOther :: enum(i16) { failed = 1 }\nbad proc() type ! (Failure | Other) { return i16 }\nSelected proc() type { return bad() catch bool }\nmain proc() Selected() { return 42 }\n",
+        "Failure :: struct { child type }\nOther :: enum(i16) { failed = 1 }\nbad proc() type ! (Failure | Other) { return i16 }\nSelected proc() type { return bad() catch bool }\nevaluate proc() Selected() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "sum composition requires compatible" },
     )
 }
@@ -1260,8 +1260,8 @@ type_records_undefined_nested_updates_preserve_partial_copies test {
     try support.check_text(
         &context,
         "type_records_undefined_nested_updates_preserve_partial_copies",
-        "Config :: struct {\n    child type = bool\n    detail struct { count usize, bias i16 }\n    rows [2]mut struct { child type, count usize }\n}\nconfig proc() Config {\n    value Config := undefined\n    value.child = i16\n    value.detail.count = 2\n    copied := value\n    value.detail.bias = 99\n    copied.detail.bias = 2\n    for (usize(0)..copied.rows.len) |index| {\n        copied.rows[index].child = copied.child\n        copied.rows[index].count = index + 1\n    }\n    return copied\n}\nStorage proc(input Config) type {\n    return struct { values [input.detail.count]input.rows[1].child, bias i16 = input.detail.bias }\n}\nmain proc() i16 {\n    value Storage(config()) :: { values = [19, 21] }\n    same Storage(config()) :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct {\n    child type = bool\n    detail struct { count usize, bias i16 }\n    rows [2]mut struct { child type, count usize }\n}\nconfig proc() Config {\n    value Config := undefined\n    value.child = i16\n    value.detail.count = 2\n    copied := value\n    value.detail.bias = 99\n    copied.detail.bias = 2\n    for (usize(0)..copied.rows.len) |index| {\n        copied.rows[index].child = copied.child\n        copied.rows[index].count = index + 1\n    }\n    return copied\n}\nStorage proc(input Config) type {\n    return struct { values [input.detail.count]input.rows[1].child, bias i16 = input.detail.bias }\n}\nevaluate proc() i16 {\n    value Storage(config()) :: { values = [19, 21] }\n    same Storage(config()) :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1271,8 +1271,8 @@ type_records_undefined_tuples_replacement_and_empty_fields test {
     try support.check_text(
         &context,
         "type_records_undefined_tuples_replacement_and_empty_fields",
-        "Pair :: struct { type, struct { child type, values [0]mut type } }\npair proc() Pair {\n    value Pair := undefined\n    value.0 = bool\n    value.1.child = i8\n    copied := value\n    value = {i16, { child = i16, values = [] }}\n    copied.0 = value.0\n    copied.1 = value.1\n    return copied\n}\nElement proc(input Pair) type { return field!(input, \"0\") }\nadd proc($schema Pair, value Element(schema)) Element(schema) {\n    if (schema.1.child != i16) return 0\n    return value + 2\n}\nmain proc() i16 { return add(pair(), 40) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Pair :: struct { type, struct { child type, values [0]mut type } }\npair proc() Pair {\n    value Pair := undefined\n    value.0 = bool\n    value.1.child = i8\n    copied := value\n    value = {i16, { child = i16, values = [] }}\n    copied.0 = value.0\n    copied.1 = value.1\n    return copied\n}\nElement proc(input Pair) type { return field!(input, \"0\") }\nadd proc($schema Pair, value Element(schema)) Element(schema) {\n    if (schema.1.child != i16) return 0\n    return value + 2\n}\nevaluate proc() i16 { return add(pair(), 40) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1282,7 +1282,7 @@ type_records_undefined_reject_type_leaf_read test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_type_leaf_read",
-        "Bad proc() type {\n    value struct { child type } := undefined\n    return value.child\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type } := undefined\n    return value.child\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1293,7 +1293,7 @@ type_records_undefined_reject_value_leaf_read test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_value_leaf_read",
-        "Bad proc() type {\n    value struct { child type, count usize } := undefined\n    value.child = i16\n    return [value.count]value.child\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type, count usize } := undefined\n    value.child = i16\n    return [value.count]value.child\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1304,7 +1304,7 @@ type_records_undefined_defaults_do_not_initialize_fields test {
     try support.check_text(
         &context,
         "type_records_undefined_defaults_do_not_initialize_fields",
-        "config proc() struct { child type = i16 } {\n    value struct { child type = i16 } := undefined\n    return value\n}\nmain proc() config().child { return 42 }\n",
+        "config proc() struct { child type = i16 } {\n    value struct { child type = i16 } := undefined\n    return value\n}\nevaluate proc() config().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1315,7 +1315,7 @@ type_records_undefined_copy_retains_uninitialized_leaves test {
     try support.check_text(
         &context,
         "type_records_undefined_copy_retains_uninitialized_leaves",
-        "Bad proc() type {\n    value struct { child type, count usize } := undefined\n    value.child = i16\n    copied :: value\n    value.count = 2\n    return [copied.count]copied.child\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type, count usize } := undefined\n    value.child = i16\n    copied :: value\n    value.count = 2\n    return [copied.count]copied.child\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1326,7 +1326,7 @@ type_records_undefined_reject_partial_argument test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_partial_argument",
-        "Config :: struct { child type, count usize }\nSelected proc(value Config) type { return value.child }\nBad proc() type {\n    value Config := undefined\n    value.child = i16\n    return Selected(value)\n}\nmain proc() Bad() { return 42 }\n",
+        "Config :: struct { child type, count usize }\nSelected proc(value Config) type { return value.child }\nBad proc() type {\n    value Config := undefined\n    value.child = i16\n    return Selected(value)\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1337,7 +1337,7 @@ type_records_undefined_reject_partial_erased_argument test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_partial_erased_argument",
-        "Config :: struct { child type, count usize }\nselected proc($value Config) i16 { return 42 }\nBad proc() type {\n    value Config := undefined\n    value.child = i16\n    return [usize(selected(value))]i16\n}\nmain proc() Bad() { return [] }\n",
+        "Config :: struct { child type, count usize }\nselected proc($value Config) i16 { return 42 }\nBad proc() type {\n    value Config := undefined\n    value.child = i16\n    return [usize(selected(value))]i16\n}\nevaluate proc() Bad() { return [] }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "local value was read before initialization" },
     )
 }
@@ -1348,7 +1348,7 @@ type_records_undefined_reject_readonly_field_update test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_readonly_field_update",
-        "Bad proc() type {\n    value struct { child type } :: undefined\n    value.child = i16\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type } :: undefined\n    value.child = i16\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
     )
 }
@@ -1359,7 +1359,7 @@ type_records_undefined_reject_readonly_nested_array_update test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_readonly_nested_array_update",
-        "Bad proc() type {\n    value struct { children [1]type } := undefined\n    value.children[0] = i16\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { children [1]type } := undefined\n    value.children[0] = i16\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
     )
 }
@@ -1370,7 +1370,7 @@ type_records_undefined_reject_invalid_schema test {
     try support.check_text(
         &context,
         "type_records_undefined_reject_invalid_schema",
-        "Bad proc() type {\n    value struct { child type, count i8 = 128 } := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type, count i8 = 128 } := undefined\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "numeric literal is outside its runtime type's range" },
     )
 }
@@ -1381,7 +1381,7 @@ type_records_undefined_construction_is_bounded test {
     try support.check_text(
         &context,
         "type_records_undefined_construction_is_bounded",
-        "Bad proc() type {\n    value struct { child type, rows [1000000000]mut struct { child type } } := undefined\n    return i16\n}\nmain proc() Bad() { return 42 }\n",
+        "Bad proc() type {\n    value struct { child type, rows [1000000000]mut struct { child type } } := undefined\n    return i16\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time execution exceeds its recursion or step limit" },
     )
 }
@@ -1392,8 +1392,8 @@ type_records_local_schema_defaults_and_owned_copies test {
     try support.check_text(
         &context,
         "type_records_local_schema_defaults_and_owned_copies",
-        "Storage proc() type {\n    Config :: struct { child type = i8, count usize = 2, text string = \"ok\" }\n    config Config := {}\n    original :: config\n    field!(config, \"child\") = i16\n    config.count = config.count + 1\n    config.text = \"owned\"\n    if (original.child != i8 or original.count != 2 or original.text.len != 2) return bool\n    return struct { values [config.count]config.child, bias original.child = 2 }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 21, 0] }\n    same Storage() :: value\n    return same.values[0] + same.values[1] + i16(same.bias)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Storage proc() type {\n    Config :: struct { child type = i8, count usize = 2, text string = \"ok\" }\n    config Config := {}\n    original :: config\n    field!(config, \"child\") = i16\n    config.count = config.count + 1\n    config.text = \"owned\"\n    if (original.child != i8 or original.count != 2 or original.text.len != 2) return bool\n    return struct { values [config.count]config.child, bias original.child = 2 }\n}\nevaluate proc() i16 {\n    value Storage() :: { values = [19, 21, 0] }\n    same Storage() :: value\n    return same.values[0] + same.values[1] + i16(same.bias)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1403,8 +1403,8 @@ type_records_nested_arrays_borrowed_iteration_and_capture_copies test {
     try support.check_text(
         &context,
         "type_records_nested_arrays_borrowed_iteration_and_capture_copies",
-        "Storage proc() type {\n    Item :: struct { child type, values [1]mut usize }\n    config struct { items [2]mut Item, bias struct { value i16 } } := {\n        items = [{ child = i8, values = [1] }, { child = bool, values = [1] }],\n        bias = { value = 0 },\n    }\n    original :: config\n    for config.items |item, index| {\n        config.items[1].child = i16\n        config.items[index].values[0] = index + 1\n        config.bias.value = config.bias.value + 1\n        if (index == 0 and item.child != i8) return bool\n        if (index == 1 and item.child != i16) return bool\n        copied := item\n        copied.child = u8\n        if (item.child == u8) return bool\n    }\n    if (original.items[1].child != bool or original.items[1].values[0] != 1) return bool\n    return struct { values [config.items[1].values[0]]config.items[1].child, bias i16 = config.bias.value }\n}\nmain proc() i16 {\n    value Storage() :: { values = [19, 21] }\n    return value.values[0] + value.values[1] + value.bias\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Storage proc() type {\n    Item :: struct { child type, values [1]mut usize }\n    config struct { items [2]mut Item, bias struct { value i16 } } := {\n        items = [{ child = i8, values = [1] }, { child = bool, values = [1] }],\n        bias = { value = 0 },\n    }\n    original :: config\n    for config.items |item, index| {\n        config.items[1].child = i16\n        config.items[index].values[0] = index + 1\n        config.bias.value = config.bias.value + 1\n        if (index == 0 and item.child != i8) return bool\n        if (index == 1 and item.child != i16) return bool\n        copied := item\n        copied.child = u8\n        if (item.child == u8) return bool\n    }\n    if (original.items[1].child != bool or original.items[1].values[0] != 1) return bool\n    return struct { values [config.items[1].values[0]]config.items[1].child, bias i16 = config.bias.value }\n}\nevaluate proc() i16 {\n    value Storage() :: { values = [19, 21] }\n    return value.values[0] + value.values[1] + value.bias\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1414,8 +1414,8 @@ type_records_inferred_tuples_nested_replacement_and_nominal_leaves test {
     try support.check_text(
         &context,
         "type_records_inferred_tuples_nested_replacement_and_nominal_leaves",
-        "Storage proc() type {\n    Child :: struct { value i16 }\n    config := { nested = { child = Child, count = usize(1) }, tuple = {i8, usize(2)} }\n    saved :: config\n    config.nested = saved.nested\n    config.tuple.0 = i16\n    config.nested.count = config.tuple.1\n    if (saved.tuple.0 != i8 or config.nested.child != Child) return bool\n    Element :: field!(config.tuple, \"0\")\n    return struct { first config.nested.child, second Child, bias Element = 2 }\n}\nmain proc() i16 {\n    value Storage() :: { first = { value = 19 }, second = { value = 21 } }\n    copied := value.first\n    copied = value.second\n    return value.first.value + copied.value + value.bias\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Storage proc() type {\n    Child :: struct { value i16 }\n    config := { nested = { child = Child, count = usize(1) }, tuple = {i8, usize(2)} }\n    saved :: config\n    config.nested = saved.nested\n    config.tuple.0 = i16\n    config.nested.count = config.tuple.1\n    if (saved.tuple.0 != i8 or config.nested.child != Child) return bool\n    Element :: field!(config.tuple, \"0\")\n    return struct { first config.nested.child, second Child, bias Element = 2 }\n}\nevaluate proc() i16 {\n    value Storage() :: { first = { value = 19 }, second = { value = 21 } }\n    copied := value.first\n    copied = value.second\n    return value.first.value + copied.value + value.bias\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1425,8 +1425,8 @@ type_record_procedure_owned_results_inputs_and_cache_identity test {
     try support.check_text(
         &context,
         "type_record_procedure_owned_results_inputs_and_cache_identity",
-        "Config :: struct { child type, counts [2]mut usize, bias i16 = 2 }\nconfig proc() Config { return { child = i16, counts = [1, 2] } }\nchange proc(input Config) Config {\n    copied := input\n    copied.child = u8\n    copied.counts[1] = 3\n    return copied\n}\nStorage proc(input Config) type {\n    saved :: input\n    changed :: change(input)\n    if (input.child != i16 or saved.counts[1] != 2) return bool\n    if (changed.child != u8 or changed.counts[1] != 3) return bool\n    return struct { values [input.counts[1]]input.child, bias i16 = input.bias }\n}\nSelected :: alias Storage(config())\nmain proc() i16 {\n    value Selected :: { values = [19, 21] }\n    same Storage({ child = i16, counts = [1, 2] }) :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { child type, counts [2]mut usize, bias i16 = 2 }\nconfig proc() Config { return { child = i16, counts = [1, 2] } }\nchange proc(input Config) Config {\n    copied := input\n    copied.child = u8\n    copied.counts[1] = 3\n    return copied\n}\nStorage proc(input Config) type {\n    saved :: input\n    changed :: change(input)\n    if (input.child != i16 or saved.counts[1] != 2) return bool\n    if (changed.child != u8 or changed.counts[1] != 3) return bool\n    return struct { values [input.counts[1]]input.child, bias i16 = input.bias }\n}\nSelected :: alias Storage(config())\nevaluate proc() i16 {\n    value Selected :: { values = [19, 21] }\n    same Storage({ child = i16, counts = [1, 2] }) :: value\n    return same.values[0] + same.values[1] + same.bias\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1436,8 +1436,8 @@ type_record_procedure_nested_array_snapshots_and_nominal_leaves test {
     try support.check_text(
         &context,
         "type_record_procedure_nested_array_snapshots_and_nominal_leaves",
-        "Item :: struct { child type, counts [1]mut usize }\nConfig :: struct { items [2]mut Item }\nconfig proc() Config {\n    Child :: struct { value i16 }\n    return { items = [{ child = Child, counts = [1] }, { child = Child, counts = [2] }] }\n}\nchange proc(input Config) Config {\n    copied := input\n    copied.items[0].child = u8\n    copied.items[1].counts[0] = 3\n    return copied\n}\nStorage proc(input Config) type {\n    changed :: change(input)\n    if (input.items[0].child != input.items[1].child) return bool\n    if (input.items[0].child == changed.items[0].child) return bool\n    if (input.items[1].counts[0] != 2 or changed.items[1].counts[0] != 3) return bool\n    return struct { first input.items[0].child, second input.items[1].child }\n}\nmain proc() i16 {\n    value Storage(config()) :: { first = { value = 19 }, second = { value = 23 } }\n    same Storage(config()) :: value\n    copied := same.first\n    copied = same.second\n    return same.first.value + copied.value\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Item :: struct { child type, counts [1]mut usize }\nConfig :: struct { items [2]mut Item }\nconfig proc() Config {\n    Child :: struct { value i16 }\n    return { items = [{ child = Child, counts = [1] }, { child = Child, counts = [2] }] }\n}\nchange proc(input Config) Config {\n    copied := input\n    copied.items[0].child = u8\n    copied.items[1].counts[0] = 3\n    return copied\n}\nStorage proc(input Config) type {\n    changed :: change(input)\n    if (input.items[0].child != input.items[1].child) return bool\n    if (input.items[0].child == changed.items[0].child) return bool\n    if (input.items[1].counts[0] != 2 or changed.items[1].counts[0] != 3) return bool\n    return struct { first input.items[0].child, second input.items[1].child }\n}\nevaluate proc() i16 {\n    value Storage(config()) :: { first = { value = 19 }, second = { value = 23 } }\n    same Storage(config()) :: value\n    copied := same.first\n    copied = same.second\n    return same.first.value + copied.value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1447,8 +1447,8 @@ type_record_procedure_tuple_results_and_erased_runtime_inputs test {
     try support.check_text(
         &context,
         "type_record_procedure_tuple_results_and_erased_runtime_inputs",
-        "Pair :: struct { type, usize }\npair proc() Pair { return {i16, 2} }\ncopy proc(input Pair) Pair { return input }\nElement proc(input Pair) type { return field!(input, \"0\") }\nadd proc($input Pair, value Element(input)) Element(input) {\n    return value + i16(field!(input, \"1\"))\n}\nforward proc(value i16) i16 { return add(copy(pair()), value) }\nmain proc() i16 {\n    if (add({i16, usize(1)}, 40) != 41) return 0\n    return forward(40)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Pair :: struct { type, usize }\npair proc() Pair { return {i16, 2} }\ncopy proc(input Pair) Pair { return input }\nElement proc(input Pair) type { return field!(input, \"0\") }\nadd proc($input Pair, value Element(input)) Element(input) {\n    return value + i16(field!(input, \"1\"))\n}\nforward proc(value i16) i16 { return add(copy(pair()), value) }\nevaluate proc() i16 {\n    if (add({i16, usize(1)}, 40) != 41) return 0\n    return forward(40)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1458,8 +1458,8 @@ type_record_procedure_dependent_annotations_and_erased_cache_values test {
     try support.check_text(
         &context,
         "type_record_procedure_dependent_annotations_and_erased_cache_values",
-        "config proc($T type, value T) struct { child type, bias T, detail struct { bias T } } {\n    return { child = T, bias = value, detail = { bias = value } }\n}\nStorage proc($T type, input struct { child type, bias T, detail struct { bias T } }) type {\n    return struct { value input.child, bias T = input.detail.bias }\n}\nadd proc($input struct { child type, bias i16, detail struct { bias i16 } }, value input.child) input.child {\n    return value + input.detail.bias\n}\nmain proc() i16 {\n    value Storage(i16, config(i16, 2)) :: { value = 40 }\n    same Storage(i16, { child = i16, bias = 2, detail = { bias = 2 } }) :: value\n    if (add(config(i16, 1), same.value) != 41) return 0\n    return add(config(i16, 2), same.value)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "config proc($T type, value T) struct { child type, bias T, detail struct { bias T } } {\n    return { child = T, bias = value, detail = { bias = value } }\n}\nStorage proc($T type, input struct { child type, bias T, detail struct { bias T } }) type {\n    return struct { value input.child, bias T = input.detail.bias }\n}\nadd proc($input struct { child type, bias i16, detail struct { bias i16 } }, value input.child) input.child {\n    return value + input.detail.bias\n}\nevaluate proc() i16 {\n    value Storage(i16, config(i16, 2)) :: { value = 40 }\n    same Storage(i16, { child = i16, bias = 2, detail = { bias = 2 } }) :: value\n    if (add(config(i16, 1), same.value) != 41) return 0\n    return add(config(i16, 2), same.value)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1469,7 +1469,7 @@ type_record_procedure_result_rejects_unknown_field test {
     try support.check_text(
         &context,
         "type_record_procedure_result_rejects_unknown_field",
-        "config proc() struct { child type } { return { child = i16, missing = 1 } }\nmain proc() config().child { return 42 }\n",
+        "config proc() struct { child type } { return { child = i16, missing = 1 } }\nevaluate proc() config().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "no such field" },
     )
 }
@@ -1480,7 +1480,7 @@ type_record_procedure_result_rejects_duplicate_field test {
     try support.check_text(
         &context,
         "type_record_procedure_result_rejects_duplicate_field",
-        "config proc() struct { child type } { return { child = i16, child = i8 } }\nmain proc() config().child { return 42 }\n",
+        "config proc() struct { child type } { return { child = i16, child = i8 } }\nevaluate proc() config().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "more than once" },
     )
 }
@@ -1491,7 +1491,7 @@ type_record_procedure_argument_rejects_missing_field test {
     try support.check_text(
         &context,
         "type_record_procedure_argument_rejects_missing_field",
-        "Selected proc(input struct { child type, count usize }) type { return input.child }\nmain proc() Selected({ child = i16 }) { return 42 }\n",
+        "Selected proc(input struct { child type, count usize }) type { return input.child }\nevaluate proc() Selected({ child = i16 }) { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "missing a required field" },
     )
 }
@@ -1502,7 +1502,7 @@ type_record_procedure_result_rejects_non_type_leaf test {
     try support.check_text(
         &context,
         "type_record_procedure_result_rejects_non_type_leaf",
-        "config proc() struct { child type } { return { child = 42 } }\nmain proc() config().child { return 42 }\n",
+        "config proc() struct { child type } { return { child = 42 } }\nevaluate proc() config().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1513,7 +1513,7 @@ type_record_procedure_argument_rejects_exact_value_leaf_mismatch test {
     try support.check_text(
         &context,
         "type_record_procedure_argument_rejects_exact_value_leaf_mismatch",
-        "Selected proc(input struct { child type, count usize }) type { return input.child }\nBad proc() type {\n    wrong i64 :: 2\n    return Selected({ child = i16, count = wrong })\n}\nmain proc() Bad() { return 42 }\n",
+        "Selected proc(input struct { child type, count usize }) type { return input.child }\nBad proc() type {\n    wrong i64 :: 2\n    return Selected({ child = i16, count = wrong })\n}\nevaluate proc() Bad() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1524,7 +1524,7 @@ type_record_procedure_erased_argument_rejects_exact_type_leaf_mismatch test {
     try support.check_text(
         &context,
         "type_record_procedure_erased_argument_rejects_exact_type_leaf_mismatch",
-        "add proc($input struct { child type }, value input.child) input.child { return value }\nmain proc() i16 {\n    wrong i32 :: 42\n    return add({ child = i16 }, wrong)\n}\n",
+        "add proc($input struct { child type }, value input.child) input.child { return value }\nevaluate proc() i16 {\n    wrong i32 :: 42\n    return add({ child = i16 }, wrong)\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -1535,7 +1535,7 @@ type_record_procedure_result_preserves_value_leaf_overflow test {
     try support.check_text(
         &context,
         "type_record_procedure_result_preserves_value_leaf_overflow",
-        "config proc() struct { child type, count i8 } { return { child = i16, count = 128 } }\nmain proc() config().child { return 42 }\n",
+        "config proc() struct { child type, count i8 } { return { child = i16, count = 128 } }\nevaluate proc() config().child { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "outside its runtime type" },
     )
 }

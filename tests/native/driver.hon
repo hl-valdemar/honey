@@ -198,7 +198,7 @@ check_native_driver proc(context @mut support.Context) void ! support.Error {
             "main proc(", entry.parameters, ") ", entry.result, " { return 0 }\n",
         ]))
         try support.check(context, app, support.Expected{
-            stdout = "", diagnostic = "main must be a runtime function with no parameters, or accept process.Init",
+            stdout = "", status = 1,
         })
     }
 }
@@ -217,7 +217,7 @@ append_driver_bytes proc(bytes @mut arraylist.ArrayList(u8), text []u8) void ! s
 check_variadic_libc proc(context @mut support.Context) void ! support.Error {
     source :: try support.put(context, context.temporary, "variadic.hon",
         `snprintf c_func(buffer ?*mut c_char, size c_ulong, format ?*c_char, ...) c_int
-        `main proc() i16 {
+        `main proc() i32 {
         `    buffer [256]mut u8 := undefined
         `    count :: snprintf(ptrcast!((&buffer).ptr), c_ulong(buffer.len),
         `        "%d %d %d %d %d %d %u %lld %llu %.2f %s",
@@ -228,7 +228,7 @@ check_variadic_libc proc(context @mut support.Context) void ! support.Error {
         `    if (count < 0 or usize(count) != expected.len) return -1
         `    for expected |byte, index| { if (buffer[index] != byte) return -2 }
         `    if (buffer[expected.len] != 0) return -3
-        `    return 42
+        `    return 0
         `}
         `
     )
@@ -241,7 +241,7 @@ check_variadic_libc proc(context @mut support.Context) void ! support.Error {
         try support.expect_result(context, built, 0, "", "")
         defer support.remove(context, context.executable) catch |_| {}
         native :: try support.run(context, &[context.executable], support.RunOptions{})
-        try support.expect_result(context, native, 0, "42\n", "")
+        try support.expect_result(context, native, 0, "", "")
         try support.remove(context, context.executable)
     }
 }
@@ -255,7 +255,7 @@ check_standalone_llvm proc(context @mut support.Context) void ! support.Error {
     try support.expect(context, assembled.status == 0, "Clang assembles standalone LLVM")
     defer support.remove(context, context.executable) catch |_| {}
     native :: try support.run(context, &[context.executable], support.RunOptions{})
-    try support.expect_result(context, native, 0, "120\n", "")
+    try support.expect_result(context, native, 120, "", "")
     try support.remove(context, context.executable)
 }
 

@@ -6,8 +6,8 @@ sentinel_arrays_keep_logical_lengths_and_physical_storage test {
     try support.check_text(
         &context,
         "sentinel_arrays_keep_logical_lengths_and_physical_storage",
-        "main proc() [10]usize {\n    values [2;7]mut u8 := [19, 23]\n    copy := values\n    copy[0] = 1\n    empty [0;7]u8 :: []\n    inferred [_;9]u8 :: [3, 4, 5]\n    _ [2][1;7]u16 :: [[11], [13]]\n    total usize := 0\n    for (values) |value| total += usize(value)\n    return [\n        values.len, sizeof!([2;7]u8), usize(values[2]),\n        usize(copy[0]), usize(values[0]), total,\n        empty.len, usize(empty[0]), inferred.len, sizeof!([2][1;7]u16),\n    ]\n}\n",
-        support.Expected{ stdout = "[2, 3, 7, 1, 19, 42, 0, 7, 3, 8]\n", diagnostic = null },
+        "evaluate proc() [10]usize {\n    values [2;7]mut u8 := [19, 23]\n    copy := values\n    copy[0] = 1\n    empty [0;7]u8 :: []\n    inferred [_;9]u8 :: [3, 4, 5]\n    _ [2][1;7]u16 :: [[11], [13]]\n    total usize := 0\n    for (values) |value| total += usize(value)\n    return [\n        values.len, sizeof!([2;7]u8), usize(values[2]),\n        usize(copy[0]), usize(values[0]), total,\n        empty.len, usize(empty[0]), inferred.len, sizeof!([2][1;7]u16),\n    ]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 10) return 1\n    if (value[0] != 2) return 1\n    if (value[1] != 3) return 1\n    if (value[2] != 7) return 1\n    if (value[3] != 1) return 1\n    if (value[4] != 19) return 1\n    if (value[5] != 42) return 1\n    if (value[6] != 0) return 1\n    if (value[7] != 7) return 1\n    if (value[8] != 3) return 1\n    if (value[9] != 8) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -17,8 +17,8 @@ sentinel_arrays_survive_generic_inference_and_owned_comptime_results test {
     try support.check_text(
         &context,
         "sentinel_arrays_survive_generic_inference_and_owned_comptime_results",
-        "identity proc($N usize, $S u8, value [N;S]u8) [N;S]u8 { return value }\nmake proc() [2;7]mut i16 {\n    values [2;7]mut i16 := [19, 23]\n    return values\n}\nmain proc() [8]usize {\n    value [2;3]u8 :: [11, 13]\n    inferred :: identity(value)\n    owned :: $(make())\n    different usize :: if $([2;0]u8 != [2;1]u8) 1 else 0\n    ordinary usize :: if $([2;0]u8 != [2]u8) 1 else 0\n    return [\n        inferred.len, usize(inferred[2]), usize(owned[0]), usize(owned[1]),\n        usize(owned[2]), sizeof!([2;7]i16), different, ordinary,\n    ]\n}\n",
-        support.Expected{ stdout = "[2, 3, 19, 23, 7, 6, 1, 1]\n", diagnostic = null },
+        "identity proc($N usize, $S u8, value [N;S]u8) [N;S]u8 { return value }\nmake proc() [2;7]mut i16 {\n    values [2;7]mut i16 := [19, 23]\n    return values\n}\nevaluate proc() [8]usize {\n    value [2;3]u8 :: [11, 13]\n    inferred :: identity(value)\n    owned :: $(make())\n    different usize :: if $([2;0]u8 != [2;1]u8) 1 else 0\n    ordinary usize :: if $([2;0]u8 != [2]u8) 1 else 0\n    return [\n        inferred.len, usize(inferred[2]), usize(owned[0]), usize(owned[1]),\n        usize(owned[2]), sizeof!([2;7]i16), different, ordinary,\n    ]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 8) return 1\n    if (value[0] != 2) return 1\n    if (value[1] != 3) return 1\n    if (value[2] != 19) return 1\n    if (value[3] != 23) return 1\n    if (value[4] != 7) return 1\n    if (value[5] != 6) return 1\n    if (value[6] != 1) return 1\n    if (value[7] != 1) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -28,8 +28,8 @@ sentinel_array_views_preserve_endpoints_and_allow_weakening test {
     try support.check_text(
         &context,
         "sentinel_array_views_preserve_endpoints_and_allow_weakening",
-        "length proc(value [;0]u8) usize { return value.len }\nordinary proc(value []u8) usize { return value.len }\nmain proc() [7]usize {\n    values [2;0]mut u8 := [19, 23]\n    pointer :: &values\n    borrowed [;0]u8 :: &values\n    suffix [;0]u8 :: pointer[1..]\n    interior [;23]u8 :: values[..1;23]\n    checked [;0]u8 :: values[..2;0]\n    return [\n        length(values), length(suffix), ordinary(values[..1]), interior.len,\n        checked.len, usize(suffix.ptr[1]), length(borrowed),\n    ]\n}\n",
-        support.Expected{ stdout = "[2, 1, 1, 1, 2, 0, 2]\n", diagnostic = null },
+        "length proc(value [;0]u8) usize { return value.len }\nordinary proc(value []u8) usize { return value.len }\nevaluate proc() [7]usize {\n    values [2;0]mut u8 := [19, 23]\n    pointer :: &values\n    borrowed [;0]u8 :: &values\n    suffix [;0]u8 :: pointer[1..]\n    interior [;23]u8 :: values[..1;23]\n    checked [;0]u8 :: values[..2;0]\n    return [\n        length(values), length(suffix), ordinary(values[..1]), interior.len,\n        checked.len, usize(suffix.ptr[1]), length(borrowed),\n    ]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 7) return 1\n    if (value[0] != 2) return 1\n    if (value[1] != 1) return 1\n    if (value[2] != 1) return 1\n    if (value[3] != 1) return 1\n    if (value[4] != 2) return 1\n    if (value[5] != 0) return 1\n    if (value[6] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -39,7 +39,7 @@ sentinel_array_endpoint_checks_observe_corrupted_backing test {
     try support.check_text(
         &context,
         "sentinel_array_endpoint_checks_observe_corrupted_backing",
-        "main proc() usize {\n    values [2;0]mut u8 := [19, 23]\n    pointer :: (&values).ptr\n    pointer[2] = 1\n    checked :: values[..2;0]\n    return checked.len\n}\n",
+        "evaluate proc() usize {\n    values [2;0]mut u8 := [19, 23]\n    pointer :: (&values).ptr\n    pointer[2] = 1\n    checked :: values[..2;0]\n    return checked.len\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "sentinel" },
     )
 }
@@ -50,8 +50,8 @@ sentinel_arrays_preserve_full_width_values_and_generated_storage test {
     try support.check_text(
         &context,
         "sentinel_arrays_preserve_full_width_values_and_generated_storage",
-        "wide proc() [0;$(maxval!(u64))]u64 { return [] }\nsigned proc() [0;$(minval!(i64))]i64 { return [] }\nFixed proc($S u8) type { return [1;S]u8 }\nFromEndpoint proc() type {\n    value [0;7]u8 :: []\n    return [value[0]]u8\n}\nmain proc() [5]bool {\n    unsigned_value :: $(wide())\n    signed_value :: $(signed())\n    generated Fixed(9) :: [5]\n    return [\n        unsigned_value[0] == maxval!(u64), signed_value[0] == minval!(i64),\n        generated[1] == 9, sizeof!(FromEndpoint()) == 7, generated.len == 1,\n    ]\n}\n",
-        support.Expected{ stdout = "[true, true, true, true, true]\n", diagnostic = null },
+        "wide proc() [0;$(maxval!(u64))]u64 { return [] }\nsigned proc() [0;$(minval!(i64))]i64 { return [] }\nFixed proc($S u8) type { return [1;S]u8 }\nFromEndpoint proc() type {\n    value [0;7]u8 :: []\n    return [value[0]]u8\n}\nevaluate proc() [5]bool {\n    unsigned_value :: $(wide())\n    signed_value :: $(signed())\n    generated Fixed(9) :: [5]\n    return [\n        unsigned_value[0] == maxval!(u64), signed_value[0] == minval!(i64),\n        generated[1] == 9, sizeof!(FromEndpoint()) == 7, generated.len == 1,\n    ]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 5) return 1\n    if (value[0] != true) return 1\n    if (value[1] != true) return 1\n    if (value[2] != true) return 1\n    if (value[3] != true) return 1\n    if (value[4] != true) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -61,8 +61,8 @@ numeric_conditional_arms_supply_literal_context_before_defaulting test {
     try support.check_text(
         &context,
         "numeric_conditional_arms_supply_literal_context_before_defaulting",
-        "choose proc(flag bool) usize {\n    first :: if (flag) usize(3) else 2\n    second :: if (flag) 1 else usize(4)\n    third :: if (flag) { yield usize(5) } else { yield 6 }\n    fourth :: if (flag) { yield 7 } else { yield usize(8) }\n    return first + second + third + fourth\n}\nmain proc() [2]usize { return [choose(true), choose(false)] }\n",
-        support.Expected{ stdout = "[16, 20]\n", diagnostic = null },
+        "choose proc(flag bool) usize {\n    first :: if (flag) usize(3) else 2\n    second :: if (flag) 1 else usize(4)\n    third :: if (flag) { yield usize(5) } else { yield 6 }\n    fourth :: if (flag) { yield 7 } else { yield usize(8) }\n    return first + second + third + fourth\n}\nevaluate proc() [2]usize { return [choose(true), choose(false)] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 16) return 1\n    if (value[1] != 20) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -72,8 +72,8 @@ generic_array_borrows_observe_final_inferred_global_length test {
     try support.check_text(
         &context,
         "generic_array_borrows_observe_final_inferred_global_length",
-        "Entry :: struct { name []u8, value u8 }\nentries [_]Entry :: [{name = \"first\", value = 19}, {name = \"second\", value = 23}]\ncount :: entries.len\nsum proc($N usize, items @[N]Entry) u8 {\n    total u8 := 0\n    for (items) |entry| { total += entry.value }\n    return total\n}\nmain proc() u8 {\n    if (count != 2) return 0\n    return sum(&entries)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Entry :: struct { name []u8, value u8 }\nentries [_]Entry :: [{name = \"first\", value = 19}, {name = \"second\", value = 23}]\ncount :: entries.len\nsum proc($N usize, items @[N]Entry) u8 {\n    total u8 := 0\n    for (items) |entry| { total += entry.value }\n    return total\n}\nevaluate proc() u8 {\n    if (count != 2) return 0\n    return sum(&entries)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -83,8 +83,8 @@ fallible_return_context_does_not_wrap_conditional_alias_uses test {
     try support.check_text(
         &context,
         "fallible_return_context_does_not_wrap_conditional_alias_uses",
-        "Err :: enum { failed }\nNodeId :: distinct u32\ntake proc(value NodeId) u32 { return u32(value) }\nparse proc(flag bool) NodeId ! Err {\n    value := if (flag) NodeId(1) else NodeId(2)\n    _ = take(value)\n    return value\n}\nmain proc() [2]u32 {\n    left :: parse(true) catch { return [0, 0] }\n    right :: parse(false) catch { return [0, 0] }\n    return [take(left), take(right)]\n}\n",
-        support.Expected{ stdout = "[1, 2]\n", diagnostic = null },
+        "Err :: enum { failed }\nNodeId :: distinct u32\ntake proc(value NodeId) u32 { return u32(value) }\nparse proc(flag bool) NodeId ! Err {\n    value := if (flag) NodeId(1) else NodeId(2)\n    _ = take(value)\n    return value\n}\nevaluate proc() [2]u32 {\n    left :: parse(true) catch { return [0, 0] }\n    right :: parse(false) catch { return [0, 0] }\n    return [take(left), take(right)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 1) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -94,8 +94,8 @@ lossless_integer_widening_preserves_source_width test {
     try support.check_text(
         &context,
         "lossless_integer_widening_preserves_source_width",
-        "Box :: struct { value u64 }\ntake proc(value u64) u64 { return value }\nmain proc() [6]u64 {\n    bytes [4]u8 :: [7, 11, 13, 17]\n    start u32 :: 1\n    end u16 :: 3\n    small u8 :: 250\n    box Box :: {value = small}\n    wide u64 := small\n    return [u64(bytes[start..end].len), u64(bytes[start]), take(small), box.value, wide, u64(~small)]\n}\n",
-        support.Expected{ stdout = "[2, 11, 250, 250, 250, 5]\n", diagnostic = null },
+        "Box :: struct { value u64 }\ntake proc(value u64) u64 { return value }\nevaluate proc() [6]u64 {\n    bytes [4]u8 :: [7, 11, 13, 17]\n    start u32 :: 1\n    end u16 :: 3\n    small u8 :: 250\n    box Box :: {value = small}\n    wide u64 := small\n    return [u64(bytes[start..end].len), u64(bytes[start]), take(small), box.value, wide, u64(~small)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 6) return 1\n    if (value[0] != 2) return 1\n    if (value[1] != 11) return 1\n    if (value[2] != 250) return 1\n    if (value[3] != 250) return 1\n    if (value[4] != 250) return 1\n    if (value[5] != 5) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -105,8 +105,8 @@ metadata_records_widen_value_leaves_and_generated_defaults test {
     try support.check_text(
         &context,
         "metadata_records_widen_value_leaves_and_generated_defaults",
-        "Generated proc(input struct { child type, count usize }) type {\n    return struct_type!(.auto, [\"value\"], [input.child], [u8(input.count)])\n}\nmain proc() i16 {\n    count u8 :: 42\n    value Generated({ child = i16, count = count }) :: {}\n    return value.value\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Generated proc(input struct { child type, count usize }) type {\n    return struct_type!(.auto, [\"value\"], [input.child], [u8(input.count)])\n}\nevaluate proc() i16 {\n    count u8 :: 42\n    value Generated({ child = i16, count = count }) :: {}\n    return value.value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -116,8 +116,8 @@ enum_explicit_ordinals_resolve_forward_package_constants test {
     try support.check_text(
         &context,
         "enum_explicit_ordinals_resolve_forward_package_constants",
-        "read proc(value Stream) c_int { return c_int(value) }\nStream :: enum(c_int) { input = INPUT, output = OUTPUT }\nINPUT c_int :: 0\nOUTPUT c_int :: 42\nmain proc() c_int { return read(.output) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "read proc(value Stream) c_int { return c_int(value) }\nStream :: enum(c_int) { input = INPUT, output = OUTPUT }\nINPUT c_int :: 0\nOUTPUT c_int :: 42\nevaluate proc() c_int { return read(.output) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -127,8 +127,8 @@ optional_capture_aliases_preserve_matched_error_residuals test {
     try support.check_text(
         &context,
         "optional_capture_aliases_preserve_matched_error_residuals",
-        "First :: enum { first }\nSecond :: enum { second }\nread proc(value ?(First | Second)) i16 ! Second {\n    if value |captured| {\n        original :: captured\n        match captured {\n            .first: return 1,\n            else: {\n                same :: match original { .first: false, .second: true }\n                if (!same) return 0\n                return captured\n            }\n        }\n    }\n    return 0\n}\nmain proc() [3]i16 {\n    return [read(.second) catch 42, read(.first) catch 99, read(null) catch 99]\n}\n",
-        support.Expected{ stdout = "[42, 1, 0]\n", diagnostic = null },
+        "First :: enum { first }\nSecond :: enum { second }\nread proc(value ?(First | Second)) i16 ! Second {\n    if value |captured| {\n        original :: captured\n        match captured {\n            .first: return 1,\n            else: {\n                same :: match original { .first: false, .second: true }\n                if (!same) return 0\n                return captured\n            }\n        }\n    }\n    return 0\n}\nevaluate proc() [3]i16 {\n    return [read(.second) catch 42, read(.first) catch 99, read(null) catch 99]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 1) return 1\n    if (value[2] != 0) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -138,8 +138,8 @@ closed_calls_skip_index_evaluation_in_short_circuit_guards test {
     try support.check_text(
         &context,
         "closed_calls_skip_index_evaluation_in_short_circuit_guards",
-        "make proc($N usize) [N + 1]mut u8 {\n    values [N]mut u8 := undefined\n    for 0..N |i| { values[i] = 1 }\n    j := N\n    while j > 0 and values[j - 1] > 0 : j -= 1 {}\n    success :: j == 0 or (values[j - 1] == 0 and values[j - 1] > 0)\n    count usize :: N + usize(values[0])\n    result [count]mut u8 := undefined\n    for 0..count |i| { result[i] = if (success) values[0] else 0 }\n    return result\n}\nmain proc() [3]mut u8 { return make(2) }\n",
-        support.Expected{ stdout = "[1, 1, 1]\n", diagnostic = null },
+        "make proc($N usize) [N + 1]mut u8 {\n    values [N]mut u8 := undefined\n    for 0..N |i| { values[i] = 1 }\n    j := N\n    while j > 0 and values[j - 1] > 0 : j -= 1 {}\n    success :: j == 0 or (values[j - 1] == 0 and values[j - 1] > 0)\n    count usize :: N + usize(values[0])\n    result [count]mut u8 := undefined\n    for 0..count |i| { result[i] = if (success) values[0] else 0 }\n    return result\n}\nevaluate proc() [3]mut u8 { return make(2) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 1) return 1\n    if (value[1] != 1) return 1\n    if (value[2] != 1) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -149,8 +149,8 @@ mixed_integer_comparisons_widen_without_rounding test {
     try support.check_text(
         &context,
         "mixed_integer_comparisons_widen_without_rounding",
-        "main proc() [6]bool {\n    large usize :: usize(maxval!(u64))\n    return [large > maxval!(u32), maxval!(u32) < large, u8(255) == u64(255), i8(-128) < i64(-127), i64(-127) > i8(-128), u64(255) == u8(255)]\n}\n",
-        support.Expected{ stdout = "[true, true, true, true, true, true]\n", diagnostic = null },
+        "evaluate proc() [6]bool {\n    large usize :: usize(maxval!(u64))\n    return [large > maxval!(u32), maxval!(u32) < large, u8(255) == u64(255), i8(-128) < i64(-127), i64(-127) > i8(-128), u64(255) == u8(255)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 6) return 1\n    if (value[0] != true) return 1\n    if (value[1] != true) return 1\n    if (value[2] != true) return 1\n    if (value[3] != true) return 1\n    if (value[4] != true) return 1\n    if (value[5] != true) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -160,8 +160,8 @@ unsigned_family_parameters_preserve_concrete_argument_types test {
     try support.check_text(
         &context,
         "unsigned_family_parameters_preserve_concrete_argument_types",
-        "measure proc(value uint) u64 { return u64(~value) }\nmain proc() [6]u64 {\n    return [measure(u8(1)), measure(u16(1)), measure(u32(1)), measure(u64(1)), measure(usize(1)), measure(c_uint(1))]\n}\n",
-        support.Expected{ stdout = "[254, 65534, 4294967294, 18446744073709551614, 18446744073709551614, 4294967294]\n", diagnostic = null },
+        "measure proc(value uint) u64 { return u64(~value) }\nevaluate proc() [6]u64 {\n    return [measure(u8(1)), measure(u16(1)), measure(u32(1)), measure(u64(1)), measure(usize(1)), measure(c_uint(1))]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 6) return 1\n    if (value[0] != 254) return 1\n    if (value[1] != 65534) return 1\n    if (value[2] != 4294967294) return 1\n    if (value[3] != 18446744073709551614) return 1\n    if (value[4] != 18446744073709551614) return 1\n    if (value[5] != 4294967294) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -171,7 +171,7 @@ unsigned_family_parameters_reject_signed_values test {
     try support.check_text(
         &context,
         "unsigned_family_parameters_reject_signed_values",
-        "measure proc(value uint) usize { return usize(value) }\nmain proc() usize { return measure(i16(1)) }\n",
+        "measure proc(value uint) usize { return usize(value) }\nevaluate proc() usize { return measure(i16(1)) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
@@ -182,8 +182,8 @@ sequential_inner_local_does_not_shadow_later_outer_lifetime test {
     try support.check_text(
         &context,
         "sequential_inner_local_does_not_shadow_later_outer_lifetime",
-        "main proc() i16 {\n    result i16 := 0\n    { value :: i16(42)\n        result = value }\n    value :: i16(7)\n    return result + value\n}\n",
-        support.Expected{ stdout = "49\n", diagnostic = null },
+        "evaluate proc() i16 {\n    result i16 := 0\n    { value :: i16(42)\n        result = value }\n    value :: i16(7)\n    return result + value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 49) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -193,8 +193,8 @@ optional_enum_match_context_precedes_null_fallback test {
     try support.check_text(
         &context,
         "optional_enum_match_context_precedes_null_fallback",
-        "E :: enum { first, second }\nchoose proc(flag bool) ?E {\n    value ?E :: match flag { true: .first, false: null }\n    return value\n}\nmain proc() bool { return choose(true)? == .first and choose(false) == null }\n",
-        support.Expected{ stdout = "true\n", diagnostic = null },
+        "E :: enum { first, second }\nchoose proc(flag bool) ?E {\n    value ?E :: match flag { true: .first, false: null }\n    return value\n}\nevaluate proc() bool { return choose(true)? == .first and choose(false) == null }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != true) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -204,8 +204,8 @@ runtime_shift_captures_are_not_constant_declarations test {
     try support.check_text(
         &context,
         "runtime_shift_captures_are_not_constant_declarations",
-        "Shift :: union(enum) { bits u8, empty void }\nmain proc() [3]u8 {\n    counts [2]u8 :: [1, 2]\n    sum u8 := 0\n    for counts |count| { sum += u8(1) << count }\n    optional ?u8 :: 2\n    from_optional u8 :: if optional |count| u8(1) << count else 0\n    tagged Shift :: .bits{3}\n    from_match u8 :: match tagged { .bits |count|: u8(1) << count, .empty: 0 }\n    return [sum, from_optional, from_match]\n}\n",
-        support.Expected{ stdout = "[6, 4, 8]\n", diagnostic = null },
+        "Shift :: union(enum) { bits u8, empty void }\nevaluate proc() [3]u8 {\n    counts [2]u8 :: [1, 2]\n    sum u8 := 0\n    for counts |count| { sum += u8(1) << count }\n    optional ?u8 :: 2\n    from_optional u8 :: if optional |count| u8(1) << count else 0\n    tagged Shift :: .bits{3}\n    from_match u8 :: match tagged { .bits |count|: u8(1) << count, .empty: 0 }\n    return [sum, from_optional, from_match]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 6) return 1\n    if (value[1] != 4) return 1\n    if (value[2] != 8) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -215,8 +215,8 @@ numeric_builtin_range_bounds_preserve_operand_families test {
     try support.check_text(
         &context,
         "numeric_builtin_range_bounds_preserve_operand_families",
-        "sum proc(limit u8) u8 {\n    total u8 := 0\n    for (0..divtrunc!(limit, u8(2))) |index| total += index\n    for (0..rem!(limit, u8(3))) |index| total += index\n    return total\n}\nmain proc() u8 { return sum(11) }\n",
-        support.Expected{ stdout = "11\n", diagnostic = null },
+        "sum proc(limit u8) u8 {\n    total u8 := 0\n    for (0..divtrunc!(limit, u8(2))) |index| total += index\n    for (0..rem!(limit, u8(3))) |index| total += index\n    return total\n}\nevaluate proc() u8 { return sum(11) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 11) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -226,8 +226,8 @@ while_steps_run_after_cleanup_and_continue_but_not_break test {
     try support.check_text(
         &context,
         "while_steps_run_after_cleanup_and_continue_but_not_break",
-        "main proc() [3]i16 {\n    index i16 := 0\n    trace i16 := 0\n    skipped i16 := 0\n    while index < 4 : index += 1 {\n        defer trace = trace * 10 + index\n        if (index == 1) continue\n        if (index == 3) break\n    }\n    while false : skipped += 1 {}\n    return [index, trace, skipped]\n}\n",
-        support.Expected{ stdout = "[3, 123, 0]\n", diagnostic = null },
+        "evaluate proc() [3]i16 {\n    index i16 := 0\n    trace i16 := 0\n    skipped i16 := 0\n    while index < 4 : index += 1 {\n        defer trace = trace * 10 + index\n        if (index == 1) continue\n        if (index == 3) break\n    }\n    while false : skipped += 1 {}\n    return [index, trace, skipped]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 3) return 1\n    if (value[1] != 123) return 1\n    if (value[2] != 0) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -237,8 +237,8 @@ while_steps_compute_generated_storage test {
     try support.check_text(
         &context,
         "while_steps_compute_generated_storage",
-        "Sized proc() type {\n    length usize := 0\n    while length < 3 : length += 1 {\n        if (length == 1) continue\n    }\n    return [length]u8\n}\nmain proc() usize { value Sized() :: [1, 2, 3]\n    return value.len }\n",
-        support.Expected{ stdout = "3\n", diagnostic = null },
+        "Sized proc() type {\n    length usize := 0\n    while length < 3 : length += 1 {\n        if (length == 1) continue\n    }\n    return [length]u8\n}\nevaluate proc() usize { value Sized() :: [1, 2, 3]\n    return value.len }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 3) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -248,8 +248,8 @@ aggregate_fields_anchor_inferred_local_enum_matches test {
     try support.check_text(
         &context,
         "aggregate_fields_anchor_inferred_local_enum_matches",
-        "Kind :: enum { first, second }\nValue :: struct { kind Kind }\nchoose proc(flag bool) Value {\n    selected :: match flag { true: .first, false: .second }\n    return {kind = selected}\n}\nmain proc() bool { return choose(true).kind == .first and choose(false).kind == .second }\n",
-        support.Expected{ stdout = "true\n", diagnostic = null },
+        "Kind :: enum { first, second }\nValue :: struct { kind Kind }\nchoose proc(flag bool) Value {\n    selected :: match flag { true: .first, false: .second }\n    return {kind = selected}\n}\nevaluate proc() bool { return choose(true).kind == .first and choose(false).kind == .second }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != true) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -259,8 +259,8 @@ prefixed_integer_float_context_preserves_large_exact_values test {
     try support.check_text(
         &context,
         "prefixed_integer_float_context_preserves_large_exact_values",
-        "main proc() bool {\n    value f64 :: 0x10000000000000000\n    return value == 18446744073709551616.0\n}\n",
-        support.Expected{ stdout = "true\n", diagnostic = null },
+        "evaluate proc() bool {\n    value f64 :: 0x10000000000000000\n    return value == 18446744073709551616.0\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != true) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -270,7 +270,7 @@ prefixed_integer_float_context_rejects_rounding test {
     try support.check_text(
         &context,
         "prefixed_integer_float_context_rejects_rounding",
-        "main proc() f64 { return 0x20000000000001 }\n",
+        "evaluate proc() f64 { return 0x20000000000001 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "integer literal is not exactly representable as float" },
     )
 }
@@ -281,8 +281,8 @@ optional_fallback_evaluates_subject_once_and_rhs_lazily test {
     try support.check_text(
         &context,
         "optional_fallback_evaluates_subject_once_and_rhs_lazily",
-        "subject proc(count @mut i16, present bool) ?i16 {\n    count^ += 1\n    if (present) return 19\n    return null\n}\nfallback proc(count @mut i16) i16 { count^ += 10\n    return 23 }\nmain proc() [4]i16 {\n    count i16 := 0\n    first :: subject(&count, true) orelse fallback(&count)\n    second :: subject(&count, false) orelse fallback(&count)\n    nested ??i16 :: null\n    third :: nested orelse some!(i16(42)) orelse i16(0)\n    return [first, second, third, count]\n}\n",
-        support.Expected{ stdout = "[19, 23, 42, 12]\n", diagnostic = null },
+        "subject proc(count @mut i16, present bool) ?i16 {\n    count^ += 1\n    if (present) return 19\n    return null\n}\nfallback proc(count @mut i16) i16 { count^ += 10\n    return 23 }\nevaluate proc() [4]i16 {\n    count i16 := 0\n    first :: subject(&count, true) orelse fallback(&count)\n    second :: subject(&count, false) orelse fallback(&count)\n    nested ??i16 :: null\n    third :: nested orelse some!(i16(42)) orelse i16(0)\n    return [first, second, third, count]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 19) return 1\n    if (value[1] != 23) return 1\n    if (value[2] != 42) return 1\n    if (value[3] != 12) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -292,8 +292,8 @@ prefixed_integers_preserve_widths_and_comptime_values test {
     try support.check_text(
         &context,
         "prefixed_integers_preserve_widths_and_comptime_values",
-        "Flags :: enum(u8) { first = 0b1, second = 0o10, last = 0x80 }\nCount proc($n usize) type { return [n]u8 }\nflags :: 0b101010\nmain proc() [5]u64 {\n    values Count(0x2) :: [0o7, 0b10]\n    minimum i64 :: -0x8000000000000000\n    maximum u64 :: 0xffffffffffffffff\n    return [u64(flags), u64(values.len), u64(Flags.last),\n        u64(minimum + 0x7fffffffffffffff + 1), maximum]\n}\n",
-        support.Expected{ stdout = "[42, 2, 128, 0, 18446744073709551615]\n", diagnostic = null },
+        "Flags :: enum(u8) { first = 0b1, second = 0o10, last = 0x80 }\nCount proc($n usize) type { return [n]u8 }\nflags :: 0b101010\nevaluate proc() [5]u64 {\n    values Count(0x2) :: [0o7, 0b10]\n    minimum i64 :: -0x8000000000000000\n    maximum u64 :: 0xffffffffffffffff\n    return [u64(flags), u64(values.len), u64(Flags.last),\n        u64(minimum + 0x7fffffffffffffff + 1), maximum]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 5) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 2) return 1\n    if (value[2] != 128) return 1\n    if (value[3] != 0) return 1\n    if (value[4] != 18446744073709551615) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -303,8 +303,8 @@ noreturn_calls_terminate_nonvoid_paths test {
     try support.check_text(
         &context,
         "noreturn_calls_terminate_nonvoid_paths",
-        "stop proc() noreturn { unreachable }\nmain proc() i16 {\n    if (false) stop()\n    return 42\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "stop proc() noreturn { unreachable }\nevaluate proc() i16 {\n    if (false) stop()\n    return 42\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -314,8 +314,8 @@ noreturn_fallthrough_is_rejected test {
     try support.check_text(
         &context,
         "noreturn_fallthrough_is_rejected",
-        "stop proc() noreturn {}\nmain proc() i16 { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "nonvoid function can finish without returning a value" },
+        "stop proc() noreturn {}\nevaluate proc() i16 { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "nonvoid function can finish without returning a value" },
     )
 }
 
@@ -325,8 +325,8 @@ noreturn_cannot_return_void test {
     try support.check_text(
         &context,
         "noreturn_cannot_return_void",
-        "stop proc() noreturn { return }\nmain proc() i16 { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "return does not match the function result type" },
+        "stop proc() noreturn { return }\nevaluate proc() i16 { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "return does not match the function result type" },
     )
 }
 
@@ -336,8 +336,8 @@ discard_assignments_preserve_evaluation_and_cleanup test {
     try support.check_text(
         &context,
         "discard_assignments_preserve_evaluation_and_cleanup",
-        "Error :: enum { failed }\nbump proc(value @mut i32) i32 {\n    value^ += 1\n    return value^\n}\nfail proc(value @mut i32) i32 ! Error {\n    value^ += 1\n    return .failed\n}\nmain proc() i32 {\n    value i32 := 0\n    _ = bump(&value)\n    {\n        defer _ = bump(&value)\n        _ = bump(&value)\n    }\n    _ = fail(&value) catch 0\n    return value\n}\n",
-        support.Expected{ stdout = "4\n", diagnostic = null },
+        "Error :: enum { failed }\nbump proc(value @mut i32) i32 {\n    value^ += 1\n    return value^\n}\nfail proc(value @mut i32) i32 ! Error {\n    value^ += 1\n    return .failed\n}\nevaluate proc() i32 {\n    value i32 := 0\n    _ = bump(&value)\n    {\n        defer _ = bump(&value)\n        _ = bump(&value)\n    }\n    _ = fail(&value) catch 0\n    return value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 4) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -347,8 +347,8 @@ multiline_strings_preserve_raw_bytes_and_content_indentation test {
     try support.check_text(
         &context,
         "multiline_strings_preserve_raw_bytes_and_content_indentation",
-        "main proc() string {\n    return `a\\q\\n\\x41 \"quoted\" ` # raw content\n      `  \xc3\xa9\n        `\tend\n}\n",
-        support.Expected{ stdout = "a\\q\\n\\x41 \"quoted\" ` # raw content\n  \xc3\xa9\n\tend\n", diagnostic = null },
+        "evaluate proc() string {\n    return `a\\q\\n\\x41 \"quoted\" ` # raw content\n      `  é\n        `\tend\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    expected :: \"a\\\\q\\\\n\\\\x41 \\\"quoted\\\" ` # raw content\\n  é\\n\\tend\"\n    if (value.len != expected.len) return 1\n    for value |byte, index| { if (byte != expected[index]) return 1 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -358,8 +358,8 @@ multiline_strings_preserve_blank_lines_and_explicit_trailing_newline test {
     try support.check_text(
         &context,
         "multiline_strings_preserve_blank_lines_and_explicit_trailing_newline",
-        "main proc() string {\n    text ::\n        `hello\n        `\n        `world\n        `\n    return text\n}\n",
-        support.Expected{ stdout = "hello\n\nworld\n\n", diagnostic = null },
+        "evaluate proc() string {\n    text ::\n        `hello\n        `\n        `world\n        `\n    return text\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    expected :: \"hello\\n\\nworld\\n\"\n    if (value.len != expected.len) return 1\n    for value |byte, index| { if (byte != expected[index]) return 1 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -369,8 +369,8 @@ multiline_strings_allow_empty_content test {
     try support.check_text(
         &context,
         "multiline_strings_allow_empty_content",
-        "main proc() string {\n    return `\n}\n",
-        support.Expected{ stdout = "\n", diagnostic = null },
+        "evaluate proc() string {\n    return `\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    expected :: \"\"\n    if (value.len != expected.len) return 1\n    for value |byte, index| { if (byte != expected[index]) return 1 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -380,8 +380,8 @@ multiline_strings_share_comptime_identity_and_generated_defaults test {
     try support.check_text(
         &context,
         "multiline_strings_share_comptime_identity_and_generated_defaults",
-        "name ::\n    `value\nraw ::\n    `a\\n\n    `b\nTag proc($text string) type { return struct { value string = text } }\nidentity proc(text string) string { return text }\nmain proc() string {\n    if (Tag(raw) != Tag(\"a\\\\n\\nb\")) return \"wrong identity\"\n    value Tag(identity(raw)) :: {}\n    return field!(value, name)\n}\n",
-        support.Expected{ stdout = "a\\n\nb\n", diagnostic = null },
+        "name ::\n    `value\nraw ::\n    `a\\n\n    `b\nTag proc($text string) type { return struct { value string = text } }\nidentity proc(text string) string { return text }\nevaluate proc() string {\n    if (Tag(raw) != Tag(\"a\\\\n\\nb\")) return \"wrong identity\"\n    value Tag(identity(raw)) :: {}\n    return field!(value, name)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    expected :: \"a\\\\n\\nb\"\n    if (value.len != expected.len) return 1\n    for value |byte, index| { if (byte != expected[index]) return 1 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -391,8 +391,8 @@ multiline_strings_end_before_comments_and_unmarked_blank_lines test {
     try support.check_text(
         &context,
         "multiline_strings_end_before_comments_and_unmarked_blank_lines",
-        "first ::\n    `a\n# this breaks the literal\nsecond ::\n    `b\n\nmain proc() string {\n    if (first.len != 1) return \"joined\"\n    return second\n}\n",
-        support.Expected{ stdout = "b\n", diagnostic = null },
+        "first ::\n    `a\n# this breaks the literal\nsecond ::\n    `b\n\nevaluate proc() string {\n    if (first.len != 1) return \"joined\"\n    return second\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    expected :: \"b\"\n    if (value.len != expected.len) return 1\n    for value |byte, index| { if (byte != expected[index]) return 1 }\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -402,7 +402,7 @@ multiline_strings_keep_following_diagnostic_locations test {
     try support.check_text(
         &context,
         "multiline_strings_keep_following_diagnostic_locations",
-        "main proc() i16 {\n    text ::\n        `a\n        `b\n    return missing\n}\n",
+        "evaluate proc() i16 {\n    text ::\n        `a\n        `b\n    return missing\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = ":5:12:" },
     )
 }
@@ -413,8 +413,8 @@ multiline_strings_are_not_import_paths test {
     try support.check_text(
         &context,
         "multiline_strings_are_not_import_paths",
-        "import `library\nmain proc() i16 { return 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "unexpected token" },
+        "import `library\nevaluate proc() i16 { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "unexpected token" },
     )
 }
 
@@ -424,8 +424,8 @@ comptime_nonnull_pointer_results_own_mutable_scalar_storage test {
     try support.check_text(
         &context,
         "comptime_nonnull_pointer_results_own_mutable_scalar_storage",
-        "make proc() @mut i16 { value i16 := 40\n    return &value }\nmain proc() i16 { pointer :: $(make())\n    pointer^ += 2\n    return pointer^ }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "make proc() @mut i16 { value i16 := 40\n    return &value }\nevaluate proc() i16 { pointer :: $(make())\n    pointer^ += 2\n    return pointer^ }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -435,8 +435,8 @@ comptime_address_graph_preserves_shared_roots_offsets_and_copies test {
     try support.check_text(
         &context,
         "comptime_address_graph_preserves_shared_roots_offsets_and_copies",
-        "Views :: struct { readonly []i16, all []mut i16, tail []mut i16, middle @mut i16 }\nmake proc() Views {\n    values [3]mut i16 := [19, 20, 3]\n    return { readonly = values[..], all = values[..], tail = values[1..], middle = &values[1] }\n}\nmain proc() i16 {\n    views :: $(make())\n    saved :: views\n    other :: $(make())\n    if (ptrcast!(*mut i16, views.middle) != views.tail.ptr) return -1\n    if (views.all.ptr + 1 != ptrcast!(*mut i16, views.middle)) return -2\n    views.middle^ += 3\n    if (views.tail[0] != 23 or saved.all[1] != 23 or views.readonly[1] != 23) return -3\n    if (other.all[1] != 20 or other.all.ptr == views.all.ptr) return -4\n    return views.all[0] + views.tail[0]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Views :: struct { readonly []i16, all []mut i16, tail []mut i16, middle @mut i16 }\nmake proc() Views {\n    values [3]mut i16 := [19, 20, 3]\n    return { readonly = values[..], all = values[..], tail = values[1..], middle = &values[1] }\n}\nevaluate proc() i16 {\n    views :: $(make())\n    saved :: views\n    other :: $(make())\n    if (ptrcast!(*mut i16, views.middle) != views.tail.ptr) return -1\n    if (views.all.ptr + 1 != ptrcast!(*mut i16, views.middle)) return -2\n    views.middle^ += 3\n    if (views.tail[0] != 23 or saved.all[1] != 23 or views.readonly[1] != 23) return -3\n    if (other.all[1] != 20 or other.all.ptr == views.all.ptr) return -4\n    return views.all[0] + views.tail[0]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -446,8 +446,8 @@ comptime_address_graph_preserves_record_and_array_interior_places test {
     try support.check_text(
         &context,
         "comptime_address_graph_preserves_record_and_array_interior_places",
-        "Pair :: struct { first u8, second i16 }\nViews :: struct { record @mut Pair, field @mut i16, rows @mut [2]mut Pair }\nmake proc() Views {\n    rows [2]mut Pair := [{ first = 1, second = 19 }, { first = 2, second = 20 }]\n    return { record = &rows[1], field = &rows[1].second, rows = &rows }\n}\nmain proc() i16 {\n    views :: $(make())\n    views.field^ += 3\n    if (views.record.second != 23 or views.rows[1].second != 23) return -1\n    if (&views.rows[1].second != views.field) return -2\n    return views.rows[0].second + views.record.second\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Pair :: struct { first u8, second i16 }\nViews :: struct { record @mut Pair, field @mut i16, rows @mut [2]mut Pair }\nmake proc() Views {\n    rows [2]mut Pair := [{ first = 1, second = 19 }, { first = 2, second = 20 }]\n    return { record = &rows[1], field = &rows[1].second, rows = &rows }\n}\nevaluate proc() i16 {\n    views :: $(make())\n    views.field^ += 3\n    if (views.record.second != 23 or views.rows[1].second != 23) return -1\n    if (&views.rows[1].second != views.field) return -2\n    return views.rows[0].second + views.record.second\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -457,8 +457,8 @@ comptime_mutable_slice_specializations_keep_backing_identity test {
     try support.check_text(
         &context,
         "comptime_mutable_slice_specializations_keep_backing_identity",
-        "make proc() []mut i16 { values [1]mut i16 := [19]\n    return values[..] }\nHolder proc($values []mut i16) type { return struct { view []mut i16 = values } }\nmain proc() i16 {\n    first :: $(make())\n    second :: $(make())\n    if (Holder(first) == Holder(second)) return -1\n    left Holder(first) :: {}\n    right Holder(second) :: {}\n    left.view[0] += 4\n    if (first[0] != 23 or second[0] != 19 or right.view[0] != 19) return -2\n    return left.view[0] + right.view[0]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "make proc() []mut i16 { values [1]mut i16 := [19]\n    return values[..] }\nHolder proc($values []mut i16) type { return struct { view []mut i16 = values } }\nevaluate proc() i16 {\n    first :: $(make())\n    second :: $(make())\n    if (Holder(first) == Holder(second)) return -1\n    left Holder(first) :: {}\n    right Holder(second) :: {}\n    left.view[0] += 4\n    if (first[0] != 23 or second[0] != 19 or right.view[0] != 19) return -2\n    return left.view[0] + right.view[0]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -468,8 +468,8 @@ comptime_address_unions_relocate_callbacks_strings_and_slices test {
     try support.check_text(
         &context,
         "comptime_address_unions_relocate_callbacks_strings_and_slices",
-        "Callback :: alias @proc(value i16) i16\nCall :: union { bits u64, callback Callback }\nText :: union { bits [2]u64, text string }\nView :: union { bits [2]u64, values []mut i16 }\nPacket :: struct { call Call, text Text, view View, pointer @mut i16 }\nincrement proc(value i16) i16 { return value + 2 }\nmake proc() Packet {\n    values [2]mut i16 := [19, 19]\n    return {\n        call = { callback = increment }, text = { text = \"owned\" },\n        view = { values = values[..] }, pointer = &values[1],\n    }\n}\nmain proc() i16 {\n    packet :: $(make())\n    copy :: packet\n    packet.pointer^ += 2\n    if (copy.view.values[1] != 21 or packet.text.text.len != 5) return -1\n    if (packet.text.text[0] != u8(111)) return -2\n    return packet.call.callback(packet.view.values[0]) + copy.view.values[1]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Callback :: alias @proc(value i16) i16\nCall :: union { bits u64, callback Callback }\nText :: union { bits [2]u64, text string }\nView :: union { bits [2]u64, values []mut i16 }\nPacket :: struct { call Call, text Text, view View, pointer @mut i16 }\nincrement proc(value i16) i16 { return value + 2 }\nmake proc() Packet {\n    values [2]mut i16 := [19, 19]\n    return {\n        call = { callback = increment }, text = { text = \"owned\" },\n        view = { values = values[..] }, pointer = &values[1],\n    }\n}\nevaluate proc() i16 {\n    packet :: $(make())\n    copy :: packet\n    packet.pointer^ += 2\n    if (copy.view.values[1] != 21 or packet.text.text.len != 5) return -1\n    if (packet.text.text[0] != u8(111)) return -2\n    return packet.call.callback(packet.view.values[0]) + copy.view.values[1]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -479,7 +479,7 @@ comptime_nonnull_pointer_rejects_uninitialized_pointee test {
     try support.check_text(
         &context,
         "comptime_nonnull_pointer_rejects_uninitialized_pointee",
-        "make proc() @i16 { value i16 := undefined\n    return &value }\nmain proc() i16 { return $(make())^ }\n",
+        "make proc() @i16 { value i16 := undefined\n    return &value }\nevaluate proc() i16 { return $(make())^ }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -490,7 +490,7 @@ comptime_mutable_slice_rechecks_sentinel_after_mutation test {
     try support.check_text(
         &context,
         "comptime_mutable_slice_rechecks_sentinel_after_mutation",
-        "make proc() [;7]mut i16 {\n    values [2]mut i16 := [42, 7]\n    view [;7]mut i16 :: values[..1;7]\n    values[1] = 9\n    return view\n}\nmain proc() usize { return $(make()).len }\n",
+        "make proc() [;7]mut i16 {\n    values [2]mut i16 := [42, 7]\n    view [;7]mut i16 :: values[..1;7]\n    values[1] = 9\n    return view\n}\nevaluate proc() usize { return $(make()).len }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "sentinel" },
     )
 }
@@ -501,7 +501,7 @@ comptime_mutable_slice_rejects_range_beyond_backing test {
     try support.check_text(
         &context,
         "comptime_mutable_slice_rejects_range_beyond_backing",
-        "make proc() []mut i16 { values [1]mut i16 := [42]\n    return values.ptr[..2] }\nmain proc() usize { return $(make()).len }\n",
+        "make proc() []mut i16 { values [1]mut i16 := [42]\n    return values.ptr[..2] }\nevaluate proc() usize { return $(make()).len }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "pointer does not refer to live accessible storage" },
     )
 }
@@ -512,7 +512,7 @@ comptime_nonnull_pointer_rejects_integer_forged_evaluation_handle test {
     try support.check_text(
         &context,
         "comptime_nonnull_pointer_rejects_integer_forged_evaluation_handle",
-        "Storage :: union { bits u64, pointer @i16 }\nmake proc() @i16 {\n    anchor i16 :: 42\n    live :: &anchor\n    storage Storage :: { bits = 0 }\n    return storage.pointer\n}\nmain proc() i16 { return $(make())^ }\n",
+        "Storage :: union { bits u64, pointer @i16 }\nmake proc() @i16 {\n    anchor i16 :: 42\n    live :: &anchor\n    storage Storage :: { bits = 0 }\n    return storage.pointer\n}\nevaluate proc() i16 { return $(make())^ }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "pointer does not refer to live accessible storage" },
     )
 }
@@ -523,7 +523,7 @@ comptime_address_union_rejects_partial_pointer_overwrite test {
     try support.check_text(
         &context,
         "comptime_address_union_rejects_partial_pointer_overwrite",
-        "Storage :: union { bytes [8]mut u8, pointer @i16 }\nmake proc() Storage {\n    anchor i16 :: 42\n    storage Storage := { pointer = &anchor }\n    storage.bytes[0] = 0\n    return storage\n}\nmain proc() i16 { return $(make()).pointer^ }\n",
+        "Storage :: union { bytes [8]mut u8, pointer @i16 }\nmake proc() Storage {\n    anchor i16 :: 42\n    storage Storage := { pointer = &anchor }\n    storage.bytes[0] = 0\n    return storage\n}\nevaluate proc() i16 { return $(make()).pointer^ }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "pointer does not refer to live accessible storage" },
     )
 }
@@ -534,8 +534,8 @@ comptime_address_graph_preserves_transitive_readonly_aliases test {
     try support.check_text(
         &context,
         "comptime_address_graph_preserves_transitive_readonly_aliases",
-        "Node :: struct { values []mut i16 }\nViews :: struct { readonly []i16, node @mut Node }\nmake proc() Views {\n    values [2]mut i16 := [19, 20]\n    node Node := { values = values[..] }\n    return { readonly = values[..], node = &node }\n}\nmain proc() i16 {\n    views :: $(make())\n    views.node.values[1] += 3\n    if (views.readonly[1] != 23) return -1\n    return views.readonly[0] + views.node.values[1]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Node :: struct { values []mut i16 }\nViews :: struct { readonly []i16, node @mut Node }\nmake proc() Views {\n    values [2]mut i16 := [19, 20]\n    node Node := { values = values[..] }\n    return { readonly = values[..], node = &node }\n}\nevaluate proc() i16 {\n    views :: $(make())\n    views.node.values[1] += 3\n    if (views.readonly[1] != 23) return -1\n    return views.readonly[0] + views.node.values[1]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -545,8 +545,8 @@ comptime_interior_pointer_preserves_uninitialized_sibling_storage test {
     try support.check_text(
         &context,
         "comptime_interior_pointer_preserves_uninitialized_sibling_storage",
-        "Pair :: struct { first i16, second i16 }\nmake proc() @mut i16 {\n    value Pair := undefined\n    value.first = 40\n    return &value.first\n}\nmain proc() i16 {\n    pointer :: $(make())\n    pointer^ += 2\n    return pointer^\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Pair :: struct { first i16, second i16 }\nmake proc() @mut i16 {\n    value Pair := undefined\n    value.first = 40\n    return &value.first\n}\nevaluate proc() i16 {\n    pointer :: $(make())\n    pointer^ += 2\n    return pointer^\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -556,8 +556,8 @@ raw_slice_pointer_provenance_survives_typed_scalar_backing test {
     try support.check_text(
         &context,
         "raw_slice_pointer_provenance_survives_typed_scalar_backing",
-        "Storage :: struct { alignment u64, values [8]mut i16 }\nmain proc() i16 {\n    storage Storage := { alignment = 0, values = [0, 0, 0, 0, 0, 0, 0, 0] }\n    bytes [3]mut u8 := [18, 0, 23]\n    slot :: ptrcast!(@mut []mut u8, &storage.values)\n    slot^ = bytes[..]\n    restored :: slot^\n    if (restored.ptr != bytes.ptr or restored.len != 3) return -1\n    restored[0] += 1\n    return i16(bytes[0]) + i16(restored[2])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Storage :: struct { alignment u64, values [8]mut i16 }\nevaluate proc() i16 {\n    storage Storage := { alignment = 0, values = [0, 0, 0, 0, 0, 0, 0, 0] }\n    bytes [3]mut u8 := [18, 0, 23]\n    slot :: ptrcast!(@mut []mut u8, &storage.values)\n    slot^ = bytes[..]\n    restored :: slot^\n    if (restored.ptr != bytes.ptr or restored.len != 3) return -1\n    restored[0] += 1\n    return i16(bytes[0]) + i16(restored[2])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -567,7 +567,7 @@ comptime_address_bits_cannot_fold_handle_comparisons test {
     try support.check_text(
         &context,
         "comptime_address_bits_cannot_fold_handle_comparisons",
-        "Raw :: union { pointer @i16, bits usize }\nbad proc() bool {\n    value i16 :: 42\n    raw Raw :: { pointer = &value }\n    return raw.bits == 0\n}\nmain proc() bool { return $(bad()) }\n",
+        "Raw :: union { pointer @i16, bits usize }\nbad proc() bool {\n    value i16 :: 42\n    raw Raw :: { pointer = &value }\n    return raw.bits == 0\n}\nevaluate proc() bool { return $(bad()) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time result cannot escape evaluation" },
     )
 }
@@ -578,8 +578,8 @@ runtime_helper_guards_preserve_borrowed_effects test {
     try support.check_text(
         &context,
         "runtime_helper_guards_preserve_borrowed_effects",
-        "predicate proc(calls @mut i16, value i16) bool {\n    calls^ += 1\n    return value == 42\n}\nchoose proc($T type, calls @mut i16, value T) i16 {\n    if predicate(calls, 42) { return i16(value) }\n    return -1\n}\nmain proc() i16 {\n    calls := i16(0)\n    first :: choose(&calls, i16(19))\n    second :: choose(&calls, i16(23))\n    if (calls != 2) return -2\n    return first + second\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "predicate proc(calls @mut i16, value i16) bool {\n    calls^ += 1\n    return value == 42\n}\nchoose proc($T type, calls @mut i16, value T) i16 {\n    if predicate(calls, 42) { return i16(value) }\n    return -1\n}\nevaluate proc() i16 {\n    calls := i16(0)\n    first :: choose(&calls, i16(19))\n    second :: choose(&calls, i16(23))\n    if (calls != 2) return -2\n    return first + second\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -589,8 +589,8 @@ demanded_constant_calls_execute_mutable_borrows_and_only_reached_errors test {
     try support.check_text(
         &context,
         "demanded_constant_calls_execute_mutable_borrows_and_only_reached_errors",
-        "fill proc(values []mut usize, seed usize) void {\n    for values |_, index| { values[index] = seed + index }\n}\nproduce proc($N usize, $seed usize) [N]mut usize {\n    values [N]mut usize := undefined\n    fill(values[..], seed)\n    if (values[0] != seed) compile_error!(\"unexpected initialization\")\n    return values\n}\nmain proc() usize {\n    total := usize(0)\n    inline for produce(3, 13) |value| { total += value }\n    return total\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "fill proc(values []mut usize, seed usize) void {\n    for values |_, index| { values[index] = seed + index }\n}\nproduce proc($N usize, $seed usize) [N]mut usize {\n    values [N]mut usize := undefined\n    fill(values[..], seed)\n    if (values[0] != seed) compile_error!(\"unexpected initialization\")\n    return values\n}\nevaluate proc() usize {\n    total := usize(0)\n    inline for produce(3, 13) |value| { total += value }\n    return total\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -600,8 +600,8 @@ type_helper_guards_infer_constant_execution_without_explicit_syntax test {
     try support.check_text(
         &context,
         "type_helper_guards_infer_constant_execution_without_explicit_syntax",
-        "scalar proc($T type) bool {\n    return T == i16 or T == Id\n}\nId :: distinct i16\nidentity proc($T type, value T) T {\n    if scalar(T) { return value }\n    else { compile_error!(\"expected scalar\") }\n}\nmain proc() Id { return identity(Id(42)) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "scalar proc($T type) bool {\n    return T == i16 or T == Id\n}\nId :: distinct i16\nidentity proc($T type, value T) T {\n    if scalar(T) { return value }\n    else { compile_error!(\"expected scalar\") }\n}\nevaluate proc() Id { return identity(Id(42)) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != Id(42)) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -611,8 +611,8 @@ pointer_array_slice_coercions_borrow_storage_and_preserve_optional_presence test
     try support.check_text(
         &context,
         "pointer_array_slice_coercions_borrow_storage_and_preserve_optional_presence",
-        "borrow proc(value @mut [2]mut i16) []mut i16 { return value }\noptional proc(value ?@[2]i16) ?[]i16 { return value }\nc_string proc(value ?string) ?*u8 { return value }\nmain proc() i16 {\n    values [2]mut i16 := [19, 23]\n    view :: borrow(&values)\n    view[0] = 20\n    if (values[0] != 20 or view.len != 2) return -1\n    immutable [2]i16 :: [19, 23]\n    present :: optional(&immutable)\n    if (present?.len != 2 or present?[0] != 19 or optional(null) != null) return -2\n    text :: c_string(\"ok\")?\n    if (text[0] != 111 or text[2] != 0 or c_string(null) != null) return -3\n    return present?[0] + present?[1]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "borrow proc(value @mut [2]mut i16) []mut i16 { return value }\noptional proc(value ?@[2]i16) ?[]i16 { return value }\nc_string proc(value ?string) ?*u8 { return value }\nevaluate proc() i16 {\n    values [2]mut i16 := [19, 23]\n    view :: borrow(&values)\n    view[0] = 20\n    if (values[0] != 20 or view.len != 2) return -1\n    immutable [2]i16 :: [19, 23]\n    present :: optional(&immutable)\n    if (present?.len != 2 or present?[0] != 19 or optional(null) != null) return -2\n    text :: c_string(\"ok\")?\n    if (text[0] != 111 or text[2] != 0 or c_string(null) != null) return -3\n    return present?[0] + present?[1]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -622,7 +622,7 @@ pointer_array_slice_coercion_rejects_readonly_reversal test {
     try support.check_text(
         &context,
         "pointer_array_slice_coercion_rejects_readonly_reversal",
-        "borrow proc(value @[2]mut i16) []mut i16 { return value }\n        main proc() i16 { values [2]mut i16 := [19, 23]\nreturn borrow(&values)[0] }\n",
+        "borrow proc(value @[2]mut i16) []mut i16 { return value }\n        evaluate proc() i16 { values [2]mut i16 := [19, 23]\nreturn borrow(&values)[0] }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "return does not match the function result type" },
     )
 }
@@ -633,7 +633,7 @@ pointer_array_slice_coercion_rejects_nominal_element_mismatch test {
     try support.check_text(
         &context,
         "pointer_array_slice_coercion_rejects_nominal_element_mismatch",
-        "Id :: distinct i16\n        borrow proc(value @[2]Id) []i16 { return value }\n        main proc() i16 { values [2]Id :: [Id(19), Id(23)]\nreturn borrow(&values)[0] }\n",
+        "Id :: distinct i16\n        borrow proc(value @[2]Id) []i16 { return value }\n        evaluate proc() i16 { values [2]Id :: [Id(19), Id(23)]\nreturn borrow(&values)[0] }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "return does not match the function result type" },
     )
 }
@@ -644,8 +644,8 @@ partial_comptime_prefix_infers_remaining_types_and_reuses_nominal_results test {
     try support.check_text(
         &context,
         "partial_comptime_prefix_infers_remaining_types_and_reuses_nominal_results",
-        "Box proc($N usize, $T type) type { return struct { values [N]T } }\nwrap proc($N usize, $T type, value T) Box(N, T) {\n    if (N != 2) compile_error!(\"expected two elements\")\n    return { values = [value, value] }\n}\nmain proc() i16 {\n    partial :: wrap(usize(2), i16(21))\n    explicit Box(2, i16) :: wrap(usize(2), i16, i16(21))\n    if (partial.values[1] != explicit.values[1]) return -1\n    return partial.values[0] + partial.values[1]\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Box proc($N usize, $T type) type { return struct { values [N]T } }\nwrap proc($N usize, $T type, value T) Box(N, T) {\n    if (N != 2) compile_error!(\"expected two elements\")\n    return { values = [value, value] }\n}\nevaluate proc() i16 {\n    partial :: wrap(usize(2), i16(21))\n    explicit Box(2, i16) :: wrap(usize(2), i16, i16(21))\n    if (partial.values[1] != explicit.values[1]) return -1\n    return partial.values[0] + partial.values[1]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -655,8 +655,8 @@ partial_comptime_prefix_checks_explicit_value_types test {
     try support.check_text(
         &context,
         "partial_comptime_prefix_checks_explicit_value_types",
-        "add proc($bias i8, $T type, value T) T { return value + T(bias) }\nmain proc() i16 { return add(i16(2), i16(40)) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "incompatible value type" },
+        "add proc($bias i8, $T type, value T) T { return value + T(bias) }\nevaluate proc() i16 { return add(i16(2), i16(40)) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "incompatible value type" },
     )
 }
 
@@ -666,7 +666,7 @@ partial_comptime_prefix_still_requires_unresolved_parameters test {
     try support.check_text(
         &context,
         "partial_comptime_prefix_still_requires_unresolved_parameters",
-        "add proc($bias i8, $T type, value i16) i16 { return value + i16(bias) }\nmain proc() i16 { return add(i8(2), i16(40)) }\n",
+        "add proc($bias i8, $T type, value i16) i16 { return value + i16(bias) }\nevaluate proc() i16 { return add(i8(2), i16(40)) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "cannot infer" },
     )
 }
@@ -677,8 +677,8 @@ pure_type_builtins_select_generic_guards_before_compile_errors test {
     try support.check_text(
         &context,
         "pure_type_builtins_select_generic_guards_before_compile_errors",
-        "checked proc($T type, value T) T {\n    if (minval!(T) == 0 and maxval!(T) == 255 and sizeof!(T) == 1 and alignof!(T) == 1) {\n        return value\n    } else {\n        compile_error!(\"expected an unsigned byte\")\n    }\n}\nmain proc() u8 { return checked(u8(42)) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "checked proc($T type, value T) T {\n    if (minval!(T) == 0 and maxval!(T) == 255 and sizeof!(T) == 1 and alignof!(T) == 1) {\n        return value\n    } else {\n        compile_error!(\"expected an unsigned byte\")\n    }\n}\nevaluate proc() u8 { return checked(u8(42)) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -688,8 +688,8 @@ remainder_preserves_exact_signed_unsigned_float_and_nominal_values test {
     try support.check_text(
         &context,
         "remainder_preserves_exact_signed_unsigned_float_and_nominal_values",
-        "Id :: distinct i16\nremainder proc(left, right Id) Id { return rem!(left, right) }\nsigns proc(left, right i64) i64 { return rem!(left, right) }\nreal proc(left, right f64) f64 { return rem!(left, right) }\nconstant proc() i16 { return rem!(i16(-42), 23) }\nmain proc() i16 {\n    if (remainder(Id(-42), Id(23)) != Id(-19)) return -1\n    if (signs(minval!(i64), -1) != 0 or signs(minval!(i64), 10) != -8) return -2\n    if (signs(5, -3) != 2 or signs(-5, 3) != -2) return -3\n    if (rem!(maxval!(u64), 10) != 5) return -4\n    if (real(-5.5, 2.0) != -1.5 or real(5.5, -2.0) != 1.5) return -5\n    if ($(constant()) != -19) return -6\n    return 42\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Id :: distinct i16\nremainder proc(left, right Id) Id { return rem!(left, right) }\nsigns proc(left, right i64) i64 { return rem!(left, right) }\nreal proc(left, right f64) f64 { return rem!(left, right) }\nconstant proc() i16 { return rem!(i16(-42), 23) }\nevaluate proc() i16 {\n    if (remainder(Id(-42), Id(23)) != Id(-19)) return -1\n    if (signs(minval!(i64), -1) != 0 or signs(minval!(i64), 10) != -8) return -2\n    if (signs(5, -3) != 2 or signs(-5, 3) != -2) return -3\n    if (rem!(maxval!(u64), 10) != 5) return -4\n    if (real(-5.5, 2.0) != -1.5 or real(5.5, -2.0) != 1.5) return -5\n    if ($(constant()) != -19) return -6\n    return 42\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -699,7 +699,7 @@ remainder_traps_on_runtime_zero test {
     try support.check_text(
         &context,
         "remainder_traps_on_runtime_zero",
-        "calculate proc(zero i16) i16 { return rem!(i16(42), zero) }\nmain proc() i16 { return calculate(0) }\n",
+        "calculate proc(zero i16) i16 { return rem!(i16(42), zero) }\nevaluate proc() i16 { return calculate(0) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "division by zero" },
     )
 }
@@ -710,7 +710,7 @@ float_remainder_traps_on_runtime_negative_zero test {
     try support.check_text(
         &context,
         "float_remainder_traps_on_runtime_negative_zero",
-        "calculate proc(zero f64) f64 { return rem!(f64(42), zero) }\nmain proc() f64 { return calculate(-0.0) }\n",
+        "calculate proc(zero f64) f64 { return rem!(f64(42), zero) }\nevaluate proc() f64 { return calculate(-0.0) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "division by zero" },
     )
 }
@@ -721,7 +721,7 @@ remainder_rejects_mismatched_nominal_types test {
     try support.check_text(
         &context,
         "remainder_rejects_mismatched_nominal_types",
-        "Id :: distinct i16\nmain proc() Id { return rem!(Id(42), i16(23)) }\n",
+        "Id :: distinct i16\nevaluate proc() Id { return rem!(Id(42), i16(23)) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
     )
 }
@@ -732,8 +732,8 @@ character_literals_preserve_codepoints_escapes_and_constant_values test {
     try support.check_text(
         &context,
         "character_literals_preserve_codepoints_escapes_and_constant_values",
-        "constant proc() u32 { return '\xf0\x9f\x99\x82' }\nmain proc() [8]u32 {\n    return ['A', '\xc3\xa9', $(constant()), '\\n', '\\r', '\\t', '\\\\', '\\'']\n}\n",
-        support.Expected{ stdout = "[65, 233, 128578, 10, 13, 9, 92, 39]\n", diagnostic = null },
+        "constant proc() u32 { return '🙂' }\nevaluate proc() [8]u32 {\n    return ['A', 'é', $(constant()), '\\n', '\\r', '\\t', '\\\\', '\\'']\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 8) return 1\n    if (value[0] != 65) return 1\n    if (value[1] != 233) return 1\n    if (value[2] != 128578) return 1\n    if (value[3] != 10) return 1\n    if (value[4] != 13) return 1\n    if (value[5] != 9) return 1\n    if (value[6] != 92) return 1\n    if (value[7] != 39) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -743,8 +743,8 @@ mixed_metadata_locals_preserve_snapshots_and_runtime_effects test {
     try support.check_text(
         &context,
         "mixed_metadata_locals_preserve_snapshots_and_runtime_effects",
-        "Config :: struct { child type, count usize }\ncompute proc($T type, effects @mut i16, value T) T {\n    Explicit type := i8\n    Explicit = T\n    Inferred := bool\n    Inferred = Explicit\n    types [2]mut type := [i8, bool]\n    saved_types :: types\n    if (T == i16) { types[0] = Inferred } else { types[0] = i16 }\n    inferred_types := [i8, bool]\n    saved_inferred_types :: inferred_types\n    inferred_types = [types[0], bool]\n    config Config := { child = i8, count = 1 }\n    saved_config :: config\n    config.child = inferred_types[0]\n    config.count += 1\n    inferred_config := Config { child = bool, count = 1 }\n    saved_inferred_config :: inferred_config\n    inferred_config.child = config.child\n    inferred_config.count = config.count\n    if (saved_types[0] != i8 or saved_inferred_types[0] != i8) return T(-1)\n    if (saved_config.child != i8 or saved_config.count != 1) return T(-2)\n    if (saved_inferred_config.child != bool or saved_inferred_config.count != 1) return T(-3)\n    Element :: inferred_config.child\n    values [inferred_config.count]Element :: [value, T(2)]\n    effects^ += 1\n    return values[0] + values[1]\n}\nforward proc(effects @mut i16, value i16) i16 { return compute(i16, effects, value) }\nmain proc() [2]i16 {\n    effects := i16(0)\n    first :: forward(&effects, 18)\n    second :: forward(&effects, 20)\n    return [first + second, effects]\n}\n",
-        support.Expected{ stdout = "[42, 2]\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\ncompute proc($T type, effects @mut i16, value T) T {\n    Explicit type := i8\n    Explicit = T\n    Inferred := bool\n    Inferred = Explicit\n    types [2]mut type := [i8, bool]\n    saved_types :: types\n    if (T == i16) { types[0] = Inferred } else { types[0] = i16 }\n    inferred_types := [i8, bool]\n    saved_inferred_types :: inferred_types\n    inferred_types = [types[0], bool]\n    config Config := { child = i8, count = 1 }\n    saved_config :: config\n    config.child = inferred_types[0]\n    config.count += 1\n    inferred_config := Config { child = bool, count = 1 }\n    saved_inferred_config :: inferred_config\n    inferred_config.child = config.child\n    inferred_config.count = config.count\n    if (saved_types[0] != i8 or saved_inferred_types[0] != i8) return T(-1)\n    if (saved_config.child != i8 or saved_config.count != 1) return T(-2)\n    if (saved_inferred_config.child != bool or saved_inferred_config.count != 1) return T(-3)\n    Element :: inferred_config.child\n    values [inferred_config.count]Element :: [value, T(2)]\n    effects^ += 1\n    return values[0] + values[1]\n}\nforward proc(effects @mut i16, value i16) i16 { return compute(i16, effects, value) }\nevaluate proc() [2]i16 {\n    effects := i16(0)\n    first :: forward(&effects, 18)\n    second :: forward(&effects, 20)\n    return [first + second, effects]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -754,8 +754,8 @@ mixed_runtime_branches_and_loops_keep_metadata_locals_independent test {
     try support.check_text(
         &context,
         "mixed_runtime_branches_and_loops_keep_metadata_locals_independent",
-        "Config :: struct { child type, count usize }\ncompute proc(value i16, repeats usize, take bool) i16 {\n    total := value\n    if (take) {\n        Element := i8\n        Element = i16\n        amount Element :: 2\n        total += amount\n    } else {\n        config Config := { child = i8, count = 1 }\n        config.child = i16\n        amount config.child :: 4\n        total += amount\n    }\n    index := usize(0)\n    while (index < repeats) {\n        config := Config { child = i8, count = 1 }\n        saved :: config\n        config.child = i16\n        config.count += 1\n        if (saved.child != i8 or saved.count != 1) return -1\n        values [config.count]config.child :: [total, 1]\n        total = values[0] + values[1]\n        index += 1\n    }\n    return total\n}\nforward proc(value i16, repeats usize, take bool) i16 { return compute(value, repeats, take) }\nmain proc() [2]i16 { return [forward(38, 2, true), forward(36, 2, false)] }\n",
-        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\ncompute proc(value i16, repeats usize, take bool) i16 {\n    total := value\n    if (take) {\n        Element := i8\n        Element = i16\n        amount Element :: 2\n        total += amount\n    } else {\n        config Config := { child = i8, count = 1 }\n        config.child = i16\n        amount config.child :: 4\n        total += amount\n    }\n    index := usize(0)\n    while (index < repeats) {\n        config := Config { child = i8, count = 1 }\n        saved :: config\n        config.child = i16\n        config.count += 1\n        if (saved.child != i8 or saved.count != 1) return -1\n        values [config.count]config.child :: [total, 1]\n        total = values[0] + values[1]\n        index += 1\n    }\n    return total\n}\nforward proc(value i16, repeats usize, take bool) i16 { return compute(value, repeats, take) }\nevaluate proc() [2]i16 { return [forward(38, 2, true), forward(36, 2, false)] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -765,8 +765,8 @@ mixed_metadata_construction_static_exits_and_cleanup test {
     try support.check_text(
         &context,
         "mixed_metadata_construction_static_exits_and_cleanup",
-        "Config :: struct { child type, count usize }\ncompute proc(value i16, effects @mut i16) i16 {\n    config Config := { child = i8, count = 0 }\n    types [2]mut type := undefined\n    for (0..usize(3)) |index| {\n        if (index == 2) break\n        types[index] = i16\n        config.count += 1\n        effects^ += 1\n    }\n    {\n        defer config.child = types[0]\n        config.child = bool\n    }\n    selected ?type :: types[1]\n    if selected |Child| {\n        if (Child != i16) return -1\n        amount Child :: 2\n        values [config.count]config.child :: [value, amount]\n        return values[0] + values[1]\n    }\n    return -2\n}\nmain proc() [2]i16 {\n    value := i16(40)\n    effects := i16(0)\n    result :: compute(value, &effects)\n    return [result, effects]\n}\n",
-        support.Expected{ stdout = "[42, 2]\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\ncompute proc(value i16, effects @mut i16) i16 {\n    config Config := { child = i8, count = 0 }\n    types [2]mut type := undefined\n    for (0..usize(3)) |index| {\n        if (index == 2) break\n        types[index] = i16\n        config.count += 1\n        effects^ += 1\n    }\n    {\n        defer config.child = types[0]\n        config.child = bool\n    }\n    selected ?type :: types[1]\n    if selected |Child| {\n        if (Child != i16) return -1\n        amount Child :: 2\n        values [config.count]config.child :: [value, amount]\n        return values[0] + values[1]\n    }\n    return -2\n}\nevaluate proc() [2]i16 {\n    value := i16(40)\n    effects := i16(0)\n    result :: compute(value, &effects)\n    return [result, effects]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -776,8 +776,8 @@ mixed_runtime_captures_and_tagged_metadata_selection test {
     try support.check_text(
         &context,
         "mixed_runtime_captures_and_tagged_metadata_selection",
-        "Choice :: union(enum) { child type, empty void }\ncompute proc(value ?i16, values []i16) i16 {\n    T := i16\n    choice Choice :: { child = T }\n    match choice {\n        .child |Child|: { if (Child != i16) return -1 },\n        .empty: return -2,\n    }\n    total := i16(0)\n    if value |captured| {\n        U := T\n        local U :: captured\n        total += local\n    }\n    for values |captured, index| {\n        U := T\n        local U :: captured\n        total += local + i16(index)\n    }\n    return total\n}\nmain proc() i16 {\n    values [2]i16 :: [10, 10]\n    return compute(21, values[..])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Choice :: union(enum) { child type, empty void }\ncompute proc(value ?i16, values []i16) i16 {\n    T := i16\n    choice Choice :: { child = T }\n    match choice {\n        .child |Child|: { if (Child != i16) return -1 },\n        .empty: return -2,\n    }\n    total := i16(0)\n    if value |captured| {\n        U := T\n        local U :: captured\n        total += local\n    }\n    for values |captured, index| {\n        U := T\n        local U :: captured\n        total += local + i16(index)\n    }\n    return total\n}\nevaluate proc() i16 {\n    values [2]i16 :: [10, 10]\n    return compute(21, values[..])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -787,8 +787,8 @@ metadata_input_dependencies_follow_mutable_scalar_updates test {
     try support.check_text(
         &context,
         "metadata_input_dependencies_follow_mutable_scalar_updates",
-        "compute proc(count usize) usize {\n    size := usize(0)\n    size = count\n    config struct { child type, count usize } := { child = i16, count = size }\n    return config.count\n}\nmain proc() usize { return compute(42) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "compute proc(count usize) usize {\n    size := usize(0)\n    size = count\n    config struct { child type, count usize } := { child = i16, count = size }\n    return config.count\n}\nevaluate proc() usize { return compute(42) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -798,7 +798,7 @@ metadata_scalar_update_dependencies_still_require_constant_inputs test {
     try support.check_text(
         &context,
         "metadata_scalar_update_dependencies_still_require_constant_inputs",
-        "compute proc(count usize) usize {\n    size := usize(0)\n    size = count\n    config struct { child type, count usize } := { child = i16, count = size }\n    return config.count\n}\nforward proc(count usize) usize { return compute(count) }\nmain proc() usize { return forward(42) }\n",
+        "compute proc(count usize) usize {\n    size := usize(0)\n    size = count\n    config struct { child type, count usize } := { child = i16, count = size }\n    return config.count\n}\nforward proc(count usize) usize { return compute(count) }\nevaluate proc() usize { return forward(42) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -809,7 +809,7 @@ mixed_metadata_locals_reject_runtime_type_initializers test {
     try support.check_text(
         &context,
         "mixed_metadata_locals_reject_runtime_type_initializers",
-        "compute proc(wide bool) i16 {\n    Element := if (wide) i16 else i8\n    value Element :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nmain proc() i16 { return forward(true) }\n",
+        "compute proc(wide bool) i16 {\n    Element := if (wide) i16 else i8\n    value Element :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nevaluate proc() i16 { return forward(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -820,7 +820,7 @@ mixed_metadata_locals_reject_runtime_record_updates test {
     try support.check_text(
         &context,
         "mixed_metadata_locals_reject_runtime_record_updates",
-        "Config :: struct { child type, count usize }\ncompute proc(wide bool) i16 {\n    config Config := { child = i8, count = 1 }\n    config.child = if (wide) i16 else i8\n    value config.child :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nmain proc() i16 { return forward(true) }\n",
+        "Config :: struct { child type, count usize }\ncompute proc(wide bool) i16 {\n    config Config := { child = i8, count = 1 }\n    config.child = if (wide) i16 else i8\n    value config.child :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nevaluate proc() i16 { return forward(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -831,7 +831,7 @@ mixed_runtime_branches_reject_outer_type_mutation test {
     try support.check_text(
         &context,
         "mixed_runtime_branches_reject_outer_type_mutation",
-        "compute proc(wide bool) i16 {\n    Element := i8\n    if (wide) { Element = i16 }\n    value Element :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nmain proc() i16 { return forward(true) }\n",
+        "compute proc(wide bool) i16 {\n    Element := i8\n    if (wide) { Element = i16 }\n    value Element :: 42\n    return i16(value)\n}\nforward proc(wide bool) i16 { return compute(wide) }\nevaluate proc() i16 { return forward(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -842,7 +842,7 @@ mixed_runtime_loops_reject_outer_metadata_mutation test {
     try support.check_text(
         &context,
         "mixed_runtime_loops_reject_outer_metadata_mutation",
-        "Config :: struct { child type, count usize }\ncompute proc(repeats usize) usize {\n    config := Config { child = i16, count = 0 }\n    index := usize(0)\n    while (index < repeats) {\n        config.count += 1\n        index += 1\n    }\n    return config.count\n}\nforward proc(repeats usize) usize { return compute(repeats) }\nmain proc() usize { return forward(42) }\n",
+        "Config :: struct { child type, count usize }\ncompute proc(repeats usize) usize {\n    config := Config { child = i16, count = 0 }\n    index := usize(0)\n    while (index < repeats) {\n        config.count += 1\n        index += 1\n    }\n    return config.count\n}\nforward proc(repeats usize) usize { return compute(repeats) }\nevaluate proc() usize { return forward(42) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -853,8 +853,8 @@ metadata_only_main_keeps_runtime_entrypoint test {
     try support.check_text(
         &context,
         "metadata_only_main_keeps_runtime_entrypoint",
-        "fallback proc() i16 { return -99 }\nmain proc() i16 {\n    _ := [i16, bool]\n    return 42\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "fallback proc() i16 { return -99 }\nevaluate proc() i16 {\n    _ := [i16, bool]\n    return 42\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -864,8 +864,8 @@ inferred_metadata_locals_preserve_owned_copies_and_updates test {
     try support.check_text(
         &context,
         "inferred_metadata_locals_preserve_owned_copies_and_updates",
-        "Config :: struct { children [2]mut ?type, count usize }\ncompute proc(count usize) i16 {\n    config := Config { children = [i8, null], count = 0 }\n    saved :: config\n    while (config.count < count) {\n        config.children[0] = i16\n        config.children[1] = config.children[0]\n        config.count += 1\n    }\n    types := [i8, bool]\n    before :: types\n    types = [i16, bool]\n    tuple := { types[0], config.count }\n    tuple.0 = i8\n    if (saved.children[0]? != i8 or saved.count != 0 or before[0] != i8) return -1\n    if (tuple.0 != i8 or tuple.1 != 2) return -2\n    for config.children |child| { if child |T| { if (T != i16) return -3 } }\n    Element :: types[0]\n    values [count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nmain proc() i16 { return compute(2) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { children [2]mut ?type, count usize }\ncompute proc(count usize) i16 {\n    config := Config { children = [i8, null], count = 0 }\n    saved :: config\n    while (config.count < count) {\n        config.children[0] = i16\n        config.children[1] = config.children[0]\n        config.count += 1\n    }\n    types := [i8, bool]\n    before :: types\n    types = [i16, bool]\n    tuple := { types[0], config.count }\n    tuple.0 = i8\n    if (saved.children[0]? != i8 or saved.count != 0 or before[0] != i8) return -1\n    if (tuple.0 != i8 or tuple.1 != 2) return -2\n    for config.children |child| { if child |T| { if (T != i16) return -3 } }\n    Element :: types[0]\n    values [count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nevaluate proc() i16 { return compute(2) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -875,8 +875,8 @@ inferred_type_locals_recurse_and_preserve_cleanup test {
     try support.check_text(
         &context,
         "inferred_type_locals_recurse_and_preserve_cleanup",
-        "Error :: enum { failed }\ncount proc(depth usize) i16 {\n    T := i8\n    T = i16\n    defer if (T != i16) unreachable\n    if (depth == 0) return 21\n    return count(depth - 1) + 21\n}\nfail proc() i16 ! Error {\n    T := ?i16\n    T = ?i8\n    errdefer if (T != ?i8) unreachable\n    return .failed\n}\nmain proc() i16 { return fail() catch { yield count(1) } }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Error :: enum { failed }\ncount proc(depth usize) i16 {\n    T := i8\n    T = i16\n    defer if (T != i16) unreachable\n    if (depth == 0) return 21\n    return count(depth - 1) + 21\n}\nfail proc() i16 ! Error {\n    T := ?i16\n    T = ?i8\n    errdefer if (T != ?i8) unreachable\n    return .failed\n}\nevaluate proc() i16 { return fail() catch { yield count(1) } }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -886,8 +886,8 @@ inferred_metadata_call_results_and_checked_projections test {
     try support.check_text(
         &context,
         "inferred_metadata_call_results_and_checked_projections",
-        "Config :: struct { child type, count usize }\nSchema :: alias Config\ncreate proc() Schema { return { child = i8, count = 2 } }\nchildren proc() [2]type { return [i8, bool] }\noptional proc() ?type { return i8 }\npair proc() struct { type, usize } { return {i8, 2} }\nfield_type proc(value i16) i16 {\n    T := create().child\n    T = i16\n    result T :: value\n    return result\n}\nindexed_type proc(value i16) i16 {\n    T := children()[0]\n    T = i16\n    result T :: value\n    return result\n}\nunwrapped_type proc(value i16) i16 {\n    T := optional()?\n    T = i16\n    result T :: value\n    return result\n}\ntuple_type proc(value i16) i16 {\n    T := pair().0\n    T = i16\n    result T :: value\n    return result\n}\ncompute proc() i16 {\n    config := create()\n    saved :: config\n    config.child = i16\n    if (saved.child != i8) return -1\n    return field_type(19) + indexed_type(19) + unwrapped_type(2) + tuple_type(2)\n}\nmain proc() i16 { return compute() }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\nSchema :: alias Config\ncreate proc() Schema { return { child = i8, count = 2 } }\nchildren proc() [2]type { return [i8, bool] }\noptional proc() ?type { return i8 }\npair proc() struct { type, usize } { return {i8, 2} }\nfield_type proc(value i16) i16 {\n    T := create().child\n    T = i16\n    result T :: value\n    return result\n}\nindexed_type proc(value i16) i16 {\n    T := children()[0]\n    T = i16\n    result T :: value\n    return result\n}\nunwrapped_type proc(value i16) i16 {\n    T := optional()?\n    T = i16\n    result T :: value\n    return result\n}\ntuple_type proc(value i16) i16 {\n    T := pair().0\n    T = i16\n    result T :: value\n    return result\n}\ncompute proc() i16 {\n    config := create()\n    saved :: config\n    config.child = i16\n    if (saved.child != i8) return -1\n    return field_type(19) + indexed_type(19) + unwrapped_type(2) + tuple_type(2)\n}\nevaluate proc() i16 { return compute() }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -897,8 +897,8 @@ inferred_metadata_value_blocks_matches_and_fallible_calls test {
     try support.check_text(
         &context,
         "inferred_metadata_value_blocks_matches_and_fallible_calls",
-        "Error :: enum { failed }\nConfig :: struct { child type, count usize }\ncreate proc() Config ! Error { return { child = i8, count = 2 } }\ncompute proc(flag bool) i16 ! Error {\n    errdefer unreachable\n    config := try create()\n    saved :: config\n    config.child = i16\n    fields := { yield [i8, bool] }\n    selected := if (flag) { yield { child = i16, count = config.count } }\n        else { yield { child = i8, count = usize(1) } }\n    if (saved.child != i8 or fields[1] != bool or selected.child != i16) return -1\n    Element :: selected.child\n    values [selected.count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nmain proc() i16 { return compute(true) catch -2 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Error :: enum { failed }\nConfig :: struct { child type, count usize }\ncreate proc() Config ! Error { return { child = i8, count = 2 } }\ncompute proc(flag bool) i16 ! Error {\n    errdefer unreachable\n    config := try create()\n    saved :: config\n    config.child = i16\n    fields := { yield [i8, bool] }\n    selected := if (flag) { yield { child = i16, count = config.count } }\n        else { yield { child = i8, count = usize(1) } }\n    if (saved.child != i8 or fields[1] != bool or selected.child != i16) return -1\n    Element :: selected.child\n    values [selected.count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nevaluate proc() i16 { return compute(true) catch -2 }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -908,7 +908,7 @@ inferred_metadata_locals_require_constant_inputs test {
     try support.check_text(
         &context,
         "inferred_metadata_locals_require_constant_inputs",
-        "Config :: struct { child type, count usize }\ncount proc(value usize) usize {\n    config := Config { child = i16, count = value }\n    return config.count\n}\nruntime proc(value usize) usize { return count(value) }\nmain proc() usize { return runtime(42) }\n",
+        "Config :: struct { child type, count usize }\ncount proc(value usize) usize {\n    config := Config { child = i16, count = value }\n    return config.count\n}\nruntime proc(value usize) usize { return count(value) }\nevaluate proc() usize { return runtime(42) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "compile-time value" },
     )
 }
@@ -919,7 +919,7 @@ inferred_metadata_arrays_keep_readonly_elements test {
     try support.check_text(
         &context,
         "inferred_metadata_arrays_keep_readonly_elements",
-        "compute proc() usize {\n    types := [i8, bool]\n    types[0] = i16\n    return types.len\n}\nmain proc() usize { return compute() }\n",
+        "compute proc() usize {\n    types := [i8, bool]\n    types[0] = i16\n    return types.len\n}\nevaluate proc() usize { return compute() }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
     )
 }
@@ -930,8 +930,8 @@ immutable_type_aliases_and_scalar_metadata_projections_stay_runtime test {
     try support.check_text(
         &context,
         "immutable_type_aliases_and_scalar_metadata_projections_stay_runtime",
-        "Config :: struct { child type, count usize }\ncreate proc() Config { return { child = i16, count = 2 } }\nChild proc() type { return i16 }\nadd proc(value i16) i16 {\n    Local :: alias i16\n    Other :: alias Child()\n    amount := create().count\n    argument Local :: value\n    result Other :: argument + i16(amount)\n    return result\n}\nforward proc(value i16) i16 { return add(value) }\nmain proc() i16 { return forward(40) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\ncreate proc() Config { return { child = i16, count = 2 } }\nChild proc() type { return i16 }\nadd proc(value i16) i16 {\n    Local :: alias i16\n    Other :: alias Child()\n    amount := create().count\n    argument Local :: value\n    result Other :: argument + i16(amount)\n    return result\n}\nforward proc(value i16) i16 { return add(value) }\nevaluate proc() i16 { return forward(40) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -941,8 +941,8 @@ explicit_metadata_locals_compute_without_metadata_inputs test {
     try support.check_text(
         &context,
         "explicit_metadata_locals_compute_without_metadata_inputs",
-        "Config :: struct { children [2]mut ?type, count usize }\ncompute proc(count usize) i16 {\n    config Config := undefined\n    config.children = [i8, null]\n    config.count = 0\n    saved :: config\n    while (config.count < count) {\n        config.children[0] = i16\n        config.children[1] = config.children[0]\n        config.count = config.count + 1\n    }\n    if (saved.children[0]? != i8 or saved.count != 0) return -1\n    for config.children |child| {\n        if child |T| { if (T != i16) return -2 }\n    }\n    Element :: config.children[0]?\n    values [config.count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nmain proc() i16 { return $(compute(2)) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { children [2]mut ?type, count usize }\ncompute proc(count usize) i16 {\n    config Config := undefined\n    config.children = [i8, null]\n    config.count = 0\n    saved :: config\n    while (config.count < count) {\n        config.children[0] = i16\n        config.children[1] = config.children[0]\n        config.count = config.count + 1\n    }\n    if (saved.children[0]? != i8 or saved.count != 0) return -1\n    for config.children |child| {\n        if child |T| { if (T != i16) return -2 }\n    }\n    Element :: config.children[0]?\n    values [config.count]Element :: [19, 23]\n    return values[0] + values[1]\n}\nevaluate proc() i16 { return $(compute(2)) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -952,8 +952,8 @@ explicit_type_locals_recurse_and_preserve_cleanup test {
     try support.check_text(
         &context,
         "explicit_type_locals_recurse_and_preserve_cleanup",
-        "Error :: enum { failed }\ncount proc(depth usize) i16 {\n    T type := i8\n    T = i16\n    defer if (T != i16) unreachable\n    if (depth == 0) return 21\n    return count(depth - 1) + 21\n}\nfail proc() i16 ! Error {\n    T ?type := i16\n    errdefer if (T? != i16) unreachable\n    return .failed\n}\nmain proc() i16 {\n    return fail() catch { yield count(1) }\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Error :: enum { failed }\ncount proc(depth usize) i16 {\n    T type := i8\n    T = i16\n    defer if (T != i16) unreachable\n    if (depth == 0) return 21\n    return count(depth - 1) + 21\n}\nfail proc() i16 ! Error {\n    T ?type := i16\n    errdefer if (T? != i16) unreachable\n    return .failed\n}\nevaluate proc() i16 {\n    return fail() catch { yield count(1) }\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -963,8 +963,8 @@ explicit_metadata_locals_allow_independent_runtime_inputs test {
     try support.check_text(
         &context,
         "explicit_metadata_locals_allow_independent_runtime_inputs",
-        "count proc(value usize) usize {\n    _ type :: i16\n    return value\n}\nruntime proc(value usize) usize { return count(value) }\nmain proc() usize { return runtime(42) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "count proc(value usize) usize {\n    _ type :: i16\n    return value\n}\nruntime proc(value usize) usize { return count(value) }\nevaluate proc() usize { return runtime(42) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -974,7 +974,7 @@ explicit_metadata_locals_reject_incomplete_results test {
     try support.check_text(
         &context,
         "explicit_metadata_locals_reject_incomplete_results",
-        "Config :: struct { child type, count usize }\ncompute proc() usize {\n    config Config := undefined\n    config.child = i16\n    return config.count\n}\nmain proc() usize { return compute() }\n",
+        "Config :: struct { child type, count usize }\ncompute proc() usize {\n    config Config := undefined\n    config.child = i16\n    return config.count\n}\nevaluate proc() usize { return compute() }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -985,7 +985,7 @@ explicit_metadata_locals_run_scoped_error_cleanup test {
     try support.check_text(
         &context,
         "explicit_metadata_locals_run_scoped_error_cleanup",
-        "Error :: enum { failed }\nfail proc() i16 ! Error {\n    T type :: i16\n    errdefer unreachable\n    return .failed\n}\nmain proc() i16 { return fail() catch 0 }\n",
+        "Error :: enum { failed }\nfail proc() i16 ! Error {\n    T type :: i16\n    errdefer unreachable\n    return .failed\n}\nevaluate proc() i16 { return fail() catch 0 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "reached unreachable statement" },
     )
 }
@@ -996,8 +996,8 @@ ordinary_local_type_aliases_keep_runtime_parameters test {
     try support.check_text(
         &context,
         "ordinary_local_type_aliases_keep_runtime_parameters",
-        "add proc(value i16) i16 {\n    Local :: alias i16\n    result Local :: value + 2\n    return result\n}\nforward proc(value i16) i16 { return add(value) }\nmain proc() i16 { return forward(40) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "add proc(value i16) i16 {\n    Local :: alias i16\n    result Local :: value + 2\n    return result\n}\nforward proc(value i16) i16 { return add(value) }\nevaluate proc() i16 { return forward(40) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1007,8 +1007,8 @@ ordinary_metadata_inputs_compute_owned_runtime_results test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_compute_owned_runtime_results",
-        "Config :: struct { child type, count usize }\nResult :: struct { values [2]i16, name []u8 }\namount proc(input Config, extra usize) usize {\n    copy := input\n    saved :: copy\n    copy.count = copy.count + extra\n    if (saved.child != i16 or saved.count != 40) return 0\n    return copy.count\n}\ncompute proc(input Config) Result {\n    return { values = [i16(amount(input, 2)), 19], name = \"owned\" }\n}\nidentity proc(T type, value i16) i16 {\n    if (T != i16) return 0\n    return value\n}\nmain proc() i16 {\n    result :: compute(Config { child = i16, count = 40 })\n    if (result.name.len != 5 or result.name[4] != 100) return -1\n    return identity(i16, result.values[0])\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Config :: struct { child type, count usize }\nResult :: struct { values [2]i16, name []u8 }\namount proc(input Config, extra usize) usize {\n    copy := input\n    saved :: copy\n    copy.count = copy.count + extra\n    if (saved.child != i16 or saved.count != 40) return 0\n    return copy.count\n}\ncompute proc(input Config) Result {\n    return { values = [i16(amount(input, 2)), 19], name = \"owned\" }\n}\nidentity proc(T type, value i16) i16 {\n    if (T != i16) return 0\n    return value\n}\nevaluate proc() i16 {\n    result :: compute(Config { child = i16, count = 40 })\n    if (result.name.len != 5 or result.name[4] != 100) return -1\n    return identity(i16, result.values[0])\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1018,8 +1018,8 @@ ordinary_metadata_inputs_select_recursive_helpers_and_void test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_select_recursive_helpers_and_void",
-        "validate proc(T type, early bool) void {\n    if (T != i16) compile_error!(\"wrong child\")\n    if (early) return\n}\ncount proc(types []type, index usize) usize {\n    validate(i16, index == 0)\n    if (index == types.len) return 0\n    bias :: if (types[index] == i16) usize(21) else usize(0)\n    return bias + count(types, index + 1)\n}\nmain proc() usize { return count([i16, bool, i16], 0) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "validate proc(T type, early bool) void {\n    if (T != i16) compile_error!(\"wrong child\")\n    if (early) return\n}\ncount proc(types []type, index usize) usize {\n    validate(i16, index == 0)\n    if (index == types.len) return 0\n    bias :: if (types[index] == i16) usize(21) else usize(0)\n    return bias + count(types, index + 1)\n}\nevaluate proc() usize { return count([i16, bool, i16], 0) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1029,8 +1029,8 @@ ordinary_metadata_inputs_preserve_fallible_cleanup test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_preserve_fallible_cleanup",
-        "Error :: enum { failed }\nfail proc(T type) i16 ! Error {\n    errdefer if (T != i16) unreachable\n    defer if (T != i16) unreachable\n    return .failed\n}\nforward proc(T type) i16 ! Error {\n    errdefer if (T != i16) unreachable\n    return try fail(T)\n}\nsucceed proc(T type) void ! Error {\n    errdefer unreachable\n    if (T == i16) return\n}\nmain proc() i16 {\n    succeed(i16) catch { return -1 }\n    succeed(bool) catch { return -2 }\n    return forward(i16) catch |error| {\n        yield if (error == .failed) i16(42) else i16(0)\n    }\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Error :: enum { failed }\nfail proc(T type) i16 ! Error {\n    errdefer if (T != i16) unreachable\n    defer if (T != i16) unreachable\n    return .failed\n}\nforward proc(T type) i16 ! Error {\n    errdefer if (T != i16) unreachable\n    return try fail(T)\n}\nsucceed proc(T type) void ! Error {\n    errdefer unreachable\n    if (T == i16) return\n}\nevaluate proc() i16 {\n    succeed(i16) catch { return -1 }\n    succeed(bool) catch { return -2 }\n    return forward(i16) catch |error| {\n        yield if (error == .failed) i16(42) else i16(0)\n    }\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1040,7 +1040,7 @@ ordinary_metadata_inputs_run_error_cleanup test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_run_error_cleanup",
-        "Error :: enum { failed }\nfail proc(T type) i16 ! Error {\n    errdefer unreachable\n    return .failed\n}\nmain proc() i16 { return fail(i16) catch 0 }\n",
+        "Error :: enum { failed }\nfail proc(T type) i16 ! Error {\n    errdefer unreachable\n    return .failed\n}\nevaluate proc() i16 { return fail(i16) catch 0 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "reached unreachable statement" },
     )
 }
@@ -1051,7 +1051,7 @@ ordinary_metadata_inputs_reject_runtime_dependencies test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_reject_runtime_dependencies",
-        "count proc(T type, value usize) usize { return value }\nruntime proc(value usize) usize { return count(i16, value) }\nmain proc() usize { return runtime(42) }\n",
+        "count proc(T type, value usize) usize { return value }\nruntime proc(value usize) usize { return count(i16, value) }\nevaluate proc() usize { return runtime(42) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "generic argument must be a compile-time value" },
     )
 }
@@ -1062,7 +1062,7 @@ ordinary_metadata_inputs_reject_incomplete_payloads test {
     try support.check_text(
         &context,
         "ordinary_metadata_inputs_reject_incomplete_payloads",
-        "Config :: struct { child type, count usize }\ncount proc(input Config) usize { return input.count }\nProduce proc() type {\n    input Config := undefined\n    input.count = 42\n    return [count(input)]i16\n}\nmain proc() usize { value Produce() :: []; return value.len }\n",
+        "Config :: struct { child type, count usize }\ncount proc(input Config) usize { return input.count }\nProduce proc() type {\n    input Config := undefined\n    input.count = 42\n    return [count(input)]i16\n}\nevaluate proc() usize { value Produce() :: []; return value.len }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "read before initialization" },
     )
 }
@@ -1073,7 +1073,7 @@ unreachable_is_a_demanded_source_trap_without_cleanup test {
     try support.check_text(
         &context,
         "unreachable_is_a_demanded_source_trap_without_cleanup",
-        "fail proc() i16 {\n    defer unreachable\n    unreachable\n}\nmain proc() i16 { return fail() }\n",
+        "fail proc() i16 {\n    defer unreachable\n    unreachable\n}\nevaluate proc() i16 { return fail() }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = ":3:5: runtime trap: reached unreachable statement" },
     )
 }
@@ -1084,8 +1084,8 @@ untaken_and_unused_unreachable_do_not_diagnose test {
     try support.check_text(
         &context,
         "untaken_and_unused_unreachable_do_not_diagnose",
-        "unused proc() i16 { unreachable }\nchoose proc(flag bool) i16 {\n    if (flag) unreachable\n    return match flag { true: unreachable, false: 42 }\n}\nmain proc() i16 { return choose(false) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "unused proc() i16 { unreachable }\nchoose proc(flag bool) i16 {\n    if (flag) unreachable\n    return match flag { true: unreachable, false: 42 }\n}\nevaluate proc() i16 { return choose(false) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1095,8 +1095,8 @@ unreachable_traps_only_selected_constant_execution test {
     try support.check_text(
         &context,
         "unreachable_traps_only_selected_constant_execution",
-        "choose proc(flag bool) i16 {\n    if (flag) unreachable\n    return 42\n}\nmain proc() i16 { return $(choose(false)) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "choose proc(flag bool) i16 {\n    if (flag) unreachable\n    return 42\n}\nevaluate proc() i16 { return $(choose(false)) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1106,7 +1106,7 @@ unreachable_constant_execution_preserves_source test {
     try support.check_text(
         &context,
         "unreachable_constant_execution_preserves_source",
-        "fail proc() i16 {\n    unreachable\n}\nmain proc() i16 { return $(fail()) }\n",
+        "fail proc() i16 {\n    unreachable\n}\nevaluate proc() i16 { return $(fail()) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = ":2:5: runtime trap: reached unreachable statement" },
     )
 }
@@ -1117,8 +1117,8 @@ terminal_while_true_preserves_nested_breaks_and_cleanups test {
     try support.check_text(
         &context,
         "terminal_while_true_preserves_nested_breaks_and_cleanups",
-        "compute proc(trace @mut i16) i16 {\n    while true {\n        defer trace^ += 1\n        while true { break }\n        if (trace^ == 2) return 42\n        continue\n    }\n}\nmain proc() [2]i16 {\n    trace i16 := 0\n    answer :: compute(&trace)\n    return [answer, trace]\n}\n",
-        support.Expected{ stdout = "[42, 3]\n", diagnostic = null },
+        "compute proc(trace @mut i16) i16 {\n    while true {\n        defer trace^ += 1\n        while true { break }\n        if (trace^ == 2) return 42\n        continue\n    }\n}\nevaluate proc() [2]i16 {\n    trace i16 := 0\n    answer :: compute(&trace)\n    return [answer, trace]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 3) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1128,8 +1128,8 @@ terminal_while_true_return test {
     try support.check_text(
         &context,
         "terminal_while_true_return",
-        "main proc() i16 { while true { return 42 } }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "evaluate proc() i16 { while true { return 42 } }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1139,8 +1139,8 @@ terminal_while_true_constant_execution test {
     try support.check_text(
         &context,
         "terminal_while_true_constant_execution",
-        "compute proc() i16 { while true { return 42 } }\nmain proc() i16 { return $(compute()) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "compute proc() i16 { while true { return 42 } }\nevaluate proc() i16 { return $(compute()) }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1150,8 +1150,8 @@ terminal_while_true_ignores_break_after_return test {
     try support.check_text(
         &context,
         "terminal_while_true_ignores_break_after_return",
-        "main proc() i16 { while true { return 42\nbreak } }\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "evaluate proc() i16 { while true { return 42\nbreak } }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1161,7 +1161,7 @@ while_true_break_requires_return test {
     try support.check_text(
         &context,
         "while_true_break_requires_return",
-        "main proc() i16 { while true { break } }\n",
+        "evaluate proc() i16 { while true { break } }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "nonvoid function can finish without returning a value" },
     )
 }
@@ -1172,7 +1172,7 @@ while_true_value_block_break_requires_return test {
     try support.check_text(
         &context,
         "while_true_value_block_break_requires_return",
-        "main proc() i16 {\n    while true {\n        value i16 :: { break }\n        _ = value\n    }\n}\n",
+        "evaluate proc() i16 {\n    while true {\n        value i16 :: { break }\n        _ = value\n    }\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "nonvoid function can finish without returning a value" },
     )
 }
@@ -1183,8 +1183,8 @@ while_runtime_guard_still_requires_return test {
     try support.check_text(
         &context,
         "while_runtime_guard_still_requires_return",
-        "main proc() i16 { flag := true\nwhile flag { return 42 } }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "nonvoid function can finish without returning a value" },
+        "evaluate proc() i16 { flag := true\nwhile flag { return 42 } }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "nonvoid function can finish without returning a value" },
     )
 }
 
@@ -1194,7 +1194,7 @@ unreachable_rejects_trailing_operand test {
     try support.check_text(
         &context,
         "unreachable_rejects_trailing_operand",
-        "main proc() i16 { unreachable 42 }\n",
+        "evaluate proc() i16 { unreachable 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "unexpected token" },
     )
 }
@@ -1205,8 +1205,8 @@ distinct_bitwise_results_preserve_nominal_type test {
     try support.check_text(
         &context,
         "distinct_bitwise_results_preserve_nominal_type",
-        "Flags :: distinct u16\nSigned :: distinct i8\nexact proc(value Flags) Flags { return value }\nmain proc() [4]i16 {\n    flags Flags := 21\n    flags <<= u8(1)\n    flags xor= 3\n    flags &= 63\n    flags |= 2\n    signed Signed := -3\n    signed >>= u64(1)\n    return [i16(exact(flags)), i16(~Flags(65500)),\n        i16(signed), i16(Signed(-2) <<| 7)]\n}\n",
-        support.Expected{ stdout = "[43, 35, -2, -128]\n", diagnostic = null },
+        "Flags :: distinct u16\nSigned :: distinct i8\nexact proc(value Flags) Flags { return value }\nevaluate proc() [4]i16 {\n    flags Flags := 21\n    flags <<= u8(1)\n    flags xor= 3\n    flags &= 63\n    flags |= 2\n    signed Signed := -3\n    signed >>= u64(1)\n    return [i16(exact(flags)), i16(~Flags(65500)),\n        i16(signed), i16(Signed(-2) <<| 7)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 43) return 1\n    if (value[1] != 35) return 1\n    if (value[2] != -2) return 1\n    if (value[3] != -128) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1216,8 +1216,8 @@ compound_updates_evaluate_places_once_before_rhs test {
     try support.check_text(
         &context,
         "compound_updates_evaluate_places_once_before_rhs",
-        "Box :: struct { values [2]mut i16 }\nplace proc(box @mut Box, trace @mut i16) @mut i16 {\n    trace^ = trace^ * 10 + 1\n    return &box.values[0]\n}\nrhs proc(box @mut Box, trace @mut i16) i16 {\n    trace^ = trace^ * 10 + 2\n    box.values[0] = 100\n    return 2\n}\nindex proc(trace @mut i16) usize {\n    trace^ = trace^ * 10 + 3\n    return 1\n}\nmain proc() [4]i16 {\n    box Box := { values = [40, 6] }\n    trace i16 := 0\n    place(&box, &trace)^ += rhs(&box, &trace)\n    box.values[index(&trace)] *= 7\n    count i16 := 0\n    for (0..3) |_| { defer count += 1 }\n    return [box.values[0], box.values[1], trace, count]\n}\n",
-        support.Expected{ stdout = "[42, 42, 123, 3]\n", diagnostic = null },
+        "Box :: struct { values [2]mut i16 }\nplace proc(box @mut Box, trace @mut i16) @mut i16 {\n    trace^ = trace^ * 10 + 1\n    return &box.values[0]\n}\nrhs proc(box @mut Box, trace @mut i16) i16 {\n    trace^ = trace^ * 10 + 2\n    box.values[0] = 100\n    return 2\n}\nindex proc(trace @mut i16) usize {\n    trace^ = trace^ * 10 + 3\n    return 1\n}\nevaluate proc() [4]i16 {\n    box Box := { values = [40, 6] }\n    trace i16 := 0\n    place(&box, &trace)^ += rhs(&box, &trace)\n    box.values[index(&trace)] *= 7\n    count i16 := 0\n    for (0..3) |_| { defer count += 1 }\n    return [box.values[0], box.values[1], trace, count]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    if (value[2] != 123) return 1\n    if (value[3] != 3) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1227,8 +1227,8 @@ compound_bitwise_and_float_updates test {
     try support.check_text(
         &context,
         "compound_bitwise_and_float_updates",
-        "main proc() [4]i16 {\n    value u8 := 255\n    value &= 15\n    value xor= 3\n    value |= 1\n    value <<= 1\n    value >>= 1\n    value <<|= u64(1000)\n    number i16 := 20\n    number += 3\n    number -= 2\n    number *= 2\n    real f64 := 84\n    real /= 2\n    return [i16(value), number, i16(real), i16(~u8(213))]\n}\n",
-        support.Expected{ stdout = "[255, 42, 42, 42]\n", diagnostic = null },
+        "evaluate proc() [4]i16 {\n    value u8 := 255\n    value &= 15\n    value xor= 3\n    value |= 1\n    value <<= 1\n    value >>= 1\n    value <<|= u64(1000)\n    number i16 := 20\n    number += 3\n    number -= 2\n    number *= 2\n    real f64 := 84\n    real /= 2\n    return [i16(value), number, i16(real), i16(~u8(213))]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 255) return 1\n    if (value[1] != 42) return 1\n    if (value[2] != 42) return 1\n    if (value[3] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1238,8 +1238,8 @@ bitwise_precedence_and_type_composition test {
     try support.check_text(
         &context,
         "bitwise_precedence_and_type_composition",
-        "A :: enum { first }\nB :: enum { second }\nError :: A | B\nfail proc() i16 ! Error { return .first }\nmain proc() [3]i16 {\n    return [i16(u8(1) | 2 xor 3 & 6), i16(u8(3) << (1 + 1)),\n        fail() catch |error| match error { .first: 42, .second: 0 }]\n}\n",
-        support.Expected{ stdout = "[0, 12, 42]\n", diagnostic = null },
+        "A :: enum { first }\nB :: enum { second }\nError :: A | B\nfail proc() i16 ! Error { return .first }\nevaluate proc() [3]i16 {\n    return [i16(u8(1) | 2 xor 3 & 6), i16(u8(3) << (1 + 1)),\n        fail() catch |error| match error { .first: 42, .second: 0 }]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 0) return 1\n    if (value[1] != 12) return 1\n    if (value[2] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1249,8 +1249,8 @@ bitwise_constants_and_type_producer_updates test {
     try support.check_text(
         &context,
         "bitwise_constants_and_type_producer_updates",
-        "Fixed proc() type {\n    counts [2]mut usize := [1, 2]\n    counts[0] <<= 2\n    counts[1] |= 1\n    total usize := counts[0]\n    total += counts[1]\n    return struct { values [total]i16, answer i16 = i16(~u8(213)) }\n}\ncompute proc() u8 {\n    value u8 := 21\n    value <<= 1\n    return value\n}\nchoose proc($value u8) i16 {\n    if ((value & 3) == 2) return 42\n    else return missing_member(value)\n}\nmain proc() [4]i16 {\n    generated Fixed() :: { values = [0, 0, 0, 0, 0, 0, 0] }\n    array [(usize(1) << 2)]i16 :: [0, 0, 0, 0]\n    return [generated.answer, i16($(compute())), choose($(u8(21) << 1)),\n        i16(generated.values.len + array.len)]\n}\nmissing_member proc(value u8) bool {\n    _ = value\n return true }\n",
-        support.Expected{ stdout = "[42, 42, 42, 11]\n", diagnostic = null },
+        "Fixed proc() type {\n    counts [2]mut usize := [1, 2]\n    counts[0] <<= 2\n    counts[1] |= 1\n    total usize := counts[0]\n    total += counts[1]\n    return struct { values [total]i16, answer i16 = i16(~u8(213)) }\n}\ncompute proc() u8 {\n    value u8 := 21\n    value <<= 1\n    return value\n}\nchoose proc($value u8) i16 {\n    if ((value & 3) == 2) return 42\n    else return missing_member(value)\n}\nevaluate proc() [4]i16 {\n    generated Fixed() :: { values = [0, 0, 0, 0, 0, 0, 0] }\n    array [(usize(1) << 2)]i16 :: [0, 0, 0, 0]\n    return [generated.answer, i16($(compute())), choose($(u8(21) << 1)),\n        i16(generated.values.len + array.len)]\n}\nmissing_member proc(value u8) bool {\n    _ = value\n return true }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    if (value[2] != 42) return 1\n    if (value[3] != 11) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1260,7 +1260,7 @@ compound_signed_overflow test {
     try support.check_text(
         &context,
         "compound_signed_overflow",
-        "main proc() i8 { value i8 := 127\nvalue += 1\nreturn value }\n",
+        "evaluate proc() i8 { value i8 := 127\nvalue += 1\nreturn value }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "integer arithmetic overflow" },
     )
 }
@@ -1271,7 +1271,7 @@ compound_readonly_place test {
     try support.check_text(
         &context,
         "compound_readonly_place",
-        "main proc() i16 { values [1]i16 := [40]\nvalues[0] += 2\nreturn 0 }\n",
+        "evaluate proc() i16 { values [1]i16 := [40]\nvalues[0] += 2\nreturn 0 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "indexed assignment requires a writable array element" },
     )
 }
@@ -1282,7 +1282,7 @@ bitwise_float_rejected test {
     try support.check_text(
         &context,
         "bitwise_float_rejected",
-        "main proc() f64 { return f64(1) & 2 }\n",
+        "evaluate proc() f64 { return f64(1) & 2 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
     )
 }
@@ -1293,7 +1293,7 @@ shift_signed_count_rejected test {
     try support.check_text(
         &context,
         "shift_signed_count_rejected",
-        "main proc() i16 { return i16(1) << i16(2) }\n",
+        "evaluate proc() i16 { return i16(1) << i16(2) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "operator requires compatible operand types" },
     )
 }
@@ -1304,8 +1304,8 @@ shift_known_count_rejected_even_untaken test {
     try support.check_text(
         &context,
         "shift_known_count_rejected_even_untaken",
-        "main proc() i16 { if (false) { _ = u8(1) << 8 }\nreturn 42 }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "shift count must be smaller than the integer bit width" },
+        "evaluate proc() i16 { if (false) { _ = u8(1) << 8 }\nreturn 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "shift count must be smaller than the integer bit width" },
     )
 }
 
@@ -1315,7 +1315,7 @@ shift_runtime_count_traps test {
     try support.check_text(
         &context,
         "shift_runtime_count_traps",
-        "shift proc(count u64) u8 { return u8(1) << count }\nmain proc() u8 { return shift(256) }\n",
+        "shift proc(count u64) u8 { return u8(1) << count }\nevaluate proc() u8 { return shift(256) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "shift count must be smaller than the integer bit width" },
     )
 }
@@ -1326,8 +1326,8 @@ yielding_blocks_nest_and_copy_before_scoped_cleanup test {
     try support.check_text(
         &context,
         "yielding_blocks_nest_and_copy_before_scoped_cleanup",
-        "Item :: struct { values [1]mut i16 }\nmain proc() [3]i16 {\n    trace i16 := 0\n    source Item := { values = [40] }\n    saved Item :: {\n        defer trace = trace * 10 + 1\n        inner i16 :: {\n            defer trace = trace * 10 + 2\n            yield 2\n        }\n        {\n            defer source.values[0] = 0\n            source.values[0] = source.values[0] + inner\n            yield source\n        }\n        trace = -1\n    }\n    return [saved.values[0], source.values[0], trace]\n}\n",
-        support.Expected{ stdout = "[42, 0, 21]\n", diagnostic = null },
+        "Item :: struct { values [1]mut i16 }\nevaluate proc() [3]i16 {\n    trace i16 := 0\n    source Item := { values = [40] }\n    saved Item :: {\n        defer trace = trace * 10 + 1\n        inner i16 :: {\n            defer trace = trace * 10 + 2\n            yield 2\n        }\n        {\n            defer source.values[0] = 0\n            source.values[0] = source.values[0] + inner\n            yield source\n        }\n        trace = -1\n    }\n    return [saved.values[0], source.values[0], trace]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 0) return 1\n    if (value[2] != 21) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1337,8 +1337,8 @@ yielding_blocks_preserve_loop_and_function_transfers test {
     try support.check_text(
         &context,
         "yielding_blocks_preserve_loop_and_function_transfers",
-        "choose proc(flag bool) i16 {\n    value i16 :: {\n        if (flag) return 7\n        yield 42\n    }\n    return value\n}\nmain proc() [3]i16 {\n    total i16 := 0\n    cleanups i16 := 0\n    for (0..5) |index| {\n        value i16 :: {\n            defer cleanups = cleanups + 1\n            if (index == 0) continue\n            if (index == 3) break\n            yield i16(index)\n        }\n        total = total + value\n    }\n    return [total, cleanups, choose(true) + choose(false)]\n}\n",
-        support.Expected{ stdout = "[3, 4, 49]\n", diagnostic = null },
+        "choose proc(flag bool) i16 {\n    value i16 :: {\n        if (flag) return 7\n        yield 42\n    }\n    return value\n}\nevaluate proc() [3]i16 {\n    total i16 := 0\n    cleanups i16 := 0\n    for (0..5) |index| {\n        value i16 :: {\n            defer cleanups = cleanups + 1\n            if (index == 0) continue\n            if (index == 3) break\n            yield i16(index)\n        }\n        total = total + value\n    }\n    return [total, cleanups, choose(true) + choose(false)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 3) return 1\n    if (value[1] != 4) return 1\n    if (value[2] != 49) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1348,8 +1348,8 @@ yielding_blocks_leave_inner_loops_on_yield test {
     try support.check_text(
         &context,
         "yielding_blocks_leave_inner_loops_on_yield",
-        "main proc() [2]i16 {\n    cleanups i16 := 0\n    value i16 :: {\n        for (0..3) |index| {\n            defer cleanups = cleanups + 1\n            if (index == 0) continue\n            yield 42\n        }\n        yield 0\n    }\n    return [value, cleanups]\n}\n",
-        support.Expected{ stdout = "[42, 2]\n", diagnostic = null },
+        "evaluate proc() [2]i16 {\n    cleanups i16 := 0\n    value i16 :: {\n        for (0..3) |index| {\n            defer cleanups = cleanups + 1\n            if (index == 0) continue\n            yield 42\n        }\n        yield 0\n    }\n    return [value, cleanups]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1359,8 +1359,8 @@ yielding_match_catch_and_conditional_blocks_are_lazy test {
     try support.check_text(
         &context,
         "yielding_match_catch_and_conditional_blocks_are_lazy",
-        "Error :: enum { failed }\nfail proc(flag bool) i16 ! Error {\n    if (flag) return .failed\n    return 40\n}\nchoose proc(flag bool) i16 {\n    return match flag {\n        true: { value :: fail(false) catch { yield 0 }\n            yield value + 2 },\n        false: { yield fail(true) catch { yield 7 } },\n    }\n}\nmain proc() [3]i16 {\n    return [choose(true), choose(false),\n        if (true) { yield 42 } else { yield divtrunc!(1, 0) }]\n}\n",
-        support.Expected{ stdout = "[42, 7, 42]\n", diagnostic = null },
+        "Error :: enum { failed }\nfail proc(flag bool) i16 ! Error {\n    if (flag) return .failed\n    return 40\n}\nchoose proc(flag bool) i16 {\n    return match flag {\n        true: { value :: fail(false) catch { yield 0 }\n            yield value + 2 },\n        false: { yield fail(true) catch { yield 7 } },\n    }\n}\nevaluate proc() [3]i16 {\n    return [choose(true), choose(false),\n        if (true) { yield 42 } else { yield divtrunc!(1, 0) }]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 7) return 1\n    if (value[2] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1370,8 +1370,8 @@ yielding_blocks_contextual_optional_fallible_and_aggregate_values test {
     try support.check_text(
         &context,
         "yielding_blocks_contextual_optional_fallible_and_aggregate_values",
-        "Error :: enum { failed }\nItem :: struct { value i16 }\noptional proc(flag bool) ?i16 {\n    return { if (flag) yield 42\n        yield null }\n}\nfallible proc(flag bool) i16 ! Error {\n    return { if (flag) yield 42\n        yield .failed }\n}\nitem proc(flag bool) Item {\n    return if (flag) { yield { value = 42 } } else { value = 7 }\n}\nmain proc() [4]i16 {\n    if (optional(false) != null) return [0, 0, 0, 0]\n    return [optional(true)?, fallible(true) catch 0,\n        fallible(false) catch { yield 7 }, item(true).value]\n}\n",
-        support.Expected{ stdout = "[42, 42, 7, 42]\n", diagnostic = null },
+        "Error :: enum { failed }\nItem :: struct { value i16 }\noptional proc(flag bool) ?i16 {\n    return { if (flag) yield 42\n        yield null }\n}\nfallible proc(flag bool) i16 ! Error {\n    return { if (flag) yield 42\n        yield .failed }\n}\nitem proc(flag bool) Item {\n    return if (flag) { yield { value = 42 } } else { value = 7 }\n}\nevaluate proc() [4]i16 {\n    if (optional(false) != null) return [0, 0, 0, 0]\n    return [optional(true)?, fallible(true) catch 0,\n        fallible(false) catch { yield 7 }, item(true).value]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    if (value[2] != 7) return 1\n    if (value[3] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1381,8 +1381,8 @@ yielding_blocks_propagate_errors_and_run_only_reached_cleanup test {
     try support.check_text(
         &context,
         "yielding_blocks_propagate_errors_and_run_only_reached_cleanup",
-        "Error :: enum { failed }\nfail proc() i16 ! Error { return .failed }\ncompute proc(trace @mut i16, flag bool) i16 ! Error {\n    value i16 :: {\n        defer trace^ = trace^ * 10 + 1\n        errdefer trace^ = trace^ * 10 + 2\n        if (flag) yield 42\n        yield try fail()\n    }\n    return value\n}\nmain proc() [4]i16 {\n    success i16 := 0\n    failure i16 := 0\n    left :: compute(&success, true) catch 0\n    right :: compute(&failure, false) catch 7\n    return [left, right, success, failure]\n}\n",
-        support.Expected{ stdout = "[42, 7, 1, 21]\n", diagnostic = null },
+        "Error :: enum { failed }\nfail proc() i16 ! Error { return .failed }\ncompute proc(trace @mut i16, flag bool) i16 ! Error {\n    value i16 :: {\n        defer trace^ = trace^ * 10 + 1\n        errdefer trace^ = trace^ * 10 + 2\n        if (flag) yield 42\n        yield try fail()\n    }\n    return value\n}\nevaluate proc() [4]i16 {\n    success i16 := 0\n    failure i16 := 0\n    left :: compute(&success, true) catch 0\n    right :: compute(&failure, false) catch 7\n    return [left, right, success, failure]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 4) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 7) return 1\n    if (value[2] != 1) return 1\n    if (value[3] != 21) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1392,8 +1392,8 @@ yielding_blocks_preserve_narrow_types_and_compile_time_values test {
     try support.check_text(
         &context,
         "yielding_blocks_preserve_narrow_types_and_compile_time_values",
-        "exact proc(value i8) i16 { return i16(value) }\ncompute proc() i8 {\n    return {\n        total i8 := 0\n        for (i8(0)..i8(3)) |index| total = total + index\n        yield total + 39\n    }\n}\nmain proc() [3]i16 {\n    return [exact({ yield i8(42) }), i16($(compute())),\n        i16($({ value i8 :: 7\n            yield value }))]\n}\n",
-        support.Expected{ stdout = "[42, 42, 7]\n", diagnostic = null },
+        "exact proc(value i8) i16 { return i16(value) }\ncompute proc() i8 {\n    return {\n        total i8 := 0\n        for (i8(0)..i8(3)) |index| total = total + index\n        yield total + 39\n    }\n}\nevaluate proc() [3]i16 {\n    return [exact({ yield i8(42) }), i16($(compute())),\n        i16($({ value i8 :: 7\n            yield value }))]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    if (value[2] != 7) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1403,8 +1403,8 @@ yielding_blocks_generate_types_defaults_and_specialized_bodies test {
     try support.check_text(
         &context,
         "yielding_blocks_generate_types_defaults_and_specialized_bodies",
-        "Choose proc(wide bool) type {\n    return {\n        Selected := i8\n        if (wide) Selected = i16\n        yield Selected\n    }\n}\nBox proc(wide bool) type {\n    count usize :: { yield if (wide) 2 else 1 }\n    return struct {\n        values [count]Choose(wide)\n        bias i16 = { yield 7 }\n    }\n}\nselect proc($flag bool, value i16) i16 {\n    return { if (flag) yield value\n        yield compile_error!(\"unselected\") }\n}\nmain proc() [3]i16 {\n    value Box(true) :: { values = [40, 2] }\n    return [select(true, value.values[0] + value.values[1]),\n        value.bias, i16(value.values.len)]\n}\n",
-        support.Expected{ stdout = "[42, 7, 2]\n", diagnostic = null },
+        "Choose proc(wide bool) type {\n    return {\n        Selected := i8\n        if (wide) Selected = i16\n        yield Selected\n    }\n}\nBox proc(wide bool) type {\n    count usize :: { yield if (wide) 2 else 1 }\n    return struct {\n        values [count]Choose(wide)\n        bias i16 = { yield 7 }\n    }\n}\nselect proc($flag bool, value i16) i16 {\n    return { if (flag) yield value\n        yield compile_error!(\"unselected\") }\n}\nevaluate proc() [3]i16 {\n    value Box(true) :: { values = [40, 2] }\n    return [select(true, value.values[0] + value.values[1]),\n        value.bias, i16(value.values.len)]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 3) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 7) return 1\n    if (value[2] != 2) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1414,8 +1414,8 @@ yielding_blocks_keep_match_and_catch_capture_scopes test {
     try support.check_text(
         &context,
         "yielding_blocks_keep_match_and_catch_capture_scopes",
-        "Choice :: union(enum) { value i8, empty void }\nError :: union(enum) { failed i8 }\nfail proc() i16 ! Error { return .failed{7} }\nchoose proc(value Choice) i16 {\n    return match value {\n        .value |payload|: { yield i16(payload) },\n        .empty: { yield fail() catch |error| {\n            yield match error {\n                .failed |code|: { yield i16(code) },\n            }\n        } },\n    }\n}\nmain proc() [2]i16 { return [choose(.value{42}), choose(.empty)] }\n",
-        support.Expected{ stdout = "[42, 7]\n", diagnostic = null },
+        "Choice :: union(enum) { value i8, empty void }\nError :: union(enum) { failed i8 }\nfail proc() i16 ! Error { return .failed{7} }\nchoose proc(value Choice) i16 {\n    return match value {\n        .value |payload|: { yield i16(payload) },\n        .empty: { yield fail() catch |error| {\n            yield match error {\n                .failed |code|: { yield i16(code) },\n            }\n        } },\n    }\n}\nevaluate proc() [2]i16 { return [choose(.value{42}), choose(.empty)] }\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 7) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1425,8 +1425,8 @@ yielding_blocks_allow_local_yields_inside_cleanup test {
     try support.check_text(
         &context,
         "yielding_blocks_allow_local_yields_inside_cleanup",
-        "main proc() i16 {\n    value i16 := 0\n    {\n        defer value = { yield 42 }\n    }\n    return value\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "evaluate proc() i16 {\n    value i16 := 0\n    {\n        defer value = { yield 42 }\n    }\n    return value\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1436,7 +1436,7 @@ yielding_blocks_require_yield_operands test {
     try support.check_text(
         &context,
         "yielding_blocks_require_yield_operands",
-        "main proc() i16 { return { yield } }\n",
+        "evaluate proc() i16 { return { yield } }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "unexpected token" },
     )
 }
@@ -1447,7 +1447,7 @@ yielding_blocks_preserve_yield_capture_immutability test {
     try support.check_text(
         &context,
         "yielding_blocks_preserve_yield_capture_immutability",
-        "main proc() i16 {\n    value ?i16 :: 42\n    return if value |payload| { payload = 7\n        yield payload } else 0\n}\n",
+        "evaluate proc() i16 {\n    value ?i16 :: 42\n    return if value |payload| { payload = 7\n        yield payload } else 0\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "assignment requires a mutable local binding" },
     )
 }
@@ -1458,7 +1458,7 @@ yielding_blocks_reject_yield_outside_value_sources test {
     try support.check_text(
         &context,
         "yielding_blocks_reject_yield_outside_value_sources",
-        "main proc() i16 { yield 42 }\n",
+        "evaluate proc() i16 { yield 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "yield requires an enclosing value block" },
     )
 }
@@ -1469,8 +1469,8 @@ yielding_blocks_check_fallthrough_without_trapping_yielded_paths test {
     try support.check_text(
         &context,
         "yielding_blocks_check_fallthrough_without_trapping_yielded_paths",
-        "choose proc(flag bool) i16 {\n    return { if (flag) yield 42 }\n}\nmain proc() i16 { return choose(true) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "nonvoid value block can finish without yielding a value" },
+        "choose proc(flag bool) i16 {\n    return { if (flag) yield 42 }\n}\nevaluate proc() i16 { return choose(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "nonvoid value block can finish without yielding a value" },
     )
 }
 
@@ -1480,7 +1480,7 @@ yielding_blocks_trap_reached_missing_value_paths test {
     try support.check_text(
         &context,
         "yielding_blocks_trap_reached_missing_value_paths",
-        "choose proc(flag bool) i16 {\n    return { if (flag) yield 42 }\n}\nmain proc() i16 { return choose(false) }\n",
+        "choose proc(flag bool) i16 {\n    return { if (flag) yield 42 }\n}\nevaluate proc() i16 { return choose(false) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "nonvoid value block can finish without yielding a value" },
     )
 }
@@ -1491,8 +1491,8 @@ yielding_blocks_reject_incompatible_runtime_yields test {
     try support.check_text(
         &context,
         "yielding_blocks_reject_incompatible_runtime_yields",
-        "choose proc(flag bool) i16 {\n    return { if (flag) yield i16(42)\n        yield i32(7) }\n}\nmain proc() i16 { return choose(true) }\n",
-        support.Expected{ stdout = "42\n", diagnostic = "yield does not match the value block result type" },
+        "choose proc(flag bool) i16 {\n    return { if (flag) yield i16(42)\n        yield i32(7) }\n}\nevaluate proc() i16 { return choose(true) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = "yield does not match the value block result type" },
     )
 }
 
@@ -1502,7 +1502,7 @@ yielding_blocks_reject_outward_cleanup_yields test {
     try support.check_text(
         &context,
         "yielding_blocks_reject_outward_cleanup_yields",
-        "main proc() i16 {\n    return { defer { yield 7 }\n        yield 42 }\n}\n",
+        "evaluate proc() i16 {\n    return { defer { yield 7 }\n        yield 42 }\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
         support.Expected{ stdout = "", diagnostic = "cleanup cannot" },
     )
 }
@@ -1513,8 +1513,8 @@ yielding_blocks_preserve_type_control_mutation_captures_and_cleanup test {
     try support.check_text(
         &context,
         "yielding_blocks_preserve_type_control_mutation_captures_and_cleanup",
-        "Choose proc(input ?bool) type {\n    Selected := i8\n    Element :: {\n        Selected = i8\n        defer Selected = i16\n        for (0..3) |index| {\n            if (index == 1) {\n                yield if input |flag| { yield if (flag) bool else i8 }\n                    else { yield i16 }\n            }\n        }\n        yield i8\n    }\n    return struct { flag Element, value Selected }\n}\nmain proc() i16 {\n    value Choose(true) :: { flag = true, value = 42 }\n    return if (value.flag) value.value else 0\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Choose proc(input ?bool) type {\n    Selected := i8\n    Element :: {\n        Selected = i8\n        defer Selected = i16\n        for (0..3) |index| {\n            if (index == 1) {\n                yield if input |flag| { yield if (flag) bool else i8 }\n                    else { yield i16 }\n            }\n        }\n        yield i8\n    }\n    return struct { flag Element, value Selected }\n}\nevaluate proc() i16 {\n    value Choose(true) :: { flag = true, value = 42 }\n    return if (value.flag) value.value else 0\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1524,8 +1524,8 @@ yielding_blocks_preserve_runtime_aliases_callbacks_and_void_results test {
     try support.check_text(
         &context,
         "yielding_blocks_preserve_runtime_aliases_callbacks_and_void_results",
-        "add proc(value i16) i16 { return value + 2 }\nnoop proc() void {}\nnothing proc() void { return { yield noop() } }\nmain proc() [2]i16 {\n    values [1]mut i16 := [40]\n    pointer @mut i16 :: { yield &values[0] }\n    view []mut i16 :: { yield values[..] }\n    callback @proc(value i16) i16 :: { yield add }\n    pointer^ = callback(view[0])\n    ({ yield nothing() })\n    return [values[0], view[0]]\n}\n",
-        support.Expected{ stdout = "[42, 42]\n", diagnostic = null },
+        "add proc(value i16) i16 { return value + 2 }\nnoop proc() void {}\nnothing proc() void { return { yield noop() } }\nevaluate proc() [2]i16 {\n    values [1]mut i16 := [40]\n    pointer @mut i16 :: { yield &values[0] }\n    view []mut i16 :: { yield values[..] }\n    callback @proc(value i16) i16 :: { yield add }\n    pointer^ = callback(view[0])\n    ({ yield nothing() })\n    return [values[0], view[0]]\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value.len != 2) return 1\n    if (value[0] != 42) return 1\n    if (value[1] != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }
 
@@ -1535,7 +1535,7 @@ yielding_blocks_keep_compile_time_logical_guards_lazy test {
     try support.check_text(
         &context,
         "yielding_blocks_keep_compile_time_logical_guards_lazy",
-        "Choose proc() type {\n    Selected := i8\n    if (false and { Selected = i16\n        yield true }) Selected = bool\n    if (true or { Selected = bool\n        yield false }) {}\n    return Selected\n}\nexact proc(value i8) i16 { return i16(value) }\nmain proc() i16 {\n    value Choose() :: 42\n    return exact(value)\n}\n",
-        support.Expected{ stdout = "42\n", diagnostic = null },
+        "Choose proc() type {\n    Selected := i8\n    if (false and { Selected = i16\n        yield true }) Selected = bool\n    if (true or { Selected = bool\n        yield false }) {}\n    return Selected\n}\nexact proc(value i8) i16 { return i16(value) }\nevaluate proc() i16 {\n    value Choose() :: 42\n    return exact(value)\n}\n\nmain proc() i32 {\n    value :: evaluate()\n    if (value != 42) return 1\n    return 0\n}\n",
+        support.Expected{ stdout = "", diagnostic = null },
     )
 }

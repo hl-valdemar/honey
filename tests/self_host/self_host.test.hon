@@ -35,12 +35,12 @@ check_self_host proc() void ! support.Error {
         "factorial", "iterative_factorial", "array_sum", "range_loop",
         "loop_control", "boolean_conditions", "temperature",
     ]
-    outputs [7][]u8 :: ["120\n", "120\n", "17\n", "40\n", "12\n", "true\n", "68\n"]
+    statuses [7]i32 :: [120, 120, 17, 40, 12, 0, 68]
     for (names) |name, index| {
         relative :: try support.concat(&context, &["programs/", name, ".hon"])
         try support.check(&context,
             try support.path(&context, context.root, relative),
-            support.Expected{ stdout = outputs[index] })
+            support.Expected{ status = statuses[index], stdout = "" })
     }
     try native.check_packages(&context)
     try native.check_dependency_provenance(&context)

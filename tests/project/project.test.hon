@@ -48,16 +48,16 @@ standalone_creation_preserves_local_files test {
     ran :: try support.run(&context, &[executable], {})
     metadata :: try support.run(&context, &["otool", "-l", executable], {})
     try support.expect(&context, metadata.status == 0 and support.contains(metadata.stdout, "cmd LC_BUILD_VERSION\n") and support.contains(metadata.stdout, " minos 11.0\n"), "an explicit lower deployment target survives init and build")
-    try support.expect(&context, ran.status == 0 and mem.eql(ran.stdout, "42\n"), "generated project uses current supported Honey syntax and preserves its entry")
+    try support.expect_result(&context, ran, 42, "", "")
     released :: try support.run(&context, &[context.compiler, "build", "--release", root], {})
     try support.expect_result(&context, released, 0, "", "")
     ran_release :: try support.run(&context, &[executable], {})
-    try support.expect_result(&context, ran_release, 0, "42\n", "")
+    try support.expect_result(&context, ran_release, 42, "", "")
     for ["--debug", "--release"] |mode| {
         implicit_root :: try support.run(&context, &[context.compiler, "build", mode], { cwd = root })
         try support.expect_result(&context, implicit_root, 0, "", "")
         ran_implicit :: try support.run(&context, &[executable], {})
-        try support.expect_result(&context, ran_implicit, 0, "42\n", "")
+        try support.expect_result(&context, ran_implicit, 42, "", "")
     }
     after_build :: try support.read(&context, stdlib)
     try support.expect(&context, mem.eql(after_build, "# user stdlib customization\n"), "build never refreshes vendored sources")
@@ -140,7 +140,7 @@ static_and_shared_native_libraries test {
         try support.expect_result(&context, built, 0, "", "")
         executable :: try support.path(&context, root, "build/native")
         ran :: try support.run(&context, &[executable], {})
-        try support.expect_result(&context, ran, 0, "42\n", "")
+        try support.expect_result(&context, ran, 42, "", "")
     }
     newer_shared :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx15.0.0", "-dynamiclib", c_file, "-framework", "CoreFoundation", "-install_name", "@rpath/libanswer.dylib", "-o", dynamic], {})
     try support.expect_result(&context, newer_shared, 0, "", "")

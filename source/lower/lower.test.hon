@@ -15,8 +15,16 @@ typecheck :: import "@source/sema/check"
 CompileError :: alias mem.AllocError | diagnostics.CapacityError | strpool.InternError | lexer.SourceError
 
 # every consumer test executes only after all source and frontend storage is gone.
+# arbitrary IR values use evaluation lowering; entry-contract tests opt into program lowering.
 @hide:file
 compile_owned proc(text []u8, diagnostic_store @mut diagnostics.Store) ir.Module ! CompileError {
+    return try compile_entry(text, diagnostic_store, false)
+}
+
+@hide:file
+compile_entry proc(
+    text []u8, diagnostic_store @mut diagnostics.Store, program_entry bool,
+) ir.Module ! CompileError {
     source :: try mem.alloc(u8, mem.c_allocator, text.len)
     defer mem.free(mem.c_allocator, source)
     for (text) |byte, i| source[i] = byte
@@ -31,7 +39,16 @@ compile_owned proc(text []u8, diagnostic_store @mut diagnostics.Store) ir.Module
     defer sema.deinit(&resolution)
     checked := try typecheck.check(mem.c_allocator, &tree, &resolution, diagnostic_store)
     defer typecheck.deinit(&checked)
-    return try lower(mem.c_allocator, &tree, &resolution, &checked, diagnostic_store)
+    if (program_entry) return try lower(mem.c_allocator, &tree, &resolution, &checked, diagnostic_store)
+    functions := arraylist.init(ast.NodeId, mem.c_allocator)
+    defer arraylist.deinit(&functions)
+    for (0..ast.package_decl_count(&tree)) |index| {
+        entry :: ast.package_decl(&tree, index)
+        if (ast.decl_kind(&tree, entry) != .function) continue
+        if (!mem.eql(strpool.get_str(&strings, ast.name_id(&tree, entry))?, "main")) continue
+        return try lower_evaluation(mem.c_allocator, &tree, &resolution, &checked, entry, &functions, diagnostic_store)
+    }
+    unreachable
 }
 
 @hide:file
@@ -180,7 +197,7 @@ supports_bare_void_value_returns_and_fallthrough test {
     for (sources) |source| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
-        module := try compile_owned(source, &diagnostic_store)
+        module := try compile_entry(source, &diagnostic_store, true)
         defer ir.deinit(&module)
         try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
@@ -362,19 +379,34 @@ traps_invalid_literals_escapes_and_checked_integer_arithmetic test {
 }
 
 validates_main_and_preserves_first_declaration test {
-    sources [7][]u8 :: [
+    sources [22][]u8 :: [
         "other proc() void {}\n",
         "main :: 42\n",
         "main proc(value int) int {\n return value\n}\n",
-        "main proc() int {\n return 42\n}\nmain proc() int {\n return 7\n}\n",
+        "main proc() i32 {\n return 42\n}\nmain proc() i32 {\n return 7\n}\n",
         "Init :: struct { value i32 }\nmain proc(init Init) i32 { return init.value }\n",
         "main proc(first i32, second i32) i32 { return first + second }\n",
         "main c_func() i32\n",
+        "main proc() int { return 42 }\n",
+        "main proc() i16 { return 42 }\n",
+        "main proc() u32 { return 42 }\n",
+        "main proc() bool { return true }\n",
+        "main proc() string { return \"answer\" }\n",
+        "main proc() f64 { return 42 }\n",
+        "main proc() ?i32 { return null }\n",
+        "Status :: distinct i32\nmain proc() Status { return Status(42) }\n",
+        "Status :: enum(i32) { ready = 42 }\nmain proc() Status { return .ready }\n",
+        "Status :: struct { value i32 }\nmain proc() Status { return { value = 42 } }\n",
+        "main proc() [1]i32 { return [42] }\n",
+        "main proc() []u8 { return \"answer\" }\n",
+        "Error :: enum { failed }\nmain proc() int ! Error { return 42 }\n",
+        "Error :: enum { failed }\nmain proc() ?i32 ! Error { return null }\n",
+        "Status :: distinct i32\nError :: enum { failed }\nmain proc() Status ! Error { return Status(42) }\n",
     ]
     for (sources) |source, i| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
-        module := try compile_owned(source, &diagnostic_store)
+        module := try compile_entry(source, &diagnostic_store, true)
         defer ir.deinit(&module)
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         defer interpreter.deinit(&outcome)
@@ -389,15 +421,58 @@ validates_main_and_preserves_first_declaration test {
     }
 }
 
+accepts_plain_and_fallible_exit_status_or_void_entries test {
+    sources [8][]u8 :: [
+        "main proc() i32 { return 42 }\n",
+        "Status :: alias i32\nmain proc() Status { return 42 }\n",
+        "main proc() void {}\n",
+        "Error :: enum { failed }\nmain proc() i32 ! Error { return 42 }\n",
+        "Error :: enum { failed }\nmain proc() i32 ! Error { return .failed }\n",
+        "Error :: enum { failed }\nmain proc() void ! Error { return }\n",
+        "Error :: enum { failed }\nmain proc() void ! Error { return .failed }\n",
+        "Status :: alias i32\nError :: enum { failed }\nmain proc() Status ! Error { return 42 }\n",
+    ]
+    for (sources) |source, index| {
+        diagnostic_store := diagnostics.init(mem.c_allocator)
+        defer diagnostics.deinit(&diagnostic_store)
+        module := try compile_entry(source, &diagnostic_store, true)
+        defer ir.deinit(&module)
+        try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
+        try testing.expect(module.entry != null and module.entry_diagnostic == diagnostics.no_diagnostic)
+        outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
+        defer interpreter.deinit(&outcome)
+        try testing.expect(outcome.trap == null)
+        if (index < 2) {
+            try testing.expect_equal(ir.Type.i32, outcome.value.type)
+            try testing.expect_equal(i64(42), outcome.value.data.integer)
+        } else if (index == 2) {
+            try testing.expect_equal(ir.Type.void, outcome.value.type)
+        } else {
+            try testing.expect(module.functions.items[usize(module.entry?)].result_fallible)
+            failed :: index == 4 or index == 6
+            payload_index usize :: if (failed) 1 else 0
+            try testing.expect(ir.union_active(&module, outcome.value, payload_index))
+            if (!failed) {
+                value :: ir.aggregate_item(&module, outcome.value, 0)
+                if (index == 5) try testing.expect_equal(ir.Type.void, value.type)
+                else {
+                    try testing.expect_equal(ir.Type.i32, value.type)
+                    try testing.expect_equal(i64(42), value.data.integer)
+                }
+            }
+        }
+    }
+}
+
 invalid_signatures_trap_without_poisoning_unrelated_main test {
     sources [2][]u8 :: [
-        "broken proc(value void) void {}\nmain proc() int {\n return 42\n}\n",
+        "broken proc(value void) void {}\nmain proc() i32 {\n return 42\n}\n",
         "main proc() Unknown {\n return 42\n}\n",
     ]
     for (sources) |source, i| {
         diagnostic_store := diagnostics.init(mem.c_allocator)
         defer diagnostics.deinit(&diagnostic_store)
-        module := try compile_owned(source, &diagnostic_store)
+        module := try compile_entry(source, &diagnostic_store, true)
         defer ir.deinit(&module)
         try testing.expect(diagnostics.count(&diagnostic_store) > 0)
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
@@ -581,7 +656,7 @@ lowers_checked_subsets_with_dirty_scratch_storage test {
                     `        .empty: 0,
                     `    }
                     `}
-                    `main proc() int { return helper(2) }
+                    `main proc() i32 { return i32(helper(2)) }
                     `unused :: true + 1
                     `main proc() int { return helper(3) }
                 strings := strpool.init(mem.c_allocator)
@@ -706,7 +781,10 @@ releases_checker_and_partially_lowered_modules_on_allocation_failure test {
             try testing.expect_equal(usize(0), state.live_bytes)
             continue
         }
-        module := lower(allocator, &tree, &resolution, &checked, &diagnostic_store) catch |error| {
+        functions := arraylist.init(ast.NodeId, mem.c_allocator)
+        defer arraylist.deinit(&functions)
+        module := lower_evaluation(allocator, &tree, &resolution, &checked,
+            ast.package_decl(&tree, ast.package_decl_count(&tree) - 1), &functions, &diagnostic_store) catch |error| {
             typecheck.deinit(&checked)
             try testing.expect(error == .out_of_memory)
             failures += 1

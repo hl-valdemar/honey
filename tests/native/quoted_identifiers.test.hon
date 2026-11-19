@@ -7,10 +7,10 @@ quoted_names_preserve_declarations_members_and_builtin_overrides test {
         `@"i32" :: alias c_int
         `@"type" :: c_struct { @"proc" @"i32" }
         `@"test" proc(value @"type") @"i32" { return value.@"proc" }
-        `main proc() c_int {
+        `main proc() i32 {
         `    value @"type" :: { @"proc" = 42 }
-        `    return @"test"(value)
+        `    return if (@"test"(value) == 42) 0 else 1
         `}
         `
-        , support.Expected{ stdout = "42\n" })
+        , support.Expected{ stdout = "" })
 }

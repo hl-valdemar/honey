@@ -353,53 +353,12 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
                 if (!failed) value = ir.aggregate_item(&module, value, 0)
             }
         }
-        if (!failed) try print_result(io.stdout(runtime), &module, value)
     }
     try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, outcome.trap)
     if (failed or outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
-    return 0
+    return if (value.type == .i32) i32(value.data.integer) else 0
 }
 
-@hide:file
-print_result proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
-    if (value.type == .void) return
-    try print_value(output, module, value)
-    try io.print("\n", output, {})
-}
-
-@hide:file
-print_value proc(output io.Writer, module @ir.Module, value ir.Value) void ! io.WriteError {
-    match value.type {
-        .int, .i8, .i16, .i32, .isize: try io.print("{}", output, {value.data.integer})
-        .usize, .u8, .u16, .u32, .u64: try io.print("{}", output, {value.data.unsigned})
-        .float, .float32: try io.print("{d}", output, {value.data.real})
-        .bool: try io.print("{}", output, {value.data.boolean})
-        .string: try io.print("{s}", output, {ir.string_bytes(module, value.data.string)})
-        .pointer: try io.write_all(output, "<pointer>")
-        .array, .record: {
-            shape :: module.arrays.items[usize(value.array_type)]
-            count :: if (value.type == .array) shape.len else shape.fields.len
-            opening :: if (value.type == .array) "[" else "{"
-            closing :: if (value.type == .array) "]" else "}"
-            try io.write_all(output, opening)
-            if (shape.is_union) {
-                for (shape.fields) |field, index| {
-                    if (!ir.union_active(module, value, index)) continue
-                    if (field.type != .void) try print_value(output, module, ir.aggregate_item(module, value, index))
-                    break
-                }
-                try io.write_all(output, closing)
-                return
-            }
-            for (0..count) |index| {
-                if (index != 0) try io.write_all(output, ", ")
-                try print_value(output, module, ir.aggregate_item(module, value, index))
-            }
-            try io.write_all(output, closing)
-        }
-        else: unreachable
-    }
-}
 
 @hide:file
 report_diagnostics proc(

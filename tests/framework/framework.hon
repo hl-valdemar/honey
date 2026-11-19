@@ -21,7 +21,7 @@ check_framework proc(context @mut support.Context) void ! support.Error {
     source :: try support.put(context, package, "main.hon",
         `import "@dependency"
         `test import "@dependency"
-        `main proc() i16 { return dependency.value() }
+        `main proc() i32 { return i32(dependency.value()) }
         `
     )
     checks :: try support.put(context, package, "checks.test.hon",
@@ -62,7 +62,7 @@ check_framework proc(context @mut support.Context) void ! support.Error {
 
     try support.write(context, dependency_tests, "invalid test syntax\n")
     production :: try support.run(context, &[context.compiler, "run", package], support.RunOptions{ timeout_seconds = 300 })
-    try support.expect_result(context, production, 0, "42\n", "")
+    try support.expect_result(context, production, 42, "", "")
     malformed :: try support.run(context, &[context.compiler, "test", package], support.RunOptions{ timeout_seconds = 300 })
     try support.expect(context, malformed.status == 1 and support.contains(malformed.stderr, "unexpected token"), "test discovery diagnoses malformed dependency")
     try support.expect(context, !support.contains(malformed.stderr, "cleanup ran"), "malformed tests never execute")
@@ -71,7 +71,7 @@ check_framework proc(context @mut support.Context) void ! support.Error {
         `checks :: import "@std/testing"
         `other :: import "@unrelated"
         `forward :: alias checks.expect
-        `main proc() i16 { return 42 }
+        `main proc() i32 { return 42 }
         `inline_check test {
         `    try checks.expect_type(i16, i16(42))
         `    try forward(other.expect(true))

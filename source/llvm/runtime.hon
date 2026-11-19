@@ -34,19 +34,10 @@ runtime ::
     `declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)
     `@honey.fmt_int = private constant [5 x i8] c"%lld\00"
     `@honey.fmt_uint = private constant [5 x i8] c"%llu\00"
-    `@honey.fmt_float = private constant [6 x i8] c"%.17g\00"
-    `@honey.true = private constant [4 x i8] c"true"
-    `@honey.false = private constant [5 x i8] c"false"
-    `@honey.pointer_text = private constant [9 x i8] c"<pointer>"
     `@honey.colon = private constant [1 x i8] c":"
     `@honey.error = private constant [9 x i8] c": error: "
     `@honey.runtime_trap = private constant [16 x i8] c": runtime trap: "
     `@honey.newline = private constant [1 x i8] c"\0A"
-    `@honey.array_open = private constant [1 x i8] c"["
-    `@honey.array_close = private constant [1 x i8] c"]"
-    `@honey.record_open = private constant [1 x i8] c"{"
-    `@honey.record_close = private constant [1 x i8] c"}"
-    `@honey.separator = private constant [2 x i8] c", "
     `@honey.write_error = private constant [44 x i8] c": infrastructure error: cannot write output\0A"
     `@honey.uninitialized_read = private constant [42 x i8] c"local value was read before initialization"
     `@honey.assign = private constant [46 x i8] c"local value was assigned before initialization"
@@ -102,36 +93,6 @@ runtime ::
     `fail:
     `  call void @honey.io_failure()
     `  unreachable
-    `}
-    `define internal void @honey.print_float(double %value) {
-    `entry:
-    `  %buffer = alloca [64 x i8], align 16
-    `  %count = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buffer, i64 64, ptr @honey.fmt_float, double %value)
-    `  %valid_low = icmp sge i32 %count, 0
-    `  %valid_high = icmp slt i32 %count, 64
-    `  %valid = and i1 %valid_low, %valid_high
-    `  br i1 %valid, label %output, label %fail
-    `output:
-    `  %length = zext i32 %count to i64
-    `  call void @honey.out(i32 1, ptr %buffer, i64 %length)
-    `  ret void
-    `fail:
-    `  call void @honey.io_failure()
-    `  unreachable
-    `}
-    `define internal void @honey.print_bool(i1 %value) {
-    `entry:
-    `  %bytes = select i1 %value, ptr @honey.true, ptr @honey.false
-    `  %length = select i1 %value, i64 4, i64 5
-    `  call void @honey.out(i32 1, ptr %bytes, i64 %length)
-    `  ret void
-    `}
-    `define internal void @honey.print_string(%string %value) {
-    `entry:
-    `  %bytes = extractvalue %string %value, 0
-    `  %length = extractvalue %string %value, 1
-    `  call void @honey.out(i32 1, ptr %bytes, i64 %length)
-    `  ret void
     `}
     `define internal void @honey.trap(i64 %id, i64 %source, i64 %line, i64 %column, ptr %message, i64 %length) noreturn {
     `entry:

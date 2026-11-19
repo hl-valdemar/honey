@@ -11,9 +11,10 @@ from this checkout, using a working Honey compiler:
 ```sh
 honey build --release
 ./build/honey run programs/factorial.hon
+echo $?  # 120
 ```
 
-the example prints `120`. keep the bootstrap executable and its matching `std/` and `ffi/c/` libraries; a compiler binary alone is not a complete distribution.
+the example exits with status `120`, without printing. keep the bootstrap executable and its matching `std/` and `ffi/c/` libraries; a compiler binary alone is not a complete distribution.
 
 Honey was originally bootstrapped with [Bro](../brolang), which implements the same language. older Bro compilers cannot build the current checkout. compiler releases and source adoption must follow the [two-release bootstrap policy](AGENTS.md#bootstrap-compatibility-required).
 
@@ -27,18 +28,19 @@ factorial proc(n int) int {
     return n * factorial(n - 1)
 }
 
-main proc() int {
-    return factorial(5)
+main proc() i32 {
+    return i32(factorial(5))
 }
 ```
 
 ```sh
 ./build/honey build programs/factorial.hon -o build/factorial --release
 ./build/factorial
+echo $?  # 120
 ./build/honey emit-llvm programs/factorial.hon
 ```
 
-a parameterless `main` prints its result rather than using it as an exit status. native applications can instead use `main proc(init process.Init) i32` from `@std/process` to receive arguments and IO and return an exit status.
+`main` returns `i32` as the program exit status, or `void` for success; neither implicitly prints. either result may be fallible, with an uncaught error returning status `1`. parameterless entries work with `honey run` and native builds. native applications can use `main proc(init process.Init) i32` from `@std/process` to receive arguments and IO; print explicitly through `@std/io`.
 
 Honey supports generics, compile-time type construction, records, tagged unions, optionals, explicit error channels, scoped cleanup, arrays, slices and pointers. `::` declares an immutable binding; `:=` declares a mutable binding. unused locals, parameters and captures are errors; use `_` for intentional discards.
 
@@ -139,6 +141,6 @@ current boundaries:
 - native code and C aggregate calling conventions target Darwin arm64 only; unsupported C layouts are diagnosed rather than guessed.
 - compile-time execution is bounded and cannot call foreign functions. project configuration uses the same restricted evaluator, not shell hooks.
 - projects describe a single executable. multiple artifacts, generation/asset tasks and package resolution are deferred; ordinary installation includes only the executable, not assets or native runtime libraries.
-- recoverable source errors can still produce output or execute unaffected code. check command status: `0` means success, `1` means source diagnostics or execution/test failure, and `2` means usage or infrastructure failure.
+- recoverable source errors can still produce output or execute unaffected code. source diagnostics or runtime traps override the program's exit status with `1`; usage or infrastructure failures return `2`. otherwise `run` forwards the program status, while successful compiler/test commands return `0`.
 
 see [TODO.md](TODO.md) for planned work.

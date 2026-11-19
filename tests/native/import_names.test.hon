@@ -10,21 +10,21 @@ hyphenated_import_namespaces test {
     _ = try support.put(&context, project, "pine_window/main.hon", "answer :: 99\n")
     _ = try support.put(&context, project, "other.name/main.hon", "answer :: 42\n")
     main :: try support.put(&context, project, "app/main.hon",
-        "import \"../pine-window\"\nmain proc() int { return pine_window.answer }\n")
-    try support.check(&context, main, { stdout = "42\n" })
+        "import \"../pine-window\"\nmain proc() i32 { return if (pine_window.answer == 42) 0 else 1 }\n")
+    try support.check(&context, main, { stdout = "" })
     try support.write(&context, main,
-        "import \"@-pine--window\"\nmain proc() int { return _pine__window.answer }\n")
-    try support.check(&context, main, { stdout = "42\n" })
+        "import \"@-pine--window\"\nmain proc() i32 { return if (_pine__window.answer == 42) 0 else 1 }\n")
+    try support.check(&context, main, { stdout = "" })
     try support.write(&context, main,
-        "window :: import \"@pine-window\"\nmain proc() int { return window.answer }\n")
-    try support.check(&context, main, { stdout = "42\n" })
+        "window :: import \"@pine-window\"\nmain proc() i32 { return if (window.answer == 42) 0 else 1 }\n")
+    try support.check(&context, main, { stdout = "" })
     try support.write(&context, main,
-        "import \"@pine-window\"\nimport \"@pine_window\"\nmain proc() int { return pine_window.answer }\n")
-    try support.check(&context, main, { stdout = "42\n", diagnostic = "duplicate name" })
+        "import \"@pine-window\"\nimport \"@pine_window\"\nmain proc() i32 { return if (pine_window.answer == 42) 0 else 1 }\n")
+    try support.check(&context, main, { stdout = "", diagnostic = "duplicate name" })
     try support.write(&context, main,
-        "import \"../other.name\"\nmain proc() int { return 42 }\n")
-    try support.check(&context, main, { stdout = "42\n", diagnostic = "import requires an explicit valid identifier alias" })
+        "import \"../other.name\"\nmain proc() i32 { return 0 }\n")
+    try support.check(&context, main, { stdout = "", diagnostic = "import requires an explicit valid identifier alias" })
     try support.write(&context, main,
-        "other :: import \"../other.name\"\nmain proc() int { return other.answer }\n")
-    try support.check(&context, main, { stdout = "42\n" })
+        "other :: import \"../other.name\"\nmain proc() i32 { return if (other.answer == 42) 0 else 1 }\n")
+    try support.check(&context, main, { stdout = "" })
 }

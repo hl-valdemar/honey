@@ -2,7 +2,7 @@ import "@tests/support"
 
 check_float_semantics proc(context @mut support.Context) void ! support.Error {
     source :: try support.path(context, context.root, "tests/abi/fixtures/float.hon")
-    try support.check(context, source, support.Expected{ stdout = "42\n" })
+    try support.check(context, source, support.Expected{ status = 42 })
 }
 
 check_c_conformance proc(context @mut support.Context) void ! support.Error {
@@ -29,7 +29,7 @@ check_c_conformance proc(context @mut support.Context) void ! support.Error {
             ], support.RunOptions{})
             try support.expect_result(context, linked, 0, "", "")
             result :: try support.run(context, &[context.executable], support.RunOptions{})
-            try support.expect_result(context, result, 0, "42\n", "")
+            try support.expect_result(context, result, 42, "", "")
             try support.remove(context, context.executable)
         }
     }
@@ -44,7 +44,7 @@ check_external_symbols proc(context @mut support.Context) void ! support.Error {
     source :: try support.put(context, project, "app/main.hon",
         `import "../left"
         `import "../right"
-        `main proc() c_int {
+        `main proc() i32 {
         `    if (left.abs(-42) != 42 or right.abs(-42) != 42) return -1
         `    return 42
         `}
@@ -54,12 +54,12 @@ check_external_symbols proc(context @mut support.Context) void ! support.Error {
             "-o", context.executable, mode], support.RunOptions{})
         try support.expect_result(context, built, 0, "", "")
         result :: try support.run(context, &[context.executable], support.RunOptions{})
-        try support.expect_result(context, result, 0, "42\n", "")
+        try support.expect_result(context, result, 42, "", "")
         try support.remove(context, context.executable)
     }
     # one demanded spelling validates all its declarations in independently loaded packages.
     try support.write(context, source,
-        "import \"../left\"\nimport \"../right\"\nmain proc() c_int { return left.abs(-42) }\n")
+        "import \"../left\"\nimport \"../right\"\nmain proc() i32 { return left.abs(-42) }\n")
     for [
         "abs c_func(value f32) c_int\n",
         "abs c_func(value c_int) f64\n",
@@ -76,7 +76,7 @@ check_external_symbols proc(context @mut support.Context) void ! support.Error {
     try support.write(context, left, "abs c_func(value f64) c_int\n")
     try support.write(context, right, "abs c_func(value c_int) c_int\n")
     try support.write(context, source,
-        "import \"../left\"\nimport \"../right\"\nmain proc() c_int { return right.abs(-42) }\n")
+        "import \"../left\"\nimport \"../right\"\nmain proc() i32 { return right.abs(-42) }\n")
     emitted :: try support.run(context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
     try support.expect(context, emitted.status == 1 and support.contains(emitted.stderr,
         "incompatible C declarations for the same external symbol"), "external conflicts are order-independent")
@@ -94,7 +94,7 @@ check_opaque_aliases proc(context @mut support.Context) void ! support.Error {
     source :: try support.put(context, project, "app/main.hon",
         `import "../common"
         `import "../binding"
-        `main proc() i16 {
+        `main proc() i32 {
         `    handle ?*binding.Handle :: null
         `    resource ?*common.Resource :: binding.retain(handle)
         `    round_trip ?*binding.HandleAlias :: resource
@@ -102,5 +102,5 @@ check_opaque_aliases proc(context @mut support.Context) void ! support.Error {
         `    return 42
         `}
     )
-    try support.check(context, source, support.Expected{ stdout = "42\n" })
+    try support.check(context, source, support.Expected{ status = 42 })
 }

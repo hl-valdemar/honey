@@ -30,7 +30,7 @@ expect_native_answer proc(context @mut support.Context, source [;0]u8, implement
     linked :: try support.run(context, arguments.items, {})
     try support.expect_result(context, linked, 0, "", "")
     executed :: try support.run(context, &[context.executable], {})
-    try support.expect_result(context, executed, 0, "42\n", "")
+    try support.expect_result(context, executed, 42, "", "")
 }
 
 selected_declarations_shared_identity_and_regeneration test {
@@ -179,7 +179,7 @@ pointer_qualifiers_and_scientific_constants test {
     linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx11.0.0", "-O2", llvm, implementation, "-o", context.executable], {})
     try support.expect_result(&context, linked, 0, "", "")
     result :: try support.run(&context, &[context.executable], {})
-    try support.expect_result(&context, result, 0, "42\n", "")
+    try support.expect_result(&context, result, 42, "", "")
     try support.write(&context, source, "binding :: import \"@ffi/qualified\"\nmain proc() i32 { return binding.pointer_levels(\"immutable\", \"immutable\", null, null, null, null, null, null) }\n")
     rejected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
     try support.expect(&context, rejected.status == 1, "immutable string was accepted as a mutable C pointer")
@@ -235,7 +235,7 @@ retargeting_regenerates_types_without_mixing_package_targets test {
     linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx11.0.0", llvm, implementation, "-o", context.executable], {})
     try support.expect_result(&context, linked, 0, "", "")
     executed :: try support.run(&context, &[context.executable], {})
-    try support.expect_result(&context, executed, 0, "0\n", "")
+    try support.expect_result(&context, executed, 0, "", "")
     other :: try support.run(&context, &[context.compiler, "translate-c", "other", "--project", project, "--target", "arm64-apple-macos15", "--header", header, "--symbol", "version_value"], {})
     try support.expect_result(&context, other, 0, "", "")
     bindings_path :: try support.path(&context, project, "ffi/versioned/bindings.hon")
@@ -277,7 +277,7 @@ all_selected_headers_exports_and_transitive_layouts test {
     linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macosx11.0.0", "-O2", llvm, implementation, "-o", context.executable], {})
     try support.expect_result(&context, linked, 0, "", "")
     executed :: try support.run(&context, &[context.executable], {})
-    try support.expect_result(&context, executed, 0, "42\n", "")
+    try support.expect_result(&context, executed, 42, "", "")
     for (["unrelated_included_function()", "UNRELATED_INCLUDED_VALUE"]) |expression| {
         text :: try support.concat(&context, &["binding :: import \"@ffi/everything\"\nmain proc() i32 { return i32(binding.", expression, ") }\n"])
         try support.write(&context, source, text)
@@ -337,8 +337,8 @@ omitted_target_uses_project_configuration_and_override_is_independent test {
         linked :: try support.run(&context, &["clang", "-target", "arm64-apple-macos15", llvm, "-o", context.executable], {})
         try support.expect_result(&context, linked, 0, "", "")
         result :: try support.run(&context, &[context.executable], {})
-        expected :: if (override) "4\n" else "8\n"
-        try support.expect_result(&context, result, 0, expected, "")
+        expected i32 :: if (override) 4 else 8
+        try support.expect_result(&context, result, expected, "", "")
     }
     bindings :: try support.path(&context, root, "ffi/versioned/bindings.hon")
     original :: try support.read(&context, bindings)

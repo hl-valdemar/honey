@@ -7,8 +7,26 @@
 - [x] make the README actually useful and readable.
     - trim all irrelevant information.
     - keep language concise and salient.
-- [ ] consider whether a parameterless `main` should continue to print its result instead of returning it as program exit status.
-    - should probably _not_ print the status; it should behave as expected - return value is exit status.
+- [x] make parameterless `main` return an exit status instead of implicitly printing: `i32` returns the status, `void` succeeds, and uncaught errors return `1`.
+- [ ] noticed that we discard the bit type when generating honey bindings from c. encountered in the wild:
+    ```
+    pw_window_create c_func(_ ?*c_char, _ uint32_t, _ uint32_t) pw_window_result
+    pw_window_destroy c_func(_ ?*mut ?*mut pw_window_handle) pw_status
+    #                        ^-- why not bring over the names for better documentation of what the params actually represent? can't see any problem in that...
+
+    # why are the types from here on down not declared before the place where they're used? would be more natural
+    pw_window_handle :: alias c_types.pw_window_handle
+    pw_window_result :: alias c_types.pw_window_result
+
+    # the c code actually declares a u32 here, but we discard it in favor of the looser
+    # `c_uint` when we should be translating it to a `u32`
+    uint32_t :: alias c_uint
+    uint8_t :: alias c_uchar
+    ```
+- [ ] investigate the possibility of defining how translate-c should translate the symbol decls.
+    - most c libraries rightly make use of a namespace convention like `ns_some_identifier`. but this becomes superfluous (and a bit annoying) when translated to honey bindings, since honey separates modules into their own namespaces.
+    - to avoid having to write something like `ns.ns_some_identifier`, we could maybe allow a project local configuration for the toolchain that defines e.g. that when generating symbols for package `ns`, drop all instances of the matching package namespace prefix (would configuration input).
+    - in plain language, a decl like: `when generating package "x" bindings -> omit prefix "x_"`
 
 ## direct C interop and standalone projects
 

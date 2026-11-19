@@ -103,7 +103,7 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, r
     # imported package identities are wired exactly like the compiler's native test runner.
     runner_text :: "__honey_build :: import \"build\"\n__honey_project :: import \"project\"\nSnapshot :: struct {\n name []u8\n source []u8\n libraries [][]u8\n lib_paths [][]u8\n includes [][]u8\n defines [][]u8\n links [][]u8\n frameworks [][]u8\n rpaths [][]u8\n linkage u8\n macos_deployment_target []u8\n install_version []u8 = \"0.0.0-dev\"\n install_self_hosted u8 = 0\n install_bootstrap []u8 = \"\"\n}\nsnapshot proc(value __honey_build.BuildConfig) Snapshot {\n return Snapshot{ name = value.name, source = value.source, libraries = value.libraries, lib_paths = value.lib_paths, includes = value.includes, defines = value.defines, links = value.links, frameworks = value.frameworks, rpaths = value.rpaths, linkage = match value.linkage { .automatic: u8(0), .static: u8(1), .shared: u8(2) }, macos_deployment_target = value.macos_deployment_target }\n}\n"
     # absent installation settings never reference InstallConfig, preserving older vendored std/build.
-    runner_main :: if (declarations.installation) "installation_snapshot proc(value __honey_build.InstallConfig) Snapshot {\n result := snapshot(__honey_project.config)\n result.install_version = value.version\n result.install_self_hosted = if (value.self_hosted) u8(1) else u8(0)\n result.install_bootstrap = value.bootstrap\n return result\n}\nmain proc() Snapshot { return installation_snapshot(__honey_project.installation) }\n" else "main proc() Snapshot { return snapshot(__honey_project.config) }\n"
+    runner_main :: if (declarations.installation) "installation_snapshot proc(value __honey_build.InstallConfig) Snapshot {\n result := snapshot(__honey_project.config)\n result.install_version = value.version\n result.install_self_hosted = if (value.self_hosted) u8(1) else u8(0)\n result.install_bootstrap = value.bootstrap\n return result\n}\nsnapshot_entry proc() Snapshot { return installation_snapshot(__honey_project.installation) }\n" else "snapshot_entry proc() Snapshot { return snapshot(__honey_project.config) }\n"
     bytes := arraylist.init(u8, allocator)
     defer arraylist.deinit(&bytes)
     runner_parts [2][]u8 :: [runner_text, runner_main]
@@ -117,7 +117,9 @@ load_config proc(allocator mem.Allocator, runtime io.Io, input []u8, required, r
         declaration :: compilation.declaration(&session, file, index)
         try arraylist.append(&session.imports, compilation.Import{ node = declaration.node, target = package })
     }
-    module := try compilation.compile(&session, runner, &store)
+    runner_tree :: ast.view(&session.builder, compilation.source(&session, file).root)
+    snapshot_entry :: compilation.declaration(&session, file, ast.package_decl_count(&runner_tree) - 1)
+    module := try compilation.compile_evaluation(&session, snapshot_entry, &store)
     defer ir.deinit(&module)
     if (diagnostics.count(&store) != 0) {
         try report_config_diagnostics(runtime, &session, &store)

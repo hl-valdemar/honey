@@ -5,6 +5,23 @@ import "@source/ast"
 import "@source/diagnostics"
 import "@source/ir"
 import "@source/interpreter"
+import "@source/strpool"
+
+@hide:file
+compile_values proc(
+    session @mut Compilation, package PackageId, diagnostic_store @mut diagnostics.Store,
+) ir.Module ! Error {
+    for (session.packages.items[usize(package)].sources.items) |source_id| {
+        tree :: ast.view(&session.builder, source(session, source_id).root)
+        for (0..ast.package_decl_count(&tree)) |index| {
+            node :: ast.package_decl(&tree, index)
+            if (ast.decl_kind(&tree, node) != .function) continue
+            if (!mem.eql(strpool.get_str(&session.strings, ast.name_id(&tree, node))?, "main")) continue
+            return try compile_evaluation(session, DeclarationId{ source = source_id, node = node }, diagnostic_store)
+        }
+    }
+    unreachable
+}
 
 @hide:file
 owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
@@ -13,6 +30,43 @@ owned_text proc(text []u8) arraylist.ArrayList(u8) ! mem.AllocError {
     try arraylist.reserve(&bytes, text.len)
     for (text) |byte| try arraylist.append(&bytes, byte)
     return bytes
+}
+
+explicit_evaluation_keeps_arbitrary_results_separate_from_program_entries test {
+    diagnostics_program := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostics_program)
+    diagnostics_evaluation := diagnostics.init(mem.c_allocator)
+    defer diagnostics.deinit(&diagnostics_evaluation)
+    module ir.Module := undefined
+    {
+        session := init(mem.c_allocator)
+        defer deinit(&session)
+        package :: try add_package(&session)
+        bytes := try owned_text(
+            `Result :: struct { value i16, text string }
+            `evaluate proc() Result { return { value = 42, text = "owned\nresult" } }
+            `main proc() bool { return true }
+            ,
+        )
+        defer arraylist.deinit(&bytes)
+        file :: try add_source(&session, package, "evaluation.hon", &bytes, &diagnostics_evaluation)
+        program := try compile(&session, package, &diagnostics_program)
+        defer ir.deinit(&program)
+        try testing.expect(program.entry == null and program.entry_diagnostic != diagnostics.no_diagnostic)
+        try testing.expect_equal(diagnostics.Code.invalid_entry,
+            diagnostics.get(&diagnostics_program, program.entry_diagnostic)?.code)
+        module = try compile_evaluation(&session, declaration(&session, file, 1), &diagnostics_evaluation)
+    }
+    defer ir.deinit(&module)
+    try testing.expect_equal(0, diagnostics.count(&diagnostics_evaluation))
+    outcome := try interpreter.run(mem.c_allocator, &module, &diagnostics_evaluation)
+    defer interpreter.deinit(&outcome)
+    try testing.expect(outcome.trap == null)
+    value :: ir.aggregate_item(&module, outcome.value, 0)
+    try testing.expect_equal(ir.Type.i16, value.type)
+    try testing.expect_equal(i64(42), value.data.integer)
+    text :: ir.aggregate_item(&module, outcome.value, 1)
+    try testing.expect(mem.eql(ir.string_bytes(&module, text.data.string), "owned\nresult"))
 }
 
 @hide:file
@@ -82,7 +136,7 @@ generic_substitutions_and_evaluations_keep_instance_local_state test {
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, package, "instances.hon", &bytes, &diagnostic_store)
-        for (0..modules.len) |i| modules[i] = try compile(&session, package, &diagnostic_store)
+        for (0..modules.len) |i| modules[i] = try compile_values(&session, package, &diagnostic_store)
     }
     defer for (0..modules.len) |i| ir.deinit(&modules[i])
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -134,7 +188,7 @@ capture_dependencies_preserve_nested_match_and_catch_narrowing test {
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, package, "captures.hon", &bytes, &diagnostic_store)
-        module = try compile(&session, package, &diagnostic_store)
+        module = try compile_values(&session, package, &diagnostic_store)
     }
     defer ir.deinit(&module)
     try testing.expect_equal(0, diagnostics.count(&diagnostic_store))
@@ -148,9 +202,9 @@ capture_dependencies_preserve_nested_match_and_catch_narrowing test {
 keeps_package_declarations_distinct_and_ir_independent test {
     diagnostic_store := diagnostics.init(mem.c_allocator)
     defer diagnostics.deinit(&diagnostic_store)
-    first := try owned_text("value :: 21\nmain proc() int { return value * 2 }")
+    first := try owned_text("value :: 21\nmain proc() i32 { return i32(value * 2) }")
     defer arraylist.deinit(&first)
-    second := try owned_text("value :: 3\nmain proc() int { return value * 2 }")
+    second := try owned_text("value :: 3\nmain proc() i32 { return i32(value * 2) }")
     defer arraylist.deinit(&second)
     sibling := try owned_text("helper proc() int { return 7 }")
     defer arraylist.deinit(&sibling)
@@ -474,9 +528,9 @@ recompiles_specialized_calls_without_borrowing_previous_ir test {
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, root, "generic.hon", &bytes, &diagnostic_store)
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -550,9 +604,9 @@ recompiles_imported_inline_for_without_retaining_expansions test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -641,9 +695,9 @@ recompiles_imported_inline_match_arms_without_retaining_expansions test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -701,9 +755,9 @@ recompiles_generated_records_without_borrowing_previous_ir test {
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, root, "generated.hon", &bytes, &diagnostic_store)
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -815,9 +869,9 @@ recompiles_imported_typeinfo_without_borrowing_metadata test {
             node = declaration(&session, root_source, 0).node,
             target = metadata,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -878,7 +932,7 @@ dependency_traps_keep_original_spans_and_remain_demand_driven test {
                 node = declaration(&session, root_source, 0).node,
                 target = dependency,
             })
-            module = try compile(&session, root, &diagnostic_store)
+            module = try compile_values(&session, root, &diagnostic_store)
         }
         defer ir.deinit(&module)
         try testing.expect_equal(1, diagnostics.count(&diagnostic_store))
@@ -945,7 +999,7 @@ hidden_declarations_preserve_file_and_package_visibility test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        module := try compile(&session, root, &diagnostic_store)
+        module := try compile_values(&session, root, &diagnostic_store)
         defer ir.deinit(&module)
         outcome := try interpreter.run(mem.c_allocator, &module, &diagnostic_store)
         defer interpreter.deinit(&outcome)
@@ -991,9 +1045,9 @@ yielding_blocks_recompile_owned_constants_and_generated_types test {
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, root, "yielding.hon", &bytes, &diagnostic_store)
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1038,9 +1092,9 @@ compound_updates_and_type_composition_recompile_without_retaining_rewrites test 
         )
         defer arraylist.deinit(&bytes)
         _ = try add_source(&session, root, "operators.hon", &bytes, &diagnostic_store)
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1087,9 +1141,9 @@ computed_callbacks_recompile_without_retaining_interpreter_function_ids test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1147,9 +1201,9 @@ computed_byte_slices_recompile_without_borrowing_evaluation_storage test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1215,9 +1269,9 @@ computed_nonbyte_slices_recompile_owned_private_elements_and_callbacks test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1275,9 +1329,9 @@ computed_untagged_unions_recompile_without_borrowing_storage_bytes test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1335,9 +1389,9 @@ optional_type_metadata_recompiles_owned_private_nominal_payloads test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1423,9 +1477,9 @@ fallible_type_metadata_recompiles_owned_private_nominal_payloads test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1518,9 +1572,9 @@ readonly_type_slices_recompile_owned_private_nominal_payloads test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1636,9 +1690,9 @@ tagged_type_metadata_recompiles_owned_private_nominal_payloads test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1702,9 +1756,9 @@ metadata_pointer_borrows_recompile_private_types_without_retained_places test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])
@@ -1775,9 +1829,9 @@ address_constants_recompile_owned_roots_relocations_and_private_callbacks test {
             node = declaration(&session, root_source, 0).node,
             target = dependency,
         })
-        modules[0] = try compile(&session, root, &diagnostic_store)
+        modules[0] = try compile_values(&session, root, &diagnostic_store)
         errdefer ir.deinit(&modules[0])
-        modules[1] = try compile(&session, root, &diagnostic_store)
+        modules[1] = try compile_values(&session, root, &diagnostic_store)
     }
     defer ir.deinit(&modules[0])
     defer ir.deinit(&modules[1])

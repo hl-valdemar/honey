@@ -468,6 +468,27 @@ compile proc(
     root_package PackageId,
     diagnostic_store @mut diagnostics.Store,
 ) ir.Module ! Error {
+    return try compile_module(compilation, root_package, null, diagnostic_store)
+}
+
+#! checks every package and lowers a caller-selected parameterless function for evaluation.
+#! `entry` belongs to this compilation; its result is not restricted to program exit status types.
+#! returned IR borrows no frontend data; release it with ir.deinit.
+compile_evaluation proc(
+    compilation @mut Compilation,
+    entry DeclarationId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! Error {
+    return try compile_module(compilation, source(compilation, entry.source).package, entry.node, diagnostic_store)
+}
+
+@hide:file
+compile_module proc(
+    compilation @mut Compilation,
+    root_package PackageId,
+    entry ?ast.NodeId,
+    diagnostic_store @mut diagnostics.Store,
+) ir.Module ! Error {
     roots := arraylist.init(ast.NodeId, compilation.allocator)
     defer arraylist.deinit(&roots)
     declarations := arraylist.init(ast.NodeId, compilation.allocator)
@@ -556,5 +577,10 @@ compile proc(
     tree = ast.view(&compilation.builder, compilation.module_root?)
     checked := try typecheck.check_elaborated(compilation.allocator, &tree, &resolution, elaborated.constraints.items, diagnostic_store)
     defer typecheck.deinit(&checked)
+    if (entry) |function| {
+        functions := arraylist.init(ast.NodeId, compilation.allocator)
+        defer arraylist.deinit(&functions)
+        return try lower.lower_evaluation(compilation.allocator, &tree, &resolution, &checked, function, &functions, diagnostic_store)
+    }
     return try lower.lower_package(compilation.allocator, &tree, &resolution, &checked, roots.items[usize(root_package)], diagnostic_store)
 }

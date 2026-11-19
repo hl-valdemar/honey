@@ -432,9 +432,6 @@ init_entry_io proc(state @State, id ast.NodeId) ?ir.FunctionId {
     # nominal records retain their defining syntax node, even through imported aliases.
     definition :: typecheck.record_type(state.checked, parameter.record_type).declaration
     if (definition != ast.statement_decl(tree, init?).initializer) return null
-    result := typecheck.type_of(state.checked, ast.function_decl(tree, id).return_type)
-    if (result.kind == .fallible) result = typecheck.array_type(state.checked, result.array_type).element
-    if ((result.kind != .i32 and result.kind != .void) or result.nominal != maxval!(ast.NodeId)) return null
     io :: imported_package(state, "@std/io")
     if (io == null) return null
     system :: package_member(tree, io?, "system")
@@ -461,12 +458,18 @@ find_entry proc(state @mut State, root_package ast.NodeId) void ! (mem.AllocErro
             return
         }
         declaration :: ast.function_decl(tree, id)
-        result :: lower_type(state, typecheck.type_of(state.checked, declaration.return_type))
+        result := typecheck.type_of(state.checked, declaration.return_type)
+        if (result.kind == .fallible) result = typecheck.array_type(state.checked, result.array_type).element
+        if (result.kind == .invalid) {
+            state.module.entry_diagnostic = result.diagnostic
+            return
+        }
         init_io :: init_entry_io(state, id)
         if (
             ast.function_external(tree, id)
             or (ast.function_param_count(tree, id) != 0 and init_io == null)
-            or result == .function
+            or (result.kind != .i32 and result.kind != .void)
+            or result.nominal != maxval!(ast.NodeId)
         ) {
             state.module.entry_diagnostic = try diagnostics.add(state.diagnostics, .invalid_entry, name)
             return

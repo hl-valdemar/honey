@@ -398,8 +398,6 @@ install_check_output proc(allocator mem.Allocator, arguments [][;0]u8) void ! In
     if (c.posix_spawnp(pid[..].ptr, ptrcast!(arguments[0].ptr), actions[..].ptr, null, descriptors.ptr, c._NSGetEnviron()?^) != 0) return .install_check_failed
     _ = c.close(pipes[1])
     write_closed = true
-    expected :: "0\n"
-    length := usize(0)
     valid := true
     buffer [256]mut u8 := undefined
     while true {
@@ -410,15 +408,11 @@ install_check_output proc(allocator mem.Allocator, arguments [][;0]u8) void ! In
             break
         }
         if (count == 0) break
-        for (buffer[..usize(count)]) |byte| {
-            if (length >= expected.len) valid = false
-            else if (byte != expected[length]) valid = false
-            if (length < expected.len + 1) length += 1
-        }
+        valid = false
     }
     status [1]mut c_int := undefined
     while (c.waitpid(pid[0], status[..].ptr, 0) < 0) {
         if (c.__error()?^ != c.EINTR) return .install_check_failed
     }
-    if (!valid or (length != 1 and length != 2) or status[0] != 0) return .install_check_failed
+    if (!valid or status[0] != 0) return .install_check_failed
 }

@@ -1,0 +1,84 @@
+import "@tests/support"
+
+parameterless_entry_results_are_statuses_without_implicit_stdout test {
+    context := try support.init("parameterless entry statuses")
+    defer support.deinit(&context)
+    Entry :: struct { result []u8, body []u8, status i32 }
+    entries [_]Entry :: [
+        { result = "i32", body = "return 0", status = 0 },
+        { result = "i32", body = "return 23", status = 23 },
+        { result = "i32", body = "return 255", status = 255 },
+        { result = "i32", body = "return 256", status = 0 },
+        { result = "i32", body = "return -1", status = 255 },
+        { result = "Status", body = "return 7", status = 7 },
+        { result = "void", body = "return", status = 0 },
+        { result = "void", body = "", status = 0 },
+        { result = "i32 ! Error", body = "return 0", status = 0 },
+        { result = "i32 ! Error", body = "return 23", status = 23 },
+        { result = "void ! Error", body = "return", status = 0 },
+        { result = "void ! Error", body = "", status = 0 },
+        { result = "i32 ! Error", body = "return .failed", status = 1 },
+        { result = "void ! Error", body = "return .failed", status = 1 },
+    ]
+    for entries |entry, index| {
+        source :: try support.concat(&context, &[
+            "Error :: enum { failed }\nStatus :: alias i32\nmain proc() ",
+            entry.result, " { ", entry.body, " }\n",
+        ])
+        name :: try support.concat(&context, &["entry_status_", try support.number(&context, index)])
+        try support.check_text(&context, name, source, { stdout = "", status = entry.status })
+    }
+}
+
+parameterless_entry_rejects_non_status_result_types test {
+    context := try support.init("invalid parameterless entry results")
+    defer support.deinit(&context)
+    sources [_][]u8 :: [
+        "main proc() i16 { return 0 }\n",
+        "main proc() u32 { return 0 }\n",
+        "main proc() i64 { return 0 }\n",
+        "main proc() bool { return true }\n",
+        "main proc() f64 { return 1.5 }\n",
+        "main proc() []u8 { return \"not stdout\" }\n",
+        "main proc() [1]u8 { return [42] }\n",
+        "Empty :: struct {}\nmain proc() Empty { return {} }\n",
+        "Id :: distinct i32\nmain proc() Id { return Id(0) }\n",
+        "Id :: distinct i32\nError :: enum { failed }\nmain proc() Id ! Error { return Id(0) }\n",
+        "Error :: enum { failed }\nmain proc() i16 ! Error { return 0 }\n",
+    ]
+    for sources |source, index| {
+        name :: try support.concat(&context, &["invalid_entry_", try support.number(&context, index)])
+        try support.check_text(&context, name, source, { stdout = "", diagnostic = "main must" })
+    }
+}
+
+entry_diagnostics_and_traps_override_success_status test {
+    context := try support.init("entry diagnostic precedence")
+    defer support.deinit(&context)
+    try support.check_text(&context, "entry_diagnostic",
+        "main proc() i32 {\n    unused :: 1\n    return 77\n}\n",
+        { stdout = "", status = 77, diagnostic = "unused local declaration" })
+    try support.check_text(&context, "entry_trap",
+        "main proc() i32 { unreachable }\n",
+        { stdout = "", diagnostic = "unreachable" })
+}
+
+explicit_entry_output_is_not_augmented_by_its_result test {
+    context := try support.init("explicit entry output")
+    defer support.deinit(&context)
+    source :: try support.put(&context, context.temporary, "explicit_output.hon",
+        "puts c_func(text *c_char) c_int\nmain proc() i32 {\n    _ = puts(ptrcast!(\"explicit\".ptr))\n    return 7\n}\n")
+    interpreted :: try support.run(&context, &[context.compiler, "run", source], {})
+    try support.expect(&context, interpreted.status == 1 and interpreted.stdout.len == 0,
+        "explicit foreign output remains native-only")
+    try support.expect(&context, support.contains(interpreted.stderr,
+        "foreign function calls are unsupported by the interpreter"), "foreign output interpreter diagnostic")
+    for ["--debug", "--release"] |mode| {
+        built :: try support.run(&context, &[context.compiler, "build", source, "-o", context.executable, mode], {})
+        try support.expect_result(&context, built, 0, "", "")
+        defer support.remove(&context, context.executable) catch |_| {}
+        native :: try support.run(&context, &[context.executable], {})
+        try support.expect_result(&context, native, 7, "explicit\n", "")
+        try support.remove(&context, context.executable)
+    }
+}

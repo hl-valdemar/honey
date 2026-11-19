@@ -11,7 +11,7 @@ unused_locals_report_root_and_dependency_locations_without_suppressing_execution
     )
     source :: try support.put(&context, context.temporary, "main.hon",
         `import "./library"
-        `main proc() i16 {
+        `main proc() i32 {
         `    leftover :: 1
         `    return 42
         `}
@@ -26,7 +26,7 @@ unused_locals_report_root_and_dependency_locations_without_suppressing_execution
         try support.expect(&context, support.contains(interpreted.stderr, diagnostic), "unused declaration name location")
     }
     try support.expect(&context, support.line_count(interpreted.stderr) == 3, "one diagnostic per unused declaration")
-    try support.check(&context, source, support.Expected{ stdout = "42\n", diagnostic = "unused local declaration" })
+    try support.check(&context, source, support.Expected{ stdout = "", status = 42, diagnostic = "unused local declaration" })
     emitted :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
     try support.expect(&context, emitted.status == 1 and support.contains(emitted.stdout, "define"), "LLVM emission retains source error status")
     try support.expect(&context, mem.eql(emitted.stderr, interpreted.stderr), "emission preserves unused diagnostics")
@@ -43,13 +43,13 @@ explicit_discards_keep_effects_and_signature_only_names_are_exempt test {
         `    return pointer^
         `}
         `ignored proc(_ i16) void {}
-        `main proc() i16 {
+        `main proc() i32 {
         `    count i16 := 40
         `    _ = touch(&count)
         `    _ :: touch(&count)
         `    ignored(count)
         `    for [1] |_, _| {}
-        `    return count
+        `    return if (count == 42) 0 else 1
         `}
-        , support.Expected{ stdout = "42\n" })
+        , support.Expected{ stdout = "" })
 }

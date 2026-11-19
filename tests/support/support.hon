@@ -34,7 +34,7 @@ RunOptions :: struct {
 }
 
 Result :: struct { status i32, stdout []u8, stderr []u8 }
-Expected :: struct { stdout ?[]u8 = null, diagnostic ?[]u8 = null }
+Expected :: struct { status i32 = 0, stdout ?[]u8 = null, diagnostic ?[]u8 = null }
 
 init proc(name []u8) Context ! Error {
     context := Context{
@@ -513,10 +513,8 @@ expect_same proc(context @Context, actual, expected Result) void ! Error {
 
 check proc(context @mut Context, source [;0]u8, expected Expected) void ! Error {
     interpreted :: try run(context, [context.compiler, "run", source], RunOptions{})
-    if (interpreted.status != 0 and interpreted.status != 1) report_result("interpreter", interpreted)
-    try expect(context, interpreted.status == 0 or interpreted.status == 1, "unexpected interpreter status")
     if (expected.stdout) |stdout| {
-        status :: if (expected.diagnostic != null) i32(1) else i32(0)
+        status :: if (expected.diagnostic != null) i32(1) else expected.status
         if (interpreted.status != status or !mem.eql(interpreted.stdout, stdout)) report_result("interpreter", interpreted)
         try expect(context, interpreted.status == status and mem.eql(interpreted.stdout, stdout), "interpreter expectation differs")
         if (expected.diagnostic) |diagnostic| {

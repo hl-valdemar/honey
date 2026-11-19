@@ -120,10 +120,6 @@ emit proc(
             output, {alignment, index})
         try emit_global(output, module, global, index)
     }
-    for (module.arrays.items) |shape, index| {
-        if (shape.kind == .record) try emit_record_printer(output, module, ir.ArrayId(index))
-        else try emit_array_printer(output, module, ir.ArrayId(index))
-    }
     for (module.functions.items) |function, index| {
         if (function.external_name.len != 0) {
             duplicate := false
@@ -180,7 +176,7 @@ emit proc(
             try io.write_all(output, " poison\n")
         }
         if (module.entry_init_io != null) try io.write_all(output, "  call void @free(ptr %descriptors)\n")
-        printable := result
+        success_type := result
         operand usize := 0
         if (function.result_fallible) {
             shape :: module.arrays.items[usize(result.shape)]
@@ -196,25 +192,20 @@ emit proc(
             try io.write_all(output, " %tag, ")
             try write_constant(output, module, success.tag)
             try io.write_all(output, "\n  br i1 %success, label %ok, label %error\nerror:\n  call void @honey.report(i64 -1)\n  ret i32 1\nok:\n")
-            printable = Type{ kind = success.type, shape = success.array_type }
+            success_type = Type{ kind = success.type, shape = success.array_type }
             operand = 1
-            if (printable.kind != .void) {
+            if (success_type.kind != .void) {
                 try io.print("  %payload = getelementptr i8, ptr %result, i64 {}\n  %r1 = load ", output, {shape.payload_offset})
-                try write_type(output, module, printable)
+                try write_type(output, module, success_type)
                 try io.write_all(output, ", ptr %payload\n")
             }
         }
-        if (module.entry_init_io == null and printable.kind != .void and printable.kind != .invalid) {
-            try print_call(output, module, printable, operand)
-            try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.newline, i64 1)\n")
-        }
         try io.write_all(output, "  call void @honey.report(i64 -1)\n")
-        if (module.entry_init_io != null and diagnostics.count(diagnostic_store) == 0) {
-            if (printable.kind == .i32) try io.print("  ret i32 %r{}\n", output, {operand})
+        if (diagnostics.count(diagnostic_store) == 0) {
+            if (success_type.kind == .i32) try io.print("  ret i32 %r{}\n", output, {operand})
             else try io.write_all(output, "  ret i32 0\n")
         } else {
-            status i32 :: if (diagnostics.count(diagnostic_store) == 0) 0 else 1
-            try io.print("  ret i32 {}\n", output, {status})
+            try io.write_all(output, "  ret i32 1\n")
         }
     } else {
         try io.print("  call void @honey.trap(i64 {}, i64 0, i64 0, i64 0, ptr null, i64 0)\n  unreachable\n", output, {u32(module.entry_diagnostic)})
@@ -477,126 +468,6 @@ emit_global proc(output io.Writer, module @ir.Module, global ir.Global, index us
         try io.print(" %r{}, ptr @honey.g{}\n", output, {value, index})
     }
     try io.print("  store i8 2, ptr @honey.gs{}\n  br label %ready\nready:\n  ret ptr @honey.g{}\n}}\n", output, {index, index})
-}
-
-@hide:file
-print_call proc(output io.Writer, module @ir.Module, type Type, operand usize) void ! io.WriteError {
-    match type.kind {
-        .i8, .i16, .i32, .int, .isize, .u8, .u16, .u32, .u64, .usize: {
-            bits :: ir.integer_bits(type.kind)
-            unsigned :: ir.unsigned_integer(type.kind)
-            if (bits < 64) {
-                extension []u8 :: if (unsigned) "zext" else "sext"
-                try io.print("  %print_value{} = {s} i{} %r{} to i64\n", output, {operand, extension, bits, operand})
-                try io.print("  call void @honey.print_integer(i32 1, i64 %print_value{}, i1 {})\n", output, {operand, unsigned})
-            } else try io.print("  call void @honey.print_integer(i32 1, i64 %r{}, i1 {})\n", output, {operand, unsigned})
-        }
-        .float: try io.print("  call void @honey.print_float(double %r{})\n", output, {operand})
-        .float32: {
-            try io.print("  %print_value{} = fpext float %r{} to double\n", output, {operand, operand})
-            try io.print("  call void @honey.print_float(double %print_value{})\n", output, {operand})
-        }
-        .bool: try io.print("  call void @honey.print_bool(i1 %r{})\n", output, {operand})
-        .string: try io.print("  call void @honey.print_string(%string %r{})\n", output, {operand})
-        .pointer: try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.pointer_text, i64 9)\n")
-        .array, .record: {
-            try io.print("  call void @honey.print_array{}(", output, {u32(type.shape)})
-            try write_type(output, module, type)
-            try io.print(" %r{})\n", output, {operand})
-        }
-        else: unreachable
-    }
-}
-
-@hide:file
-emit_array_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
-    shape :: module.arrays.items[usize(id)]
-    type :: Type{ kind = .array, shape = id }
-    element :: Type{ kind = shape.element, shape = shape.element_array }
-    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
-    try write_type(output, module, type)
-    try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
-    try write_type(output, module, type)
-    try io.write_all(output, "\n  store ")
-    try write_type(output, module, type)
-    try io.write_all(output, " %value, ptr %storage\n  call void @honey.out(i32 1, ptr @honey.array_open, i64 1)\n  br label %loop\nloop:\n  %index = phi i64 [ 0, %entry ], [ %next, %element ]\n")
-    try io.print("  %done = icmp eq i64 %index, {}\n", output, {shape.len})
-    try io.write_all(output, "  br i1 %done, label %end, label %separator\nseparator:\n  %first = icmp eq i64 %index, 0\n  br i1 %first, label %element, label %comma\ncomma:\n  call void @honey.out(i32 1, ptr @honey.separator, i64 2)\n  br label %element\nelement:\n  %pointer = getelementptr ")
-    try write_type(output, module, type)
-    try io.write_all(output, ", ptr %storage, i64 0, i64 %index\n  %r0 = load ")
-    try write_type(output, module, element)
-    try io.write_all(output, ", ptr %pointer\n")
-    # functions may occur inside arrays without being printable source results.
-    if (element.kind != .function) try print_call(output, module, element, 0)
-    else try io.write_all(output, "  call void @exit(i32 2)\n")
-    try io.write_all(output, "  %next = add i64 %index, 1\n  br label %loop\nend:\n  call void @honey.out(i32 1, ptr @honey.array_close, i64 1)\n  ret void\n}\n")
-}
-
-@hide:file
-emit_record_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
-    shape :: module.arrays.items[usize(id)]
-    type :: Type{ kind = .record, shape = id }
-    if (shape.is_union) {
-        try emit_union_printer(output, module, id)
-        return
-    }
-    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
-    try write_type(output, module, type)
-    try io.write_all(output, " %value) {\nentry:\n  call void @honey.out(i32 1, ptr @honey.record_open, i64 1)\n")
-    for (shape.fields) |field, index| {
-        if (index != 0) try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.separator, i64 2)\n")
-        try io.print("  %r{} = extractvalue ", output, {index})
-        try write_type(output, module, type)
-        try io.print(" %value, {}\n", output, {index})
-        if (field.type != .function) try print_call(output, module, Type{ kind = field.type, shape = field.array_type }, index)
-        else try io.write_all(output, "  call void @exit(i32 2)\n")
-    }
-    try io.write_all(output, "  call void @honey.out(i32 1, ptr @honey.record_close, i64 1)\n  ret void\n}\n")
-}
-
-@hide:file
-emit_union_printer proc(output io.Writer, module @ir.Module, id ir.ArrayId) void ! io.WriteError {
-    shape :: module.arrays.items[usize(id)]
-    type :: Type{ kind = .record, shape = id }
-    try io.print("define internal void @honey.print_array{}(", output, {u32(id)})
-    try write_type(output, module, type)
-    try io.write_all(output, " %value) {\nentry:\n  %storage = alloca ")
-    try write_type(output, module, type)
-    try io.write_all(output, "\n  store ")
-    try write_type(output, module, type)
-    try io.write_all(output, " %value, ptr %storage\n  call void @honey.out(i32 1, ptr @honey.record_open, i64 1)\n")
-    if (shape.tag_type != .void) {
-        try io.write_all(output, "  %tag = load ")
-        try write_type(output, module, Type{ kind = shape.tag_type })
-        try io.write_all(output, ", ptr %storage\n")
-        target :: if (shape.fields.len == 0) "  br label %end\n" else "  br label %test0\n"
-        try io.write_all(output, target)
-        for (shape.fields) |field, index| {
-            try io.print("test{}:\n  %tag_match{} = icmp eq ", output, {index, index})
-            try write_type(output, module, Type{ kind = shape.tag_type })
-            try io.write_all(output, " %tag, ")
-            try write_constant(output, module, field.tag)
-            try io.print("\n  br i1 %tag_match{}, label %case{}, label %", output, {index, index})
-            if (index + 1 == shape.fields.len) try io.write_all(output, "end\n")
-            else try io.print("test{}\n", output, {index + 1})
-        }
-    } else {
-        target :: if (shape.fields.len == 0) "  br label %end\n" else "  br label %case0\n"
-        try io.write_all(output, target)
-    }
-    for (shape.fields) |field, index| {
-        if (shape.tag_type == .void and index != 0) break
-        try io.print("case{}:\n", output, {index})
-        if (field.type != .void) {
-            try io.print("  %p{} = getelementptr i8, ptr %storage, i64 {}\n  %r{} = load ", output, {index, shape.payload_offset, index})
-            try write_type(output, module, Type{ kind = field.type, shape = field.array_type })
-            try io.print(", ptr %p{}\n", output, {index})
-            if (field.type != .function) try print_call(output, module, Type{ kind = field.type, shape = field.array_type }, index)
-            else try io.write_all(output, "  call void @exit(i32 2)\n")
-        }
-        try io.write_all(output, "  br label %end\n")
-    }
-    try io.write_all(output, "end:\n  call void @honey.out(i32 1, ptr @honey.record_close, i64 1)\n  ret void\n}\n")
 }
 
 @hide
