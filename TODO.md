@@ -8,7 +8,7 @@
     - trim all irrelevant information.
     - keep language concise and salient.
 - [x] make parameterless `main` return an exit status instead of implicitly printing: `i32` returns the status, `void` succeeds, and uncaught errors return `1`.
-- [x] preserve exact-width integer typedefs in generated C bindings, retain function parameter names and emit type aliases before constants/functions.
+- [x] translate standard exact-width C integer typedefs directly to Honey types, retain meaningful library typedefs and function parameter names, and emit type aliases before constants/functions.
 - [ ] investigate the possibility of defining how translate-c should translate the symbol decls.
     - most c libraries rightly make use of a namespace convention like `ns_some_identifier`. but this becomes superfluous (and a bit annoying) when translated to honey bindings, since honey separates modules into their own namespaces.
     - to avoid having to write something like `ns.ns_some_identifier`, we could maybe allow a project local configuration for the toolchain that defines e.g. that when generating symbols for package `ns`, drop all instances of the matching package namespace prefix (would configuration input).

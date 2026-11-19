@@ -549,12 +549,12 @@ fixed_width_types_and_documented_parameters test {
     try support.expect_result(&context, compatible, 0, "", "")
     bindings :: try support.read(&context, try support.path(&context, project, "ffi/widths/bindings.hon"))
     c_names [8][]u8 :: ["int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"]
-    honey_names [8][]u8 :: ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
-    for (c_names) |name, index| {
-        declaration :: try support.concat(&context, &[name, " :: alias ", honey_names[index], "\n"])
-        try support.expect(&context, support.contains(bindings, declaration), "exact-width integer typedef lost its width")
+    for (c_names) |name| {
+        declaration :: try support.concat(&context, &[name, " :: alias "])
+        try support.expect(&context, !support.contains(bindings, declaration), "standard exact-width typedef emitted a redundant alias")
     }
-    try support.expect(&context, support.contains(bindings, "a_measure c_func(Count Count, @\"u32\" uint32_t, @\"proc\" c_int, c_types c_int, _ c_int) z_result"), "C parameter names, keyword escaping or unnamed parameter fallback were lost")
+    try support.expect(&context, support.contains(bindings, "a_measure c_func(Count Count, @\"u32\" u32, @\"proc\" c_int, c_types c_int, _ c_int) z_result"), "C parameter names, keyword escaping or unnamed parameter fallback were lost")
+    try support.expect(&context, support.contains(bindings, "Count :: alias u32") and support.contains(bindings, "word c_func(value u32) u32"), "direct fixed-width types or meaningful library alias were lost")
     try support.expect(&context, support.contains(bindings, "plain c_func(value c_uint) c_uint"), "ordinary C integers must retain target-dependent spelling")
     type_end := usize(0)
     function_start := bindings.len
@@ -567,7 +567,6 @@ fixed_width_types_and_documented_parameters test {
         `binding :: import "@ffi/widths"
         `main proc() i32 {
         `    result :: binding.a_measure(u32(20), u32(22), 0, 0, 0)
-        `    if (sizeof!(binding.uint64_t) != 8 or sizeof!(binding.uint8_t) != 1) return 1
         `    if (result.signed_byte != -1 or result.signed_half != -2 or result.signed_word != -3 or result.signed_wide != -4) return 2
         `    if (result.byte != 255 or result.half != 65535 or result.wide != 18446744073709551615) return 3
         `    return i32(result.word)

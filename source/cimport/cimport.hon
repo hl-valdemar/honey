@@ -962,6 +962,17 @@ top_const proc(context @Context, spelling []u8, depth usize) bool ! Error {
     return false
 }
 @hide:file
+fixed_width_type proc(name []u8) []u8 {
+    integers [8]Entry :: [
+        { key = "int8_t", text = "i8" }, { key = "uint8_t", text = "u8" },
+        { key = "int16_t", text = "i16" }, { key = "uint16_t", text = "u16" },
+        { key = "int32_t", text = "i32" }, { key = "uint32_t", text = "u32" },
+        { key = "int64_t", text = "i64" }, { key = "uint64_t", text = "u64" },
+    ]
+    for (integers) |integer| { if (mem.eql(name, integer.key)) return integer.text }
+    return ""
+}
+@hide:file
 render_type proc(context @mut Context, spelling []u8, depth usize) []u8 ! Error {
     return try render_type_inner(context, spelling, depth, false)
 }
@@ -1041,17 +1052,8 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
     } else if (lookup_type(context, text, "TypedefDecl")) |index| {
         context.declarations.items[index].required = true
         node :: context.declarations.items[index].node
-        fixed_width [8]Entry :: [
-            { key = "int8_t", text = "i8" }, { key = "uint8_t", text = "u8" },
-            { key = "int16_t", text = "i16" }, { key = "uint16_t", text = "u16" },
-            { key = "int32_t", text = "i32" }, { key = "uint32_t", text = "u32" },
-            { key = "int64_t", text = "i64" }, { key = "uint64_t", text = "u64" },
-        ]
-        for (fixed_width) |integer| {
-            if (context.canonical or !mem.eql(text, integer.key)) continue
-            if (!context.shared and !mem.eql(text, context.defining_typedef)) return try escaped(context.storage, text)
-            return integer.text
-        }
+        integer :: fixed_width_type(text)
+        if (!context.canonical and integer.len != 0) return integer
         tag :: owned_record(context, node)
         if (tag) |record| {
             rendered :: try render_record_reference(context, record, indirect)
@@ -1363,6 +1365,7 @@ emit_declaration proc(context @mut Context, index usize) void ! Error {
         return
     }
     if (kind(json, node, "TypedefDecl")) {
+        if (fixed_width_type(name).len != 0) return
         context.defining_typedef = name
         defer context.defining_typedef = ""
         rendered :: try render_type_inner(context, name, 0, true)
