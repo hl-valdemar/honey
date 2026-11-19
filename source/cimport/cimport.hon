@@ -109,6 +109,16 @@ identifier proc(text []u8) bool {
     return true
 }
 @hide:file
+package_name proc(text []u8) bool {
+    if (text.len == 0) return false
+    for (text) |byte, i| {
+        if ((byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_' or byte == '-') continue
+        if (i != 0 and byte >= '0' and byte <= '9') continue
+        return false
+    }
+    return true
+}
+@hide:file
 escaped proc(storage @mut Storage, name []u8) []u8 ! Error {
     if (!identifier(name)) return .unsupported_declaration
     keywords [70][]u8 :: ["proc", "c_func", "null", "undefined", "return", "yield", "break", "continue", "unreachable", "try", "catch", "orelse", "defer", "errdefer", "if", "for", "inline", "else", "while", "true", "false", "and", "or", "xor", "mut", "struct", "c_struct", "opaque", "enum", "union", "distinct", "alias", "match", "import", "test", "int", "float", "bool", "string", "void", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "uint", "isize", "usize", "anyopaque", "c_char", "c_schar", "c_uchar", "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong", "c_longlong", "c_ulonglong", "c_float", "c_double", "c_longdouble", "type", "noreturn"]
@@ -431,6 +441,7 @@ command_inner proc(storage @mut Storage, runtime io.Io, args process.Args) i32 !
 }
 
 #! generate ffi/<name>/bindings.hon and the shared ffi/__c_types module beside source/.
+#! package names retain their spelling and accept identifier characters plus hyphens.
 #! `options.project` must contain source/ and a build.hon/build.bro project-root marker.
 #! errors never authorize replacing handwritten or edited output. inputs are borrowed until return.
 #! generated declarations do not imply ownership, lifetime, callback threading or library initialization contracts.
@@ -486,7 +497,7 @@ c_string_literal proc(storage @mut Storage, text []u8) []u8 ! Error {
 
 @hide:file
 generate_inner proc(storage @mut Storage, runtime io.Io, options Options) void ! Error {
-    if (!identifier(options.name) or mem.eql(options.name, "c") or mem.eql(options.name, "__c_types")) return .invalid_options
+    if (!package_name(options.name) or mem.eql(options.name, "c") or mem.eql(options.name, "__c_types")) return .invalid_options
     if (options.headers.len == 0 or options.target.len == 0 or (options.all and options.symbols.len != 0) or (!options.all and options.symbols.len == 0)) return .invalid_options
     if (!(prefix(options.target, "arm64-apple-") or prefix(options.target, "aarch64-apple-")) or (find(options.target, "macos") == null and find(options.target, "darwin") == null)) {
         try io.write_all(io.stderr(runtime), "translate-c: only Darwin arm64 targets are supported\n")

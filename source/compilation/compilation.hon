@@ -513,7 +513,12 @@ compile proc(
             while (start > 0 and path[start - 1] != '/') start -= 1
             candidate :: path[start..]
             valid := candidate.len > 0
+            has_hyphen := false
             for (candidate) |byte, index| {
+                if (byte == '-') {
+                    has_hyphen = true
+                    continue
+                }
                 if (
                     !(byte >= 'a' and byte <= 'z')
                     and !(byte >= 'A' and byte <= 'Z')
@@ -522,7 +527,14 @@ compile proc(
                 ) valid = false
             }
             if (valid) {
-                name = try strpool.intern(&compilation.strings, candidate)
+                if (has_hyphen) {
+                    normalized :: try mem.alloc(u8, compilation.allocator, candidate.len)
+                    defer mem.free(compilation.allocator, normalized)
+                    for (candidate) |byte, index| normalized[index] = if (byte == '-') '_' else byte
+                    name = try strpool.intern(&compilation.strings, normalized)
+                } else {
+                    name = try strpool.intern(&compilation.strings, candidate)
+                }
             } else if (failure == null) {
                 failure = try diagnostics.add(diagnostic_store, .invalid_import_alias, imported.path)
             }

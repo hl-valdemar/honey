@@ -42,6 +42,8 @@ a parameterless `main` prints its result rather than using it as an exit status.
 
 Honey supports generics, compile-time type construction, records, tagged unions, optionals, explicit error channels, scoped cleanup, arrays, slices and pointers. `::` declares an immutable binding; `:=` declares a mutable binding. unused locals, parameters and captures are errors; use `_` for intentional discards.
 
+unaliased imports infer their namespace from the resolved package directory's final component, replacing hyphens with underscores: `import "@ffi/pine-window"` declares `pine_window`. paths keep their original spelling. other characters that cannot form an identifier require an explicit alias, such as `window :: import "@ffi/pine.window"`. inferred namespaces use the normal duplicate-name diagnostics; explicit aliases are unchanged.
+
 see the [examples](programs/) and [style guide](docs/style.md). the [Bro project](../brolang) contains the language grammar and further documentation; Honey's implemented subset may differ.
 
 ## install
@@ -113,6 +115,8 @@ honey translate-c raylib --project hello-raylib \
 import the result with `import "@ffi/raylib"`. add `libraries = &["raylib"]` and `lib_paths = &["/opt/homebrew/opt/raylib/lib"]` to the project's `BuildConfig` to link it. the deployment minimum must also satisfy the installed raylib library.
 
 `translate-c` uses Clang and the project's configured target. repeat `--header` for additional headers, or replace `--all` with repeated `--symbol <name>` options for a strict selection. `-I`, `-D`, `--sysroot` and `--target` control preprocessing and targeting.
+
+binding package names accept letters, digits, underscores and hyphens, starting with a letter, underscore or hyphen; `c` and `__c_types` are reserved. for example, `honey translate-c pine-window ...` writes `ffi/pine-window/`, imported as `import "@ffi/pine-window"` with implicit namespace `pine_window`.
 
 `--all` reports and omits unsupported declarations while retaining usable bindings; read its diagnostics even when it succeeds. an unsupported explicit `--symbol` fails without installing partial bindings. generation creates no C bridges and does not install or link libraries.
 

@@ -78,6 +78,29 @@ selected_declarations_shared_identity_and_regeneration test {
     try support.expect(&context, mem.eql("handwritten :: 123\n", try support.read(&context, bindings_path)), "edited output was destroyed")
 }
 
+hyphenated_package_names_preserve_paths test {
+    context := try support.init("cimport_package_names")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.path(&context, context.root, "tests/cimport/fixtures/bindings.h")
+    rejected [12][;0]u8 :: ["", ".", "..", "../escape", "nested/package", "nested\\package", "with space", "bad.name", "bad@name", "1package", "c", "__c_types"]
+    for (rejected) |name| {
+        result :: try translate(&context, project, name, header, &["ANSWER"])
+        try support.expect(&context, result.status == 2, "unsafe or reserved package name was accepted")
+    }
+    invalid_symbol :: try translate(&context, project, "my-lib_2", header, &["bad-name"])
+    try support.expect(&context, invalid_symbol.status == 2, "hyphenated C declaration name was accepted")
+    try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi")), "invalid names wrote partial bindings")
+    generated :: try translate(&context, project, "my-lib_2", header, &["ANSWER"])
+    try support.expect_result(&context, generated, 0, "", "")
+    try support.expect(&context, try support.exists(&context, try support.path(&context, project, "ffi/my-lib_2/bindings.hon")), "hyphenated package path was not preserved")
+    try support.expect(&context, !try support.exists(&context, try support.path(&context, project, "ffi/my_lib_2")), "hyphenated package path was rewritten")
+    source :: try support.put(&context, project, "source/main.hon", "import \"@ffi/my-lib_2\"\nmain proc() i32 { return my_lib_2.ANSWER }\n")
+    try expect_native_answer(&context, source, &[])
+}
+
 unsupported_requests_are_explicit_and_non_destructive test {
     context := try support.init("cimport_unsupported")
     defer support.deinit(&context)
