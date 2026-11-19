@@ -124,6 +124,8 @@ binding package names accept letters, digits, underscores and hyphens, starting 
 
 bindings live under `ffi/<name>/`, with shared nominal types under `ffi/__c_types/`. regeneration records its inputs and refuses to overwrite modified generated files or unrelated outputs. keep handwritten helpers separate. C declarations do not establish ownership, callback lifetime or threading contracts; those remain the caller's responsibility.
 
+generated bindings retain exact-width integer typedefs (`uint32_t :: alias u32`) and function parameter names, escaping Honey keywords and using `_` for unnamed parameters. external parameter names are documentary and may match type names. type aliases precede constants and functions; ordinary C integers retain target-dependent `c_int`/`c_uint` spellings.
+
 ## tests and compiler development
 
 ```sh

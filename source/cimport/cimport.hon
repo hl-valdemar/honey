@@ -604,6 +604,7 @@ Context :: struct {
     common arraylist.ArrayList(Entry)
     symbols arraylist.ArrayList(Entry)
     shared bool = false
+    canonical bool = false
     defining_typedef []u8 = ""
     namespace []u8 = "c_types"
     input []u8 = ""
@@ -1011,13 +1012,13 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
         closing :: opening + 2 + closing_relative
         qualifiers :: strip_qualifiers(text[opening + 2..closing])
         if (qualifiers.len != 0 or closing + 1 >= text.len or text[closing + 1] != '(' or !suffix(text, ")")) return .unsupported_declaration
-        signature :: try render_signature(context, text[..opening], text[closing + 2..text.len - 1], depth + 1)
+        signature :: try render_signature(context, text[..opening], text[closing + 2..text.len - 1], depth + 1, 0)
         callback_parts [2][]u8 :: ["?*", signature]
         return try join(context.storage, callback_parts[..])
     }
     if (find(text, "(")) |opening| {
         if (!suffix(text, ")")) return .unsupported_declaration
-        return try render_signature(context, text[..opening], text[opening + 1..text.len - 1], depth + 1)
+        return try render_signature(context, text[..opening], text[opening + 1..text.len - 1], depth + 1, 0)
     }
     builtins [15]Entry :: [
         { key = "void", text = "void" }, { key = "_Bool", text = "bool" },
@@ -1040,6 +1041,17 @@ render_type_inner proc(context @mut Context, spelling []u8, depth usize, indirec
     } else if (lookup_type(context, text, "TypedefDecl")) |index| {
         context.declarations.items[index].required = true
         node :: context.declarations.items[index].node
+        fixed_width [8]Entry :: [
+            { key = "int8_t", text = "i8" }, { key = "uint8_t", text = "u8" },
+            { key = "int16_t", text = "i16" }, { key = "uint16_t", text = "u16" },
+            { key = "int32_t", text = "i32" }, { key = "uint32_t", text = "u32" },
+            { key = "int64_t", text = "i64" }, { key = "uint64_t", text = "u64" },
+        ]
+        for (fixed_width) |integer| {
+            if (context.canonical or !mem.eql(text, integer.key)) continue
+            if (!context.shared and !mem.eql(text, context.defining_typedef)) return try escaped(context.storage, text)
+            return integer.text
+        }
         tag :: owned_record(context, node)
         if (tag) |record| {
             rendered :: try render_record_reference(context, record, indirect)
@@ -1087,9 +1099,10 @@ owned_record proc(context @Context, node usize) ?usize {
     return null
 }
 @hide:file
-render_signature proc(context @mut Context, result, arguments []u8, depth usize) []u8 ! Error {
+render_signature proc(context @mut Context, result, arguments []u8, depth, parameters usize) []u8 ! Error {
     text []u8 := "c_func("
     remaining :: trim(arguments)
+    parameter := inner(context.json, parameters)
     if (remaining.len == 0) {
         try report(context, result, "C function without a prototype is unsupported; declare an explicit (void) parameter list")
         return .unsupported_declaration
@@ -1111,7 +1124,10 @@ render_signature proc(context @mut Context, result, arguments []u8, depth usize)
             separator []u8 :: if (count == 0) "" else ", "
             rendered_argument []u8 := "..."
             if (!mem.eql(argument, "...")) {
-                argument_parts [2][]u8 :: ["_ ", try render_type(context, argument, depth + 1)]
+                while (parameter != 0 and !kind(context.json, parameter, "ParmVarDecl")) parameter = context.json.nodes.items[parameter].next
+                name :: json_text(context.json, parameter, "name")
+                argument_parts [3][]u8 :: [if (name.len == 0) "_" else try escaped(context.storage, name), " ", try render_type(context, argument, depth + 1)]
+                if (parameter != 0) parameter = context.json.nodes.items[parameter].next
                 rendered_argument = try join(context.storage, argument_parts[..])
             }
             signature_parts [3][]u8 :: [text, separator, rendered_argument]
@@ -1393,13 +1409,38 @@ emit_declaration proc(context @mut Context, index usize) void ! Error {
             }
             child = json.nodes.items[child].next
         }
-        signature :: try render_type(context, qual_type(json, node), 0)
+        # Parameter names document the binding, not its external ABI identity.
+        # Use the most informative redeclaration consistently for this package.
+        parameters := usize(0)
+        named_count := usize(0)
+        for (context.declarations.items) |candidate| {
+            if (!kind(json, candidate.node, "FunctionDecl") or !mem.eql(candidate.name, name)) continue
+            count := usize(0)
+            parameter := inner(json, candidate.node)
+            while (parameter != 0) {
+                if (kind(json, parameter, "ParmVarDecl") and json_text(json, parameter, "name").len != 0) count += 1
+                parameter = json.nodes.items[parameter].next
+            }
+            if (parameters == 0 or count > named_count) {
+                parameters = candidate.node
+                named_count = count
+            }
+        }
+        spelling :: qual_type(json, parameters)
+        found_opening :: find(spelling, "(")
+        if (found_opening == null) return .unsupported_declaration
+        opening :: found_opening?
+        if (!suffix(spelling, ")")) return .unsupported_declaration
+        signature :: try render_signature(context, spelling[..opening], spelling[opening + 1..spelling.len - 1], 1, parameters)
         context.shared = true
+        context.canonical = true
         canonical_signature :: render_type(context, qual_type(json, node), 0) catch |err| {
             context.shared = false
+            context.canonical = false
             return err
         }
         context.shared = false
+        context.canonical = false
         try entry_put(context, &context.symbols, name, canonical_signature)
         function_parts [4][]u8 :: [try escaped(context.storage, name), " ", signature, "\n"]
         try entry_put(context, &context.bindings, name, try join(context.storage, function_parts[..]))
@@ -2053,9 +2094,14 @@ source_text proc(storage @mut Storage, entries []mut Entry, common bool, namespa
         try append_parts(&result, import_parts[..])
     }
     try arraylist.append(&result, '\n')
-    for (entries) |entry| {
-        entry_parts [2][]u8 :: [entry.text, "\n"]
-        try append_parts(&result, entry_parts[..])
+    # Keep types ahead of values/functions, with stable alphabetical order in each group.
+    for (0..2) |group| {
+        for (entries) |entry| {
+            is_type :: find(entry.text, " :: alias ") != null or common
+            if (is_type != (group == 0)) continue
+            entry_parts [2][]u8 :: [entry.text, "\n"]
+            try append_parts(&result, entry_parts[..])
+        }
     }
     return try retain_list(storage, &result)
 }

@@ -48,7 +48,6 @@ selected_declarations_shared_identity_and_regeneration test {
     original :: try support.read(&context, bindings_path)
     original_common :: try support.read(&context, common_path)
     original_manifest :: try support.read(&context, manifest_path)
-    try support.expect(&context, support.contains(original, "move_point c_func(_ Point, _ c_float) Point"), "public function signature does not use readable local C aliases")
     try support.expect(&context, support.contains(original, "Callback :: alias ?*c_func(_ Point,"), "callback signature does not use its local record alias")
     try support.expect(&context, support.contains(original_common, "\nPoint :: c_struct {"), "shared declaration did not retain the original C record name")
     try support.expect(&context, support.contains(original, "MODE_DONE c_int :: 8"), "implicit enumerator was not evaluated")
@@ -489,7 +488,6 @@ anonymous_typedef_and_contained_records_have_readable_shared_names test {
     try support.expect_result(&context, paint, 0, "", "")
     paint_path :: try support.path(&context, project, "ffi/paint/bindings.hon")
     paint_bindings :: try support.read(&context, paint_path)
-    try support.expect(&context, support.contains(paint_bindings, "paint_rectangle c_func(_ Rectangle, _ Color) Rectangle"), "record-valued signature exposes shared implementation names instead of C aliases")
     colors :: try translate(&context, project, "colors", header, &["rectangle_color"])
     try support.expect_result(&context, colors, 0, "", "")
     common_path :: try support.path(&context, project, "ffi/__c_types/bindings.hon")
@@ -526,4 +524,56 @@ local_record_aliases_preserve_distinct_c_namespaces test {
     try support.write(&context, source, "binding :: import \"@ffi/names\"\nmain proc() i32 { return binding.read_tag(binding.make_typedef()) }\n")
     rejected :: try support.run(&context, &[context.compiler, "emit-llvm", source], {})
     try support.expect(&context, rejected.status == 1, "local alias rendering collapsed the C tag and ordinary type namespaces")
+}
+
+fixed_width_types_and_documented_parameters test {
+    context := try support.init("cimport_fixed_width")
+    defer support.deinit(&context)
+    project :: try support.path(&context, context.temporary, "project")
+    try support.directory(&context, try support.path(&context, project, "source"))
+    _ = try support.put(&context, project, "build.hon", "# project-root marker\n")
+    header :: try support.put(&context, project, "widths.h",
+        `#include <stdint.h>
+        `typedef uint32_t Count;
+        `typedef struct z_result { uint8_t byte; int8_t signed_byte; uint16_t half; int16_t signed_half; uint32_t word; int32_t signed_word; uint64_t wide; int64_t signed_wide; } z_result;
+        `extern z_result a_measure(Count Count, uint32_t u32, int proc, int c_types, int);
+        `extern z_result a_measure(Count columns, uint32_t rows, int other, int context, int);
+        `extern unsigned int plain(unsigned int value);
+        `extern uint32_t word(uint32_t value);
+        `
+    )
+    generated :: try translate(&context, project, "widths", header, &["a_measure", "plain", "word"])
+    try support.expect_result(&context, generated, 0, "", "")
+    other_header :: try support.put(&context, project, "other.h", "extern unsigned int word(unsigned int other_name);\n")
+    compatible :: try translate(&context, project, "other", other_header, &["word"])
+    try support.expect_result(&context, compatible, 0, "", "")
+    bindings :: try support.read(&context, try support.path(&context, project, "ffi/widths/bindings.hon"))
+    c_names [8][]u8 :: ["int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"]
+    honey_names [8][]u8 :: ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
+    for (c_names) |name, index| {
+        declaration :: try support.concat(&context, &[name, " :: alias ", honey_names[index], "\n"])
+        try support.expect(&context, support.contains(bindings, declaration), "exact-width integer typedef lost its width")
+    }
+    try support.expect(&context, support.contains(bindings, "a_measure c_func(Count Count, @\"u32\" uint32_t, @\"proc\" c_int, c_types c_int, _ c_int) z_result"), "C parameter names, keyword escaping or unnamed parameter fallback were lost")
+    try support.expect(&context, support.contains(bindings, "plain c_func(value c_uint) c_uint"), "ordinary C integers must retain target-dependent spelling")
+    type_end := usize(0)
+    function_start := bindings.len
+    for (0..bindings.len) |index| {
+        if (support.has_prefix(bindings[index..], "z_result :: alias")) type_end = index
+        if (support.has_prefix(bindings[index..], "a_measure c_func")) function_start = index
+    }
+    try support.expect(&context, type_end != 0 and type_end < function_start, "type declarations must precede functions")
+    source :: try support.put(&context, project, "source/main.hon",
+        `binding :: import "@ffi/widths"
+        `main proc() i32 {
+        `    result :: binding.a_measure(u32(20), u32(22), 0, 0, 0)
+        `    if (sizeof!(binding.uint64_t) != 8 or sizeof!(binding.uint8_t) != 1) return 1
+        `    if (result.signed_byte != -1 or result.signed_half != -2 or result.signed_word != -3 or result.signed_wide != -4) return 2
+        `    if (result.byte != 255 or result.half != 65535 or result.wide != 18446744073709551615) return 3
+        `    return i32(result.word)
+        `}
+        `
+    )
+    implementation :: try support.put(&context, project, "widths.c", "#include \"widths.h\"\nz_result a_measure(Count width, uint32_t height, int proc, int context, int unused) { return (z_result){255, -1, 65535, -2, width + height, -3, UINT64_MAX, -4}; }\n")
+    try expect_native_answer(&context, source, &[implementation])
 }

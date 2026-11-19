@@ -439,10 +439,12 @@ resolve_function proc(
         if (ast.param(tree, parameter).comptime) try predeclare(state, &signature, parameter, ast.param(tree, parameter).name)
     }
     try resolve_expr(state, &signature, function.return_type)
+    # External parameter names document the signature; they introduce no body bindings.
+    if (ast.function_external(tree, id)) return
     scope := Scope{
         names = hashmap.init(state.allocator),
         parent = package_scope,
-        local = !ast.function_external(tree, id),
+        local = true,
     }
     defer hashmap.deinit(&scope.names)
     for (0..ast.function_param_count(tree, id)) |i| {
