@@ -97,6 +97,11 @@ emit proc(
         try bytes_constant(output, diagnostics.message(diagnostic), false)
         try io.write_all(output, "\n")
     }
+    try io.write_all(output, "@honey.note_label = private constant ")
+    try bytes_constant(output, ": note: ", false)
+    try io.write_all(output, "\n@honey.immutable_note = private constant ")
+    try bytes_constant(output, "value was declared immutable here\nhelp: use `:=` instead of `::` if this value should be mutable", false)
+    try io.write_all(output, "\n")
     memory_codes [_]diagnostics.Code :: [
         .null_unwrap, .invalid_slice_bounds, .sentinel_mismatch,
         .overlapping_memory_copy, .unsupported_foreign_call, .invalid_pointer_access,
@@ -417,7 +422,7 @@ emit_reporting proc(
     try io.write_all(output, "define internal void @honey.io_failure() noreturn {\nentry:\n")
     try io.print("  %path_result = call i64 @write(i32 2, ptr @honey.p{}, i64 {})\n", output, {usize(primary), sources[usize(primary)].path.len})
     try io.write_all(output, "  %message_result = call i64 @write(i32 2, ptr @honey.write_error, i64 44)\n  call void @exit(i32 2)\n  unreachable\n}\n")
-    try io.write_all(output, "define internal void @honey.diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {\nentry:\n")
+    try io.write_all(output, "define internal void @honey.describe(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, ptr %label, i64 %label_length) {\nentry:\n")
     try io.print("  %descriptor = getelementptr [{} x %string], ptr @honey.paths, i64 0, i64 %source\n", output, {sources.len})
     try io.write_all(output, "  %path = load %string, ptr %descriptor\n  %bytes = extractvalue %string %path, 0\n  %path_length = extractvalue %string %path, 1\n  call void @honey.out(i32 2, ptr %bytes, i64 %path_length)\n")
     try io.write_all(output,
@@ -425,11 +430,18 @@ emit_reporting proc(
         `  call void @honey.print_integer(i32 2, i64 %line, i1 true)
         `  call void @honey.out(i32 2, ptr @honey.colon, i64 1)
         `  call void @honey.print_integer(i32 2, i64 %column, i1 true)
-        `  %label = select i1 %trap, ptr @honey.runtime_trap, ptr @honey.error
-        `  %label_length = select i1 %trap, i64 16, i64 9
         `  call void @honey.out(i32 2, ptr %label, i64 %label_length)
         `  call void @honey.out(i32 2, ptr %message, i64 %length)
         `  call void @honey.out(i32 2, ptr @honey.newline, i64 1)
+        `  ret void
+        `}
+    )
+    try io.write_all(output,
+        `define internal void @honey.diagnose(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, i1 %trap) {
+        `entry:
+        `  %label = select i1 %trap, ptr @honey.runtime_trap, ptr @honey.error
+        `  %label_length = select i1 %trap, i64 16, i64 9
+        `  call void @honey.describe(i64 %source, i64 %line, i64 %column, ptr %message, i64 %length, ptr %label, i64 %label_length)
         `  ret void
         `}
     )
@@ -441,6 +453,13 @@ emit_reporting proc(
         try io.print("  call void @honey.diagnose(i64 {}, i64 {}, i64 {}, ptr @honey.d{}, i64 {}, i1 %t{})\n", output, {
             usize(diagnostic.span.source), position.line, position.column, index, message.len, index,
         })
+        if (diagnostic.immutable_declaration) |declaration| {
+            origin :: location(line_starts, declaration)
+            note :: "value was declared immutable here\nhelp: use `:=` instead of `::` if this value should be mutable"
+            try io.print("  call void @honey.describe(i64 {}, i64 {}, i64 {}, ptr @honey.immutable_note, i64 {}, ptr @honey.note_label, i64 8)\n", output, {
+                usize(declaration.source), origin.line, origin.column, note.len,
+            })
+        }
     }
     try io.write_all(output, "  ret void\n}\n")
 }

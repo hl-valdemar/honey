@@ -406,6 +406,24 @@ report_diagnostics proc(
                 label,
                 diagnostics.message(diagnostic),
             })
+            if (diagnostic.immutable_declaration) |declaration| {
+                declaration_source :: sources[usize(declaration.source)]
+                declaration_starts :: line_starts.items[usize(declaration.source)].items
+                declaration_offset :: usize(declaration.start)
+                declaration_line := usize(0)
+                declaration_end := declaration_starts.len
+                while (declaration_line + 1 < declaration_end) {
+                    middle :: declaration_line + divtrunc!(declaration_end - declaration_line, 2)
+                    if (declaration_starts[middle] <= declaration_offset) declaration_line = middle
+                    else declaration_end = middle
+                }
+                try io.print("{s}:{}:{}: note: value was declared immutable here\n", output, {
+                    declaration_source.path,
+                    declaration_line + 1,
+                    declaration_offset - declaration_starts[declaration_line] + 1,
+                })
+                try io.write_all(output, "help: use `:=` instead of `::` if this value should be mutable\n")
+            }
         }
     }
 }

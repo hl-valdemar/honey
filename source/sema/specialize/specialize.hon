@@ -4472,6 +4472,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
         if (diagnostic.custom_message) |text| {
             _ = try diagnostics.add_message(&diagnostic_store, diagnostic.code, diagnostic.span, text)
         } else _ = try diagnostics.add(&diagnostic_store, diagnostic.code, diagnostic.span)
+        diagnostic_store.list.items[diagnostic_store.list.items.len - 1].immutable_declaration = diagnostic.immutable_declaration
     }
     original_diagnostics :: diagnostics.count(&diagnostic_store)
     checked := try typecheck.check(state.allocator, &tree, &resolution, &diagnostic_store)
@@ -4479,6 +4480,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
     if (diagnostics.count(&diagnostic_store) != original_diagnostics) {
         diagnostic :: diagnostic_store.list.items[original_diagnostics]
         state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, diagnostic.code, diagnostic.span)
+        state.diagnostics.list.items[usize(state.evaluation_diagnostic)].immutable_declaration = diagnostic.immutable_declaration
         return Value{}
     }
     functions := arraylist.init(ast.NodeId, state.allocator)
@@ -4493,6 +4495,7 @@ evaluate_ir_body proc(state @mut State, at, body, result_type ast.NodeId) Value 
         else {
             diagnostic :: diagnostics.get(&diagnostic_store, trap)?
             state.evaluation_diagnostic = try diagnostics.add(state.diagnostics, diagnostic.code, diagnostic.span)
+            state.diagnostics.list.items[usize(state.evaluation_diagnostic)].immutable_declaration = diagnostic.immutable_declaration
         }
         return Value{}
     }

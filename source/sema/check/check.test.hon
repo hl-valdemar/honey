@@ -3193,3 +3193,46 @@ opaque_aliases_do_not_admit_by_value_storage_or_signatures test {
         try testing.expect(diagnostics.count(&fixture.diagnostics) > 0)
     }
 }
+
+readonly_pointer_arguments_identify_immutable_storage test {
+    sources [_][]u8 :: [
+        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy c_func(slot ?*mut ?*mut Handle) void\nmain proc() void { init_res Result :: { handle = null }\ndestroy(&init_res.handle) }\n",
+        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy proc(slot ?*mut ?*mut Handle) void { _ = slot }\nmain proc() void { init_res Result :: { handle = null }\ndestroy(&init_res.handle) }\n",
+        "set proc(slot *mut i16) void { _ = slot }\nmain proc() void { init_res i16 :: 0\nset(&init_res) }\n",
+    ]
+    for (sources) |source| {
+        fixture := try array_fixture(source)
+        defer deinit_array_fixture(&fixture)
+        try testing.expect_equal(1, diagnostics.count(&fixture.diagnostics))
+        diagnostic :: diagnostics.get(&fixture.diagnostics, diagnostics.DiagnosticId(0))?
+        try testing.expect_equal(diagnostics.Code.readonly_storage, diagnostic.code)
+        try testing.expect_equal("init_res", ast.source_text(&fixture.tree, diagnostic.immutable_declaration?))
+        try testing.expect(ast.source_text(&fixture.tree, diagnostic.span)[0] == '&')
+    }
+}
+
+pointer_mutability_help_excludes_other_constraints test {
+    sources [_][]u8 :: [
+        "set proc(slot *mut u16) void { _ = slot }\nmain proc() void { value i16 :: 0\nset(&value) }\n",
+        "set proc(slot *mut i16) void { _ = slot }\nmain proc() void { value i16 := 0\npointer *i16 :: &value\nset(pointer) }\n",
+        "Box :: struct { value i16 }\nset proc(slot *mut i16) void { _ = slot }\nmain proc() void { value Box := { value = 0 }\npointer *Box :: &value\nset(&pointer.value) }\n",
+        "set proc(slot *mut *mut i16) void { _ = slot }\nmain proc() void { value i16 := 0\npointer *i16 :: &value\nset(&pointer) }\n",
+    ]
+    for (sources) |source, index| {
+        fixture := try array_fixture(source)
+        defer deinit_array_fixture(&fixture)
+        try testing.expect_equal(1, diagnostics.count(&fixture.diagnostics))
+        diagnostic :: diagnostics.get(&fixture.diagnostics, diagnostics.DiagnosticId(0))?
+        expected :: if (index == 1 or index == 2) diagnostics.Code.readonly_storage else diagnostics.Code.type_mismatch
+        try testing.expect_equal(expected, diagnostic.code)
+        try testing.expect(diagnostic.immutable_declaration == null)
+    }
+}
+
+mutable_handle_slot_arguments_remain_valid test {
+    fixture := try array_fixture(
+        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy proc(slot ?*mut ?*mut Handle) void { _ = slot }\nmain proc() void { init_res Result := { handle = null }\ndestroy(&init_res.handle) }\n",
+    )
+    defer deinit_array_fixture(&fixture)
+    try testing.expect_equal(0, diagnostics.count(&fixture.diagnostics))
+}

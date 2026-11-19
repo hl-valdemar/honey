@@ -2309,11 +2309,61 @@ composed_type proc(state @State, type Type) bool {
 }
 
 @hide:file
+readonly_pointer_mismatch proc(state @State, actual, expected Type) bool {
+    source := actual
+    target := expected
+    while (target.kind == .optional) {
+        target = state.arrays.items[usize(target.array_type)].element
+        if (source.kind == .optional) source = state.arrays.items[usize(source.array_type)].element
+    }
+    if (source.kind != .pointer or target.kind != .pointer or source.nominal != target.nominal) return false
+    a :: state.pointers.items[usize(source.pointer_type)]
+    b :: state.pointers.items[usize(target.pointer_type)]
+    return (
+        !a.mutable and b.mutable and a.many == b.many
+        and (same_type(state, a.element, b.element)
+            or (b.element.kind == .anyopaque and b.element.nominal == ast.NodeId(maxval!(u32))))
+    )
+}
+
+@hide:file
+immutable_storage_declaration proc(state @mut State, id ast.NodeId) ?ast.Span {
+    kind :: ast.expr_kind(state.tree, id)
+    if (kind == .selection and sema.binding(state.resolution, id).kind == .none) {
+        base :: ast.selection_expr(state.tree, id).base
+        if (group_type(state, base).kind != .record) return null
+        return immutable_storage_declaration(state, base)
+    }
+    if (kind == .index) {
+        base :: ast.index_expr(state.tree, id).base
+        type :: group_type(state, base)
+        if (type.kind != .array or !state.arrays.items[usize(type.array_type)].mutable) return null
+        return immutable_storage_declaration(state, base)
+    }
+    binding :: sema.binding(state.resolution, id)
+    if (binding.kind != .declaration) return null
+    declaration :: binding.data.declaration
+    if (state.cells[usize(declaration)].role != .declaration) return null
+    view :: ast.statement_decl(state.tree, declaration)
+    if (view.mutability == .variable) return null
+    return view.name
+}
+
+@hide:file
 compatible proc(state @mut State, value ast.NodeId, expected Type) void ! (mem.AllocError | diagnostics.CapacityError) {
     actual :: state.types[usize(value)]
     if (actual.kind == .invalid or expected.kind == .invalid) return
     if (!assignable_value(state, value, actual, expected)) {
-        try fail(state, value, .type_mismatch, ast.node_span(state.tree, value))
+        if (readonly_pointer_mismatch(state, actual, expected)) {
+            try fail(state, value, .readonly_storage, ast.node_span(state.tree, value))
+            if (ast.expr_kind(state.tree, value) == .unary) {
+                view :: ast.unary_expr(state.tree, value)
+                if (view.operator == .address_of) {
+                    diagnostic :: state.types[usize(value)].diagnostic
+                    state.diagnostics.list.items[usize(diagnostic)].immutable_declaration = immutable_storage_declaration(state, view.operand)
+                }
+            }
+        } else try fail(state, value, .type_mismatch, ast.node_span(state.tree, value))
     }
 }
 

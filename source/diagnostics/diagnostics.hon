@@ -103,6 +103,7 @@ Code :: enum {
     invalid_address_operand
     invalid_dereference
     invalid_pointer_assignment
+    readonly_storage
     invalid_pointer_access
     null_unwrap
     invalid_slice_bounds
@@ -143,6 +144,7 @@ Diagnostic :: struct {
     code Code
     span Span
     custom_message ?[]u8 = null
+    immutable_declaration ?Span = null
 }
 
 #! owns diagnostic storage and retains its allocator; release with deinit.
@@ -283,6 +285,7 @@ messages :: $enummap.init(Code, []u8, {
     invalid_address_operand = "address-of requires addressable storage",
     invalid_dereference = "dereference requires a pointer",
     invalid_pointer_assignment = "pointer assignment requires a mutable pointee",
+    readonly_storage = "requires writable storage but receives read-only storage",
     invalid_pointer_access = "pointer does not refer to live accessible storage",
     null_unwrap = "cannot unwrap a null optional",
     invalid_slice_bounds = "slice bounds are invalid",
