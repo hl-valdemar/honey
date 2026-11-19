@@ -403,7 +403,7 @@ multiline_strings_keep_following_diagnostic_locations test {
         &context,
         "multiline_strings_keep_following_diagnostic_locations",
         "evaluate proc() i16 {\n    text ::\n        `a\n        `b\n    return missing\n}\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
-        support.Expected{ stdout = "", diagnostic = ":5:12:" },
+        support.Expected{ stdout = "", diagnostic = ":5:12\n  |\n5 |     return missing\n  |            ^^^^^^^" },
     )
 }
 
@@ -1107,7 +1107,11 @@ unreachable_constant_execution_preserves_source test {
         &context,
         "unreachable_constant_execution_preserves_source",
         "fail proc() i16 {\n    unreachable\n}\nevaluate proc() i16 { return $(fail()) }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
-        support.Expected{ stdout = "", diagnostic = ":2:5: runtime trap: reached unreachable statement" },
+        support.Expected{ stdout = "", diagnostic = try support.concat(&context, &[
+            "runtime trap: reached unreachable statement\n --> ",
+            try support.path(&context, context.temporary, "unreachable_constant_execution_preserves_source.hon"),
+            ":2:5\n  |\n2 |     unreachable\n  |     ^^^^^^^^^^^",
+        ]) },
     )
 }
 

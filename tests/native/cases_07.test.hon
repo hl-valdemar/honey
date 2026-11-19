@@ -150,20 +150,40 @@ pointer_readonly_not_mutable_argument test {
         &context,
         "pointer_readonly_not_mutable_argument",
         "set proc(p @mut i16) void { p^ = 42 }\nevaluate proc() i16 { value i16 :: 0\nset(&value)\nreturn value }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
-        support.Expected{ stdout = "", diagnostic = "requires writable storage but receives read-only storage" },
+        support.Expected{ stdout = "", diagnostic = "cannot pass read-only storage to a mutable pointer parameter" },
     )
-    source :: try support.put(&context, context.temporary, "readonly-slot.hon",
-        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy c_func(slot ?*mut ?*mut Handle) void\nmain proc() void {\n    init_res Result :: { handle = null }\n    destroy(&init_res.handle)\n}\n")
-    result :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
-    try support.expect(&context, result.status == 1, "read-only foreign argument is rejected")
-    try support.expect(&context, support.contains(result.stderr,
-        ":6:13: error: requires writable storage but receives read-only storage"), "argument storage diagnostic")
-    try support.expect(&context, support.contains(result.stderr,
-        ":5:5: note: value was declared immutable here"), "immutable declaration location")
-    try support.expect(&context, support.contains(result.stderr,
-        "help: use `:=` instead of `::` if this value should be mutable"), "conditional mutability help")
+    for (["destroy c_func(slot ?*mut ?*mut Handle) void", "destroy proc(slot ?*mut ?*mut Handle) void { _ = slot }"]) |declaration, index| {
+        filename :: if (index == 0) "readonly-foreign-slot.hon" else "readonly-ordinary-slot.hon"
+        text :: try support.concat(&context, &[
+            "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\n", declaration,
+            "\nmain proc() void {\n    init_res Result :: { handle = null }\n    destroy(&init_res.handle)\n}\n",
+        ])
+        source :: try support.put(&context, context.temporary, filename, text)
+        result :: try support.run(&context, &[context.compiler, "emit-llvm", source], support.RunOptions{})
+        try support.expect(&context, result.status == 1, "read-only argument is rejected")
+        try support.expect(&context, support.has_prefix(result.stderr,
+            "error: cannot pass read-only storage to a mutable pointer parameter\n"), "argument storage diagnostic headline")
+        try support.expect(&context, support.contains(result.stderr,
+            ":6:13\n  |\n6 |     destroy(&init_res.handle)\n  |             ^^^^^^^^^^^^^^^^ requires writable storage\n"), "argument source excerpt and complete underline")
+        try support.expect(&context, support.contains(result.stderr,
+            "note: `init_res` was declared immutable here\n"), "immutable declaration names its binding")
+        try support.expect(&context, support.contains(result.stderr,
+            ":5:5\n  |\n5 |     init_res Result :: { handle = null }\n  |     ^^^^^^^^ immutable binding\n"), "immutable declaration excerpt and underline")
+        try support.expect(&context, support.contains(result.stderr,
+            "help: use `:=` instead of `::` if this value should be mutable\n"), "conditional mutability help")
+        if (index == 1) try support.check(&context, source, support.Expected{
+            stdout = "", diagnostic = "cannot pass read-only storage to a mutable pointer parameter",
+        })
+        if (index == 0) {
+            mutable_source :: try support.put(&context, context.temporary, "mutable-foreign-slot.hon",
+                try support.replace(&context, text, "init_res Result ::", "init_res Result :="))
+            mutable_result :: try support.run(&context, &[context.compiler, "emit-llvm", mutable_source], support.RunOptions{})
+            try support.expect(&context, mutable_result.status == 0 and mutable_result.stderr.len == 0, "mutable foreign argument emits without diagnostics or mutability help")
+            try support.expect(&context, support.contains(mutable_result.stdout, "@\"\\64\\65\\73\\74\\72\\6F\\79\""), "mutable foreign call is emitted")
+        }
+    }
     try support.check_text(&context, "mutable-slot",
-        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy proc(slot ?*mut ?*mut Handle) void { _ = slot }\nmain proc() void { init_res Result := { handle = null }\ndestroy(&init_res.handle) }\n",
+        "Handle :: opaque\nResult :: struct { handle ?*mut Handle }\ndestroy proc(slot ?*mut ?*mut Handle) void { if slot |pointer| { pointer^ = null } }\nmain proc() void { init_res Result := { handle = null }\ndestroy(&init_res.handle) }\n",
         support.Expected{ stdout = "", diagnostic = null })
 }
 
@@ -1494,7 +1514,7 @@ type_execution_unreachable_retains_source test {
         &context,
         "type_execution_unreachable_retains_source",
         "Storage proc() type {\n    unreachable\n}\nevaluate proc() Storage() { return 42 }\n\nmain proc() i32 {\n    _ = evaluate()\n    return 0\n}\n",
-        support.Expected{ stdout = "", diagnostic = ":2:5:" },
+        support.Expected{ stdout = "", diagnostic = ":2:5\n  |\n2 |     unreachable\n  |     ^^^^^^^^^^^" },
     )
 }
 

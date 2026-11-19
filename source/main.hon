@@ -202,7 +202,7 @@ emit_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! Driver
     sources :: compilation.source_files(&session)
     primary :: session.packages.items[usize(root)].sources.items[0]
     try llvm.emit(allocator, io.stdout(runtime), &module, &diagnostic_store, sources, primary, config.target)
-    try report_diagnostics(allocator, io.stderr(runtime), sources, &diagnostic_store, null)
+    try report_diagnostics(io.stderr(runtime), sources, &diagnostic_store, null, 0)
     return if (diagnostics.count(&diagnostic_store) == 0) 0 else 1
 }
 
@@ -272,7 +272,7 @@ build_module proc(
         if (native_arguments.len != 0) project.report_link_failure(runtime)
         return .compiler_failed
     }
-    try report_diagnostics(allocator, io.stderr(runtime), sources, diagnostic_store, null)
+    try report_diagnostics(io.stderr(runtime), sources, diagnostic_store, null, 0)
     return if (diagnostics.count(diagnostic_store) == 0) 0 else 1
 }
 
@@ -292,7 +292,7 @@ test_path proc(allocator mem.Allocator, runtime io.Io, path [;0]u8, configured_p
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
     if (diagnostics.count(&diagnostic_store) != 0) {
-        try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, null)
+        try report_diagnostics(io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, null, 0)
         return 1
     }
     if (session.tests.items.len == 0) {
@@ -342,6 +342,7 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
     root :: try compilation.load(&session, runtime, path, &diagnostic_store)
     module := try compilation.compile(&session, root, &diagnostic_store)
     defer ir.deinit(&module)
+    runtime_start :: diagnostics.count(&diagnostic_store)
     outcome := try interpreter.run(allocator, &module, &diagnostic_store)
     defer interpreter.deinit(&outcome)
     value := outcome.value
@@ -354,7 +355,7 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
             }
         }
     }
-    try report_diagnostics(allocator, io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, outcome.trap)
+    try report_diagnostics(io.stderr(runtime), compilation.source_files(&session), &diagnostic_store, outcome.trap, runtime_start)
     if (failed or outcome.trap != null or diagnostics.count(&diagnostic_store) != 0) return 1
     return if (value.type == .i32) i32(value.data.integer) else 0
 }
@@ -362,68 +363,25 @@ run_file proc(allocator mem.Allocator, runtime io.Io, path [;0]u8) i32 ! DriverE
 
 @hide:file
 report_diagnostics proc(
-    allocator mem.Allocator,
     output io.Writer,
     sources []diagnostics.Source,
     diagnostic_store @diagnostics.Store,
     trap ?diagnostics.DiagnosticId,
-) void ! (mem.AllocError | io.WriteError) {
-    if (diagnostics.count(diagnostic_store) == 0) return
-    line_starts := arraylist.init(arraylist.ArrayList(usize), allocator)
-    defer {
-        for (line_starts.items) |@starts| arraylist.deinit(starts)
-        arraylist.deinit(&line_starts)
-    }
-    for (sources) |source| {
-        starts := arraylist.init(usize, allocator)
-        errdefer arraylist.deinit(&starts)
-        try arraylist.append(&starts, usize(0))
-        for (source.text) |byte, index| {
-            if (byte == '\n') try arraylist.append(&starts, index + 1)
-        }
-        try arraylist.append(&line_starts, starts)
-    }
+    runtime_start usize,
+) void ! io.WriteError {
     for (0..diagnostics.count(diagnostic_store)) |index| {
         if (diagnostics.get(diagnostic_store, diagnostics.DiagnosticId(index))) |diagnostic| {
-            source :: sources[usize(diagnostic.span.source)]
-            starts :: line_starts.items[usize(diagnostic.span.source)].items
-            offset :: usize(diagnostic.span.start)
-            line := usize(0)
-            end := starts.len
-            while (line + 1 < end) {
-                middle :: line + divtrunc!(end - line, 2)
-                if (starts[middle] <= offset) line = middle
-                else end = middle
-            }
             label []u8 := "error"
             if (trap) |id| {
-                if (id == diagnostics.DiagnosticId(index)) label = "runtime trap"
-            }
-            try io.print("{s}:{}:{}: {s}: {s}\n", output, {
-                source.path,
-                line + 1,
-                offset - starts[line] + 1,
-                label,
-                diagnostics.message(diagnostic),
-            })
-            if (diagnostic.immutable_declaration) |declaration| {
-                declaration_source :: sources[usize(declaration.source)]
-                declaration_starts :: line_starts.items[usize(declaration.source)].items
-                declaration_offset :: usize(declaration.start)
-                declaration_line := usize(0)
-                declaration_end := declaration_starts.len
-                while (declaration_line + 1 < declaration_end) {
-                    middle :: declaration_line + divtrunc!(declaration_end - declaration_line, 2)
-                    if (declaration_starts[middle] <= declaration_offset) declaration_line = middle
-                    else declaration_end = middle
+                if (id == diagnostics.DiagnosticId(index)) {
+                    label = "runtime trap"
+                    if (index >= runtime_start) {
+                        try diagnostics.render_compact(output, sources, diagnostic, label)
+                        continue
+                    }
                 }
-                try io.print("{s}:{}:{}: note: value was declared immutable here\n", output, {
-                    declaration_source.path,
-                    declaration_line + 1,
-                    declaration_offset - declaration_starts[declaration_line] + 1,
-                })
-                try io.write_all(output, "help: use `:=` instead of `::` if this value should be mutable\n")
             }
+            try diagnostics.render(output, sources, diagnostic, label)
         }
     }
 }

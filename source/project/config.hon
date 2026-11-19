@@ -342,8 +342,7 @@ report_link_failure proc(runtime io.Io) void {
 @hide:file
 report_config_diagnostics proc(runtime io.Io, session @compilation.Compilation, store @diagnostics.Store) void ! Error {
     for (store.list.items) |diagnostic| {
-        file :: session.sources.items[usize(diagnostic.span.source)]
-        try io.print("{s}:{}: build config: {s}\n", io.stderr(runtime), {file.path, diagnostic.span.start, diagnostics.message(diagnostic)})
+        try diagnostics.render(io.stderr(runtime), compilation.source_files(session), diagnostic, "build config")
     }
 }
 

@@ -1,0 +1,152 @@
+import "@std/io"
+import "@std/mem"
+
+@hide:file
+BufferedOutput :: struct {
+    output io.Writer
+    bytes []mut u8
+    len usize = 0
+}
+
+@hide:file
+flush_output proc(state @mut BufferedOutput) void ! io.WriteError {
+    try io.write_all(state.output, state.bytes[..state.len])
+    state.len = 0
+}
+
+@hide:file
+buffered_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    state @mut BufferedOutput :: ptrcast!(context?)
+    if (state.len == state.bytes.len) try flush_output(state)
+    if (state.len == 0 and bytes.len >= state.bytes.len) return try io.write(state.output, bytes)
+    length := state.bytes.len - state.len
+    if (length > bytes.len) length = bytes.len
+    memcopy!(state.bytes[state.len..state.len + length], bytes[..length])
+    state.len += length
+    return length
+}
+
+@hide:file
+write_repeat proc(output io.Writer, byte u8, repetitions usize) void ! io.WriteError {
+    bytes [64]mut u8 := undefined
+    mem.set(bytes[..], byte)
+    remaining := repetitions
+    while (remaining != 0) {
+        length := remaining
+        if (length > bytes.len) length = bytes.len
+        try io.write_all(output, bytes[..length])
+        remaining -= length
+    }
+}
+
+@hide:file
+column_after proc(column usize, byte u8) usize {
+    return if (byte == '\t') column + 4 - rem!(column, 4) else column + 1
+}
+
+@hide:file
+Location :: struct {
+    offset usize
+    line usize = 1
+    start usize = 0
+}
+
+@hide:file
+locate proc(text []u8, offset usize) Location {
+    location := Location{ offset = offset }
+    if (location.offset > text.len) location.offset = text.len
+    for (text[..location.offset]) |byte, index| {
+        if (byte == '\n') {
+            location.line += 1
+            location.start = index + 1
+        }
+    }
+    return location
+}
+
+@hide:file
+render_span proc(output io.Writer, sources []Source, span Span, annotation []u8) void ! io.WriteError {
+    source :: sources[usize(span.source)]
+    location :: locate(source.text, usize(span.start))
+    offset :: location.offset
+    start :: location.start
+    line :: location.line
+    end := usize(span.end)
+    if (end > source.text.len) end = source.text.len
+    if (end < offset) end = offset
+    line_end := offset
+    while (line_end < source.text.len and source.text[line_end] != '\n') line_end += 1
+    continues :: end > line_end
+    if (line_end > start and source.text[line_end - 1] == '\r') line_end -= 1
+    width := usize(1)
+    digits := line
+    while (digits >= 10) {
+        width += 1
+        digits = divtrunc!(digits, 10)
+    }
+    try write_repeat(output, ' ', width)
+    try io.print("--> {s}:{}:{}\n", output, {source.path, line, offset - start + 1})
+    try write_repeat(output, ' ', width)
+    try io.write_all(output, " |\n")
+    try io.print("{} | ", output, {line})
+    column := usize(0)
+    underline_start := usize(0)
+    underline_end := usize(0)
+    segment := start
+    for (source.text[start..line_end]) |byte, index| {
+        next :: column_after(column, byte)
+        if (byte == '\t') {
+            try io.write_all(output, source.text[segment..start + index])
+            try write_repeat(output, ' ', next - column)
+            segment = start + index + 1
+        }
+        if (start + index < offset) underline_start = next
+        if (start + index < end) underline_end = next
+        column = next
+    }
+    try io.write_all(output, source.text[segment..line_end])
+    if (underline_end <= underline_start) underline_end = underline_start + 1
+    try io.write_all(output, "\n")
+    try write_repeat(output, ' ', width)
+    try io.write_all(output, " | ")
+    try write_repeat(output, ' ', underline_start)
+    try write_repeat(output, '^', underline_end - underline_start)
+    if (annotation.len != 0) try io.print(" {s}", output, {annotation})
+    if (continues) try io.write_all(output, " (continues on following lines)")
+    try io.write_all(output, "\n")
+}
+
+#! writes a source-aware diagnostic without allocating or closing the borrowed output.
+#! `label` names the severity, such as "error" or "runtime trap"; source IDs must be valid.
+#! spans are byte offsets; tabs expand to four-column stops and multiline spans show their first line.
+#! buffers writes and flushes before success; empty and EOF spans retain a one-column underline.
+render proc(output io.Writer, sources []Source, diagnostic Diagnostic, label []u8) void ! io.WriteError {
+    storage [4096]mut u8 := undefined
+    buffered := BufferedOutput{ output = output, bytes = storage[..] }
+    writer :: io.Writer{ context = &buffered, handle = output.handle, write = buffered_write }
+    try io.print("{s}: {s}\n", writer, {label, message(diagnostic)})
+    annotation []u8 :: if (diagnostic.code == .readonly_storage) "requires writable storage" else ""
+    try render_span(writer, sources, diagnostic.span, annotation)
+    if (diagnostic.immutable_declaration) |declaration| {
+        text :: sources[usize(declaration.source)].text
+        start := usize(declaration.start)
+        if (start > text.len) start = text.len
+        end := usize(declaration.end)
+        if (end > text.len) end = text.len
+        if (end < start) end = start
+        try io.print("note: `{s}` was declared immutable here\n", writer, {text[start..end]})
+        try render_span(writer, sources, declaration, "immutable binding")
+        try io.write_all(writer, "help: use `:=` instead of `::` if this value should be mutable\n")
+    }
+    try flush_output(&buffered)
+}
+
+#! writes the compact runtime-trap format used by native dynamic checks.
+#! source IDs must be valid; the output remains borrowed and open.
+render_compact proc(output io.Writer, sources []Source, diagnostic Diagnostic, label []u8) void ! io.WriteError {
+    source :: sources[usize(diagnostic.span.source)]
+    location :: locate(source.text, usize(diagnostic.span.start))
+    try io.print("{s}:{}:{}: {s}: {s}\n", output, {
+        source.path, location.line, location.offset - location.start + 1, label, message(diagnostic),
+    })
+}

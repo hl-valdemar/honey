@@ -1,0 +1,224 @@
+import "@std/io"
+import "@std/mem"
+import "@std/testing"
+
+@hide:file
+RenderOutput :: struct {
+    bytes []mut u8
+    len usize = 0
+    chunk usize = maxval!(usize)
+    fail bool = false
+}
+
+@hide:file
+render_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    output @mut RenderOutput :: ptrcast!(context?)
+    if (output.fail) return .write_failed
+    length := bytes.len
+    if (length > output.chunk) length = output.chunk
+    if (length > output.bytes.len - output.len) return .write_failed
+    memcopy!(output.bytes[output.len..output.len + length], bytes[..length])
+    output.len += length
+    return length
+}
+
+@hide:file
+render_writer proc(output @mut RenderOutput) io.Writer {
+    return io.Writer{ context = output, handle = io.Handle{ file_desc = -1 }, write = render_write }
+}
+
+@hide:file
+expect_render proc(sources []Source, diagnostic Diagnostic, label []u8, expected []u8) void ! (io.WriteError | testing.Error) {
+    storage [4096]mut u8 := undefined
+    output := RenderOutput{ bytes = storage[..], chunk = 7 }
+    try render(render_writer(&output), sources, diagnostic, label)
+    try testing.expect_equal(expected, output.bytes[..output.len])
+}
+
+renderer_groups_named_cross_source_binding_note_and_help test {
+    sources [2]Source :: [
+        Source{ path = "binding.hon", text = "init_res :: make()\n" },
+        Source{ path = "call.hon", text = "\tuse(&init_res)\n" },
+    ]
+    try expect_render(sources[..], Diagnostic{
+        code = .readonly_storage,
+        span = Span{ source = SourceId(1), start = 5, end = 14 },
+        immutable_declaration = Span{ start = 0, end = 8 },
+    }, "runtime trap",
+        `runtime trap: cannot pass read-only storage to a mutable pointer parameter
+        ` --> call.hon:1:6
+        `  |
+        `1 |     use(&init_res)
+        `  |         ^^^^^^^^^ requires writable storage
+        `note: `init_res` was declared immutable here
+        ` --> binding.hon:1:1
+        `  |
+        `1 | init_res :: make()
+        `  | ^^^^^^^^ immutable binding
+        `help: use `:=` instead of `::` if this value should be mutable
+        `
+    )
+}
+
+renderer_omits_binding_help_without_provenance test {
+    sources [1]Source :: [Source{ path = "literal.hon", text = "&42" }]
+    try expect_render(sources[..], Diagnostic{
+        code = .readonly_storage,
+        span = Span{ start = 0, end = 3 },
+    }, "error",
+        `error: cannot pass read-only storage to a mutable pointer parameter
+        ` --> literal.hon:1:1
+        `  |
+        `1 | &42
+        `  | ^^^ requires writable storage
+        `
+    )
+}
+
+renderer_keeps_zero_width_and_eof_spans_visible test {
+    sources [1]Source :: [Source{ path = "eof.hon", text = "abc" }]
+    try expect_render(sources[..], Diagnostic{
+        code = .unexpected_token,
+        span = Span{ start = 1, end = 1 },
+    }, "error",
+        `error: unexpected token
+        ` --> eof.hon:1:2
+        `  |
+        `1 | abc
+        `  |  ^
+        `
+    )
+    for (0..2) |index| {
+        offset :: if (index == 0) u32(3) else u32(20)
+        try expect_render(sources[..], Diagnostic{
+            code = .unexpected_token,
+            span = Span{ start = offset, end = offset },
+        }, "error",
+            `error: unexpected token
+            ` --> eof.hon:1:4
+            `  |
+            `1 | abc
+            `  |    ^
+            `
+        )
+    }
+    empty [1]Source :: [Source{ path = "empty.hon", text = "" }]
+    try expect_render(empty[..], Diagnostic{
+        code = .unexpected_token,
+        span = Span{ start = 0, end = 0 },
+    }, "error",
+        `error: unexpected token
+        ` --> empty.hon:1:1
+        `  |
+        `1 | 
+        `  | ^
+        `
+    )
+    trailing_newline [1]Source :: [Source{ path = "newline.hon", text = "abc\n" }]
+    try expect_render(trailing_newline[..], Diagnostic{
+        code = .unexpected_token,
+        span = Span{ start = 4, end = 4 },
+    }, "error",
+        `error: unexpected token
+        ` --> newline.hon:2:1
+        `  |
+        `2 | 
+        `  | ^
+        `
+    )
+}
+
+renderer_marks_multiline_spans_and_preserves_custom_messages test {
+    sources [1]Source :: [Source{ path = "multi.hon", text = "alpha\nbeta\n" }]
+    try expect_render(sources[..], Diagnostic{
+        code = .compile_error,
+        span = Span{ start = 2, end = 9 },
+        custom_message = "explanation from the program",
+    }, "error",
+        `error: explanation from the program
+        ` --> multi.hon:1:3
+        `  |
+        `1 | alpha
+        `  |   ^^^ (continues on following lines)
+        `
+    )
+}
+
+renderer_aligns_multidigit_gutters_and_crlf_lines test {
+    sources [1]Source :: [Source{ path = "crlf.hon", text = "\n\n\n\n\n\n\n\n\nab\r\n" }]
+    try expect_render(sources[..], Diagnostic{
+        code = .unknown_name,
+        span = Span{ start = 10, end = 11 },
+    }, "error",
+        `error: unknown name
+        `  --> crlf.hon:10:2
+        `   |
+        `10 | ab
+        `   |  ^
+        `
+    )
+}
+
+renderer_underlines_tab_spans_at_display_width test {
+    sources [1]Source :: [Source{ path = "tabs.hon", text = "a\tb" }]
+    try expect_render(sources[..], Diagnostic{
+        code = .invalid_character,
+        span = Span{ start = 1, end = 2 },
+    }, "error",
+        `error: invalid character
+        ` --> tabs.hon:1:2
+        `  |
+        `1 | a   b
+        `  |  ^^^
+        `
+    )
+}
+
+renderer_propagates_write_failure_and_no_progress test {
+    sources [1]Source :: [Source{ path = "error.hon", text = "x" }]
+    storage [4096]mut u8 := undefined
+    for (0..2) |index| {
+        output := RenderOutput{ bytes = storage[..], fail = index == 0, chunk = 0 }
+        render(render_writer(&output), sources[..], Diagnostic{
+            code = .unknown_name,
+            span = Span{ start = 0, end = 1 },
+        }, "error") catch |err| {
+            expected io.WriteError :: if (index == 0) .write_failed else .no_progress
+            try testing.expect_equal(expected, err)
+            continue
+        }
+        try testing.expect(false)
+    }
+}
+
+compact_renderer_preserves_dynamic_runtime_trap_format test {
+    sources [1]Source :: [Source{ path = "runtime.hon", text = "first\n  value" }]
+    storage [256]mut u8 := undefined
+    output := RenderOutput{ bytes = storage[..], chunk = 2 }
+    try render_compact(render_writer(&output), sources[..], Diagnostic{
+        code = .integer_overflow,
+        span = Span{ start = 8, end = 13 },
+    }, "runtime trap")
+    try testing.expect_equal([]u8, "runtime.hon:2:3: runtime trap: integer arithmetic overflow\n", output.bytes[..output.len])
+}
+
+renderer_streams_long_excerpts_through_short_writes test {
+    text [5000]mut u8 := undefined
+    mem.set(text[..], u8('x'))
+    sources [1]Source :: [Source{ path = "long.hon", text = text[..] }]
+    storage [12000]mut u8 := undefined
+    output := RenderOutput{ bytes = storage[..], chunk = 31 }
+    try render(render_writer(&output), sources[..], Diagnostic{
+        code = .unknown_name,
+        span = Span{ start = 0, end = u32(text.len) },
+    }, "error")
+    prefix :: "error: unknown name\n --> long.hon:1:1\n  |\n1 | "
+    middle :: "\n  | "
+    try testing.expect_equal(prefix.len + text.len + middle.len + text.len + 1, output.len)
+    try testing.expect_equal([]u8, prefix, output.bytes[..prefix.len])
+    try testing.expect_equal([]u8, text[..], output.bytes[prefix.len..prefix.len + text.len])
+    caret_start :: prefix.len + text.len + middle.len
+    try testing.expect_equal([]u8, middle, output.bytes[prefix.len + text.len..caret_start])
+    for (output.bytes[caret_start..caret_start + text.len]) |byte| try testing.expect_equal(u8('^'), byte)
+    try testing.expect_equal(u8('\n'), output.bytes[output.len - 1])
+}

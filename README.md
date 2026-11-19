@@ -44,7 +44,7 @@ echo $?  # 120
 
 Honey supports generics, compile-time type construction, records, tagged unions, optionals, explicit error channels, scoped cleanup, arrays, slices and pointers. `::` declares an immutable binding; `:=` declares a mutable binding. unused locals, parameters and captures are errors; use `_` for intentional discards.
 
-passing read-only storage to a writable pointer reports the mutability mismatch. when an immutable binding causes it, the diagnostic points to that declaration and conditionally suggests `:=`; read-only pointer contents and unrelated type mismatches do not receive that suggestion.
+compiler diagnostics show source excerpts and underline the affected span. passing read-only storage to a writable pointer labels the storage requirement; when an immutable binding causes it, a named note underlines that declaration and conditionally suggests `:=`. read-only pointer contents and unrelated type mismatches do not receive that suggestion. dynamic runtime traps retain compact location-based reporting.
 
 unaliased imports infer their namespace from the resolved package directory's final component, replacing hyphens with underscores: `import "@ffi/pine-window"` declares `pine_window`. paths keep their original spelling. other characters that cannot form an identifier require an explicit alias, such as `window :: import "@ffi/pine.window"`. inferred namespaces use the normal duplicate-name diagnostics; explicit aliases are unchanged.
 

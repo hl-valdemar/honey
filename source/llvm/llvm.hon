@@ -46,6 +46,16 @@ buffered_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io
     return count
 }
 
+@hide:file
+diagnostic_write proc(context ?@mut anyopaque, _ io.Handle, bytes []u8) usize ! io.WriteError {
+    buffer @mut arraylist.ArrayList(u8) :: ptrcast!(context?)
+    length :: buffer.items.len
+    arraylist.reserve(buffer, length + bytes.len) catch |_| { return .write_failed }
+    buffer.items = buffer.items.ptr[..length + bytes.len]
+    memcopy!(buffer.items[length..], bytes)
+    return bytes.len
+}
+
 #! writes a standalone native LLVM module; all temporary emitter storage is released before returning.
 #! buffers writes and flushes before success; does not close the borrowed destination.
 #! `target` is a validated Darwin arm64 LLVM target triple.
@@ -92,16 +102,22 @@ emit proc(
         try bytes_constant(output, string.allocation[..string.len], true)
         try io.write_all(output, "\n")
     }
+    rendered := arraylist.init(u8, allocator)
+    defer arraylist.deinit(&rendered)
+    diagnostic_output :: io.Writer{ context = &rendered, handle = destination.handle, write = diagnostic_write }
     for (diagnostic_store.list.items) |diagnostic, index| {
-        try io.print("@honey.d{} = private constant ", output, {index})
-        try bytes_constant(output, diagnostics.message(diagnostic), false)
-        try io.write_all(output, "\n")
+        arraylist.clear(&rendered)
+        try diagnostics.render(diagnostic_output, sources, diagnostic, "error")
+        error_length :: rendered.items.len
+        try io.print("@honey.d{}_error = private constant ", output, {index})
+        try bytes_constant(output, rendered.items, false)
+        arraylist.clear(&rendered)
+        try diagnostics.render(diagnostic_output, sources, diagnostic, "runtime trap")
+        try io.print("\n@honey.d{}_trap = private constant ", output, {index})
+        try bytes_constant(output, rendered.items, false)
+        try io.print("\n@honey.d{} = private constant [2 x %string] [%string {{ ptr @honey.d{}_error, i64 {} }}, %string {{ ptr @honey.d{}_trap, i64 {} }}]\n",
+            output, {index, index, error_length, index, rendered.items.len})
     }
-    try io.write_all(output, "@honey.note_label = private constant ")
-    try bytes_constant(output, ": note: ", false)
-    try io.write_all(output, "\n@honey.immutable_note = private constant ")
-    try bytes_constant(output, "value was declared immutable here\nhelp: use `:=` instead of `::` if this value should be mutable", false)
-    try io.write_all(output, "\n")
     memory_codes [_]diagnostics.Code :: [
         .null_unwrap, .invalid_slice_bounds, .sentinel_mismatch,
         .overlapping_memory_copy, .unsupported_foreign_call, .invalid_pointer_access,
@@ -114,7 +130,7 @@ emit proc(
         try bytes_constant(output, enummap.get(diagnostics.Code, []u8, &diagnostics.messages, code)?, false)
         try io.write_all(output, "\n")
     }
-    try emit_reporting(output, diagnostic_store, line_starts.items, sources, primary)
+    try emit_reporting(output, diagnostic_store, sources, primary)
     for (module.globals.items) |global, index| {
         try io.print("@honey.g{} = internal global ", output, {index})
         storage_kind :: if (global.type == .void) ir.Type.invalid else global.type
@@ -415,7 +431,6 @@ location proc(sources []arraylist.ArrayList(usize), span diagnostics.Span) Locat
 emit_reporting proc(
     output io.Writer,
     diagnostic_store @diagnostics.Store,
-    line_starts []arraylist.ArrayList(usize),
     sources []diagnostics.Source,
     primary diagnostics.SourceId,
 ) void ! io.WriteError {
@@ -446,20 +461,14 @@ emit_reporting proc(
         `}
     )
     try io.write_all(output, "define internal void @honey.report(i64 %trap) {\nentry:\n")
-    for (diagnostic_store.list.items) |diagnostic, index| {
-        position :: location(line_starts, diagnostic.span)
-        message :: diagnostics.message(diagnostic)
+    for (diagnostic_store.list.items) |_, index| {
         try io.print("  %t{} = icmp eq i64 %trap, {}\n", output, {index, index})
-        try io.print("  call void @honey.diagnose(i64 {}, i64 {}, i64 {}, ptr @honey.d{}, i64 {}, i1 %t{})\n", output, {
-            usize(diagnostic.span.source), position.line, position.column, index, message.len, index,
-        })
-        if (diagnostic.immutable_declaration) |declaration| {
-            origin :: location(line_starts, declaration)
-            note :: "value was declared immutable here\nhelp: use `:=` instead of `::` if this value should be mutable"
-            try io.print("  call void @honey.describe(i64 {}, i64 {}, i64 {}, ptr @honey.immutable_note, i64 {}, ptr @honey.note_label, i64 8)\n", output, {
-                usize(declaration.source), origin.line, origin.column, note.len,
-            })
-        }
+        try io.print("  %label{} = zext i1 %t{} to i64\n", output, {index, index})
+        try io.print("  %descriptor{} = getelementptr [2 x %string], ptr @honey.d{}, i64 0, i64 %label{}\n", output, {index, index, index})
+        try io.print("  %diagnostic{} = load %string, ptr %descriptor{}\n", output, {index, index})
+        try io.print("  %bytes{} = extractvalue %string %diagnostic{}, 0\n", output, {index, index})
+        try io.print("  %length{} = extractvalue %string %diagnostic{}, 1\n", output, {index, index})
+        try io.print("  call void @honey.out(i32 2, ptr %bytes{}, i64 %length{})\n", output, {index, index})
     }
     try io.write_all(output, "  ret void\n}\n")
 }
