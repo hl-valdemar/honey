@@ -13,6 +13,8 @@
     - most c libraries rightly make use of a namespace convention like `ns_some_identifier`. but this becomes superfluous (and a bit annoying) when translated to honey bindings, since honey separates modules into their own namespaces.
     - to avoid having to write something like `ns.ns_some_identifier`, we could maybe allow a project local configuration for the toolchain that defines e.g. that when generating symbols for package `ns`, drop all instances of the matching package namespace prefix (would configuration input).
     - in plain language, a decl like: `when generating package "x" bindings -> omit prefix "x_"`
+- [ ] Implement differential testing to verify that Honey’s interpreter and LLVM-based native compiler produce consistent results for the same programs.
+- [ ] Improve how developers interact with Honey’s interpreter and native compiler, emphasizing clarity, predictable behavior, and actionable diagnostics.
 
 ## direct C interop and standalone projects
 
